@@ -183,7 +183,15 @@ defmodule H.VmRestartTest do
       storage_opts: [sync: :datasync]
     ]
 
-    # Waking session triggers automatic recovery of interrupted unsafe bash tool & resumes generation!
+    # Boot recovery pass automatically wakes and reconciles unfinished active sessions
+    # BEFORE any client reconnects or calls get_session_detail!
+    assert :ok = Daemon.recover_active_sessions(opts2)
+    assert length(Fake.requests(fake2)) >= 0
+
+    wait_until(fn ->
+      Fake.requests(fake2) != []
+    end)
+
     assert {:ok, detail} = Daemon.get_session_detail("vm-rec", opts2)
     assert detail.session.session_id == "vm-rec"
 

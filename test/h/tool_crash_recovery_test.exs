@@ -245,7 +245,7 @@ defmodule H.ToolCrashRecoveryTest do
           opts
         )
 
-      assert_receive {:safe_tool_entered, _worker_pid}
+      assert_receive {:safe_tool_entered, _worker_pid}, 1_000
 
       # Crash Session.Server mid-tool-execution
       [{pid1, _}] = Registry.lookup(opts[:registry], {:session, sid})
@@ -323,7 +323,7 @@ defmodule H.ToolCrashRecoveryTest do
           opts
         )
 
-      assert_receive {:unsafe_tool_entered, _worker_pid, 1}
+      assert_receive {:unsafe_tool_entered, _worker_pid, 1}, 1_000
 
       # Wait for deferred flush of tool partial output
       wait_until(fn ->
@@ -420,7 +420,7 @@ defmodule H.ToolCrashRecoveryTest do
           opts
         )
 
-      assert_receive {:unsafe_tool_entered, tool_pid1, 1}
+      assert_receive {:unsafe_tool_entered, tool_pid1, 1}, 1_000
 
       # Start sid2 -> write fails workspace_busy, next turn read fails invalid_arguments, hits max_turns=2
       {:ok, _} =

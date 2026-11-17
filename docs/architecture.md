@@ -1,9 +1,8 @@
 # Architecture
 
 **Status:**
-- **Implemented (Slice 0):** Pure in-memory history core (`H.Session`, `H.Conversation`, `H.Entry`).
-- **Self-Hosting Core Proposal (Slices 1–4):** Pluggable dependency-free storage (`H.Storage.Memory`, `H.Storage.File` — no database NIF needed), `H.Catalog`, supervised per-session coordinator (`H.Session.Server`), `Bandit` + `Plug` HTTP/SSE daemon + zero-build web client (`H.HTTP`), `Req` + `ReqLLM` multi-provider streaming loop (`H.Provider`), and `H.ExecutionEnv.Local` + coding tools (`read`, `write`, `edit`, `bash`, `search_history`).
-- **Post-Self-Hosting Proposal (Slice 5+):** Background/blocking compaction, subagents & suspendable work (`sleeping`, `signals`, parked tools, 4-stage hooks/gates, `WakeScheduler`), `H.Storage.SQLite` (`exqlite`), and session share grants.
+- **Implemented (Slices 0–4 Self-Hosting Core):** Pure history (`H.Session`, `H.Conversation`, `H.Entry`), pluggable storage (`H.Storage.Memory`, `H.Storage.File`, `H.Storage.Conformance`), `H.StoreLock`, `H.Catalog`, `H.Auth`, `H.Schema`, supervised per-session coordinator (`H.Session.Supervisor`, `H.Session.Server`, `H.Daemon`), `Bandit` + `Plug` HTTP/SSE daemon + zero-build web client (`H.HTTP.*`, `priv/static/*`), `Req` + `ReqLLM` streaming loop (`H.Provider.Fake`, `H.Provider.ReqLLM`, `H.Context`, `H.Credentials`), and `H.ExecutionEnv.Local` + `H.WorkspaceLease` + `JSV`-validated coding tools (`read`, `write`, `edit`, `bash`, `search_history`).
+- **Post-Self-Hosting Proposal (Slice 5+):** Background/blocking compaction, subagents & suspendable work (`sleeping` on `signals`, parked tools, 4-stage hooks/gates, `WakeScheduler`), `H.Storage.SQLite` (`exqlite`), and session share grants.
 
 ---
 

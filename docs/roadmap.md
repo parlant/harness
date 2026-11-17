@@ -30,7 +30,7 @@ Detailed engineering blueprints for each slice live under [`docs/roadmap/`](./ro
 
 Immutable root, independent, and forked conversations with visible entry cutoffs (`entry.id <= cutoff`) and one session-local monotonic ID allocator (`next_id`). 12 unit tests passing.
 
-### 1. Durable Core, Pluggable Storage (`Memory` + `File`), and `H.Catalog` — **Next**
+### 1. Durable Core, Pluggable Storage (`Memory` + `File`), and `H.Catalog` — **Implemented**
 Spec: [`docs/roadmap/01-durable-core-and-storage.md`](./roadmap/01-durable-core-and-storage.md)
 
 - `H.Storage` behaviour + `H.Storage.Conformance` test suite.
@@ -39,7 +39,7 @@ Spec: [`docs/roadmap/01-durable-core-and-storage.md`](./roadmap/01-durable-core-
 - `H.Catalog` (ETS-backed session index under `<data_dir>/catalog/`, never opening session stores directly).
 - `H.Session.Supervisor` (`:one_for_all`, `restart: :temporary` under `DynamicSupervisor` for per-session blast-radius isolation) + `H.Session.Server` (idempotent `request_id` admission, mailbox drain-batch group commit, versioned `live`/`inbox`/`agent`/`usage` documents, fenced workers, `restart_limit` crash-loop guard, cache-evicting idle hibernation/unload).
 
-### 2. `Bandit` + `Plug` HTTP/SSE Daemon, Web Client, and Early `Req` / `ReqLLM` Connection
+### 2. `Bandit` + `Plug` HTTP/SSE Daemon, Web Client, and Early `Req` / `ReqLLM` Connection — **Implemented**
 Spec: [`docs/roadmap/02-http-sse-and-web-client.md`](./roadmap/02-http-sse-and-web-client.md)
 
 - Add `{:bandit, "~> 1.14"}`, `{:plug, "~> 1.20"}`, `{:req, "~> 0.7.5"}`, and `{:req_llm, "~> 1.30"}`.
@@ -47,20 +47,20 @@ Spec: [`docs/roadmap/02-http-sse-and-web-client.md`](./roadmap/02-http-sse-and-w
 - `H.Provider` (`H.Provider.Fake` + `H.Provider.ReqLLM` + `H.Credentials` via `token-exchange` + `GET /api/v1/models` from `LLMDB`) so the browser web client chats with **real streaming models right in Slice 2**.
 - Zero-build ES-module web UI (`priv/static/index.html`, `app.js`, `app.css`): session catalog, model picker, conversation/fork switcher, gap-aware `ConversationTranscript` pager, live streaming reasoning/text, and `submit` / `steer` / `continue` / `abort` / `fork` controls. Verified with `Req` HTTP/SSE tests + shared Playwright E2E smoke test.
 
-### 3. Durable Multi-Turn Generation, `ReqLLM.Context` Projection, and Crash-Retry Recovery
+### 3. Durable Multi-Turn Generation, `ReqLLM.Context` Projection, and Crash-Retry Recovery — **Implemented**
 Spec: [`docs/roadmap/03-provider-and-streaming.md`](./roadmap/03-provider-and-streaming.md)
 
 - `H.Context` reducer projecting `H.Entry` history to `ReqLLM.Context` + `ReqLLM.Tool` declarations (leading system baseline for prompt-cache stability, lossless reasoning/thought-signature metadata, synthetic interrupted tool results across fork cuts, and no tool auto-execution inside `ReqLLM`).
 - `H.Task.Generation`: deferred `persist_within_ms` progress flushes, crash-recovery retry accounting (`aborted` partial entry + `sleeping` backoff + sticky `run_failure: "interrupted"` + `continue` resume), and `steer` / `follow_up` / `when_idle: "reject"` turn boundaries.
 
-### 4. `H.ExecutionEnv`, Coding Tools, and **Self-Hosting Milestone**
+### 4. `H.ExecutionEnv`, Coding Tools, and **Self-Hosting Milestone** — **Implemented**
 Spec: [`docs/roadmap/04-tools-and-self-hosting.md`](./roadmap/04-tools-and-self-hosting.md)
 
 - `H.ExecutionEnv` behaviour + `H.ExecutionEnv.Conformance` + `H.ExecutionEnv.Local` (`no_follow` bounded line scanner, atomic file writes, OTP `Port.open` `SID == PGID == os_pid` process-group reaper, source-side `window` + `skipped` output truncation).
 - Core tools validated with `JSV` JSON Schemas: `read` (`replay: :safe`), `search_history` (`:safe`), `write` (`:unsafe`), `edit` (`:unsafe`, exact unique replacement), and `bash` (`:unsafe`, nonzero exit diagnostic + bounded output spill file), plus per-workspace (`cwd`) writer lease and `max_turns`.
 - **Self-Hosting Milestone:** Open `H`'s web client in a browser pointed at `/Users/partenkirchen/Projects/diy-harness`, inspect code, implement a feature + test through the browser UI, run `mix format` / `mix compile --warnings-as-errors` / `mix test --no-start`, and survive a forced BEAM VM restart mid-run.
 
-### 5. Post-Self-Hosting Evolution (Built Inside `H`)
+### 5. Post-Self-Hosting Evolution (Built Inside `H`) — **Next**
 Spec: [`docs/roadmap/05-post-self-hosting-and-hex.md`](./roadmap/05-post-self-hosting-and-hex.md)
 
 - Background & blocking compaction (`background_tokens`, `reserve_tokens`, thinking omitted from summarization) + `handoff`/`reset` markers.

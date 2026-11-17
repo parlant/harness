@@ -27,11 +27,23 @@ defmodule H.Tool do
   @callback mutating?() :: boolean()
   @callback execute(args :: map(), context()) :: {:ok, tool_output()} | {:error, tool_output()}
 
-  @doc "Validates decoded JSON tool arguments against `tool_mod.parameters_schema/0` via `JSV`."
+  @doc "Validates decoded JSON tool arguments against `tool_mod.parameters_schema/0` via cached `JSV` root."
   @spec validate_args(module(), term()) :: {:ok, map()} | {:error, String.t()}
   def validate_args(tool_mod, args) when is_atom(tool_mod) do
     if is_map(args) do
-      root = JSV.build!(tool_mod.parameters_schema())
+      schema = tool_mod.parameters_schema()
+      cache_key = {__MODULE__, tool_mod, :erlang.phash2(schema)}
+
+      root =
+        case :persistent_term.get(cache_key, nil) do
+          nil ->
+            built = JSV.build!(schema)
+            :persistent_term.put(cache_key, built)
+            built
+
+          cached ->
+            cached
+        end
 
       case JSV.validate(args, root) do
         {:ok, validated} ->

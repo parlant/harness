@@ -4,7 +4,9 @@ defmodule H.Application do
 
   Unit tests run with `--no-start` and start isolated children via `start_supervised!`.
   When `:data_dir` is configured (`Application.get_env(:harness, :data_dir)` or
-  start args), `H.Supervisor` also starts `H.StoreLock`, `H.Auth`, and `H.Catalog`.
+  start args), `H.Supervisor` starts `H.StoreLock`, `H.Auth`, `H.Catalog`,
+  runs a boot recovery pass for unfinished active sessions, and optionally binds
+  the loopback `Bandit` HTTP/SSE server when `:http_port` is configured.
   """
   use Application
 
@@ -27,15 +29,8 @@ defmodule H.Application do
 
     registry = Keyword.get(args, :registry, H.Registry)
     pubsub = Keyword.get(args, :pubsub, H.PubSub)
-    runtime_sup = Keyword.get(opts_or(args), :runtime_sup, H.Session.RuntimeSupervisor)
+    runtime_sup = Keyword.get(args, :runtime_sup, H.Session.RuntimeSupervisor)
     workspace_lease = Keyword.get(args, :workspace_lease, H.WorkspaceLease)
-
-    base_children = [
-      {Registry, keys: :unique, name: registry},
-      {Registry, keys: :duplicate, name: pubsub},
-      {workspace_lease_mod(), name: workspace_lease},
-      {DynamicSupervisor, strategy: :one_for_one, name: runtime_sup}
-    ]
 
     if start_daemon? and is_binary(data_dir) do
       catalog = Keyword.get(args, :catalog, H.Catalog)
@@ -43,6 +38,39 @@ defmodule H.Application do
       auth = Keyword.get(args, :auth, H.Auth)
       auth_table = Keyword.get(args, :auth_table, :h_auth)
       store_lock = Keyword.get(args, :store_lock, H.StoreLock)
+      http_port = Keyword.get(args, :http_port, Application.get_env(:harness, :http_port))
+
+      daemon_opts = [
+        data_dir: data_dir,
+        registry: registry,
+        pubsub: pubsub,
+        catalog: catalog,
+        catalog_table: catalog_table,
+        workspace_lease: workspace_lease,
+        runtime_sup: runtime_sup
+      ]
+
+      recovery_child =
+        Supervisor.child_spec(
+          {Task, fn -> H.Daemon.recover_active_sessions(daemon_opts) end},
+          id: :boot_recovery,
+          restart: :temporary
+        )
+
+      http_children =
+        if is_integer(http_port) and http_port >= 0 do
+          router_opts = [
+            port: http_port,
+            auth_server: auth,
+            auth_table: auth_table,
+            daemon: H.Daemon,
+            daemon_opts: daemon_opts
+          ]
+
+          [{Bandit, plug: {H.HTTP.Router, router_opts}, ip: {127, 0, 0, 1}, port: http_port}]
+        else
+          []
+        end
 
       [
         {H.StoreLock, data_dir: data_dir, name: store_lock},
@@ -50,14 +78,17 @@ defmodule H.Application do
         {Registry, keys: :duplicate, name: pubsub},
         {H.Auth, data_dir: data_dir, name: auth, table: auth_table},
         {H.Catalog, data_dir: data_dir, name: catalog, table: catalog_table},
-        {workspace_lease_mod(), name: workspace_lease},
+        {H.WorkspaceLease, name: workspace_lease},
+        {DynamicSupervisor, strategy: :one_for_one, name: runtime_sup},
+        recovery_child
+      ] ++ http_children
+    else
+      [
+        {Registry, keys: :unique, name: registry},
+        {Registry, keys: :duplicate, name: pubsub},
+        {H.WorkspaceLease, name: workspace_lease},
         {DynamicSupervisor, strategy: :one_for_one, name: runtime_sup}
       ]
-    else
-      base_children
     end
   end
-
-  defp opts_or(args) when is_list(args), do: args
-  defp workspace_lease_mod, do: H.WorkspaceLease
 end

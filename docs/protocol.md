@@ -1,6 +1,6 @@
 # Wire Protocol and First Web Client
 
-**Status:** proposal for Slice 2. Only the pure Elixir history API (`H.Session`, `H.Conversation`, `H.Entry`) exists today.
+**Status:** implemented in Slices 2–4 (`H.HTTP.SecurityPlug`, `H.HTTP.Router`, `H.HTTP.SSE`, `H.Daemon`, `priv/static/*`), except the Slice 5 `signal` command.
 
 ---
 

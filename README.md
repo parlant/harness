@@ -6,26 +6,30 @@ The aim is Pi Durable's execution semantics, p2's shared session/history surface
 
 ## Current state
 
-A dependency-free **pure history core**, not yet a daemon:
+Implemented self-hosting core (**Slices 0–4**, 180 ExUnit + Node ESM tests passing under `--no-start`):
 
-- A session has an identity, an absolute working directory, and a root conversation.
-- Conversations contain immutable entries and may inherit another conversation's prefix.
-- Forks reference a concrete visible entry; later parent entries never leak into a fork.
-- Independent conversations and nested forks use one ordered, session-local ID namespace.
-- Functions return new values. No persistence, processes, provider calls, tools, or sockets yet.
-
-The current maps are a semantic reference, not a plan to retain every transcript in a production GenServer. Fork validation currently scans visible history; the storage implementation will need indexed, paged traversal.
+- **Pure history & fork forest (`H.Session`, `H.Conversation`, `H.Entry`):** Root, independent, and nested forked conversations sharing immutable entry prefixes (`entry.id <= cutoff`).
+- **Pluggable dependency-free storage (`H.Storage`, `H.Storage.Memory`, `H.Storage.File`):** Atomic multi-batch commits with per-batch `seq`, prefix-refusal checks, `:raw` CRC32-framed `commit.log`, atomic temp/rename snapshots, torn-tail recovery, OS Unix-socket single-daemon `H.StoreLock`, and ETS-backed `H.Catalog`.
+- **Supervised durable session runtime (`H.Session.Supervisor`, `H.Session.Server`, `H.Daemon`):** Per-session `:temporary` blast-radius isolation (`quarantine`), mailbox drain-batch commits, idempotent `request_id` `Submission` receipts, versioned `agent` (`:as_of` fork) / `live` / `inbox` / `usage` documents, deferred `persist_within_ms` progress flushes, `restart_limit` crash-loop guard, retry-accounted interrupted model calls, `steer` / `follow_up` / `continue`, and boot recovery of unfinished sessions without client reconnect.
+- **HTTP/SSE daemon & zero-build web client (`H.HTTP.*`, `priv/static/*`):** `Bandit` + `Plug` server with anti-DNS-rebinding `Host` guard, `Bearer` + `HttpOnly; SameSite=Strict` cookie + `Origin` CSRF guard, zero-copy `ProcBin` SSE fan-out (`snapshot`, `commit` with `id: <seq>`, ID-less `ephemeral`), and a vanilla ES-module browser UI (`ConversationTranscript`).
+- **LLM providers & coding tools (`H.Provider.Fake`, `H.Provider.ReqLLM`, `H.ExecutionEnv.Local`, `H.Tools.*`):** Multi-provider `ReqLLM` streaming + `LLMDB` catalog + `token-exchange` in-memory Vertex auth, `H.Context` prompt-cache-friendly projection + fork tool-call pairing, OTP `Port` PGID process-group reaping, `H.WorkspaceLease`, and `JSV`-validated `read`, `write`, `edit`, `bash`, and `search_history` tools.
 
 ## Start here
 
-Development target: Elixir 1.20 / OTP 29. No Hex dependencies or services required.
+Development target: Elixir 1.20 / OTP 29.
 
 ```sh
 cd ~/Projects/diy-harness
+mix deps.get
 mix format --check-formatted
 mix compile --warnings-as-errors
 mix test
-iex -S mix
+```
+
+Start the local daemon and web client:
+
+```sh
+mix run --no-halt -e 'H.serve()'
 ```
 
 In IEx:

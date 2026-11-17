@@ -173,7 +173,11 @@ defmodule H.Daemon do
          {:ok, server} <- ensure_session_started(entry, opts, nil) do
       topic = {:conversation, session_id, cid}
 
-      if subscriber_pid == self() and not is_nil(pubsub) do
+      already_registered? =
+        subscriber_pid == self() and not is_nil(pubsub) and
+          topic in Registry.keys(pubsub, self())
+
+      if subscriber_pid == self() and not is_nil(pubsub) and not already_registered? do
         Registry.register(pubsub, topic, nil)
       end
 
@@ -182,7 +186,7 @@ defmodule H.Daemon do
           {:ok, result}
 
         {:error, reason} ->
-          if subscriber_pid == self() and not is_nil(pubsub) do
+          if subscriber_pid == self() and not is_nil(pubsub) and not already_registered? do
             Registry.unregister(pubsub, topic)
           end
 
@@ -212,6 +216,26 @@ defmodule H.Daemon do
 
   def execute_command(_session_id, _raw_envelope, _opts) do
     {:error, {:bad_request, "command envelope must be a map"}}
+  end
+
+  @doc """
+  Boot recovery pass: starts supervised session runtimes for every unquarantined
+  session that was `active: true` in `H.Catalog` when the previous VM stopped,
+  reconciling unfinished work without waiting for a client reconnect.
+  """
+  @spec recover_active_sessions(keyword()) :: :ok
+  def recover_active_sessions(opts \\ []) when is_list(opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+    table
+    |> Catalog.list_sessions()
+    |> Enum.each(fn entry ->
+      if entry.active and entry.status == "ok" do
+        _ = ensure_session_started(entry, opts, nil)
+      end
+    end)
+
+    :ok
   end
 
   # Session supervision lookup / startup
