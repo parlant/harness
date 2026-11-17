@@ -10,14 +10,12 @@
 defp deps do
   [
     {:bandit, "~> 1.14"},
-    {:plug, "~> 1.20"},
+    {:plug, "~> 1.20.4"}, # >= 1.20.4 includes CVE-2026-120287 fix
     {:req, "~> 0.7.5"},
-    {:req_llm, "~> 1.30"} # >= 1.29.0 includes GHSA-6vww-5m28-f26v fix; 1.30.0 (2026-11-03)
+    {:req_llm, "~> 1.30.0"} # >= 1.29.0 includes GHSA-6vww-5m28-f26v fix
   ]
 end
 ```
-
-*(Release-age note when locking in Slice 2: prefer releases aged past same-day publish, e.g. `bandit 1.14.1` and `plug 1.20.3` if `1.15.0` / `1.20.4` are brand-new.)*
 
 Why this 4-package stack accelerates self-hosting cleanly:
 - **`Bandit` + `Plug`:** Pure-Elixir HTTP/1.1 + HTTP/2 server (`ThousandIsland`), static asset serving with built-in path-traversal protection (`Plug.Static`), bounded JSON parsing (`Plug.Parsers` with `json_decoder: JSON`), loopback TCP **and** Unix domain socket (`{:local, path}`) listeners, and native chunked SSE streaming (`Plug.Conn.send_chunked/2` + `Plug.Conn.chunk/2`). Also gives us a zero-rewrite path to WebSockets (`WebSock`) later if an interactive PTY view needs one.
