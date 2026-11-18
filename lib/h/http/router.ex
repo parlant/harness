@@ -20,25 +20,8 @@ defmodule H.HTTP.Router do
   plug(:security_plug)
   plug(Plug.Head)
 
-  plug(Plug.Static,
-    at: "/",
-    from: {:harness, "priv/static"},
-    only: ~w(index.html app.js transcript.js app.css)
-  )
-
-  plug(Plug.Static,
-    at: "/assets",
-    from: {:harness, "priv/static"}
-  )
-
   plug(:match)
   plug(:dispatch)
-
-  get "/" do
-    conn
-    |> put_resp_content_type("text/html")
-    |> send_file(200, Application.app_dir(:harness, "priv/static/index.html"))
-  end
 
   get "/api/v1/environments" do
     {daemon, daemon_opts} = daemon_config(conn)

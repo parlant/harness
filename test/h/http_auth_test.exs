@@ -123,9 +123,11 @@ defmodule H.HTTP.AuthTest do
 
     test "accepts [::1]:<port> and gates localhost:<port> behind allow_localhost", %{
       req: req,
+      token: token,
       router_opts: router_opts
     } do
-      resp = Req.get!(req, url: "/", headers: [{"host", "[::1]:4000"}])
+      auth = {"authorization", "Bearer #{token}"}
+      resp = Req.get!(req, url: "/api/v1/sessions", headers: [{"host", "[::1]:4000"}, auth])
       assert resp.status == 200
 
       localhost_req =
@@ -136,30 +138,15 @@ defmodule H.HTTP.AuthTest do
           retry: false
         )
 
-      assert Req.get!(localhost_req, url: "/").status == 200
+      assert Req.get!(localhost_req, url: "/api/v1/sessions", headers: [auth]).status == 200
     end
   end
 
-  describe "static assets and CSP headers" do
-    test "serves / and /index.html with strict CSP and nosniff headers", %{req: req} do
-      expected_csp =
-        "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
-
-      for path <- ["/", "/index.html"] do
-        resp = Req.get!(req, url: path)
-        assert resp.status == 200
-        assert Req.Response.get_header(resp, "content-security-policy") == [expected_csp]
-        assert Req.Response.get_header(resp, "x-content-type-options") == ["nosniff"]
-        assert resp.body =~ "H — Durable Agent Harness"
-      end
-    end
-
-    test "serves /app.js, /transcript.js, /app.css, and /assets/*", %{req: req} do
-      for path <- ["/app.js", "/transcript.js", "/app.css", "/assets/app.js"] do
-        resp = Req.get!(req, url: path)
-        assert resp.status == 200
-        assert byte_size(resp.body) > 0
-      end
+  test "the standalone daemon does not serve a web UI", %{req: req} do
+    for path <- ["/", "/index.html", "/app.js", "/app.css", "/transcript.js", "/assets/app.js"] do
+      resp = Req.get!(req, url: path)
+      assert resp.status == 404
+      assert resp.body == %{"error" => "not found"}
     end
   end
 

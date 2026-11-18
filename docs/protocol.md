@@ -1,136 +1,53 @@
-# Wire Protocol and First Web Client
+# Local daemon API v1
 
-**Status:** implemented through Slice 5, except features marked planned.
+`H.serve()` serves only the daemon API on loopback TCP and, by default, `<data_dir>/api.sock`. These are daemon routes, not the Phoenix site's login or LiveView routes.
 
----
+## Authentication
 
-## 1. Separate Domain API from Transport
+- On TCP, send `Host: 127.0.0.1:<port>` or `[::1]:<port>`; other hosts are rejected with `421` by default. Unix-socket requests need a nonempty `Host` and still require API authentication.
+- CLI: send `Authorization: Bearer <owner token>` from `<data_dir>/auth.token`. Send JSON bodies as `Content-Type: application/json`.
+- Browser: `POST /api/v1/auth/session` with `{"token":"..."}` as JSON. A supplied `Origin` must be allowed. Success sets `h_owner` (`HttpOnly; SameSite=Strict; Path=/api`). Cookie-authenticated mutations require both an allowed loopback `Origin` and JSON content type. The JSON parser's length limit is 4,000,000 bytes.
 
-`H` owns sessions, admission, scheduling, persistence, and cancellation. Clients send commands, read bounded history pages, and observe committed state updates. Closing a browser tab or `curl` stream never cancels admitted work.
+## Routes (under `/api/v1`)
 
-The first network surface is **HTTP JSON commands + SSE (`text/event-stream`) state observation** served by `Bandit` + `Plug` (`H.HTTP.Router`), calling the transport-agnostic `H.Daemon` API.
-
-The first human client is a **zero-build web client** (`priv/static/index.html`, `app.js`, `app.css` using native browser ES modules, `fetch`, and `EventSource`, served by `Plug.Static`) so `H` can chat with real models via `ReqLLM` in Slice 2 and self-host in the browser by Slice 4. Every route and stream stays plain JSON so `curl`, `hurl`, and `Req` tests drive the daemon directly without a browser.
-
----
-
-## 2. Endpoints
-
-| Method & Path | Purpose |
+| Method and path | Request / response |
 |---|---|
-| `GET /` & `GET /assets/*` | Serve the local web client (`index.html`, `app.js`, `app.css`) with strict `Content-Security-Policy` (`default-src 'self'`). |
-| `POST /api/v1/auth/session` | Exchange owner token (`{"token": "..."}`) for an `HttpOnly; SameSite=Strict` cookie so browser `EventSource` authenticates without tokens in URLs. |
-| `GET /api/v1/models` | List available models, capabilities, and context limits from `LLMDB` (`ReqLLM`). |
-| `GET /api/v1/environments` | List configured execution environments and default folders. |
-| `GET /api/v1/fs` | Browse `env_id` and `path`, with folder markers, session counts, and sessions rooted there. |
-| `GET /api/v1/sessions` | List catalog entries without waking sessions; optionally filter with `env_id`, `cwd`, and `subtree`. |
-| `POST /api/v1/sessions` | Create from `cwd`, optional `env_id`, `harness_id`, and initial `agent`. Supply `session_id` for retryable create-or-attach; omitting it generates a fresh ID (a retry may create another session). |
-| `GET /api/v1/sessions/:sid` | Session detail: conversation ancestry forest (`id`, `parent`, `owner`), task graph summary, and open waits. |
-| `GET /api/v1/sessions/:sid/conversations/:cid/entries` | Cursor-paged raw entries (`order=desc\|asc`, `cursor`, `limit <= 200`), respecting fork cutoffs. |
-| `GET /api/v1/sessions/:sid/conversations/:cid/events` | SSE stream: atomic initial `snapshot` followed by `commit` and `ephemeral` delta frames. Supports `Last-Event-ID`. |
-| `POST /api/v1/sessions/:sid/commands` | Mutating session/conversation command envelope returning an idempotent receipt. |
+| `GET /models` | `models` from the configured provider. |
+| `GET /environments` | Configured `environments` and their default directories. |
+| `GET /fs` | Browse `env_id` and `path`; returns the resolved path, parent, annotated directories and sessions rooted there. |
+| `GET /sessions` | Catalog `sessions`; optional filters `env_id`, `cwd`, `subtree`. |
+| `POST /sessions` | Required absolute `cwd`; optional `env_id` (default `host`), `harness_id` (default `coding`), `title`, `agent`, `session_id`. Returns `session` and `seq`. Supply a stable `session_id` for create-or-attach; a different workspace conflicts. Omitting the ID can create a second session on retry. |
+| `GET /sessions/:sid` | `session`, `conversations` with ancestry, and `tasks`. No open-waits API. |
+| `GET /sessions/:sid/conversations/:cid/entries` | `items` and `next_cursor` through the visible lineage. `order=desc` (default) or `asc`; `cursor` optional, `limit` 1–200 (default 50). |
+| `GET /sessions/:sid/conversations/:cid/events` | Conversation view as `text/event-stream` (below). |
+| `POST /sessions/:sid/commands` | Command envelope → receipt. |
 
----
-
-## 3. Authentication, Anti-CSRF, and Anti-DNS-Rebinding
-
-1. **`Host` allowlist:** Every request must carry `Host: 127.0.0.1:<port>` (or `[::1]:<port>`). Any other `Host` is rejected `421 Misdirected Request` before dispatch (blocks DNS rebinding).
-2. **CLI / test auth:** `Authorization: Bearer <owner_token>` (verified via `:crypto.hash_equals/2`) works on all `GET` and `POST` routes.
-3. **Browser auth:** Browser exchanges the owner token once at `POST /api/v1/auth/session` to set `Cookie: h_owner=<session_token>; HttpOnly; SameSite=Strict; Path=/api`.
-   - `GET /api/v1/...` (including `EventSource`) accepts `Authorization: Bearer` or `Cookie: h_owner`.
-   - Mutating `POST /api/v1/...` requires `Authorization: Bearer` **or** (`Cookie: h_owner` **AND** `Origin: http://127.0.0.1:<port>` **AND** `Content-Type: application/json`).
-4. **Input safety:** Enforce header cap (16 KiB), body cap (e.g. 4 MiB), idle socket read timeout, and `H.Schema` validation without `String.to_atom/1`.
-
----
-
-## 4. Command Envelope and Idempotent Receipts
-
-Request (`POST /api/v1/sessions/demo/commands`):
+## Commands
 
 ```json
-{
-  "version": 1,
-  "request_id": "client-generated-stable-id",
-  "command": "submit",
-  "conversation_id": "1",
-  "args": {
-    "type": "input",
-    "content": [{"type": "text", "text": "Explain H.Session.fork/3"}],
-    "when_busy": "follow_up",
-    "when_idle": "start"
-  }
-}
+{"version":1,"request_id":"demo-1","conversation_id":"1","command":"submit","args":{"type":"input","content":"Explain this project"}}
 ```
 
-Receipt (`200 OK`):
+A `200` receipt acknowledges the command, not a completed model reply. It includes `version`, `request_id`, integer `seq`, and command-specific fields such as `submission_id`, `status`, or the new `conversation_id`. Retry an ambiguous request with the **same request ID and normalized command**: it returns a receipt without repeating the command. Reusing the ID for another payload returns `409`.
 
-```json
-{
-  "version": 1,
-  "request_id": "client-generated-stable-id",
-  "seq": 42,
-  "submission_id": "17",
-  "status": "queued"
-}
-```
+| Command | `args` |
+|---|---|
+| `submit` | `type: "input"` with nonempty `content` (string or block list). `when_busy`: `follow_up` (default), `steer`, `reject`; `when_idle`: `start` (default), `reject`. Also accepts `type: "continue"` or display-only `type: "write"`. |
+| `fork` | `at_entry_id`: visible entry at which to branch. |
+| `fork_and_submit` | `at_entry_id` and input `content` in one commit; accepts input busy/idle policies. |
+| `configure` | `model`, `thinking`, `system_prompt`, `instructions`, `tools`, `max_turns`; optional `expected_seq` conflict guard. |
+| `abort` | Abort active generation work in the conversation, optionally with `reason`. Although validation accepts `task_id`, the handler does **not** narrow cancellation to that task. |
 
-- Wire IDs are strings (`"1"`, `"17"`) even when internal session-local IDs are positive integers; `seq` is a monotonic integer.
-- Returning `200 OK` means admission is durable in `H.Storage`, not that the model has finished answering.
-- Retrying the same `(session_id, request_id)` with the same normalized payload returns the original receipt (with its latest `status`); a different payload returns `409 Conflict`.
+## SSE cursor rules
 
-### Commands
+Each JSON frame identifies the session and conversation. Sequence numbers are session-wide; a jump in numbers alone does not indicate a lost conversation update.
 
-| Command | Slice | Meaning |
+| Event | SSE `id` | Client action |
 |---|---|---|
-| `submit` | 1–2 | Admit `type: "input"` (`when_busy`: `"follow_up" \| "steer" \| "reject"`, `when_idle`: `"start" \| "reject"`), idle `type: "continue"`, or display-only `type: "write"`. |
-| `fork` | 1–2 | Create a branch inheriting history through visible `at_entry_id`, applying document `fork` rules (`as_of`, `current`, `initial`). |
-| `fork_and_submit` | 1–2 | Atomically fork at `at_entry_id` and admit the branch's first input in one commit. |
-| `configure` | 1–2 | Update `agent` document (`model`, `thinking`, `instructions`, `tools`, `max_turns`, `compaction`) for subsequent turns; optional `expected_seq` guard. |
-| `abort` | 1–2 | Persist cancellation of a conversation or task scope (`background: true` optional in Slice 5). |
-| `signal` (planned) | 9 | Deliver a typed external signal (`{task_id, token, key, value}`) to wake a parked task/gate (`delivered \| duplicate \| invalid \| closed \| not_found`). |
+| `snapshot` | `seq` | Replace the window with `entries` (up to 50, oldest first) and `docs` (`live`, `inbox`, `agent`, `usage`). Use `before_entry_id` to page further back. |
+| `commit` | `seq` | Ignore stale frames. For a newer frame require `prev_seq` to equal the conversation cursor, append `appended_entries`, apply `doc_ops` and advance the cursor. On mismatch, request a fresh snapshot. |
+| `ephemeral` | None | Apply progress `doc_ops` only for a matching `base_seq`. Do not advance the cursor; unflushed progress can be lost on restart. |
 
----
+`doc_ops` maps document names to ordered operations such as `["replace", value]` or `["set", path, value]`. Reconnect with `Last-Event-ID` (or `last_event_id` query parameter) for replay from the recent commit ring; otherwise expect a snapshot if replay is unavailable. A slow connection can receive a replacement snapshot instead of queued deltas. Disconnecting does not abort a run.
 
-## 5. SSE State-View Stream (`snapshot`, `commit`, `ephemeral`)
-
-Clients render committed state views rather than assembling UI state from raw event streams.
-
-To keep **zero-copy `ProcBin` fan-out** across all subscribers of a conversation while letting each client scroll/page its own transcript window independently, `H.Session.Server` never tracks per-client scroll windows. Instead:
-
-1. **Atomic subscribe + bounded `snapshot` (`event: snapshot`, `id: <seq>`):**
-   On `GET .../conversations/:cid/events` (when no `Last-Event-ID` is supplied, or when `Last-Event-ID` is older than `H.Session.Server`'s bounded recent-commit ring), `H.Session.Server` atomically registers the SSE worker PID in `H.PubSub` (`{:conversation, sid, cid}`) and returns the current `seq`, the newest `window_limit` entries (default 50) + `before_entry_id` cursor, and current conversation documents (`live`, `inbox`, `agent`, `usage`):
-   ```text
-   id: 42
-   event: snapshot
-   data: {"version":1,"session_id":"demo","conversation_id":"1","seq":42,"before_entry_id":"12","entries":[...],"docs":{"live":{...},"inbox":[...],"agent":{...},"usage":{...}}}
-   ```
-   If `Last-Event-ID: <last_seq>` hits the recent-commit ring, the SSE worker replays the conversation's retained `commit` frames after that cursor, or sends a snapshot if replay is unavailable.
-
-2. **Durable commit frame (`event: commit`, `id: <seq>`):**
-   For every durable batch committed on `(sid, cid)`, `H.Session.Server` encodes the commit payload **once** as a shared refc binary (`ProcBin`) and broadcasts `{:commit_frame, seq, bin}` via `H.PubSub`:
-   ```text
-   id: 45
-   event: commit
-   data: {"version":1,"session_id":"demo","conversation_id":"1","prev_seq":42,"seq":45,"appended_entries":[...],"doc_ops":{"live":[...],"usage":[...]}}
-   ```
-   Sequence numbers are session-wide; unrelated branches and internal commits can cause numerical jumps. Ignore already-applied frames. For a newer frame, `prev_seq` must equal the conversation cursor; on mismatch, fetch a fresh snapshot. Otherwise append `appended_entries`, apply `doc_ops`, and advance the cursor.
-
-3. **Deferred streaming progress (`event: ephemeral`, NO `id:` line):**
-   Between durable flushes (`persist_within_ms`, default 1,000 ms), throttled LLM token chunks and tool output chunks broadcast as `event: ephemeral` **without an SSE `id:` field**:
-   ```text
-   event: ephemeral
-   data: {"version":1,"session_id":"demo","conversation_id":"1","base_seq":45,"doc_ops":{"live":[...]}}
-   ```
-   Per the SSE standard, omitting `id:` leaves `EventSource.lastEventId` at `45` (the last visible durable commit). If the BEAM VM crashes before the 1-second flush, `EventSource` reconnects with `Last-Event-ID: 45`—never colliding with post-recovery `seq` numbers.
-
-4. **Bounded slow-client backpressure (state replacement, never producer blocking):**
-   Each SSE connection worker bounds its pending queue by frame count (e.g. 128 frames) and byte size (e.g. 2 MiB). If a slow browser tab exceeds either bound, the SSE worker drops its queued deltas, fetches a fresh committed `snapshot` from `H.Session.Server`, and sends `event: snapshot` (`id: <newest_seq>`). `H.Session.Server` never blocks on a slow client.
-
----
-
-## 6. Web Client Responsibilities (`priv/static/`)
-
-- Generate and persist pending `request_id`s in `sessionStorage` until admission is confirmed, reconciling on reconnect.
-- Maintain `ConversationTranscript` locally: merge live `snapshot`/`commit` windows with older pages loaded on scroll via `GET .../entries?cursor=<before_entry_id>&order=desc`.
-- Render `docs.live` directly: active run status (`turns`), streaming `generation.message` (thinking + text + tool calls), running `tools` output slots, and sticky `run_failure` / `compaction_failure` banners with a one-click `Continue` action.
-- Keep selected session, selected conversation/branch, history tree cursor, and unsent per-branch drafts purely client-local (URL hash / `localStorage`), naming `conversation_id` explicitly on every command.
+Sources: [router](../lib/h/http/router.ex), [security plug](../lib/h/http/security_plug.ex), [daemon validation](../lib/h/daemon.ex), [SSE transport](../lib/h/http/sse.ex), [transcript reducer](../lib/h/transcript.ex).

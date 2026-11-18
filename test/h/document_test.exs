@@ -4,7 +4,7 @@ defmodule H.DocumentTest do
   alias H.{Document, Storage}
 
   describe "apply_op/2 and apply_ops/2" do
-    test "supports replace, r, set, append_text, and delete matching transcript.js" do
+    test "supports replace, r, set, append_text, and delete" do
       assert %{"b" => 2} == Document.apply_ops(%{"a" => 1}, [["replace", %{"b" => 2}]])
       assert %{"c" => 3} == Document.apply_ops(%{"a" => 1}, [["r", %{"c" => 3}]])
 

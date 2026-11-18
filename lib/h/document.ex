@@ -1,7 +1,7 @@
 defmodule H.Document do
   @moduledoc """
   Versioned pure-functional conversation documents (`agent`, `live`, `inbox`, `usage`),
-  JSON delta operations matching `priv/static/transcript.js`, and fork policy resolution.
+  JSON delta operations, and fork policy resolution.
   """
 
   @definitions %{
@@ -148,10 +148,10 @@ defmodule H.Document do
   """
   @spec configure_agent(map(), map()) :: {map(), [op()]}
   def configure_agent(agent, updates) when is_map(agent) and is_map(updates) do
-    allowed = ["model", "thinking", "system_prompt", "instructions", "tools", "max_turns"]
+    allowed = [:model, :thinking, :system_prompt, :instructions, :tools, :max_turns]
 
-    Enum.reduce(allowed, {agent, []}, fn key, {acc_doc, acc_ops} ->
-      atom_key = String.to_existing_atom(key)
+    Enum.reduce(allowed, {agent, []}, fn atom_key, {acc_doc, acc_ops} ->
+      key = Atom.to_string(atom_key)
 
       cond do
         Map.has_key?(updates, key) ->
@@ -227,8 +227,6 @@ defmodule H.Document do
         {:error, reason}
     end
   end
-
-  # Path traversal helpers matching priv/static/transcript.js
 
   defp get_at_path(root, []), do: root
   defp get_at_path(nil, _path), do: nil

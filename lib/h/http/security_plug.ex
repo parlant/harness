@@ -3,7 +3,6 @@ defmodule H.HTTP.SecurityPlug do
   Loopback HTTP security boundary:
 
     * Rejects DNS rebinding via strict `Host` allowlist (`421`).
-    * Sets CSP and `X-Content-Type-Options: nosniff` headers on static HTML.
     * Handles `POST /api/v1/auth/session` owner-token to `HttpOnly; SameSite=Strict` cookie exchange.
     * Enforces `Bearer` token or cookie + `Origin` + `application/json` auth on `/api/v1/*`.
     * Parses bounded JSON bodies (`4_000_000` bytes) via `Plug.Parsers`.
@@ -13,7 +12,6 @@ defmodule H.HTTP.SecurityPlug do
 
   import Plug.Conn
 
-  @csp "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
   @mutating_methods ~w(POST PUT PATCH DELETE)
   @json_parser Plug.Parsers.init(
                  parsers: [:json],
@@ -33,7 +31,7 @@ defmodule H.HTTP.SecurityPlug do
 
     with :ok <- check_host(conn, port, allow_localhost, unix_socket?) do
       conn
-      |> put_security_headers()
+      |> put_resp_header("x-content-type-options", "nosniff")
       |> enforce_route_security(opts, port, allow_localhost)
     else
       {:error, status, msg} -> send_json_halt(conn, status, %{"error" => msg})
@@ -85,16 +83,6 @@ defmodule H.HTTP.SecurityPlug do
 
       _ ->
         {:error, 421, "invalid host header"}
-    end
-  end
-
-  defp put_security_headers(conn) do
-    conn = put_resp_header(conn, "x-content-type-options", "nosniff")
-
-    if conn.path_info in [[], ["index.html"]] do
-      put_resp_header(conn, "content-security-policy", @csp)
-    else
-      conn
     end
   end
 

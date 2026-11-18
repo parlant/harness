@@ -1,8 +1,7 @@
 defmodule H.Transcript do
   @moduledoc """
-  Pure Elixir reducer for conversation transcript SSE/PubSub frames, matching
-  the wire semantics of `priv/static/transcript.js` (`ConversationTranscript`)
-  and `H.Document.apply_ops/2`.
+  Pure Elixir reducer for conversation transcript SSE/PubSub frames.
+  Applies document deltas with `H.Document.apply_ops/2`.
   """
 
   alias H.Document

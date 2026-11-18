@@ -1,30 +1,18 @@
 # H (`:harness`)
 
-An Elixir/OTP experiment: one BEAM OS process hosts many durable agent sessions (`H`), with a web client (and other surfaces) attached to the same daemon.
-
-The aim is Pi Durable's execution semantics, p2's shared session/history surfaces, and mini-swe-agent's small, inspectable turn loop—reaching **self-hosting through a web-based client as soon as possible** without external database dependencies.
-
-## Current state
-
-Implemented self-hosting core, workspace browsing, and two clients. See the [roadmap](docs/roadmap.md) for features still planned.
-
-- **Pure history & fork forest (`H.Session`, `H.Conversation`, `H.Entry`):** Root, independent, and nested forked conversations sharing immutable entry prefixes (`entry.id <= cutoff`).
-- **Pluggable dependency-free storage (`H.Storage`, `H.Storage.Memory`, `H.Storage.File`):** Atomic multi-batch commits with per-batch `seq`, prefix-refusal checks, `:raw` CRC32-framed `commit.log`, atomic temp/rename snapshots, torn-tail recovery, OS Unix-socket single-daemon `H.StoreLock`, and ETS-backed `H.Catalog`.
-- **Supervised durable session runtime (`H.Session.Supervisor`, `H.Session.Server`, `H.Daemon`):** Per-session `:temporary` blast-radius isolation (`quarantine`), mailbox drain-batch commits, idempotent `request_id` `Submission` receipts, versioned `agent` (`:as_of` fork) / `live` / `inbox` / `usage` documents, deferred `persist_within_ms` progress flushes, `restart_limit` crash-loop guard, retry-accounted interrupted model calls, `steer` / `follow_up` / `continue`, and boot recovery of unfinished sessions without client reconnect.
-- **HTTP/SSE daemon & zero-build web client (`H.HTTP.*`, `priv/static/*`):** `Bandit` + `Plug` server with anti-DNS-rebinding `Host` guard, `Bearer` + `HttpOnly; SameSite=Strict` cookie + `Origin` CSRF guard, zero-copy `ProcBin` SSE fan-out (`snapshot`, `commit` with `id: <seq>`, ID-less `ephemeral`), and a vanilla ES-module browser UI (`ConversationTranscript`).
-- **LLM providers & coding tools (`H.Provider.Fake`, `H.Provider.ReqLLM`, `H.ExecutionEnv.Local`, `H.Tools.*`):** Multi-provider `ReqLLM` streaming + `LLMDB` catalog + `token-exchange` in-memory Vertex auth, `H.Context` prompt-cache-friendly projection + fork tool-call pairing, OTP `Port` PGID process-group reaping, `H.WorkspaceLease`, and `JSV`-validated `read`, `write`, `edit`, `bash`, and `search_history` tools.
+H is a local Elixir/OTP daemon for coding-agent sessions. A session can branch without copying its transcript. The Phoenix LiveView app and native terminal client can work on the same conversation; disconnecting one does not stop a run.
 
 ## Start here
 
 Development target: Elixir 1.20 / OTP 29 (plus Rust for `clients/tui`).
 
 ```sh
-# From repo root: standalone daemon with the reference web client
+# Web UI: start Phoenix and the daemon together from the repo root
+(cd clients/web && mix deps.get && PHX_SERVER=true mix run --no-halt)
+
+# Alternatively, for API and terminal clients only (no browser UI):
 mix deps.get
 mix run --no-halt -e 'H.serve()'
-
-# Alternatively, from repo root: Phoenix and daemon in one VM
-(cd clients/web && mix deps.get && PHX_SERVER=true mix run --no-halt)
 ```
 
 Run only one server per data directory. For Phoenix, open `http://127.0.0.1:4000` and sign in with the owner token in `${H_DATA_DIR:-$HOME/.local/share/h}/auth.token`.
@@ -38,53 +26,15 @@ h -r                       # select a session in this folder
 h -s SESSION_ID            # attach by ID, including when using a symlink to the workspace
 ```
 
-In IEx:
+The standalone daemon prints its API address. Its default data directory is `~/.local/share/h`; override it with `H.serve(data_dir: "...")`. Phoenix and `h` honor `H_DATA_DIR`. Host tools run with your user's filesystem and shell access, not in a sandbox.
 
-```elixir
-alias H.Session
+## Test
 
-session = Session.new("demo", Path.expand("."))
-{:ok, session, question} = Session.append(session, 1, "user", %{text: "Try approach A"})
-{:ok, session, _answer} = Session.append(session, 1, "assistant", %{text: "Approach A..."})
-{:ok, session, branch} = Session.fork(session, 1, question.id)
-{:ok, session, _entry} = Session.append(session, branch.id, "user", %{text: "Now consider B"})
-Session.entries(session, branch.id)
-```
+Run `mix test` at the root and in `clients/web/`; both projects default to `--no-start`. Run `cargo test --locked` in `clients/tui/`. The root suite excludes live LLM calls. To include the Phoenix/Rust sync test, build `h` first and run `H_NATIVE_TEST_BIN=/absolute/path/to/h mix test --include native_client` in `clients/web/`.
 
-This manually builds history. It does not contact a model or save anything to disk. `append/4` is a trusted low-level primitive, not the future client submission API.
+## Documentation
 
-## The important distinctions
-
-**Supervision restarts processes; stored checkpoints resume work.** Neither PIDs nor mailboxes are a durable record.
-
-Keep these structures separate:
-
-1. **History/fork tree:** conversations and immutable inherited prefixes.
-2. **Work ownership tree:** tasks/subagents, cancellation, and joins.
-3. **Supervision tree:** live processes and restart boundaries.
-4. **Client cursor:** what one person is viewing; a zipper can represent this.
-
-A historical fork must not inherit a running task or cancel its parent. Closing a terminal must not cancel daemon work. Navigating in one client must not move another client's cursor.
-
-A chat agent and a coding agent use the same run loop. Chat offers no tools; coding adds a small selected tool set. An agent is configuration plus execution, not a separate persistence system.
-
-## First interfaces and self-hosting goal
-
-- **Now:** plain Elixir API (`H.Session`, `H.Conversation`, `H.Entry`) and IEx, making the domain semantics concrete.
-- **First daemon client (for self-hosting):** a minimal **web-based client** served by the daemon over versioned HTTP/JSON commands and SSE committed-state view updates (`ConversationView`). `curl` remains enough to debug every endpoint and stream.
-- **Later:** a full-screen TUI or mobile surface over the same protocol. None owns scheduling or persistence.
-
-See the [proposed protocol](docs/protocol.md) and the [self-hosting roadmap](docs/roadmap.md).
-
-## Design
-
-- [Architecture overview](docs/architecture.md)
-  - [Durable Engine (`H.*` / `:harness`)](docs/architecture/engine.md)
-  - [Harness Profiles & Pluggable `ExecutionEnv`](docs/architecture/harness.md)
-  - [Phoenix Web & Mobile Client (`clients/web/`, `HWeb.*`)](docs/architecture/client-web.md)
-  - [Cooperative Non-BEAM Terminal Client (`clients/tui/`, `h`)](docs/architecture/client-tui.md)
-- [HTTP/JSON + SSE wire protocol](docs/protocol.md)
-- [Roadmap](docs/roadmap.md)
-- [Pinned upstream references](docs/references.md)
-
-The architecture/protocol documents distinguish proposals from implemented behavior. Storage is pluggable (`H.Storage`): we start with dependency-free `H.Storage.Memory` and `H.Storage.File` (atomic framed commit logs + snapshots using Elixir's stdlib `JSON`), with `H.Storage.SQLite` agreed as the relational backend to plug in later behind the same conformance suite.
+- [Architecture](docs/architecture.md) — ownership, commits, recovery and client boundaries
+- [Local HTTP/JSON and SSE protocol](docs/protocol.md)
+- [Roadmap](docs/roadmap.md) — implemented milestones and remaining work
+- [Design references](docs/references.md)

@@ -22,7 +22,7 @@ defmodule H do
 
   @doc """
   Starts the local `H` daemon (binding both loopback TCP and `<data_dir>/api.sock`
-  plus `<data_dir>/daemon.json`) and prints the authenticated web client URL.
+  plus `<data_dir>/daemon.json`) and prints the API base URL.
 
   Options:
     * `:data_dir` - storage root directory (default `"~/.local/share/h"`)
@@ -96,9 +96,8 @@ defmodule H do
 
     write_daemon_manifest!(data_dir, bound_port, sock_path)
 
-    token = H.Auth.owner_token(:h_auth)
-    url = "http://127.0.0.1:#{bound_port}/#token=#{token}"
-    IO.puts("H web client listening at #{url}")
+    url = "http://127.0.0.1:#{bound_port}"
+    IO.puts("H daemon API listening at #{url}/api/v1")
 
     {:ok, %{url: url, port: bound_port, api_socket: sock_path, data_dir: data_dir}}
   end
