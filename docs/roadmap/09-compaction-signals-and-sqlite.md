@@ -1,4 +1,4 @@
-# Slice 8: Compaction, Suspendable Work (`Signals` & Hooks), and `H.Storage.SQLite`
+# Slice 9: Compaction, Suspendable Work (`Signals` & Hooks), and `H.Storage.SQLite`
 
 **Prerequisite:** Slices 4–6 self-hosting and client architecture in place.
 

@@ -85,12 +85,12 @@ Before introducing Phoenix (`:harness_web`) and a full-screen TUI (`:harness_tui
      ```
    - `GET /api/v1/sessions?env_id=host&cwd=/Users/me/Projects/diy-harness` -> filtered session list for `pwd`.
 
-### 2.5 Usable Client Surfaces in Slice 5
+### 2.5 Cooperative Daemon Socket & Usable Reference Folder Picker
 
-1. **Web Folder Browser (`priv/static/`):** Replace manual `/path/to/repo` typing in `+ New Session` with an interactive folder browser showing parent `..`, clickable subdirectories, project markers, per-folder past session badges, 1-click **Resume** on past folder sessions, and 1-click **Start New Session Here**.
-2. **`pwd`-Scoped Terminal Client (`Mix.Tasks.H` / `H.CLI`):**
-   - Run `mix h` (or `mix h --continue` / `mix h --resume`) from any directory inside `tmux`.
-   - Connects to the local `H.HTTP` daemon (starting one on loopback if `H.StoreLock` is free), scopes to `File.cwd!()`, lets the user pick a past session in `pwd` or start a new one, streams live thinking/text/tool output over SSE, and stays 100% synchronized with any browser tab open on the same session.
+1. **Unix Domain Socket Listener (`<data_dir>/api.sock`):**
+   - Allow `H.Application` / `H.serve/1` to bind an owner-only (`0600`) Unix domain socket (`{:local, Path.join(data_dir, "api.sock")}`) alongside loopback TCP and adjust `H.HTTP.SecurityPlug` to permit authenticated local Unix-socket `Bearer` requests from cooperative local clients (such as `clients/tui/`).
+2. **Interactive Folder Browser in Reference Web UI (`priv/static/`):**
+   - Replace manual `/path/to/repo` typing in `+ New Session` with an interactive folder picker backed by `GET /api/v1/fs` showing parent `..`, clickable subdirectories, project markers, per-folder past session badges, 1-click **Resume**, and 1-click **Start New Session Here**—proving the full workspace-browsing UX before building `clients/web/` (Slice 6) and `clients/tui/` (Slice 7).
 
 ---
 
@@ -100,4 +100,4 @@ Before introducing Phoenix (`:harness_web`) and a full-screen TUI (`:harness_tui
 2. **`H.Catalog` Folder Annotation Tests:** Exact vs. prefix boundary tests (`/path/app` must never match `/path/app-v2`!), subtree rollups, and active counts without starting `H.Session.Server`.
 3. **`H.Harness.Coding` Tests:** Ancestor `AGENTS.md` discovery through `H.ExecutionEnv` (verified on disposable temp workspaces without touching the user's home directory).
 4. **Auto-ID, Auto-Title & HTTP `/api/v1/fs` Tests:** `POST /api/v1/sessions` with `%{"cwd" => cwd}` only -> auto-minted `session_id` -> first prompt sets `title` in `GET /api/v1/fs` and `GET /api/v1/sessions?cwd=...`.
-5. **Live Dual-Surface Sync Test:** Terminal SSE client + Browser HTTP/SSE client attached to the same folder session observe identical `seq` commits and `ephemeral` deltas when submitting, steering, and aborting across surfaces.
+5. **Unix-Socket + TCP Multi-Client Sync Test:** Simultaneous Unix-socket `Bearer` SSE subscriber (modeling the cooperative TUI) and loopback cookie/Origin HTTP+SSE subscriber (modeling the browser) attached to the same folder session observe identical `seq` commits and `ephemeral` deltas across `submit`, `steer`, and `abort`.

@@ -2,7 +2,7 @@
 
 **Status:**
 - **Implemented (Slice 4):** `H.ExecutionEnv` behaviour, `H.ExecutionEnv.Conformance` suite, local host implementation (`H.ExecutionEnv.Local`), `H.WorkspaceLease`, and `JSV`-validated coding tools (`read`, `write`, `edit`, `bash`, `search_history`).
-- **Proposed (Slices 5 & 7):** `H.Harness` profile behaviour (e.g. `Pi`-compatible coding harness with `AGENTS.md` discovery via `H.ExecutionEnv`), `H.ExecutionEnv.Host` + pre-session directory browsing enhancements, `{env_id, cwd}` lease/catalog scoping, and cooperative `H.ExecutionEnv.Remote` VM execution agents.
+- **Proposed (Slices 5 & 8):** `H.Harness` profile behaviour (e.g. `Pi`-compatible coding harness with `AGENTS.md` discovery via `H.ExecutionEnv`), `H.ExecutionEnv.Host` + pre-session directory browsing enhancements, `{env_id, cwd}` lease/catalog scoping, and cooperative `H.ExecutionEnv.Remote` VM execution agents.
 
 ---
 
@@ -93,9 +93,9 @@ Every implementation must pass the shared `H.ExecutionEnv.Conformance` test suit
 |---|---|---|
 | **`H.ExecutionEnv.Host`** *(alias: `Local`)* | `"host"` | Direct local `:file` `:raw` I/O, `File.ls`/`lstat`/`stat`, and OTP `Port.open` (`SID == PGID == os_pid`) with negative-PGID (`kill -TERM/-KILL -<os_pid>`) process-group reaping on the same machine as `:harness`. |
 | **`H.ExecutionEnv.Worktree` / `Sandbox`** | `"worktree"` / `"sandbox"` | Scoped local checkout (e.g. isolated Git worktree or local container root) enabling parallel mutating branches on one machine without workspace lease contention. |
-| **`H.ExecutionEnv.Remote`** *(Slice 7)* | `"remote"` | Cooperative lightweight execution agent running on a remote VM/container, speaking a versioned RPC protocol over authenticated mTLS WebSocket/HTTPS, SSH subsystem, or Distributed Erlang. |
+| **`H.ExecutionEnv.Remote`** *(Slice 8)* | `"remote"` | Cooperative lightweight execution agent running on a remote VM/container, speaking a versioned RPC protocol over authenticated mTLS WebSocket/HTTPS, SSH subsystem, or Distributed Erlang. |
 
-### 4.1 Cooperative Remote `ExecutionEnv` Design (`Slice 7`)
+### 4.1 Cooperative Remote `ExecutionEnv` Design (`Slice 8`)
 
 When `:harness` runs locally (or on a central server) and cooperates with a remote VM's `ExecutionEnv.Remote` agent, network partitions and independent crashes become possible. `H`'s existing effect-sandwich architecture handles this cleanly when paired with three remote-agent rules:
 

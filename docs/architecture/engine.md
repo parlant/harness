@@ -2,7 +2,7 @@
 
 **Status:**
 - **Implemented (Slices 0–4):** Pure history (`H.Session`, `H.Conversation`, `H.Entry`), pluggable storage (`H.Storage`, `H.Storage.Memory`, `H.Storage.File`, `H.Storage.Conformance`), `H.StoreLock`, `H.Catalog`, `H.Auth`, `H.Schema`, supervised session runtime (`H.Session.Supervisor`, `H.Session.Server`, `H.Daemon`), `H.Provider` (`Fake`, `ReqLLM`), `H.Credentials`, and `H.Context`.
-- **Proposed Refinements (Slice 5+):** `{env_id, cwd}` workspace identity in `H.Catalog` (replacing host-coupled `Path.expand/1` in `H.Daemon`), `harness_id` metadata on sessions, and Slice 8 compaction/signals/`WakeScheduler`/`H.Storage.SQLite`.
+- **Proposed Refinements (Slice 5+):** `{env_id, cwd}` workspace identity in `H.Catalog` (replacing host-coupled `Path.expand/1` in `H.Daemon`), `harness_id` metadata on sessions, and Slice 9 compaction/signals/`WakeScheduler`/`H.Storage.SQLite`.
 
 ---
 
@@ -38,7 +38,7 @@ Every record and entry ID in a session comes from one **strictly monotonic sessi
 
 A task belongs to a conversation (`{:conversation, id}`) or a parent task (`{:task, id}`). Ownership is persistent, immutable, and governs cancellation and completion joins:
 - **Foreground work (default):** Descendants drain before their owner transitions from `completing` to `terminal`. Cancellation flows down ownership edges; normal completion joins bottom-up.
-- **Background & suspendable work (Slice 8):** `background: true` detaches side tasks from ordinary `Esc` aborts; `sleeping` tasks wait on deadlines (`until`) or typed `signals` while holding **zero BEAM worker processes**.
+- **Background & suspendable work (Slice 9):** `background: true` detaches side tasks from ordinary `Esc` aborts; `sleeping` tasks wait on deadlines (`until`) or typed `signals` while holding **zero BEAM worker processes**.
 
 ### 2.3 Supervision and Per-Session Fault Isolation
 

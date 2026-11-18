@@ -75,9 +75,10 @@ See the [proposed protocol](docs/protocol.md) and the [self-hosting roadmap](doc
 - [Architecture overview](docs/architecture.md)
   - [Durable Engine (`H.*` / `:harness`)](docs/architecture/engine.md)
   - [Harness Profiles & Pluggable `ExecutionEnv`](docs/architecture/harness.md)
-  - [Clients (`HWeb.*` Phoenix, `HTUI.*`) & Live Multi-Surface Sync](docs/architecture/client.md)
+  - [Phoenix Web & Mobile Client (`clients/web/`, `HWeb.*`)](docs/architecture/client-web.md)
+  - [Cooperative Non-BEAM Terminal Client (`clients/tui/`, `h`)](docs/architecture/client-tui.md)
 - [HTTP/JSON + SSE wire protocol](docs/protocol.md)
-- [Roadmap (Slices 0–4 implemented, Slices 5–8 next)](docs/roadmap.md)
+- [Roadmap (Slices 0–4 implemented, Slices 5–9 next)](docs/roadmap.md)
 - [Pinned upstream references](docs/references.md)
 
 The architecture/protocol documents distinguish proposals from implemented behavior. Storage is pluggable (`H.Storage`): we start with dependency-free `H.Storage.Memory` and `H.Storage.File` (atomic framed commit logs + snapshots using Elixir's stdlib `JSON`), with `H.Storage.SQLite` agreed as the relational backend to plug in later behind the same conformance suite.
