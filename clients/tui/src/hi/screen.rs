@@ -1,10 +1,11 @@
 use crate::render::{sanitize_single_line, sanitize_terminal_text};
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use crossterm::{cursor, queue};
 #[cfg(test)]
@@ -12,10 +13,11 @@ use ratatui::backend::TestBackend;
 use ratatui::backend::{Backend, CrosstermBackend, WindowSize};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect, Size};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 use ratatui::Terminal;
 use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::io::{self, IsTerminal, Write};
 use unicode_segmentation::UnicodeSegmentation;
@@ -26,6 +28,12 @@ const TAB_SPACES: &str = "    ";
 const EDITOR_PROMPT: &str = "> ";
 const EDITOR_CONT_PREFIX: &str = "  ";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenMode {
+    Fullscreen,
+    Regular,
+}
+
 trait TerminalModeOps {
     fn enable_raw_mode(&mut self) -> io::Result<()>;
     fn disable_raw_mode(&mut self) -> io::Result<()>;
@@ -35,6 +43,8 @@ trait TerminalModeOps {
     fn disable_bracketed_paste(&mut self) -> io::Result<()>;
     fn push_keyboard_enhancement(&mut self) -> io::Result<()>;
     fn pop_keyboard_enhancement(&mut self) -> io::Result<()>;
+    fn enable_mouse_capture(&mut self) -> io::Result<()>;
+    fn disable_mouse_capture(&mut self) -> io::Result<()>;
     fn hide_cursor(&mut self) -> io::Result<()>;
     fn show_cursor(&mut self) -> io::Result<()>;
     fn flush(&mut self) -> io::Result<()>;
@@ -88,6 +98,14 @@ impl TerminalModeOps for RealTerminalOps {
         queue!(self.stdout, PopKeyboardEnhancementFlags)
     }
 
+    fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        queue!(self.stdout, EnableMouseCapture)
+    }
+
+    fn disable_mouse_capture(&mut self) -> io::Result<()> {
+        queue!(self.stdout, DisableMouseCapture)
+    }
+
     fn hide_cursor(&mut self) -> io::Result<()> {
         queue!(self.stdout, cursor::Hide)
     }
@@ -107,6 +125,7 @@ struct TerminalModeGuard {
     alt_screen: bool,
     bracketed_paste: bool,
     keyboard_enhancement: bool,
+    mouse_capture: bool,
     cleaned_up: bool,
 }
 
@@ -119,34 +138,38 @@ impl TerminalModeGuard {
             alt_screen: false,
             bracketed_paste: false,
             keyboard_enhancement: false,
+            mouse_capture: false,
             cleaned_up: true,
         }
     }
 
-    fn enter(ops: Box<dyn TerminalModeOps>) -> io::Result<Self> {
+    fn enter(ops: Box<dyn TerminalModeOps>, mode: ScreenMode) -> io::Result<Self> {
         let mut guard = Self {
             ops: Some(ops),
             raw_mode: false,
             alt_screen: false,
             bracketed_paste: false,
             keyboard_enhancement: false,
+            mouse_capture: false,
             cleaned_up: false,
         };
 
-        if let Err(err) = guard.enter_inner() {
+        if let Err(err) = guard.enter_inner(mode) {
             let _ = guard.cleanup();
             return Err(err);
         }
         Ok(guard)
     }
 
-    fn enter_inner(&mut self) -> io::Result<()> {
+    fn enter_inner(&mut self, mode: ScreenMode) -> io::Result<()> {
         let ops = self.ops.as_deref_mut().expect("ops present");
         ops.enable_raw_mode()?;
         self.raw_mode = true;
 
-        ops.enter_alt_screen()?;
-        self.alt_screen = true;
+        if mode == ScreenMode::Fullscreen {
+            ops.enter_alt_screen()?;
+            self.alt_screen = true;
+        }
 
         ops.enable_bracketed_paste()?;
         self.bracketed_paste = true;
@@ -154,7 +177,12 @@ impl TerminalModeGuard {
         ops.push_keyboard_enhancement()?;
         self.keyboard_enhancement = true;
 
-        ops.hide_cursor()?;
+        if mode == ScreenMode::Fullscreen {
+            ops.enable_mouse_capture()?;
+            self.mouse_capture = true;
+            ops.hide_cursor()?;
+        }
+
         ops.flush()?;
         Ok(())
     }
@@ -178,6 +206,10 @@ impl TerminalModeGuard {
             }
         };
 
+        if self.mouse_capture {
+            record_err(ops.disable_mouse_capture());
+            self.mouse_capture = false;
+        }
         if self.keyboard_enhancement {
             record_err(ops.pop_keyboard_enhancement());
             self.keyboard_enhancement = false;
@@ -304,6 +336,38 @@ impl Backend for ScreenBackend {
     }
 }
 
+trait RegularTarget {
+    fn size(&self) -> io::Result<(u16, u16)>;
+    fn write_bytes(&mut self, data: &[u8]) -> io::Result<()>;
+    fn flush(&mut self) -> io::Result<()>;
+}
+
+struct StdoutRegularTarget {
+    stdout: io::Stdout,
+}
+
+impl StdoutRegularTarget {
+    fn new() -> Self {
+        Self {
+            stdout: io::stdout(),
+        }
+    }
+}
+
+impl RegularTarget for StdoutRegularTarget {
+    fn size(&self) -> io::Result<(u16, u16)> {
+        terminal_size()
+    }
+
+    fn write_bytes(&mut self, data: &[u8]) -> io::Result<()> {
+        self.stdout.write_all(data)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stdout.flush()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ScrollState {
     Bottom,
@@ -315,11 +379,70 @@ enum ScrollState {
     },
 }
 
-pub struct Screen {
+struct FullscreenState {
     terminal: Terminal<ScreenBackend>,
-    _guard: TerminalModeGuard,
     scroll_state: ScrollState,
     editor_scroll: usize,
+}
+
+struct RegularState {
+    target: Box<dyn RegularTarget>,
+    flushed_visual_lines: Vec<String>,
+    working_lines: Vec<String>,
+    cursor_row: usize,
+    cursor_visible: bool,
+    editor_scroll: usize,
+    prev_width: u16,
+    prev_height: u16,
+    cached_width: usize,
+    cached_row_hashes: Vec<u64>,
+    cached_wrapped: Vec<WrappedRow>,
+}
+
+impl RegularState {
+    fn new(target: Box<dyn RegularTarget>) -> Self {
+        Self {
+            target,
+            flushed_visual_lines: Vec::new(),
+            working_lines: Vec::new(),
+            cursor_row: 0,
+            cursor_visible: false,
+            editor_scroll: 0,
+            prev_width: 0,
+            prev_height: 0,
+            cached_width: 0,
+            cached_row_hashes: Vec::new(),
+            cached_wrapped: Vec::new(),
+        }
+    }
+}
+
+enum ModeState {
+    Fullscreen(FullscreenState),
+    Regular(RegularState),
+}
+
+pub struct Screen {
+    mode: ModeState,
+    _guard: TerminalModeGuard,
+}
+
+impl Drop for Screen {
+    fn drop(&mut self) {
+        if let ModeState::Regular(reg) = &mut self.mode {
+            if !reg.working_lines.is_empty() {
+                let mut out = String::new();
+                let down = reg.working_lines.len().saturating_sub(1 + reg.cursor_row);
+                if down > 0 {
+                    let _ = write!(out, "\x1b[{down}B");
+                }
+                out.push_str("\r\n");
+                let _ = reg.target.write_bytes(out.as_bytes());
+                let _ = reg.target.flush();
+                reg.working_lines.clear();
+            }
+        }
+    }
 }
 
 impl Screen {
@@ -331,15 +454,35 @@ impl Screen {
             term.as_deref(),
         )?;
 
-        let guard = TerminalModeGuard::enter(Box::new(RealTerminalOps::new()))?;
+        let guard =
+            TerminalModeGuard::enter(Box::new(RealTerminalOps::new()), ScreenMode::Fullscreen)?;
         let backend = ScreenBackend::Crossterm(CrosstermBackend::new(io::stdout()));
         let terminal = Terminal::new(backend)?;
 
         Ok(Self {
-            terminal,
+            mode: ModeState::Fullscreen(FullscreenState {
+                terminal,
+                scroll_state: ScrollState::Bottom,
+                editor_scroll: 0,
+            }),
             _guard: guard,
-            scroll_state: ScrollState::Bottom,
-            editor_scroll: 0,
+        })
+    }
+
+    pub fn open_regular() -> io::Result<Self> {
+        let term = std::env::var("TERM").ok();
+        check_open_env(
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+            term.as_deref(),
+        )?;
+
+        let guard =
+            TerminalModeGuard::enter(Box::new(RealTerminalOps::new()), ScreenMode::Regular)?;
+
+        Ok(Self {
+            mode: ModeState::Regular(RegularState::new(Box::new(StdoutRegularTarget::new()))),
+            _guard: guard,
         })
     }
 
@@ -348,25 +491,48 @@ impl Screen {
         let backend = ScreenBackend::Test(TestBackend::new(width, height));
         let terminal = Terminal::new(backend)?;
         Ok(Self {
-            terminal,
+            mode: ModeState::Fullscreen(FullscreenState {
+                terminal,
+                scroll_state: ScrollState::Bottom,
+                editor_scroll: 0,
+            }),
             _guard: TerminalModeGuard::noop(),
-            scroll_state: ScrollState::Bottom,
-            editor_scroll: 0,
         })
     }
 
     #[cfg(test)]
+    fn with_regular_test_target(target: Box<dyn RegularTarget>) -> Self {
+        Self {
+            mode: ModeState::Regular(RegularState::new(target)),
+            _guard: TerminalModeGuard::noop(),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_backend(&self) -> &TestBackend {
-        match self.terminal.backend() {
-            ScreenBackend::Test(b) => b,
-            ScreenBackend::Crossterm(_) => unreachable!(),
+        match &self.mode {
+            ModeState::Fullscreen(fs) => match fs.terminal.backend() {
+                ScreenBackend::Test(b) => b,
+                ScreenBackend::Crossterm(_) => unreachable!(),
+            },
+            ModeState::Regular(_) => unreachable!(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cursor_position(&mut self) -> io::Result<Position> {
+        match &mut self.mode {
+            ModeState::Fullscreen(fs) => fs.terminal.get_cursor_position(),
+            ModeState::Regular(_) => unreachable!(),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn resize_test_backend(&mut self, width: u16, height: u16) {
-        if let ScreenBackend::Test(ref mut b) = self.terminal.backend_mut() {
-            b.resize(width, height);
+        if let ModeState::Fullscreen(fs) = &mut self.mode {
+            if let ScreenBackend::Test(ref mut b) = fs.terminal.backend_mut() {
+                b.resize(width, height);
+            }
         }
     }
 
@@ -374,10 +540,13 @@ impl Screen {
         if lines == 0 {
             return;
         }
-        match &mut self.scroll_state {
+        let ModeState::Fullscreen(fs) = &mut self.mode else {
+            return;
+        };
+        match &mut fs.scroll_state {
             ScrollState::Bottom => {
                 if lines > 0 {
-                    self.scroll_state = ScrollState::Scrolled {
+                    fs.scroll_state = ScrollState::Scrolled {
                         pending_delta: lines,
                         from_bottom: 0,
                         top_anchor: None,
@@ -392,7 +561,9 @@ impl Screen {
     }
 
     pub fn bottom(&mut self) {
-        self.scroll_state = ScrollState::Bottom;
+        if let ModeState::Fullscreen(fs) = &mut self.mode {
+            fs.scroll_state = ScrollState::Bottom;
+        }
     }
 
     pub fn draw(
@@ -403,139 +574,528 @@ impl Screen {
         status: &str,
         overlay: &[String],
     ) -> io::Result<()> {
-        let mut next_scroll_state = self.scroll_state.clone();
-        let mut next_editor_scroll = self.editor_scroll;
+        match &mut self.mode {
+            ModeState::Fullscreen(fs) => draw_fullscreen(fs, rows, editor, cursor, status, overlay),
+            ModeState::Regular(reg) => draw_regular(reg, rows, editor, cursor, status, overlay),
+        }
+    }
+}
 
-        self.terminal.draw(|frame| {
-            let area = frame.area();
-            if area.width == 0 || area.height == 0 {
-                return;
-            }
+fn draw_fullscreen(
+    fs: &mut FullscreenState,
+    rows: &[String],
+    editor: &str,
+    cursor: usize,
+    status: &str,
+    overlay: &[String],
+) -> io::Result<()> {
+    let mut next_scroll_state = fs.scroll_state.clone();
+    let mut next_editor_scroll = fs.editor_scroll;
 
-            let width = area.width as usize;
-            let use_prompt = width >= 4;
-            let prefix_width = if use_prompt { 2 } else { 0 };
-            let editor_content_width = width.saturating_sub(prefix_width).max(1);
+    fs.terminal.draw(|frame| {
+        let area = frame.area();
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
 
-            let editor_layout = layout_editor(editor, cursor, editor_content_width);
-            let layout = compute_layout(area.height, editor_layout.lines.len());
+        let width = area.width as usize;
+        let use_prompt = width >= 4;
+        let prefix_width = if use_prompt { 2 } else { 0 };
+        let editor_content_width = width.saturating_sub(prefix_width).max(1);
 
-            // 1. Transcript rows
-            if layout.transcript_height > 0 {
-                let wrapped_rows = wrap_transcript_rows(rows, width);
-                let total_visual = wrapped_rows.len();
-                let view_h = layout.transcript_height as usize;
-                let max_top = total_visual.saturating_sub(view_h);
+        let editor_layout = layout_editor(editor, cursor, editor_content_width);
+        let layout = compute_layout(area.height, editor_layout.lines.len());
 
-                let (top, updated_scroll) =
-                    resolve_scroll_top(&next_scroll_state, rows, &wrapped_rows, max_top);
-                next_scroll_state = updated_scroll;
+        // 1. Transcript rows
+        if layout.transcript_height > 0 {
+            let wrapped_rows = wrap_transcript_rows(rows, width);
+            let total_visual = wrapped_rows.len();
+            let view_h = layout.transcript_height as usize;
+            let max_top = total_visual.saturating_sub(view_h);
 
-                let end = (top + view_h).min(total_visual);
-                let buf = frame.buffer_mut();
-                for (offset, vline) in wrapped_rows[top..end].iter().enumerate() {
-                    let y = area.y + offset as u16;
-                    write_segments_to_row(buf, area.x, y, width, &vline.segments, Style::default());
-                }
-            }
+            let (top, updated_scroll) =
+                resolve_scroll_top(&next_scroll_state, rows, &wrapped_rows, max_top);
+            next_scroll_state = updated_scroll;
 
-            // 2. Separator line
-            let scrolled_lines = match &next_scroll_state {
-                ScrollState::Bottom => 0,
-                ScrollState::Scrolled { from_bottom, .. } => *from_bottom,
-            };
-            if let Some(sep_y) = layout.separator_y {
-                render_separator(
-                    frame.buffer_mut(),
-                    area.x,
-                    area.y + sep_y,
-                    area.width,
-                    scrolled_lines,
-                );
-            }
-
-            // 3. Editor area + draft cursor
-            let visible_editor_h = layout.editor_height as usize;
-            let cursor_visual_row = editor_layout.cursor_row;
-            if cursor_visual_row < next_editor_scroll {
-                next_editor_scroll = cursor_visual_row;
-            } else if visible_editor_h > 0
-                && cursor_visual_row >= next_editor_scroll + visible_editor_h
-            {
-                next_editor_scroll = cursor_visual_row + 1 - visible_editor_h;
-            }
-            let max_ed_scroll = editor_layout.lines.len().saturating_sub(visible_editor_h);
-            next_editor_scroll = next_editor_scroll.min(max_ed_scroll);
-
-            let mut cursor_pos: Option<Position> = None;
+            let end = (top + view_h).min(total_visual);
             let buf = frame.buffer_mut();
-            for row_offset in 0..visible_editor_h {
-                let line_idx = next_editor_scroll + row_offset;
-                let Some(ed_line) = editor_layout.lines.get(line_idx) else {
-                    break;
-                };
-                let y = area.y + layout.editor_y + row_offset as u16;
-                if use_prompt {
-                    let prefix = if line_idx == 0 {
-                        EDITOR_PROMPT
-                    } else {
-                        EDITOR_CONT_PREFIX
-                    };
-                    let p_style = if line_idx == 0 {
-                        Style::default().add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    write_plain_str_to_row(buf, area.x, y, prefix_width, prefix, p_style);
-                }
-                write_segments_to_row(
-                    buf,
-                    area.x + prefix_width as u16,
-                    y,
-                    editor_content_width,
-                    &ed_line.segments,
-                    Style::default(),
-                );
-                if line_idx == editor_layout.cursor_row {
-                    let cx = (area.x as usize + prefix_width + editor_layout.cursor_col)
-                        .min(area.x as usize + width.saturating_sub(1))
-                        as u16;
-                    cursor_pos = Some(Position::new(cx, y));
-                }
+            for (offset, vline) in wrapped_rows[top..end].iter().enumerate() {
+                let y = area.y + offset as u16;
+                write_segments_to_row(buf, area.x, y, width, &vline.segments, Style::default());
             }
+        }
 
-            // 4. Status bar
-            if let Some(status_y) = layout.status_y {
-                let safe_status = sanitize_single_line(status);
-                let style = Style::default().add_modifier(Modifier::REVERSED);
-                let y = area.y + status_y;
-                // Fill entire status bar width with reversed background
-                for dx in 0..area.width {
-                    buf[(area.x + dx, y)].set_symbol(" ").set_style(style);
-                }
-                write_plain_str_to_row(buf, area.x, y, width, &safe_status, style);
+        // 2. Separator line
+        let scrolled_lines = match &next_scroll_state {
+            ScrollState::Bottom => 0,
+            ScrollState::Scrolled { from_bottom, .. } => *from_bottom,
+        };
+        if let Some(sep_y) = layout.separator_y {
+            render_separator(
+                frame.buffer_mut(),
+                area.x,
+                area.y + sep_y,
+                area.width,
+                scrolled_lines,
+            );
+        }
+
+        // 3. Editor area + draft cursor
+        let cursor_pos = render_editor_area(
+            frame.buffer_mut(),
+            area.x,
+            area.y + layout.editor_y,
+            area.width,
+            layout.editor_height,
+            &editor_layout,
+            &mut next_editor_scroll,
+            use_prompt,
+            prefix_width,
+            editor_content_width,
+        );
+
+        // 4. Status bar
+        if let Some(status_y) = layout.status_y {
+            render_status_bar(
+                frame.buffer_mut(),
+                area.x,
+                area.y + status_y,
+                area.width,
+                status,
+            );
+        }
+
+        // 5. Overlay (modal/picker/completion)
+        let overlay_rect = if !overlay.is_empty() {
+            render_overlay(frame.buffer_mut(), area, overlay)
+        } else {
+            None
+        };
+
+        if let Some(pos) = cursor_pos {
+            let covered_by_overlay = overlay_rect.is_some_and(|r| {
+                pos.x >= r.x && pos.x < r.x + r.width && pos.y >= r.y && pos.y < r.y + r.height
+            });
+            if !covered_by_overlay {
+                frame.set_cursor_position(pos);
             }
+        }
+    })?;
 
-            // 5. Overlay (modal/picker/completion)
-            let overlay_rect = if !overlay.is_empty() {
-                render_overlay(frame.buffer_mut(), area, overlay)
+    fs.scroll_state = next_scroll_state;
+    fs.editor_scroll = next_editor_scroll;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_editor_area(
+    buf: &mut Buffer,
+    area_x: u16,
+    editor_y: u16,
+    total_width: u16,
+    editor_height: u16,
+    editor_layout: &EditorLayout,
+    editor_scroll: &mut usize,
+    use_prompt: bool,
+    prefix_width: usize,
+    editor_content_width: usize,
+) -> Option<Position> {
+    let visible_editor_h = editor_height as usize;
+    let cursor_visual_row = editor_layout.cursor_row;
+    if cursor_visual_row < *editor_scroll {
+        *editor_scroll = cursor_visual_row;
+    } else if visible_editor_h > 0 && cursor_visual_row >= *editor_scroll + visible_editor_h {
+        *editor_scroll = cursor_visual_row + 1 - visible_editor_h;
+    }
+    let max_ed_scroll = editor_layout.lines.len().saturating_sub(visible_editor_h);
+    *editor_scroll = (*editor_scroll).min(max_ed_scroll);
+
+    let mut cursor_pos: Option<Position> = None;
+    for row_offset in 0..visible_editor_h {
+        let line_idx = *editor_scroll + row_offset;
+        let Some(ed_line) = editor_layout.lines.get(line_idx) else {
+            break;
+        };
+        let y = editor_y + row_offset as u16;
+        if use_prompt {
+            let prefix = if line_idx == 0 {
+                EDITOR_PROMPT
             } else {
-                None
+                EDITOR_CONT_PREFIX
             };
+            let p_style = if line_idx == 0 {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            write_plain_str_to_row(buf, area_x, y, prefix_width, prefix, p_style);
+        }
+        write_segments_to_row(
+            buf,
+            area_x + prefix_width as u16,
+            y,
+            editor_content_width,
+            &ed_line.segments,
+            Style::default(),
+        );
+        if line_idx == editor_layout.cursor_row {
+            let cx = (area_x as usize + prefix_width + editor_layout.cursor_col)
+                .min(area_x as usize + (total_width as usize).saturating_sub(1))
+                as u16;
+            cursor_pos = Some(Position::new(cx, y));
+        }
+    }
+    cursor_pos
+}
 
-            if let Some(pos) = cursor_pos {
-                let covered_by_overlay = overlay_rect.is_some_and(|r| {
-                    pos.x >= r.x && pos.x < r.x + r.width && pos.y >= r.y && pos.y < r.y + r.height
-                });
-                if !covered_by_overlay {
-                    frame.set_cursor_position(pos);
+fn render_status_bar(buf: &mut Buffer, x: u16, y: u16, width: u16, status: &str) {
+    let safe_status = sanitize_single_line(status);
+    let style = Style::default().add_modifier(Modifier::REVERSED);
+    for dx in 0..width {
+        buf[(x + dx, y)].set_symbol(" ").set_style(style);
+    }
+    write_plain_str_to_row(buf, x, y, width as usize, &safe_status, style);
+}
+
+fn draw_regular(
+    reg: &mut RegularState,
+    rows: &[String],
+    editor: &str,
+    cursor: usize,
+    status: &str,
+    overlay: &[String],
+) -> io::Result<()> {
+    let (term_w, term_h) = reg.target.size()?;
+    if term_w == 0 || term_h == 0 {
+        return Ok(());
+    }
+
+    let width = term_w as usize;
+    let height = term_h as usize;
+
+    let width_changed = reg.prev_width != 0 && reg.prev_width != term_w;
+    let height_shrunk = reg.prev_height != 0 && height < reg.working_lines.len();
+    let mut need_full_clear = width_changed || height_shrunk;
+
+    let use_prompt = width >= 4;
+    let prefix_width = if use_prompt { 2 } else { 0 };
+    let editor_content_width = width.saturating_sub(prefix_width).max(1);
+    let editor_layout = layout_editor(editor, cursor, editor_content_width);
+    let layout = compute_layout(term_h, editor_layout.lines.len());
+
+    let sep_h = usize::from(layout.separator_y.is_some());
+    let status_h = usize::from(layout.status_y.is_some());
+    let editor_h = layout.editor_height as usize;
+    let bottom_h = sep_h + editor_h + status_h;
+    let max_tail_lines = height.saturating_sub(bottom_h);
+
+    // Cache wrapped rows when rows + width are unchanged (e.g. typing in editor)
+    let row_hashes: Vec<u64> = rows.iter().map(|r| hash_str(r)).collect();
+    if reg.cached_width != width || reg.cached_row_hashes != row_hashes {
+        reg.cached_wrapped = wrap_transcript_rows(rows, width);
+        reg.cached_row_hashes = row_hashes;
+        reg.cached_width = width;
+    }
+
+    let total_visual = reg.cached_wrapped.len();
+    let flush_target = total_visual.saturating_sub(max_tail_lines);
+
+    // Check if already-flushed prefix is still intact
+    let mut prefix_intact = !need_full_clear && flush_target >= reg.flushed_visual_lines.len();
+    let mut newly_flushed_ansi: Vec<String> = Vec::new();
+    if prefix_intact {
+        for (idx, expected) in reg.flushed_visual_lines.iter().enumerate() {
+            let line_ansi = segments_to_ansi_line(&reg.cached_wrapped[idx].segments);
+            if &line_ansi != expected {
+                prefix_intact = false;
+                break;
+            }
+        }
+    }
+
+    if !prefix_intact {
+        need_full_clear = true;
+        reg.flushed_visual_lines.clear();
+        reg.working_lines.clear();
+        reg.cursor_row = 0;
+    }
+
+    let flush_from = reg.flushed_visual_lines.len();
+    for vrow in &reg.cached_wrapped[flush_from..flush_target] {
+        newly_flushed_ansi.push(segments_to_ansi_line(&vrow.segments));
+    }
+
+    let tail = &reg.cached_wrapped[flush_target..];
+    let base_h = tail.len() + bottom_h;
+    let overlay_desired_h = if overlay.is_empty() {
+        0
+    } else {
+        desired_overlay_height(term_w, term_h, overlay)
+    };
+    let work_h = base_h.max(overlay_desired_h).clamp(1, height);
+
+    let area = Rect::new(0, 0, term_w, work_h as u16);
+    let mut buf = Buffer::empty(area);
+
+    for (idx, vrow) in tail.iter().enumerate() {
+        write_segments_to_row(
+            &mut buf,
+            0,
+            idx as u16,
+            width,
+            &vrow.segments,
+            Style::default(),
+        );
+    }
+
+    let mut cur_y = tail.len() as u16;
+    if layout.separator_y.is_some() && (cur_y as usize) < work_h {
+        render_separator(&mut buf, 0, cur_y, term_w, 0);
+        cur_y += 1;
+    }
+
+    let mut cursor_pos = render_editor_area(
+        &mut buf,
+        0,
+        cur_y,
+        term_w,
+        layout.editor_height,
+        &editor_layout,
+        &mut reg.editor_scroll,
+        use_prompt,
+        prefix_width,
+        editor_content_width,
+    );
+    cur_y += layout.editor_height;
+
+    if layout.status_y.is_some() && (cur_y as usize) < work_h {
+        render_status_bar(&mut buf, 0, cur_y, term_w, status);
+    }
+
+    let overlay_rect = if !overlay.is_empty() {
+        render_overlay(&mut buf, area, overlay)
+    } else {
+        None
+    };
+
+    if let Some(pos) = cursor_pos {
+        let covered = overlay_rect.is_some_and(|r| {
+            pos.x >= r.x && pos.x < r.x + r.width && pos.y >= r.y && pos.y < r.y + r.height
+        });
+        if covered {
+            cursor_pos = None;
+        }
+    }
+
+    let new_working_lines: Vec<String> = (0..work_h)
+        .map(|y| buffer_row_to_ansi(&buf, y as u16, term_w))
+        .collect();
+
+    let mut out = String::new();
+    out.push_str("\x1b[?2026h");
+
+    if need_full_clear {
+        out.push_str("\x1b[2J\x1b[H\x1b[3J");
+    }
+
+    let mut hw_row: usize;
+    if !newly_flushed_ansi.is_empty() || reg.working_lines.is_empty() {
+        if !reg.working_lines.is_empty() && !need_full_clear {
+            if reg.cursor_row > 0 {
+                let _ = write!(out, "\x1b[{}A", reg.cursor_row);
+            }
+            out.push_str("\r\x1b[J");
+        }
+        for line in &newly_flushed_ansi {
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+        for (i, line) in new_working_lines.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\r\n");
+            }
+            out.push_str(line);
+        }
+        reg.flushed_visual_lines.extend(newly_flushed_ansi);
+        hw_row = new_working_lines.len().saturating_sub(1);
+    } else {
+        // Diff only within the working area; flushed scrollback is untouched.
+        let old_len = reg.working_lines.len();
+        let new_len = new_working_lines.len();
+        let max_len = old_len.max(new_len);
+
+        let mut first_changed: Option<usize> = None;
+        let mut last_changed: usize = 0;
+        for i in 0..max_len {
+            let old_l = reg.working_lines.get(i).map(String::as_str).unwrap_or("");
+            let new_l = new_working_lines.get(i).map(String::as_str).unwrap_or("");
+            if old_l != new_l {
+                if first_changed.is_none() {
+                    first_changed = Some(i);
+                }
+                last_changed = i;
+            }
+        }
+
+        hw_row = reg.cursor_row;
+        if let Some(fc) = first_changed {
+            if fc >= new_len {
+                // Lines were only removed from the bottom.
+                let target_row = new_len.saturating_sub(1);
+                append_vertical_move(&mut out, hw_row, target_row);
+                let extra = old_len - new_len;
+                for _ in 0..extra {
+                    out.push_str("\r\n\x1b[2K");
+                }
+                if extra > 0 {
+                    let _ = write!(out, "\x1b[{extra}A");
+                }
+                hw_row = target_row;
+            } else {
+                let move_target = fc.min(old_len - 1);
+                append_vertical_move(&mut out, hw_row, move_target);
+                out.push('\r');
+                if fc >= old_len {
+                    out.push_str("\r\n");
+                }
+
+                let render_end = last_changed.min(new_len - 1);
+                for (offset, line) in new_working_lines[fc..=render_end].iter().enumerate() {
+                    if offset > 0 {
+                        out.push_str("\r\n");
+                    }
+                    out.push_str("\x1b[2K");
+                    out.push_str(line);
+                }
+                hw_row = render_end;
+
+                if old_len > new_len {
+                    let tail_row = new_len - 1;
+                    append_vertical_move(&mut out, hw_row, tail_row);
+                    let extra = old_len - new_len;
+                    for _ in 0..extra {
+                        out.push_str("\r\n\x1b[2K");
+                    }
+                    let _ = write!(out, "\x1b[{extra}A");
+                    hw_row = tail_row;
                 }
             }
-        })?;
+        }
+    }
 
-        self.scroll_state = next_scroll_state;
-        self.editor_scroll = next_editor_scroll;
-        Ok(())
+    if let Some(pos) = cursor_pos {
+        let target_row = (pos.y as usize).min(new_working_lines.len().saturating_sub(1));
+        append_vertical_move(&mut out, hw_row, target_row);
+        let _ = write!(out, "\x1b[{}G", pos.x as usize + 1);
+        if !reg.cursor_visible {
+            out.push_str("\x1b[?25h");
+            reg.cursor_visible = true;
+        }
+        reg.cursor_row = target_row;
+    } else {
+        if reg.cursor_visible {
+            out.push_str("\x1b[?25l");
+            reg.cursor_visible = false;
+        }
+        reg.cursor_row = hw_row;
+    }
+
+    out.push_str("\x1b[?2026l");
+    reg.target.write_bytes(out.as_bytes())?;
+    reg.target.flush()?;
+
+    reg.working_lines = new_working_lines;
+    reg.prev_width = term_w;
+    reg.prev_height = term_h;
+    Ok(())
+}
+
+fn append_vertical_move(out: &mut String, from_row: usize, to_row: usize) {
+    if to_row > from_row {
+        let _ = write!(out, "\x1b[{}B", to_row - from_row);
+    } else if to_row < from_row {
+        let _ = write!(out, "\x1b[{}A", from_row - to_row);
+    }
+}
+
+fn segments_to_ansi_line(segs: &[RenderSeg]) -> String {
+    let mut out = String::new();
+    let mut active = Style::default();
+    for seg in segs {
+        if seg.style != active {
+            write_style_transition(&mut out, seg.style);
+            active = seg.style;
+        }
+        out.push_str(&seg.text);
+    }
+    if active != Style::default() {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+
+fn buffer_row_to_ansi(buf: &Buffer, y: u16, width: u16) -> String {
+    let mut end_x = width as usize;
+    while end_x > 0 {
+        let cell = &buf[(end_x as u16 - 1, y)];
+        if cell.symbol() == " " && cell.style() == Style::default() {
+            end_x -= 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut out = String::new();
+    let mut active = Style::default();
+    let mut x = 0usize;
+    while x < end_x {
+        let cell = &buf[(x as u16, y)];
+        let style = cell.style();
+        if style != active {
+            write_style_transition(&mut out, style);
+            active = style;
+        }
+        let sym = cell.symbol();
+        out.push_str(sym);
+        let w = grapheme_display_width(sym).max(1);
+        x += w;
+    }
+    if active != Style::default() {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+
+fn write_style_transition(out: &mut String, style: Style) {
+    out.push_str("\x1b[0m");
+    if style == Style::default() {
+        return;
+    }
+    let mut codes: Vec<&str> = Vec::new();
+    if style.add_modifier.contains(Modifier::BOLD) {
+        codes.push("1");
+    }
+    if style.add_modifier.contains(Modifier::DIM) {
+        codes.push("2");
+    }
+    if style.add_modifier.contains(Modifier::REVERSED) {
+        codes.push("7");
+    }
+    if let Some(fg) = style.fg {
+        match fg {
+            Color::Red => codes.push("31"),
+            Color::Green => codes.push("32"),
+            Color::Yellow => codes.push("33"),
+            Color::Cyan => codes.push("36"),
+            Color::Gray => codes.push("37"),
+            Color::DarkGray => codes.push("90"),
+            _ => {}
+        }
+    }
+    if !codes.is_empty() {
+        out.push_str("\x1b[");
+        out.push_str(&codes.join(";"));
+        out.push('m');
     }
 }
 
@@ -654,6 +1214,7 @@ struct RenderSeg {
     orig_end: usize,
     is_whitespace: bool,
     is_cjk: bool,
+    style: Style,
 }
 
 #[derive(Debug, Clone)]
@@ -730,6 +1291,10 @@ fn display_str_width(s: &str) -> usize {
 }
 
 fn sanitize_graphemes_for_line(line: &str) -> Vec<RenderSeg> {
+    sanitize_graphemes_with_style(line, Style::default())
+}
+
+fn sanitize_graphemes_with_style(line: &str, style: Style) -> Vec<RenderSeg> {
     let safe = sanitize_terminal_text(line);
     let mut segs = Vec::new();
     for g in safe.graphemes(true) {
@@ -741,6 +1306,7 @@ fn sanitize_graphemes_for_line(line: &str) -> Vec<RenderSeg> {
                 orig_end: 0,
                 is_whitespace: true,
                 is_cjk: false,
+                style,
             });
         } else {
             let w = grapheme_display_width(g);
@@ -753,6 +1319,7 @@ fn sanitize_graphemes_for_line(line: &str) -> Vec<RenderSeg> {
                 orig_end: 0,
                 is_whitespace: is_ws,
                 is_cjk,
+                style,
             });
         }
     }
@@ -830,13 +1397,142 @@ fn wrap_segments(segs: &[RenderSeg], max_width: usize) -> Vec<Vec<RenderSeg>> {
     chunks
 }
 
+#[derive(Default)]
+struct RowStyler {
+    in_fence: bool,
+    in_diff: bool,
+}
+
+impl RowStyler {
+    fn style_sanitized_line(&mut self, safe_line: &str) -> Vec<RenderSeg> {
+        let trimmed_start = safe_line.trim_start();
+        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+            self.in_fence = !self.in_fence;
+            self.in_diff = self.in_fence && trimmed_start.starts_with("```diff");
+            return sanitize_graphemes_with_style(
+                safe_line,
+                Style::default().add_modifier(Modifier::DIM),
+            );
+        }
+
+        if self.in_fence {
+            if self.in_diff {
+                return sanitize_graphemes_with_style(safe_line, diff_line_style(safe_line));
+            }
+            return sanitize_graphemes_with_style(safe_line, Style::default());
+        }
+
+        if safe_line.starts_with("diff --git ")
+            || safe_line.starts_with("--- ")
+            || safe_line.starts_with("+++ ")
+            || (safe_line.starts_with("@@ ") && safe_line.contains(" @@"))
+        {
+            self.in_diff = true;
+            return sanitize_graphemes_with_style(safe_line, diff_line_style(safe_line));
+        }
+
+        if self.in_diff {
+            if safe_line.starts_with('+') || safe_line.starts_with('-') {
+                return sanitize_graphemes_with_style(safe_line, diff_line_style(safe_line));
+            }
+            if safe_line.is_empty() || safe_line.starts_with(' ') {
+                return sanitize_graphemes_with_style(safe_line, Style::default());
+            }
+            self.in_diff = false;
+        }
+
+        if let Some(heading_style) = markdown_heading_style(safe_line) {
+            return sanitize_graphemes_with_style(safe_line, heading_style);
+        }
+
+        if let Some(bullet_byte_idx) = markdown_bullet_index(safe_line) {
+            let mut segs = sanitize_graphemes_with_style(safe_line, Style::default());
+            let mut byte_pos = 0usize;
+            for seg in &mut segs {
+                if byte_pos == bullet_byte_idx {
+                    seg.style = Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD);
+                    break;
+                }
+                byte_pos += if seg.text == TAB_SPACES {
+                    1
+                } else {
+                    seg.text.len()
+                };
+            }
+            return segs;
+        }
+
+        sanitize_graphemes_with_style(safe_line, Style::default())
+    }
+}
+
+fn diff_line_style(line: &str) -> Style {
+    if line.starts_with("@@ ") {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("+++ ") {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("--- ") {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if line.starts_with("diff --git ") {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default()
+    }
+}
+
+fn markdown_heading_style(line: &str) -> Option<Style> {
+    let indent = line.bytes().take_while(|&b| b == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let hashes = rest.bytes().take_while(|&b| b == b'#').count();
+    if (1..=6).contains(&hashes) && rest.as_bytes().get(hashes) == Some(&b' ') {
+        let style = if hashes <= 2 {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        Some(style)
+    } else {
+        None
+    }
+}
+
+fn markdown_bullet_index(line: &str) -> Option<usize> {
+    let indent = line.bytes().take_while(|&b| b == b' ').count();
+    let rest = &line[indent..];
+    if (rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ "))
+        && !rest.starts_with("---")
+    {
+        Some(indent)
+    } else {
+        None
+    }
+}
+
 fn wrap_transcript_rows(rows: &[String], width: usize) -> Vec<WrappedRow> {
     let mut out = Vec::new();
+    let mut styler = RowStyler::default();
     for (row_idx, raw_row) in rows.iter().enumerate() {
         let safe = sanitize_terminal_text(raw_row);
         let mut sub_idx = 0usize;
         for logical in safe.split('\n') {
-            let segs = sanitize_graphemes_for_line(logical);
+            let segs = styler.style_sanitized_line(logical);
             for chunk in wrap_segments(&segs, width) {
                 out.push(WrappedRow {
                     row_idx,
@@ -974,6 +1670,7 @@ fn sanitize_editor_line_slice(editor: &str, start: usize, end: usize) -> Vec<Ren
                 orig_end,
                 is_whitespace: true,
                 is_cjk: false,
+                style: Style::default(),
             });
             continue;
         }
@@ -989,6 +1686,7 @@ fn sanitize_editor_line_slice(editor: &str, start: usize, end: usize) -> Vec<Ren
                     orig_end,
                     is_whitespace: false,
                     is_cjk: false,
+                    style: Style::default(),
                 });
                 continue;
             }
@@ -1016,6 +1714,7 @@ fn sanitize_editor_line_slice(editor: &str, start: usize, end: usize) -> Vec<Ren
             orig_end,
             is_whitespace: is_ws,
             is_cjk,
+            style: Style::default(),
         });
     }
     segs
@@ -1105,6 +1804,37 @@ fn layout_editor(editor: &str, raw_cursor: usize, content_width: usize) -> Edito
     }
 }
 
+fn desired_overlay_height(area_width: u16, area_height: u16, overlay: &[String]) -> usize {
+    if area_width == 0 || area_height == 0 || overlay.is_empty() {
+        return 0;
+    }
+    let bordered = area_width >= 6 && area_height >= 4;
+    let max_box_w = if bordered {
+        (area_width as usize).saturating_sub(2).max(4)
+    } else {
+        area_width as usize
+    };
+    let inner_max_w = if bordered {
+        max_box_w.saturating_sub(2).max(1)
+    } else {
+        max_box_w.max(1)
+    };
+    let mut line_count = 0usize;
+    for raw in overlay {
+        let safe = sanitize_terminal_text(raw);
+        for logical in safe.split('\n') {
+            let segs = sanitize_graphemes_for_line(logical);
+            line_count += wrap_segments(&segs, inner_max_w).len();
+        }
+    }
+    line_count = line_count.max(1);
+    if bordered {
+        (line_count + 2).min(area_height as usize)
+    } else {
+        line_count.clamp(1, area_height as usize)
+    }
+}
+
 fn render_overlay(buf: &mut Buffer, area: Rect, overlay: &[String]) -> Option<Rect> {
     if area.width == 0 || area.height == 0 || overlay.is_empty() {
         return None;
@@ -1142,8 +1872,7 @@ fn render_overlay(buf: &mut Buffer, area: Rect, overlay: &[String]) -> Option<Re
 
     let (box_w, box_h, inner_w, inner_h) = if bordered {
         let desired_w = (widest_content + 2).clamp(16.min(max_box_w), max_box_w);
-        let max_box_h = (area.height as usize).saturating_sub(2).max(3);
-        let desired_h = (wrapped_lines.len() + 2).min(max_box_h);
+        let desired_h = (wrapped_lines.len() + 2).min(area.height as usize);
         (
             desired_w as u16,
             desired_h as u16,
@@ -1211,7 +1940,7 @@ fn write_segments_to_row(
     y: u16,
     max_width: usize,
     segs: &[RenderSeg],
-    style: Style,
+    base_style: Style,
 ) {
     if max_width == 0 {
         return;
@@ -1230,6 +1959,7 @@ fn write_segments_to_row(
         if w == 0 {
             continue;
         }
+        let style = base_style.patch(seg.style);
         if col + w > max_width {
             if max_width == 1 && col == 0 {
                 let x = start_x;
@@ -1276,6 +2006,7 @@ mod tests {
         alt_screen_active: bool,
         paste_active: bool,
         keyboard_active: bool,
+        mouse_active: bool,
     }
 
     struct MockTerminalOps {
@@ -1352,6 +2083,21 @@ mod tests {
             Ok(())
         }
 
+        fn enable_mouse_capture(&mut self) -> io::Result<()> {
+            self.maybe_fail("enable_mouse_capture")?;
+            let mut log = self.log.borrow_mut();
+            log.mouse_active = true;
+            log.events.push("enable_mouse_capture");
+            Ok(())
+        }
+
+        fn disable_mouse_capture(&mut self) -> io::Result<()> {
+            let mut log = self.log.borrow_mut();
+            log.mouse_active = false;
+            log.events.push("disable_mouse_capture");
+            Ok(())
+        }
+
         fn hide_cursor(&mut self) -> io::Result<()> {
             self.log.borrow_mut().events.push("hide_cursor");
             Ok(())
@@ -1364,6 +2110,34 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             self.log.borrow_mut().events.push("flush");
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockRegularLog {
+        width: u16,
+        height: u16,
+        writes: Vec<String>,
+    }
+
+    struct MockRegularTarget {
+        log: Rc<RefCell<MockRegularLog>>,
+    }
+
+    impl RegularTarget for MockRegularTarget {
+        fn size(&self) -> io::Result<(u16, u16)> {
+            let log = self.log.borrow();
+            Ok((log.width, log.height))
+        }
+
+        fn write_bytes(&mut self, data: &[u8]) -> io::Result<()> {
+            let s = String::from_utf8(data.to_vec()).expect("valid utf8 output");
+            self.log.borrow_mut().writes.push(s);
+            Ok(())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
@@ -1383,23 +2157,28 @@ mod tests {
     }
 
     #[test]
-    fn guard_restores_all_modes_on_drop_and_unwind() {
+    fn guard_restores_all_modes_including_mouse_on_fullscreen_drop() {
         let log = Rc::new(RefCell::new(MockOpsLog::default()));
         {
-            let _guard = TerminalModeGuard::enter(Box::new(MockTerminalOps {
-                log: Rc::clone(&log),
-            }))
+            let _guard = TerminalModeGuard::enter(
+                Box::new(MockTerminalOps {
+                    log: Rc::clone(&log),
+                }),
+                ScreenMode::Fullscreen,
+            )
             .unwrap();
             assert!(log.borrow().raw_mode_active);
             assert!(log.borrow().alt_screen_active);
             assert!(log.borrow().paste_active);
             assert!(log.borrow().keyboard_active);
+            assert!(log.borrow().mouse_active);
         }
         let borrowed = log.borrow();
         assert!(!borrowed.raw_mode_active);
         assert!(!borrowed.alt_screen_active);
         assert!(!borrowed.paste_active);
         assert!(!borrowed.keyboard_active);
+        assert!(!borrowed.mouse_active);
         assert_eq!(
             borrowed.events,
             vec![
@@ -1407,8 +2186,10 @@ mod tests {
                 "enter_alt_screen",
                 "enable_bracketed_paste",
                 "push_keyboard_enhancement",
+                "enable_mouse_capture",
                 "hide_cursor",
                 "flush",
+                "disable_mouse_capture",
                 "pop_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "show_cursor",
@@ -1420,14 +2201,56 @@ mod tests {
     }
 
     #[test]
+    fn guard_regular_mode_skips_alt_screen_and_mouse_capture() {
+        let log = Rc::new(RefCell::new(MockOpsLog::default()));
+        {
+            let _guard = TerminalModeGuard::enter(
+                Box::new(MockTerminalOps {
+                    log: Rc::clone(&log),
+                }),
+                ScreenMode::Regular,
+            )
+            .unwrap();
+            assert!(log.borrow().raw_mode_active);
+            assert!(!log.borrow().alt_screen_active);
+            assert!(log.borrow().paste_active);
+            assert!(log.borrow().keyboard_active);
+            assert!(!log.borrow().mouse_active);
+        }
+        let borrowed = log.borrow();
+        assert!(!borrowed.raw_mode_active);
+        assert!(!borrowed.alt_screen_active);
+        assert!(!borrowed.paste_active);
+        assert!(!borrowed.keyboard_active);
+        assert!(!borrowed.mouse_active);
+        assert_eq!(
+            borrowed.events,
+            vec![
+                "enable_raw_mode",
+                "enable_bracketed_paste",
+                "push_keyboard_enhancement",
+                "flush",
+                "pop_keyboard_enhancement",
+                "disable_bracketed_paste",
+                "show_cursor",
+                "flush",
+                "disable_raw_mode",
+            ]
+        );
+    }
+
+    #[test]
     fn guard_unwinds_partial_init_on_error() {
         let log = Rc::new(RefCell::new(MockOpsLog {
-            fail_at: Some("push_keyboard_enhancement"),
+            fail_at: Some("enable_mouse_capture"),
             ..Default::default()
         }));
-        let res = TerminalModeGuard::enter(Box::new(MockTerminalOps {
-            log: Rc::clone(&log),
-        }));
+        let res = TerminalModeGuard::enter(
+            Box::new(MockTerminalOps {
+                log: Rc::clone(&log),
+            }),
+            ScreenMode::Fullscreen,
+        );
         assert!(res.is_err());
 
         let borrowed = log.borrow();
@@ -1435,12 +2258,15 @@ mod tests {
         assert!(!borrowed.alt_screen_active);
         assert!(!borrowed.paste_active);
         assert!(!borrowed.keyboard_active);
+        assert!(!borrowed.mouse_active);
         assert_eq!(
             borrowed.events,
             vec![
                 "enable_raw_mode",
                 "enter_alt_screen",
                 "enable_bracketed_paste",
+                "push_keyboard_enhancement",
+                "pop_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "show_cursor",
                 "leave_alt_screen",
@@ -1455,8 +2281,11 @@ mod tests {
         let log = Rc::new(RefCell::new(MockOpsLog::default()));
         let log_clone = Rc::clone(&log);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard =
-                TerminalModeGuard::enter(Box::new(MockTerminalOps { log: log_clone })).unwrap();
+            let _guard = TerminalModeGuard::enter(
+                Box::new(MockTerminalOps { log: log_clone }),
+                ScreenMode::Fullscreen,
+            )
+            .unwrap();
             panic!("simulated ui panic");
         }));
         assert!(result.is_err());
@@ -1466,14 +2295,19 @@ mod tests {
         assert!(!borrowed.alt_screen_active);
         assert!(!borrowed.paste_active);
         assert!(!borrowed.keyboard_active);
+        assert!(!borrowed.mouse_active);
     }
 
     #[test]
     fn non_tty_open_fails_cleanly_without_raw_mode() {
-        // Under cargo test, stdin/stdout are pipes (non-TTY), so Screen::open() must refuse.
+        // Under cargo test, stdin/stdout are pipes (non-TTY), so open/open_regular must refuse.
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             let err = Screen::open().err().expect("open must fail when non-TTY");
             assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            let err_reg = Screen::open_regular()
+                .err()
+                .expect("open_regular must fail when non-TTY");
+            assert_eq!(err_reg.kind(), io::ErrorKind::Unsupported);
         }
     }
 
@@ -1493,10 +2327,7 @@ mod tests {
         assert_eq!(lines[9], "[seq 1 · idle]");
 
         // Prompt is "> " (2 cols), cursor at byte 5 ("draft") -> x = 2 + 5 = 7, y = 8
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(7, 8)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(7, 8));
     }
 
     #[test]
@@ -1507,19 +2338,13 @@ mod tests {
         let text = "你好a";
         screen.draw(&[], text, "你好".len(), "ok", &[]).unwrap();
         // "> " (2) + "你好" (4) = col 6, row 6
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(6, 6)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(6, 6));
 
         // Tab expands to 4 spaces
         let tab_text = "a\tb";
         screen.draw(&[], tab_text, 2, "ok", &[]).unwrap();
         // "> " (2) + "a" (1) + "\t" (4) = col 7
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(7, 6)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(7, 6));
 
         // Combining accent "e\u{0301}" (1 cell) + "x"
         let accent = "e\u{0301}x";
@@ -1527,26 +2352,17 @@ mod tests {
             .draw(&[], accent, "e\u{0301}".len(), "ok", &[])
             .unwrap();
         // "> " (2) + 1 = col 3
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(3, 6)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(3, 6));
 
         // ZWJ emoji "👨‍💻" (2 cells) + "z"
         let zwj = "👨‍💻z";
         screen.draw(&[], zwj, "👨‍💻".len(), "ok", &[]).unwrap();
         // "> " (2) + 2 = col 4
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(4, 6)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(4, 6));
 
         // Invalid mid-UTF8 byte cursor must clamp safely without panicking
         screen.draw(&[], "你好", 1, "ok", &[]).unwrap();
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(2, 6)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(2, 6));
     }
 
     #[test]
@@ -1565,10 +2381,7 @@ mod tests {
         assert_eq!(lines[6], "> hello world");
         assert_eq!(lines[7], "  second line");
         assert_eq!(lines[8], "  third");
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(7, 8)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(7, 8));
 
         // 5 logical lines: editor must scroll internally so cursor on line 5 is visible on row 8
         let five_lines = "l1\nl2\nl3\nl4\nl5";
@@ -1579,10 +2392,7 @@ mod tests {
         assert_eq!(lines[6], "  l3");
         assert_eq!(lines[7], "  l4");
         assert_eq!(lines[8], "  l5");
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(4, 8)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(4, 8));
 
         // Moving cursor back to line 1 scrolls editor back up to show "> l1"
         screen.draw(&[], five_lines, 1, "ok", &[]).unwrap();
@@ -1590,19 +2400,13 @@ mod tests {
         assert_eq!(lines[6], "> l1");
         assert_eq!(lines[7], "  l2");
         assert_eq!(lines[8], "  l3");
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(3, 6)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(3, 6));
 
         // Full-width single line places cursor on trailing soft-wrapped line:
         // "123456789012" + trailing cursor line = 2 lines (y=7 and y=8 for height 10)
         let exact = "123456789012";
         screen.draw(&[], exact, exact.len(), "ok", &[]).unwrap();
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(2, 8)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(2, 8));
     }
 
     #[test]
@@ -1700,7 +2504,7 @@ mod tests {
         screen
             .draw(&["让👍a".to_string()], "让b", 3, "status\nline2", &[])
             .unwrap();
-        let pos = screen.terminal.get_cursor_position().unwrap();
+        let pos = screen.test_cursor_position().unwrap();
         assert_eq!(pos.x, 0);
         assert_eq!(pos.y, 0);
 
@@ -1887,9 +2691,200 @@ mod tests {
         let lines = buffer_all_text(screen.test_backend().buffer());
         assert_eq!(lines[0], "entry 06 alpha beta");
         assert_eq!(lines[8], "> draft msg");
-        assert_eq!(
-            screen.terminal.get_cursor_position().unwrap(),
-            Position::new(7, 8)
-        );
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(7, 8));
+    }
+
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for ch in chars.by_ref() {
+                    if ('@'..='~').contains(&ch) {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn regular_mode_streams_tokens_without_reprinting_flushed_history() {
+        let log = Rc::new(RefCell::new(MockRegularLog {
+            width: 30,
+            height: 8,
+            writes: Vec::new(),
+        }));
+        let mut screen = Screen::with_regular_test_target(Box::new(MockRegularTarget {
+            log: Rc::clone(&log),
+        }));
+
+        // height=8 -> bottom_h=3 -> max_tail_lines=5.
+        // 10 rows -> 5 flushed to scrollback, 5 in working tail.
+        let mut rows: Vec<String> = (1..=9).map(|i| format!("hist {i:02}")).collect();
+        rows.push("live: Hel".to_string());
+
+        screen.draw(&rows, "draft", 5, "streaming", &[]).unwrap();
+        assert_eq!(log.borrow().writes.len(), 1);
+        let first_plain = strip_sgr(&log.borrow().writes[0]);
+        assert!(first_plain.contains("hist 01"));
+        assert!(first_plain.contains("hist 05"));
+        assert!(first_plain.contains("live: Hel"));
+        assert!(first_plain.contains("> draft"));
+
+        // Token update on last line: flushed history hist 01..05 must NOT be reprinted!
+        rows[9] = "live: Hello world".to_string();
+        screen.draw(&rows, "draft", 5, "streaming", &[]).unwrap();
+        let second_write = log.borrow().writes[1].clone();
+        let second_plain = strip_sgr(&second_write);
+        for i in 1..=8 {
+            assert!(
+                !second_plain.contains(&format!("hist {i:02}")),
+                "stable row hist {i:02} must not be reprinted on token update"
+            );
+        }
+        assert!(second_plain.contains("live: Hello world"));
+        assert!(!second_write.contains("\x1b[3J"));
+
+        // Typing in editor updates only editor line, not tail or scrollback
+        screen.draw(&rows, "draft!", 6, "streaming", &[]).unwrap();
+        let third_plain = strip_sgr(&log.borrow().writes[2]);
+        assert!(!third_plain.contains("hist 01"));
+        assert!(!third_plain.contains("live: Hello world"));
+        assert!(third_plain.contains("> draft!"));
+    }
+
+    #[test]
+    fn regular_mode_flushes_new_excess_lines_incrementally() {
+        let log = Rc::new(RefCell::new(MockRegularLog {
+            width: 30,
+            height: 8,
+            writes: Vec::new(),
+        }));
+        let mut screen = Screen::with_regular_test_target(Box::new(MockRegularTarget {
+            log: Rc::clone(&log),
+        }));
+
+        let mut rows: Vec<String> = (1..=10).map(|i| format!("line {i:02}")).collect();
+        screen.draw(&rows, "", 0, "idle", &[]).unwrap();
+
+        // Append 2 more rows -> line 06 and line 07 flush incrementally; line 01..05 NEVER reprint.
+        rows.push("line 11".to_string());
+        rows.push("line 12".to_string());
+        screen.draw(&rows, "", 0, "idle", &[]).unwrap();
+
+        let second = &log.borrow().writes[1];
+        for i in 1..=5 {
+            assert!(
+                !second.contains(&format!("line {i:02}")),
+                "already-flushed line {i:02} must not be reprinted"
+            );
+        }
+        assert!(second.contains("line 06"));
+        assert!(second.contains("line 07"));
+        assert!(second.contains("line 12"));
+        assert!(!second.contains("\x1b[3J"));
+    }
+
+    #[test]
+    fn regular_mode_handles_overlay_shrink_width_resize_and_drop() {
+        let log = Rc::new(RefCell::new(MockRegularLog {
+            width: 30,
+            height: 10,
+            writes: Vec::new(),
+        }));
+        {
+            let mut screen = Screen::with_regular_test_target(Box::new(MockRegularTarget {
+                log: Rc::clone(&log),
+            }));
+            screen
+                .draw(&["a让bcde".to_string()], "hi", 2, "ok", &[])
+                .unwrap();
+
+            // scroll() / bottom() are safe no-ops in regular mode
+            screen.scroll(5);
+            screen.bottom();
+
+            // Open overlay taller than working area (4 lines -> 8-row overlay)
+            let overlay = vec![
+                "Title".to_string(),
+                "1. Option A".to_string(),
+                "2. Option B".to_string(),
+                "3. Option C".to_string(),
+                "4. Option D".to_string(),
+            ];
+            screen
+                .draw(&["a让bcde".to_string()], "hi", 2, "ok", &overlay)
+                .unwrap();
+            let ov_write = log.borrow().writes[1].clone();
+            assert!(ov_write.contains("Title"));
+            assert!(ov_write.contains("4. Option D"));
+            assert!(!ov_write.contains("\x1b[3J"));
+
+            // Dismiss overlay -> shrinks back and clears extra rows without full reset
+            screen
+                .draw(&["a让bcde".to_string()], "hi", 2, "ok", &[])
+                .unwrap();
+            let dismiss_write = log.borrow().writes[2].clone();
+            assert!(dismiss_write.contains("\x1b[2K"));
+            assert!(!dismiss_write.contains("\x1b[3J"));
+
+            // Width resize triggers clean reset + reflow
+            log.borrow_mut().width = 20;
+            screen
+                .draw(&["a让bcde".to_string()], "hi", 2, "ok", &[])
+                .unwrap();
+            let resize_write = log.borrow().writes[3].clone();
+            assert!(resize_write.contains("\x1b[2J\x1b[H\x1b[3J"));
+        }
+
+        // Drop emits trailing newline below working area
+        let writes = &log.borrow().writes;
+        assert!(writes.last().unwrap().ends_with("\r\n"));
+    }
+
+    #[test]
+    fn markdown_heading_fence_bullet_and_diff_styles_use_renderer_styles_only() {
+        let mut screen = Screen::with_test_backend(40, 12).unwrap();
+        let rows = vec![
+            "# Title\x1b[31m".to_string(),
+            "- bullet item".to_string(),
+            "```rust".to_string(),
+            "let x = 1;".to_string(),
+            "```".to_string(),
+            "@@ -1,2 +1,2 @@".to_string(),
+            "-old".to_string(),
+            "+new".to_string(),
+        ];
+
+        screen.draw(&rows, "", 0, "ok", &[]).unwrap();
+        let buf = screen.test_backend().buffer();
+
+        // Row 0: "# Title\x1b[31m" -> bold cyan heading, escape literalized
+        assert_eq!(buf[(0, 0)].symbol(), "#");
+        assert!(buf[(0, 0)].style().add_modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(0, 0)].style().fg, Some(Color::Cyan));
+        assert!(buffer_row_text(buf, 0).contains("\\x1b[31m"));
+
+        // Row 1: "- bullet item" -> '-' is bold cyan, 'b' is default (NOT red diff!)
+        assert_eq!(buf[(0, 1)].symbol(), "-");
+        assert_eq!(buf[(0, 1)].style().fg, Some(Color::Cyan));
+        assert!(matches!(buf[(2, 1)].style().fg, None | Some(Color::Reset)));
+
+        // Row 2 & 4: code fence markers are DIM
+        assert!(buf[(0, 2)].style().add_modifier.contains(Modifier::DIM));
+        assert!(buf[(0, 4)].style().add_modifier.contains(Modifier::DIM));
+
+        // Row 5: diff hunk header is Cyan + Bold
+        assert_eq!(buf[(0, 5)].style().fg, Some(Color::Cyan));
+        assert!(buf[(0, 5)].style().add_modifier.contains(Modifier::BOLD));
+
+        // Row 6: "-old" inside diff is Red; Row 7: "+new" is Green
+        assert_eq!(buf[(0, 6)].style().fg, Some(Color::Red));
+        assert_eq!(buf[(0, 7)].style().fg, Some(Color::Green));
     }
 }
