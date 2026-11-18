@@ -1,0 +1,14 @@
+[package]
+name = "h-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Cooperative native terminal client for the H harness daemon"
+
+[[bin]]
+name = "h"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.0", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
