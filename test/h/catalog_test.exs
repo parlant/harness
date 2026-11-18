@@ -32,6 +32,8 @@ defmodule H.CatalogTest do
                })
 
       assert entry.session_id == "demo"
+      assert entry.env_id == "host"
+      assert entry.harness_id == "coding"
       assert entry.cwd == "/work/project"
       assert entry.title == "Demo"
       assert entry.root_conversation_id == 1
@@ -58,6 +60,20 @@ defmodule H.CatalogTest do
 
       assert {:error, _} = Catalog.put_session(server, %{session_id: "../bad", cwd: "/tmp/work"})
       assert {:error, _} = Catalog.put_session(server, %{session_id: "ok", cwd: "relative/path"})
+      assert {:error, _} = Catalog.put_session(server, %{session_id: "ok", cwd: "/tmp/bad\0path"})
+
+      assert {:error, _} =
+               Catalog.put_session(server, %{session_id: "ok", cwd: "/tmp/work", env_id: ""})
+
+      assert {:error, _} =
+               Catalog.put_session(server, %{session_id: "ok", cwd: "/tmp/work", harness_id: ""})
+
+      assert {:error, _} =
+               Catalog.put_session(server, %{
+                 session_id: "ok",
+                 env_id: "vm-1",
+                 cwd: "/home/bad\0path"
+               })
     end
 
     test "reloads persisted sessions across restart", %{

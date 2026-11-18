@@ -42,6 +42,73 @@ defmodule H.Catalog do
   end
 
   @doc """
+  Lists catalog entries directly from ETS scoped to `{env_id, cwd}`.
+
+  Options:
+    * `:table` - ETS table name (default `:h_catalog`)
+    * `:subtree` - include sessions in descendant subdirectories (default `false`)
+  """
+  @spec list_sessions_for_cwd(String.t() | nil, String.t(), keyword()) :: [map()]
+  def list_sessions_for_cwd(env_id, cwd, opts \\ [])
+      when (is_binary(env_id) or is_nil(env_id)) and is_binary(cwd) and is_list(opts) do
+    table = Keyword.get(opts, :table, @default_table)
+    subtree? = Keyword.get(opts, :subtree, false)
+    target_env = normalize_env_id(env_id)
+    target_cwd = normalize_query_cwd(target_env, cwd)
+
+    table
+    |> :ets.tab2list()
+    |> Enum.reduce([], fn {_id, entry}, acc ->
+      entry_env = normalize_env_id(Map.get(entry, :env_id))
+      entry_cwd = normalize_query_cwd(target_env, entry.cwd)
+
+      if entry_env == target_env and cwd_matches?(entry_cwd, target_cwd, subtree?) do
+        [entry | acc]
+      else
+        acc
+      end
+    end)
+    |> Enum.sort_by(&{&1.updated_at || 0, &1.session_id}, :desc)
+  end
+
+  @doc """
+  Annotates a list of directory entry maps in a single pass over ETS for `env_id`.
+
+  Each directory map is enriched with `direct_session_count`, `subtree_session_count`,
+  `active_session_count`, and `latest_session` (matching atom vs. string key style of
+  each input directory map).
+
+  Options:
+    * `:table` - ETS table name (default `:h_catalog`)
+    * `:parent_path` - optional base path used when a directory map only provides `:name` / `"name"`
+  """
+  @spec annotate_directories(String.t() | nil, [map()], keyword()) :: [map()]
+  def annotate_directories(env_id, dir_entries, opts \\ [])
+      when (is_binary(env_id) or is_nil(env_id)) and is_list(dir_entries) and is_list(opts) do
+    if dir_entries == [] do
+      []
+    else
+      table = Keyword.get(opts, :table, @default_table)
+      parent_path = Keyword.get(opts, :parent_path)
+      target_env = normalize_env_id(env_id)
+
+      resolved_dirs = Enum.map(dir_entries, &resolve_dir_path(&1, target_env, parent_path))
+
+      wanted_paths =
+        resolved_dirs
+        |> Enum.reject(&is_nil/1)
+        |> MapSet.new()
+
+      stats_by_path = build_dir_stats(table, target_env, wanted_paths)
+
+      Enum.zip_with(dir_entries, resolved_dirs, fn dir, dir_path ->
+        stats = Map.get(stats_by_path, dir_path, empty_dir_stats())
+        merge_dir_annotations(dir, stats)
+      end)
+    end
+  end
+
+  @doc """
   Looks up a single session entry directly from ETS.
   """
   @spec get_session(String.t(), atom()) :: {:ok, map()} | {:error, :not_found}
@@ -195,7 +262,9 @@ defmodule H.Catalog do
     with {:ok, base} <-
            Schema.validate_map(attrs, [
              {:session_id, :session_id, required: true},
-             {:cwd, :abs_path, required: true},
+             {:env_id, :non_empty_string, required: false, default: "host"},
+             {:harness_id, :non_empty_string, required: false, default: "coding"},
+             {:cwd, :string, required: true},
              {:title, :string, required: false, nullable: true},
              {:root_conversation_id, :pos_int, required: false},
              {:created_at, :int, required: false},
@@ -206,8 +275,9 @@ defmodule H.Catalog do
              {:quarantine_reason, :string, required: false, nullable: true},
              {:pending_edits, {:list, :any}, required: false},
              {:applied_edit_rev, :int, required: false}
-           ]) do
-      {:ok, %{base | cwd: Path.expand(base.cwd)}}
+           ]),
+         {:ok, normalized_cwd} <- validate_and_normalize_cwd(base.env_id, base.cwd) do
+      {:ok, %{base | cwd: normalized_cwd}}
     end
   end
 
@@ -215,7 +285,9 @@ defmodule H.Catalog do
     %{
       session_id: validated.session_id,
       title: Map.get(validated, :title, nil),
+      env_id: Map.get(validated, :env_id, "host"),
       cwd: validated.cwd,
+      harness_id: Map.get(validated, :harness_id, "coding"),
       root_conversation_id: Map.get(validated, :root_conversation_id, 1),
       created_at: Map.get(validated, :created_at, now),
       updated_at: Map.get(validated, :updated_at, now),
@@ -277,7 +349,9 @@ defmodule H.Catalog do
     %{
       session_id: Map.fetch!(raw, "session_id"),
       title: Map.get(raw, "title"),
+      env_id: non_empty_or_default(Map.get(raw, "env_id"), "host"),
       cwd: Map.fetch!(raw, "cwd"),
+      harness_id: non_empty_or_default(Map.get(raw, "harness_id"), "coding"),
       root_conversation_id: Map.get(raw, "root_conversation_id", 1),
       created_at: Map.fetch!(raw, "created_at"),
       updated_at: Map.fetch!(raw, "updated_at"),
@@ -288,6 +362,227 @@ defmodule H.Catalog do
       pending_edits: Map.get(raw, "pending_edits", []),
       applied_edit_rev: Map.get(raw, "applied_edit_rev", 0)
     }
+  end
+
+  defp non_empty_or_default(val, _default) when is_binary(val) and val != "", do: val
+  defp non_empty_or_default(_val, default), do: default
+
+  defp normalize_env_id(val) when is_binary(val) and val != "", do: val
+  defp normalize_env_id(_), do: "host"
+
+  defp validate_and_normalize_cwd("host", cwd) do
+    cond do
+      not String.starts_with?(cwd, "/") ->
+        {:error, "cwd: must be an absolute path"}
+
+      String.contains?(cwd, <<0>>) ->
+        {:error, "cwd: must not contain NUL bytes"}
+
+      true ->
+        {:ok, Path.expand(cwd)}
+    end
+  end
+
+  defp validate_and_normalize_cwd(_env_id, cwd) do
+    cond do
+      not String.starts_with?(cwd, "/") ->
+        {:error, "cwd: must be an absolute path"}
+
+      String.contains?(cwd, <<0>>) ->
+        {:error, "cwd: must not contain NUL bytes"}
+
+      true ->
+        {:ok, trim_trailing_slash(cwd)}
+    end
+  end
+
+  defp normalize_query_cwd("host", cwd), do: Path.expand(cwd)
+  defp normalize_query_cwd(_env_id, cwd), do: trim_trailing_slash(cwd)
+
+  defp trim_trailing_slash("/"), do: "/"
+
+  defp trim_trailing_slash(cwd) do
+    case String.trim_trailing(cwd, "/") do
+      "" -> if String.starts_with?(cwd, "/"), do: "/", else: ""
+      trimmed -> trimmed
+    end
+  end
+
+  defp cwd_matches?(entry_cwd, target_cwd, false), do: entry_cwd == target_cwd
+
+  defp cwd_matches?(entry_cwd, "/", true),
+    do: entry_cwd == "/" or String.starts_with?(entry_cwd, "/")
+
+  defp cwd_matches?(entry_cwd, target_cwd, true),
+    do: entry_cwd == target_cwd or String.starts_with?(entry_cwd, target_cwd <> "/")
+
+  defp resolve_dir_path(dir, target_env, parent_path) when is_map(dir) do
+    cond do
+      is_binary(path = Map.get(dir, :path) || Map.get(dir, "path")) ->
+        normalize_query_cwd(target_env, path)
+
+      is_binary(name = Map.get(dir, :name) || Map.get(dir, "name")) and is_binary(parent_path) ->
+        join_and_normalize_cwd(target_env, parent_path, name)
+
+      true ->
+        nil
+    end
+  end
+
+  defp join_and_normalize_cwd("host", parent_path, name) do
+    Path.join(parent_path, name) |> Path.expand()
+  end
+
+  defp join_and_normalize_cwd(env_id, parent_path, name) do
+    base = normalize_query_cwd(env_id, parent_path)
+    trimmed_name = String.trim_leading(name, "/")
+
+    joined =
+      case base do
+        "/" -> "/" <> trimmed_name
+        _ -> base <> "/" <> trimmed_name
+      end
+
+    normalize_query_cwd(env_id, joined)
+  end
+
+  defp build_dir_stats(table, target_env, wanted_paths) do
+    table
+    |> :ets.tab2list()
+    |> Enum.reduce(%{}, fn {_id, entry}, acc ->
+      if normalize_env_id(Map.get(entry, :env_id)) == target_env do
+        accumulate_session_stats(acc, entry, target_env, wanted_paths)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp accumulate_session_stats(acc, entry, target_env, wanted_paths) do
+    entry_cwd = normalize_query_cwd(target_env, entry.cwd)
+
+    acc =
+      if MapSet.member?(wanted_paths, entry_cwd) do
+        update_dir_stat(acc, entry_cwd, entry, true)
+      else
+        acc
+      end
+
+    entry_cwd
+    |> ancestor_paths()
+    |> Enum.reduce(acc, fn anc_path, inner_acc ->
+      if MapSet.member?(wanted_paths, anc_path) do
+        update_dir_stat(inner_acc, anc_path, entry, false)
+      else
+        inner_acc
+      end
+    end)
+  end
+
+  defp ancestor_paths("/"), do: []
+
+  defp ancestor_paths(path) do
+    case Path.dirname(path) do
+      ^path -> []
+      parent -> [parent | ancestor_paths(parent)]
+    end
+  end
+
+  defp update_dir_stat(acc, path, entry, direct?) do
+    active_inc = if entry.active == true, do: 1, else: 0
+    direct_inc = if direct?, do: 1, else: 0
+
+    Map.update(
+      acc,
+      path,
+      %{
+        direct_session_count: direct_inc,
+        subtree_session_count: 1,
+        active_session_count: active_inc,
+        latest_session: entry
+      },
+      fn stat ->
+        %{
+          direct_session_count: stat.direct_session_count + direct_inc,
+          subtree_session_count: stat.subtree_session_count + 1,
+          active_session_count: stat.active_session_count + active_inc,
+          latest_session: newer_session(stat.latest_session, entry)
+        }
+      end
+    )
+  end
+
+  defp newer_session(current, candidate) do
+    if {candidate.updated_at || 0, candidate.session_id} >
+         {current.updated_at || 0, current.session_id} do
+      candidate
+    else
+      current
+    end
+  end
+
+  defp empty_dir_stats do
+    %{
+      direct_session_count: 0,
+      subtree_session_count: 0,
+      active_session_count: 0,
+      latest_session: nil
+    }
+  end
+
+  defp merge_dir_annotations(dir, stats) do
+    if string_keyed_map?(dir) do
+      latest =
+        case stats.latest_session do
+          nil ->
+            nil
+
+          s ->
+            %{
+              "session_id" => s.session_id,
+              "title" => s.title,
+              "cwd" => s.cwd,
+              "updated_at" => s.updated_at,
+              "active" => s.active == true,
+              "status" => s.status || "ok"
+            }
+        end
+
+      Map.merge(dir, %{
+        "direct_session_count" => stats.direct_session_count,
+        "subtree_session_count" => stats.subtree_session_count,
+        "active_session_count" => stats.active_session_count,
+        "latest_session" => latest
+      })
+    else
+      latest =
+        case stats.latest_session do
+          nil ->
+            nil
+
+          s ->
+            %{
+              session_id: s.session_id,
+              title: s.title,
+              cwd: s.cwd,
+              updated_at: s.updated_at,
+              active: s.active == true,
+              status: s.status || "ok"
+            }
+        end
+
+      Map.merge(dir, %{
+        direct_session_count: stats.direct_session_count,
+        subtree_session_count: stats.subtree_session_count,
+        active_session_count: stats.active_session_count,
+        latest_session: latest
+      })
+    end
+  end
+
+  defp string_keyed_map?(map) do
+    keys = Map.keys(map)
+    Enum.any?(keys, &is_binary/1) and not Enum.any?(keys, &is_atom/1)
   end
 
   defp persist_entries!(file_path, entries) do

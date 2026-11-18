@@ -1,13 +1,20 @@
 defmodule H.WorkspaceLease do
   @moduledoc """
-  Coordinates per-workspace mutating tool leases by canonical `cwd` so
-  concurrent coding runs do not clobber the same working tree.
+  Coordinates per-workspace mutating tool leases by `{env_id, canonical_cwd}`
+  so concurrent coding runs do not clobber the same working tree while keeping
+  separate execution environments isolated.
   """
 
   use GenServer
 
   @type server :: GenServer.server()
+  @type workspace_key :: {env_id :: String.t(), cwd :: String.t()} | String.t()
   @type holder_key :: term()
+
+  defguardp is_valid_workspace_key(key)
+            when is_binary(key) or
+                   (is_tuple(key) and tuple_size(key) == 2 and is_binary(elem(key, 0)) and
+                      elem(key, 0) != "" and is_binary(elem(key, 1)))
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -16,16 +23,20 @@ defmodule H.WorkspaceLease do
     GenServer.start_link(__MODULE__, init_opts, gen_opts)
   end
 
-  @spec acquire(server(), String.t(), holder_key(), pid()) ::
+  @spec acquire(server(), workspace_key(), holder_key(), pid()) ::
           :ok | {:error, {:workspace_busy, holder_key()}}
-  def acquire(server \\ __MODULE__, cwd, holder_key, holder_pid)
-      when is_binary(cwd) and is_pid(holder_pid) do
-    GenServer.call(server, {:acquire, Path.expand(cwd), holder_key, holder_pid})
+  def acquire(server \\ __MODULE__, workspace_key, holder_key, holder_pid)
+      when is_valid_workspace_key(workspace_key) and is_pid(holder_pid) do
+    GenServer.call(
+      server,
+      {:acquire, normalize_workspace_key(workspace_key), holder_key, holder_pid}
+    )
   end
 
-  @spec release(server(), String.t(), holder_key()) :: :ok
-  def release(server \\ __MODULE__, cwd, holder_key) when is_binary(cwd) do
-    GenServer.call(server, {:release, Path.expand(cwd), holder_key})
+  @spec release(server(), workspace_key(), holder_key()) :: :ok
+  def release(server \\ __MODULE__, workspace_key, holder_key)
+      when is_valid_workspace_key(workspace_key) do
+    GenServer.call(server, {:release, normalize_workspace_key(workspace_key), holder_key})
   end
 
   @impl true
@@ -111,5 +122,18 @@ defmodule H.WorkspaceLease do
       | leases: Map.delete(state.leases, canonical_cwd),
         monitors: Map.delete(state.monitors, ref)
     }
+  end
+
+  defp normalize_workspace_key(cwd) when is_binary(cwd), do: {"host", Path.expand(cwd)}
+  defp normalize_workspace_key({"host", cwd}) when is_binary(cwd), do: {"host", Path.expand(cwd)}
+  defp normalize_workspace_key({env_id, cwd}), do: {env_id, normalize_remote_cwd(cwd)}
+
+  defp normalize_remote_cwd("/"), do: "/"
+
+  defp normalize_remote_cwd(cwd) do
+    case String.trim_trailing(cwd, "/") do
+      "" -> if String.starts_with?(cwd, "/"), do: "/", else: ""
+      trimmed -> trimmed
+    end
   end
 end
