@@ -37,4 +37,6 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 - [Architecture](docs/architecture.md) — ownership, commits, recovery and client boundaries
 - [Local HTTP/JSON and SSE protocol](docs/protocol.md)
 - [Roadmap](docs/roadmap.md) — implemented milestones and remaining work
+- [hi: planned pi replacement](docs/hi.md) — interaction parity, Rust choices and durable differences
+- [Bringing a harness or tool to hi](docs/hi-extensions.md) — proposed contributor boundaries
 - [Design references](docs/references.md)

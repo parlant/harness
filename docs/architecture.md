@@ -36,3 +36,5 @@ Supervision alone cannot recover an effect. On startup the daemon consults the c
 
 - **Phoenix** (`clients/web/`): `:harness_web` depends on `:harness` by path. `HWeb.Backend.InVM` calls the daemon in the same VM; there is no HTTP backend. `WorkspaceLive` browses folders. `SessionLive` streams entry rows and retains document and cursor state rather than every rendered entry body.
 - **Terminal** (`clients/tui/`): `h` discovers an existing daemon via `api.sock` or literal loopback HTTP. It sends the owner bearer token, consumes the [JSON/SSE API](protocol.md) and renders line-oriented output. Interactive and print modes share the same sessions as Phoenix.
+
+**Next client (proposed):** [`hi` terminal architecture](hi.md) maps pi workflows onto this boundary; [profiles and tool hosts](hi-extensions.md) separates trusted daemon packages from client presentation and external worker processes. Neither changes the shipped API described above.
