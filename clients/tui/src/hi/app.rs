@@ -216,9 +216,7 @@ pub fn run(
 impl Ui {
     fn draw(&mut self, screen: &mut Screen) -> Result<(), String> {
         if let Ok((width, _)) = crossterm::terminal::size() {
-            self.draft
-                .editor
-                .set_width(usize::from(width.saturating_sub(2)).max(1));
+            self.draft.editor.set_width(usize::from(width).max(1));
         }
         if self.rows_dirty {
             self.cached_rows = cards::rows(

@@ -2,7 +2,8 @@ use crate::render::sanitize_single_line;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 
-const DEFAULT_MAX_VISIBLE: usize = 10;
+// One search row plus six choices fits the seven-row inline picker.
+const DEFAULT_MAX_VISIBLE: usize = 6;
 
 /// Outcome of handling a key event inside [`Picker`].
 ///
@@ -111,7 +112,7 @@ impl Picker {
 
     /// Sets the maximum number of visible rows (clamped to at least 1).
     pub fn set_max_visible(&mut self, max_visible: usize) {
-        self.max_visible = max_visible.max(1);
+        self.max_visible = max_visible.clamp(1, DEFAULT_MAX_VISIBLE);
     }
 
     /// Returns the currently highlighted choice ID, if any match exists.
@@ -140,10 +141,8 @@ impl Picker {
     pub fn lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         let clean_title = sanitize_single_line(&self.title);
-        out.push(clean_title);
-
         let clean_query = sanitize_single_line(&self.query);
-        out.push(format!("Search: {clean_query}"));
+        out.push(format!("{clean_title} · Search: {clean_query}"));
 
         if self.filtered.is_empty() {
             out.push("  (no matches)".to_string());
@@ -158,24 +157,8 @@ impl Picker {
                 };
                 out.push(format!("{prefix}{}", self.items[item_idx].display_text()));
             }
-
-            if start > 0 || end < self.filtered.len() {
-                out.push(format!(
-                    "  ({}/{} · {} total)",
-                    self.selected + 1,
-                    self.filtered.len(),
-                    self.items.len()
-                ));
-            } else if self.filtered.len() != self.items.len() {
-                out.push(format!(
-                    "  ({} of {} matching)",
-                    self.filtered.len(),
-                    self.items.len()
-                ));
-            }
         }
 
-        out.push("  Up/Down move · Enter select · Esc cancel".to_string());
         out
     }
 
@@ -742,8 +725,7 @@ mod tests {
     fn empty_picker_handles_navigation_confirm_and_cancel_safely() {
         let mut picker = Picker::new("Sessions", vec![]);
         let rendered = picker.lines();
-        assert_eq!(rendered[0], "Sessions");
-        assert_eq!(rendered[1], "Search: ");
+        assert_eq!(rendered[0], "Sessions · Search: ");
         assert!(rendered.iter().any(|l| l.contains("(no matches)")));
 
         assert_eq!(picker.key(press(KeyCode::Up)), Choice::Stay);
@@ -1044,8 +1026,8 @@ mod tests {
         assert!(!joined.contains('\u{009b}'));
         assert!(lines[0].contains("\\x1b[2J"));
         assert!(lines[0].contains("\\nBreak"));
-        assert!(lines[2].starts_with("> "));
-        assert!(lines[2].contains("\\x1b]0;pwn\\x07"));
+        assert!(lines[1].starts_with("> "));
+        assert!(lines[1].contains("\\x1b]0;pwn\\x07"));
     }
 
     #[test]
@@ -1054,6 +1036,7 @@ mod tests {
             .map(|i| (format!("id-{i:02}"), format!("Choice {i:02}")))
             .collect();
         let mut picker = Picker::new("Long List", choices);
+        assert_eq!(picker.lines().len(), 7);
         picker.set_max_visible(5);
 
         let initial = picker.lines();
@@ -1062,7 +1045,7 @@ mod tests {
             .filter(|l| l.starts_with("> ") || l.starts_with("  Choice"))
             .collect();
         assert_eq!(item_lines.len(), 5);
-        assert!(initial.iter().any(|l| l.contains("(1/25 · 25 total)")));
+        assert_eq!(initial.len(), 6);
 
         assert_eq!(picker.key(press(KeyCode::PageDown)), Choice::Stay);
         assert_eq!(picker.selected_id(), Some("id-06"));
@@ -1074,6 +1057,6 @@ mod tests {
         assert_eq!(picker.selected_id(), Some("id-25"));
         let at_end = picker.lines();
         assert!(at_end.iter().any(|l| l.contains("Choice 25")));
-        assert!(at_end.iter().any(|l| l.contains("(25/25 · 25 total)")));
+        assert_eq!(at_end.len(), 6);
     }
 }

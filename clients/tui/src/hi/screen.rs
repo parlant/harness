@@ -14,7 +14,6 @@ use ratatui::backend::{Backend, CrosstermBackend, WindowSize};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, Widget};
 use ratatui::Terminal;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
@@ -25,8 +24,6 @@ use unicode_width::UnicodeWidthStr;
 
 const TAB_WIDTH: usize = 4;
 const TAB_SPACES: &str = "    ";
-const EDITOR_PROMPT: &str = "> ";
-const EDITOR_CONT_PREFIX: &str = "  ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenMode {
@@ -599,12 +596,8 @@ fn draw_fullscreen(
         }
 
         let width = area.width as usize;
-        let use_prompt = width >= 4;
-        let prefix_width = if use_prompt { 2 } else { 0 };
-        let editor_content_width = width.saturating_sub(prefix_width).max(1);
-
-        let editor_layout = layout_editor(editor, cursor, editor_content_width);
-        let layout = compute_layout(area.height, editor_layout.lines.len());
+        let editor_layout = layout_editor(editor, cursor, width);
+        let layout = compute_layout(area.height, editor_layout.lines.len(), overlay.len());
 
         // 1. Transcript rows
         if layout.transcript_height > 0 {
@@ -649,9 +642,7 @@ fn draw_fullscreen(
             layout.editor_height,
             &editor_layout,
             &mut next_editor_scroll,
-            use_prompt,
-            prefix_width,
-            editor_content_width,
+            overlay,
         );
 
         // 4. Status bar
@@ -665,20 +656,8 @@ fn draw_fullscreen(
             );
         }
 
-        // 5. Overlay (modal/picker/completion)
-        let overlay_rect = if !overlay.is_empty() {
-            render_overlay(frame.buffer_mut(), area, overlay)
-        } else {
-            None
-        };
-
         if let Some(pos) = cursor_pos {
-            let covered_by_overlay = overlay_rect.is_some_and(|r| {
-                pos.x >= r.x && pos.x < r.x + r.width && pos.y >= r.y && pos.y < r.y + r.height
-            });
-            if !covered_by_overlay {
-                frame.set_cursor_position(pos);
-            }
+            frame.set_cursor_position(pos);
         }
     })?;
 
@@ -696,11 +675,30 @@ fn render_editor_area(
     editor_height: u16,
     editor_layout: &EditorLayout,
     editor_scroll: &mut usize,
-    use_prompt: bool,
-    prefix_width: usize,
-    editor_content_width: usize,
+    picker: &[String],
 ) -> Option<Position> {
     let visible_editor_h = editor_height as usize;
+    if !picker.is_empty() {
+        // Header stays put; keep the selected result visible even after a short resize.
+        let selected = picker.iter().position(|s| s.starts_with("> ")).unwrap_or(1);
+        let skip = selected.saturating_sub(visible_editor_h.saturating_sub(1));
+        for (row, line) in picker[..1]
+            .iter()
+            .chain(picker[1..].iter().skip(skip))
+            .take(visible_editor_h)
+            .enumerate()
+        {
+            write_plain_str_to_row(
+                buf,
+                area_x,
+                editor_y + row as u16,
+                total_width as usize,
+                line,
+                Style::default(),
+            );
+        }
+        return None;
+    }
     let cursor_visual_row = editor_layout.cursor_row;
     if cursor_visual_row < *editor_scroll {
         *editor_scroll = cursor_visual_row;
@@ -717,29 +715,16 @@ fn render_editor_area(
             break;
         };
         let y = editor_y + row_offset as u16;
-        if use_prompt {
-            let prefix = if line_idx == 0 {
-                EDITOR_PROMPT
-            } else {
-                EDITOR_CONT_PREFIX
-            };
-            let p_style = if line_idx == 0 {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            write_plain_str_to_row(buf, area_x, y, prefix_width, prefix, p_style);
-        }
         write_segments_to_row(
             buf,
-            area_x + prefix_width as u16,
+            area_x,
             y,
-            editor_content_width,
+            total_width as usize,
             &ed_line.segments,
             Style::default(),
         );
         if line_idx == editor_layout.cursor_row {
-            let cx = (area_x as usize + prefix_width + editor_layout.cursor_col)
+            let cx = (area_x as usize + editor_layout.cursor_col)
                 .min(area_x as usize + (total_width as usize).saturating_sub(1))
                 as u16;
             cursor_pos = Some(Position::new(cx, y));
@@ -777,11 +762,8 @@ fn draw_regular(
     let height_shrunk = reg.prev_height != 0 && height < reg.working_lines.len();
     let mut need_full_clear = width_changed || height_shrunk;
 
-    let use_prompt = width >= 4;
-    let prefix_width = if use_prompt { 2 } else { 0 };
-    let editor_content_width = width.saturating_sub(prefix_width).max(1);
-    let editor_layout = layout_editor(editor, cursor, editor_content_width);
-    let layout = compute_layout(term_h, editor_layout.lines.len());
+    let editor_layout = layout_editor(editor, cursor, width);
+    let layout = compute_layout(term_h, editor_layout.lines.len(), overlay.len());
 
     let sep_h = usize::from(layout.separator_y.is_some());
     let status_h = usize::from(layout.status_y.is_some());
@@ -798,7 +780,9 @@ fn draw_regular(
     }
 
     let total_visual = reg.cached_wrapped.len();
-    let flush_target = total_visual.saturating_sub(max_tail_lines);
+    let flush_target = total_visual
+        .saturating_sub(max_tail_lines)
+        .max(reg.flushed_visual_lines.len().min(total_visual));
 
     // Check if already-flushed prefix is still intact
     let mut prefix_intact = !need_full_clear && flush_target >= reg.flushed_visual_lines.len();
@@ -827,12 +811,7 @@ fn draw_regular(
 
     let tail = &reg.cached_wrapped[flush_target..];
     let base_h = tail.len() + bottom_h;
-    let overlay_desired_h = if overlay.is_empty() {
-        0
-    } else {
-        desired_overlay_height(term_w, term_h, overlay)
-    };
-    let work_h = base_h.max(overlay_desired_h).clamp(1, height);
+    let work_h = base_h.clamp(1, height);
 
     let area = Rect::new(0, 0, term_w, work_h as u16);
     let mut buf = Buffer::empty(area);
@@ -854,7 +833,7 @@ fn draw_regular(
         cur_y += 1;
     }
 
-    let mut cursor_pos = render_editor_area(
+    let cursor_pos = render_editor_area(
         &mut buf,
         0,
         cur_y,
@@ -862,29 +841,12 @@ fn draw_regular(
         layout.editor_height,
         &editor_layout,
         &mut reg.editor_scroll,
-        use_prompt,
-        prefix_width,
-        editor_content_width,
+        overlay,
     );
     cur_y += layout.editor_height;
 
     if layout.status_y.is_some() && (cur_y as usize) < work_h {
         render_status_bar(&mut buf, 0, cur_y, term_w, status);
-    }
-
-    let overlay_rect = if !overlay.is_empty() {
-        render_overlay(&mut buf, area, overlay)
-    } else {
-        None
-    };
-
-    if let Some(pos) = cursor_pos {
-        let covered = overlay_rect.is_some_and(|r| {
-            pos.x >= r.x && pos.x < r.x + r.width && pos.y >= r.y && pos.y < r.y + r.height
-        });
-        if covered {
-            cursor_pos = None;
-        }
     }
 
     let new_working_lines: Vec<String> = (0..work_h)
@@ -1123,7 +1085,11 @@ struct ScreenLayout {
     status_y: Option<u16>,
 }
 
-fn compute_layout(total_height: u16, editor_visual_lines: usize) -> ScreenLayout {
+fn compute_layout(
+    total_height: u16,
+    editor_visual_lines: usize,
+    picker_lines: usize,
+) -> ScreenLayout {
     if total_height == 0 {
         return ScreenLayout {
             transcript_height: 0,
@@ -1152,7 +1118,7 @@ fn compute_layout(total_height: u16, editor_visual_lines: usize) -> ScreenLayout
         };
     }
     if total_height <= 4 {
-        let editor_h = 1u16;
+        let editor_h = (picker_lines as u16).clamp(1, total_height - 1);
         let status_y = total_height - 1;
         let editor_y = status_y - editor_h;
         return ScreenLayout {
@@ -1170,7 +1136,11 @@ fn compute_layout(total_height: u16, editor_visual_lines: usize) -> ScreenLayout
     let max_editor = ((total_height as usize * 3) / 10)
         .max(3)
         .min((total_height - status_h - sep_h - 1) as usize);
-    let editor_h = editor_visual_lines.clamp(1, max_editor) as u16;
+    let editor_h = if picker_lines == 0 {
+        editor_visual_lines.clamp(1, max_editor) as u16
+    } else {
+        (picker_lines.min(7) as u16).min(total_height - status_h - sep_h - 1)
+    };
     let status_y = total_height - 1;
     let editor_y = status_y - editor_h;
     let separator_y = editor_y - 1;
@@ -1804,124 +1774,6 @@ fn layout_editor(editor: &str, raw_cursor: usize, content_width: usize) -> Edito
     }
 }
 
-fn desired_overlay_height(area_width: u16, area_height: u16, overlay: &[String]) -> usize {
-    if area_width == 0 || area_height == 0 || overlay.is_empty() {
-        return 0;
-    }
-    let bordered = area_width >= 6 && area_height >= 4;
-    let max_box_w = if bordered {
-        (area_width as usize).saturating_sub(2).max(4)
-    } else {
-        area_width as usize
-    };
-    let inner_max_w = if bordered {
-        max_box_w.saturating_sub(2).max(1)
-    } else {
-        max_box_w.max(1)
-    };
-    let mut line_count = 0usize;
-    for raw in overlay {
-        let safe = sanitize_terminal_text(raw);
-        for logical in safe.split('\n') {
-            let segs = sanitize_graphemes_for_line(logical);
-            line_count += wrap_segments(&segs, inner_max_w).len();
-        }
-    }
-    line_count = line_count.max(1);
-    if bordered {
-        (line_count + 2).min(area_height as usize)
-    } else {
-        line_count.clamp(1, area_height as usize)
-    }
-}
-
-fn render_overlay(buf: &mut Buffer, area: Rect, overlay: &[String]) -> Option<Rect> {
-    if area.width == 0 || area.height == 0 || overlay.is_empty() {
-        return None;
-    }
-
-    let bordered = area.width >= 6 && area.height >= 4;
-    let max_box_w = if bordered {
-        (area.width as usize).saturating_sub(2).max(4)
-    } else {
-        area.width as usize
-    };
-    let inner_max_w = if bordered {
-        max_box_w.saturating_sub(2).max(1)
-    } else {
-        max_box_w.max(1)
-    };
-
-    let mut wrapped_lines: Vec<Vec<RenderSeg>> = Vec::new();
-    let mut widest_content = 0usize;
-    for raw in overlay {
-        let safe = sanitize_terminal_text(raw);
-        for logical in safe.split('\n') {
-            let segs = sanitize_graphemes_for_line(logical);
-            for chunk in wrap_segments(&segs, inner_max_w) {
-                let w: usize = chunk.iter().map(|s| s.width).sum();
-                widest_content = widest_content.max(w);
-                wrapped_lines.push(chunk);
-            }
-        }
-    }
-
-    if wrapped_lines.is_empty() {
-        wrapped_lines.push(Vec::new());
-    }
-
-    let (box_w, box_h, inner_w, inner_h) = if bordered {
-        let desired_w = (widest_content + 2).clamp(16.min(max_box_w), max_box_w);
-        let desired_h = (wrapped_lines.len() + 2).min(area.height as usize);
-        (
-            desired_w as u16,
-            desired_h as u16,
-            desired_w - 2,
-            desired_h - 2,
-        )
-    } else {
-        let desired_w = widest_content.clamp(1, area.width as usize);
-        let desired_h = wrapped_lines.len().clamp(1, area.height as usize);
-        (desired_w as u16, desired_h as u16, desired_w, desired_h)
-    };
-
-    let box_x = area.x + (area.width.saturating_sub(box_w)) / 2;
-    let box_y = area.y + (area.height.saturating_sub(box_h)) / 2;
-    let rect = Rect::new(box_x, box_y, box_w, box_h);
-
-    // Protect left CJK/wide-character boundary before clearing the overlay rect:
-    // if cell (rect.x - 1, y) holds a width-2 grapheme that overlaps rect.x, clear it to space.
-    if rect.x > area.x {
-        let left_x = rect.x - 1;
-        for y in rect.y..rect.y + rect.height {
-            let sym = buf[(left_x, y)].symbol();
-            if grapheme_display_width(sym) > 1 {
-                buf[(left_x, y)].set_symbol(" ");
-            }
-        }
-    }
-
-    Clear.render(rect, buf);
-
-    let inner_rect = if bordered {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().add_modifier(Modifier::DIM));
-        let inner = block.inner(rect);
-        block.render(rect, buf);
-        inner
-    } else {
-        rect
-    };
-
-    for (idx, line) in wrapped_lines.iter().take(inner_h).enumerate() {
-        let y = inner_rect.y + idx as u16;
-        write_segments_to_row(buf, inner_rect.x, y, inner_w, line, Style::default());
-    }
-
-    Some(rect)
-}
-
 fn write_plain_str_to_row(
     buf: &mut Buffer,
     start_x: u16,
@@ -2323,11 +2175,10 @@ mod tests {
         assert_eq!(lines[0], "user: hello");
         assert_eq!(lines[1], "assistant: world");
         assert!(lines[7].starts_with("────"));
-        assert_eq!(lines[8], "> draft text");
+        assert_eq!(lines[8], "draft text");
         assert_eq!(lines[9], "[seq 1 · idle]");
 
-        // Prompt is "> " (2 cols), cursor at byte 5 ("draft") -> x = 2 + 5 = 7, y = 8
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(7, 8));
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(5, 8));
     }
 
     #[test]
@@ -2337,38 +2188,34 @@ mod tests {
         // CJK "你好" (each width 2 -> 4 cols) + "a"
         let text = "你好a";
         screen.draw(&[], text, "你好".len(), "ok", &[]).unwrap();
-        // "> " (2) + "你好" (4) = col 6, row 6
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(6, 6));
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(4, 6));
 
         // Tab expands to 4 spaces
         let tab_text = "a\tb";
         screen.draw(&[], tab_text, 2, "ok", &[]).unwrap();
-        // "> " (2) + "a" (1) + "\t" (4) = col 7
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(7, 6));
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(5, 6));
 
         // Combining accent "e\u{0301}" (1 cell) + "x"
         let accent = "e\u{0301}x";
         screen
             .draw(&[], accent, "e\u{0301}".len(), "ok", &[])
             .unwrap();
-        // "> " (2) + 1 = col 3
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(3, 6));
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(1, 6));
 
         // ZWJ emoji "👨‍💻" (2 cells) + "z"
         let zwj = "👨‍💻z";
         screen.draw(&[], zwj, "👨‍💻".len(), "ok", &[]).unwrap();
-        // "> " (2) + 2 = col 4
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(4, 6));
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(2, 6));
 
         // Invalid mid-UTF8 byte cursor must clamp safely without panicking
         screen.draw(&[], "你好", 1, "ok", &[]).unwrap();
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(2, 6));
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(0, 6));
     }
 
     #[test]
     fn editor_wraps_and_scrolls_internally_to_keep_cursor_visible() {
-        let mut screen = Screen::with_test_backend(14, 10).unwrap();
-        // Width 14 -> prefix 2 -> content width 12
+        let mut screen = Screen::with_test_backend(12, 10).unwrap();
+        // All 12 columns are available to the draft.
         // "hello world foo bar" wraps cleanly at spaces into 3 lines:
         // "hello world ", "foo bar" -> 2 lines, let's test 3 lines then 5 lines (internal scroll).
         let three_lines = "hello world second line third";
@@ -2378,10 +2225,10 @@ mod tests {
 
         let lines = buffer_all_text(screen.test_backend().buffer());
         // max_editor for height 10 is (10*3/10).max(3) = 3
-        assert_eq!(lines[6], "> hello world");
-        assert_eq!(lines[7], "  second line");
-        assert_eq!(lines[8], "  third");
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(7, 8));
+        assert_eq!(lines[6], "hello world");
+        assert_eq!(lines[7], "second line");
+        assert_eq!(lines[8], "third");
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(5, 8));
 
         // 5 logical lines: editor must scroll internally so cursor on line 5 is visible on row 8
         let five_lines = "l1\nl2\nl3\nl4\nl5";
@@ -2389,24 +2236,24 @@ mod tests {
             .draw(&[], five_lines, five_lines.len(), "ok", &[])
             .unwrap();
         let lines = buffer_all_text(screen.test_backend().buffer());
-        assert_eq!(lines[6], "  l3");
-        assert_eq!(lines[7], "  l4");
-        assert_eq!(lines[8], "  l5");
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(4, 8));
+        assert_eq!(lines[6], "l3");
+        assert_eq!(lines[7], "l4");
+        assert_eq!(lines[8], "l5");
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(2, 8));
 
-        // Moving cursor back to line 1 scrolls editor back up to show "> l1"
+        // Moving cursor back to line 1 scrolls the editor back up.
         screen.draw(&[], five_lines, 1, "ok", &[]).unwrap();
         let lines = buffer_all_text(screen.test_backend().buffer());
-        assert_eq!(lines[6], "> l1");
-        assert_eq!(lines[7], "  l2");
-        assert_eq!(lines[8], "  l3");
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(3, 6));
+        assert_eq!(lines[6], "l1");
+        assert_eq!(lines[7], "l2");
+        assert_eq!(lines[8], "l3");
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(1, 6));
 
         // Full-width single line places cursor on trailing soft-wrapped line:
         // "123456789012" + trailing cursor line = 2 lines (y=7 and y=8 for height 10)
         let exact = "123456789012";
         screen.draw(&[], exact, exact.len(), "ok", &[]).unwrap();
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(2, 8));
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(0, 8));
     }
 
     #[test]
@@ -2525,29 +2372,20 @@ mod tests {
     }
 
     #[test]
-    fn overlay_renders_and_protects_cjk_left_boundary() {
+    fn picker_occupies_editor_rows_without_covering_transcript() {
         let mut screen = Screen::with_test_backend(20, 10).unwrap();
-        // Place "abcd让EFGH" on every transcript row so the overlay left border hits column 2/3 or inside a wide char.
-        // For width 20 and overlay width 16 (min 16), box_x = (20-16)/2 = 2.
-        // Put a wide char at column 1..3: "a让bcd" -> 'a' at 0, '让' at 1..3 (crosses col 2!).
+        // Wide transcript cells must remain intact above the inline list.
         let rows: Vec<String> = (0..6).map(|_| "a让bcdefghijkl".to_string()).collect();
         let overlay = vec!["Pick model".to_string(), "1. claude".to_string()];
 
         screen.draw(&rows, "hi", 2, "ok", &overlay).unwrap();
         let buf = screen.test_backend().buffer();
 
-        // Row 3..7 has the overlay box starting at x=2.
-        // Verify cell at x=1 on overlay rows was cleared from "让" (width 2) to " " so it doesn't collide with '┌'/'│'.
-        for y in 3..7 {
-            assert_eq!(
-                buf[(1, y)].symbol(),
-                " ",
-                "wide char at col 1 row {y} must be cleared"
-            );
+        for y in 0..6 {
+            assert_eq!(buf[(1, y)].symbol(), "让");
         }
-        let all = buffer_all_text(buf).join("\n");
-        assert!(all.contains("Pick model"));
-        assert!(all.contains("1. claude"));
+        let lines = buffer_all_text(buf);
+        assert_eq!(&lines[7..], &["Pick model", "1. claude", "ok"]);
     }
 
     #[test]
@@ -2651,7 +2489,7 @@ mod tests {
             assert!(!line.contains("l2"));
             assert!(!line.contains("l3"));
         }
-        assert_eq!(lines[8], ">");
+        assert_eq!(lines[8], "");
         assert_eq!(lines[9], "idle");
     }
 
@@ -2690,8 +2528,8 @@ mod tests {
             .unwrap();
         let lines = buffer_all_text(screen.test_backend().buffer());
         assert_eq!(lines[0], "entry 06 alpha beta");
-        assert_eq!(lines[8], "> draft msg");
-        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(7, 8));
+        assert_eq!(lines[8], "draft msg");
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(5, 8));
     }
 
     fn strip_sgr(s: &str) -> String {
@@ -2734,7 +2572,8 @@ mod tests {
         assert!(first_plain.contains("hist 01"));
         assert!(first_plain.contains("hist 05"));
         assert!(first_plain.contains("live: Hel"));
-        assert!(first_plain.contains("> draft"));
+        assert!(first_plain.contains("draft"));
+        assert!(!first_plain.contains("> draft"));
 
         // Token update on last line: flushed history hist 01..05 must NOT be reprinted!
         rows[9] = "live: Hello world".to_string();
@@ -2755,7 +2594,7 @@ mod tests {
         let third_plain = strip_sgr(&log.borrow().writes[2]);
         assert!(!third_plain.contains("hist 01"));
         assert!(!third_plain.contains("live: Hello world"));
-        assert!(third_plain.contains("> draft!"));
+        assert!(third_plain.contains("draft!"));
     }
 
     #[test]
