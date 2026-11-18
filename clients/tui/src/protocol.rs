@@ -279,6 +279,28 @@ impl CommandEnvelope {
         }
     }
 
+    pub fn fork_and_submit(
+        request_id: impl Into<String>,
+        conversation_id: u64,
+        at_entry_id: u64,
+        text: impl Into<String>,
+        when_busy: WhenBusy,
+        when_idle: WhenIdle,
+    ) -> Self {
+        Self {
+            version: 1,
+            request_id: request_id.into(),
+            command: "fork_and_submit".to_string(),
+            conversation_id,
+            args: serde_json::json!({
+                "at_entry_id": at_entry_id,
+                "content": [TextContentBlock::text(text)],
+                "when_busy": when_busy,
+                "when_idle": when_idle,
+            }),
+        }
+    }
+
     pub fn configure(
         request_id: impl Into<String>,
         conversation_id: u64,
@@ -673,6 +695,43 @@ mod tests {
         assert_eq!(val["args"]["when_idle"], "start");
         assert_eq!(val["args"]["content"][0]["type"], "text");
         assert_eq!(val["args"]["content"][0]["text"], "hello world");
+    }
+
+    #[test]
+    fn fork_and_submit_envelope_serializes_v1_shape_distinct_from_fork() {
+        let fork_env = CommandEnvelope::fork("req-fork", 1, 12);
+        let fork_val = serde_json::to_value(&fork_env).unwrap();
+        assert_eq!(fork_val["command"], "fork");
+        assert_eq!(fork_val["conversation_id"], 1);
+        assert_eq!(fork_val["args"], serde_json::json!({"at_entry_id": 12}));
+
+        let fs_env = CommandEnvelope::fork_and_submit(
+            "req-fs",
+            1,
+            11,
+            "edited prompt",
+            WhenBusy::Steer,
+            WhenIdle::Start,
+        );
+        let fs_val = serde_json::to_value(&fs_env).unwrap();
+        assert_eq!(fs_val["version"], 1);
+        assert_eq!(fs_val["request_id"], "req-fs");
+        assert_eq!(fs_val["command"], "fork_and_submit");
+        assert_eq!(fs_val["conversation_id"], 1);
+        assert_eq!(fs_val["args"]["at_entry_id"], 11);
+        assert_eq!(fs_val["args"]["when_busy"], "steer");
+        assert_eq!(fs_val["args"]["when_idle"], "start");
+        assert_eq!(fs_val["args"]["content"][0]["type"], "text");
+        assert_eq!(fs_val["args"]["content"][0]["text"], "edited prompt");
+
+        let receipt: CommandReceipt = serde_json::from_str(
+            r#"{"version":1,"request_id":"req-fs","seq":19,"conversation_id":"2","submission_id":"sub-9","status":"placed"}"#,
+        )
+        .unwrap();
+        assert_eq!(receipt.conversation_id.as_deref(), Some("2"));
+        assert_eq!(receipt.submission_id.as_deref(), Some("sub-9"));
+        assert_eq!(receipt.status.as_deref(), Some("placed"));
+        assert_eq!(receipt.seq, Some(19));
     }
 
     #[test]

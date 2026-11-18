@@ -24,6 +24,7 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Submit(CommandEnvelope),
+    ForkAndSubmit(CommandEnvelope),
     Sessions,
     Models,
     Branches,
@@ -44,6 +45,10 @@ pub enum Effect {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     Receipt(CommandReceipt),
+    ForkSubmitted {
+        target: Target,
+        receipt: CommandReceipt,
+    },
     Menu(String, Vec<(String, String)>),
     Page(EntriesPageResponse),
     Target(Target),
@@ -74,6 +79,40 @@ pub fn execute(
             }
             let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
             Ok(Reply::Receipt(receipt))
+        }
+
+        Effect::ForkAndSubmit(envelope) => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot fork_and_submit: missing session_id".to_string());
+            }
+            if envelope.command != "fork_and_submit" {
+                return Err(format!(
+                    "cannot fork_and_submit: unexpected command '{}'",
+                    sanitize_single_line(&envelope.command)
+                ));
+            }
+            let cid_num = parse_cid(&target.cid)?;
+            if envelope.conversation_id != cid_num {
+                return Err(format!(
+                    "cannot fork_and_submit: wrong branch (expected conversation #{}, got #{})",
+                    cid_num, envelope.conversation_id
+                ));
+            }
+            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+            let new_cid = receipt
+                .conversation_id
+                .clone()
+                .filter(|c| !c.trim().is_empty())
+                .ok_or_else(|| "fork_and_submit receipt missing conversation_id".to_string())?;
+            Ok(Reply::ForkSubmitted {
+                target: Target {
+                    sid: target.sid.clone(),
+                    cid: new_cid,
+                    cwd: target.cwd.clone(),
+                    env_id: target.env_id.clone(),
+                },
+                receipt,
+            })
         }
 
         Effect::Sessions => {
@@ -1265,5 +1304,122 @@ mod tests {
                 .unwrap_err()
                 .contains("env_id mismatch")
         );
+    }
+
+    #[test]
+    fn fork_and_submit_posts_atomic_command_and_guards_wrong_branch() {
+        let (sock_path, listener, client) = bind_test_socket("fork-and-submit");
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured_srv = Arc::clone(&captured);
+
+        let handle = thread::spawn(move || {
+            // 1. Attempt 1 drops socket (ambiguous I/O -> retries with same request_id)
+            let (mut s1, _) = listener.accept().unwrap();
+            let (_h1, b1) = read_http_request(&mut s1);
+            captured_srv
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(&b1).unwrap());
+            drop(s1);
+
+            // 2. Attempt 2 succeeds
+            let (mut s2, _) = listener.accept().unwrap();
+            let (h2, b2) = read_http_request(&mut s2);
+            assert!(h2.starts_with("POST /api/v1/sessions/sess-1/commands HTTP/1.1"));
+            captured_srv
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(&b2).unwrap());
+            write_json_response(
+                &mut s2,
+                "200 OK",
+                r#"{"version":1,"request_id":"req-fs-1","seq":15,"conversation_id":"2","submission_id":"sub-9","status":"placed"}"#,
+            );
+
+            // 3. Definite 400 entry_not_visible (no retry)
+            let (mut s3, _) = listener.accept().unwrap();
+            let (_h3, b3) = read_http_request(&mut s3);
+            captured_srv
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(&b3).unwrap());
+            write_json_response(
+                &mut s3,
+                "400 Bad Request",
+                r#"{"error":"entry_not_visible"}"#,
+            );
+        });
+
+        let target = test_target();
+
+        // Wrong branch conversation_id fails before hitting socket
+        let wrong_branch_env = CommandEnvelope::fork_and_submit(
+            "req-wrong",
+            99,
+            11,
+            "edited",
+            WhenBusy::Steer,
+            WhenIdle::Start,
+        );
+        let wrong_err = execute(
+            &client,
+            &target,
+            None,
+            Effect::ForkAndSubmit(wrong_branch_env),
+        )
+        .unwrap_err();
+        assert!(wrong_err.contains("wrong branch"), "err={wrong_err}");
+
+        // Matching branch retries ambiguous I/O with identical envelope and switches target
+        let fs_env = CommandEnvelope::fork_and_submit(
+            "req-fs-1",
+            1,
+            11,
+            "edited prompt",
+            WhenBusy::Steer,
+            WhenIdle::Start,
+        );
+        let reply = execute(&client, &target, None, Effect::ForkAndSubmit(fs_env)).unwrap();
+        assert_eq!(
+            reply,
+            Reply::ForkSubmitted {
+                target: Target {
+                    sid: "sess-1".to_string(),
+                    cid: "2".to_string(),
+                    cwd: "/tmp/proj".to_string(),
+                    env_id: "host".to_string(),
+                },
+                receipt: CommandReceipt {
+                    version: Some(1),
+                    request_id: "req-fs-1".to_string(),
+                    seq: Some(15),
+                    submission_id: Some("sub-9".to_string()),
+                    conversation_id: Some("2".to_string()),
+                    status: Some("placed".to_string()),
+                    withdrawn: Vec::new(),
+                    reason: None,
+                },
+            }
+        );
+
+        // 400 entry_not_visible is not retried
+        let bad_env = CommandEnvelope::fork_and_submit(
+            "req-fs-bad",
+            1,
+            77,
+            "stale",
+            WhenBusy::FollowUp,
+            WhenIdle::Start,
+        );
+        let err = execute(&client, &target, None, Effect::ForkAndSubmit(bad_env)).unwrap_err();
+        assert!(err.contains("entry_not_visible"), "err={err}");
+
+        handle.join().unwrap();
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 3);
+        assert_eq!(reqs[0], reqs[1]);
+        assert_eq!(reqs[0]["command"], "fork_and_submit");
+        assert_eq!(reqs[0]["args"]["at_entry_id"], 11);
+        let _ = std::fs::remove_file(&sock_path);
     }
 }
