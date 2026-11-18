@@ -1,7 +1,7 @@
 defmodule H.Submission do
   @moduledoc """
   Idempotent command receipt keyed by `request_id` with deterministic payload
-  fingerprinting and status transitions (`queued`, `placed`, `done`, `unanswered`).
+  fingerprinting and status transitions (`queued`, `placed`, `done`, `unanswered`, `withdrawn`).
   """
 
   @type status :: String.t()
@@ -40,6 +40,7 @@ defmodule H.Submission do
       notify: Map.get(attrs, :notify),
       when_busy: Map.get(attrs, :when_busy),
       when_idle: Map.get(attrs, :when_idle),
+      withdrawn: Map.get(attrs, :withdrawn),
       seq: Map.get(attrs, :seq),
       created_at: now,
       updated_at: Map.get(attrs, :updated_at, now)
@@ -62,6 +63,7 @@ defmodule H.Submission do
       notify: field(raw, :notify, "notify"),
       when_busy: field(raw, :when_busy, "when_busy"),
       when_idle: field(raw, :when_idle, "when_idle"),
+      withdrawn: field(raw, :withdrawn, "withdrawn"),
       seq: field(raw, :seq, "seq"),
       created_at: field(raw, :created_at, "created_at"),
       updated_at: field(raw, :updated_at, "updated_at")
@@ -92,6 +94,14 @@ defmodule H.Submission do
     |> Map.merge(%{status: "unanswered", reason: reason, updated_at: now})
   end
 
+  @doc "Transitions a queued submission to `withdrawn`."
+  @spec mark_withdrawn(map(), integer()) :: map()
+  def mark_withdrawn(sub, now \\ System.system_time(:millisecond)) do
+    sub
+    |> from_storage()
+    |> Map.merge(%{status: "withdrawn", updated_at: now})
+  end
+
   @doc "Formats a submission into a wire command receipt."
   @spec to_receipt(map(), non_neg_integer()) :: map()
   def to_receipt(sub, current_seq) when is_map(sub) do
@@ -119,6 +129,11 @@ defmodule H.Submission do
 
       "abort" ->
         Map.put(base, :status, s.status)
+
+      "withdraw" ->
+        base
+        |> Map.put(:status, s.status)
+        |> Map.put(:withdrawn, s.withdrawn || [])
 
       _submit_kind ->
         base

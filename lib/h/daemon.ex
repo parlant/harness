@@ -596,7 +596,8 @@ defmodule H.Daemon do
            Schema.validate_map(raw, [
              {:version, {:literal, 1}, required: true},
              {:request_id, :non_empty_string, required: true},
-             {:command, {:enum, ["submit", "fork", "fork_and_submit", "configure", "abort"]},
+             {:command,
+              {:enum, ["submit", "fork", "fork_and_submit", "configure", "abort", "withdraw"]},
               required: true},
              {:conversation_id, :pos_int, required: true},
              {:args, :map, default: %{}}
@@ -677,6 +678,19 @@ defmodule H.Daemon do
       {:reason, :string, required: false, nullable: true}
     ])
   end
+
+  defp validate_command_args("withdraw", raw_args) do
+    with {:ok, args} <-
+           Schema.validate_map(raw_args, [
+             {:submission_ids, {:list, :pos_int}, required: true}
+           ]),
+         :ok <- validate_non_empty_list(args.submission_ids, "submission_ids") do
+      {:ok, %{args | submission_ids: Enum.uniq(args.submission_ids)}}
+    end
+  end
+
+  defp validate_non_empty_list([_ | _], _field), do: :ok
+  defp validate_non_empty_list([], field), do: {:error, "#{field} must be a non-empty list"}
 
   defp validate_content(text) when is_binary(text) and byte_size(text) > 0, do: :ok
 

@@ -787,7 +787,7 @@ defmodule H.Session.Server do
   defp run_items([], state), do: {:noreply, state}
 
   defp run_items(items, state) do
-    {staged_items, immediate_replies, post_effects, working_state} =
+    {staged_items, immediate_replies, post_effects, working_state, deferred_items} =
       stage_items(items, state, [], [], [])
 
     batches = Enum.map(staged_items, & &1.writes)
@@ -820,7 +820,7 @@ defmodule H.Session.Server do
 
           case refused do
             nil ->
-              {:noreply, state_after_effects}
+              run_items(deferred_items, state_after_effects)
 
             {_idx, reason} ->
               [refused_item | remaining_staged] = rest_staged
@@ -829,7 +829,7 @@ defmodule H.Session.Server do
                 GenServer.reply(refused_item.reply_from, {:error, map_storage_refusal(reason)})
               end
 
-              remaining_items = Enum.map(remaining_staged, & &1.raw_item)
+              remaining_items = Enum.map(remaining_staged, & &1.raw_item) ++ deferred_items
               run_items(remaining_items, state_after_effects)
           end
       end
@@ -837,11 +837,29 @@ defmodule H.Session.Server do
   end
 
   defp stage_items([], state, staged_rev, replies_rev, effects_rev) do
-    {Enum.reverse(staged_rev), Enum.reverse(replies_rev), Enum.reverse(effects_rev), state}
+    {Enum.reverse(staged_rev), Enum.reverse(replies_rev), Enum.reverse(effects_rev), state, []}
+  end
+
+  defp stage_items(
+         [{:command, _from, %{request_id: req_id}} = item | rest] = all,
+         state,
+         staged_rev,
+         replies_rev,
+         effects_rev
+       ) do
+    if staged_request_id?(staged_rev, req_id) do
+      {Enum.reverse(staged_rev), Enum.reverse(replies_rev), Enum.reverse(effects_rev), state, all}
+    else
+      stage_next_item(item, rest, state, staged_rev, replies_rev, effects_rev)
+    end
   end
 
   defp stage_items([item | rest], state, staged_rev, replies_rev, effects_rev) do
-    case stage_single_item(item, state) do
+    stage_next_item(item, rest, state, staged_rev, replies_rev, effects_rev)
+  end
+
+  defp stage_next_item(item, rest, state, staged_rev, replies_rev, effects_rev) do
+    case stage_single_item(item, state, staged_rev) do
       {:skip, next_state} ->
         stage_items(rest, next_state, staged_rev, replies_rev, effects_rev)
 
@@ -854,37 +872,43 @@ defmodule H.Session.Server do
     end
   end
 
-  defp stage_single_item({:worker_done_fenced, inc, tid, attempt_id, result}, state) do
+  defp staged_request_id?(staged_rev, req_id) do
+    Enum.any?(staged_rev, fn staged ->
+      Enum.any?(staged.submissions, &(&1.request_id == req_id))
+    end)
+  end
+
+  defp stage_single_item({:worker_done_fenced, inc, tid, attempt_id, result}, state, staged_rev) do
     if inc == state.incarnation and Map.has_key?(state.workers, attempt_id) do
-      stage_single_item({:worker_done, tid, attempt_id, result}, state)
+      stage_single_item({:worker_done, tid, attempt_id, result}, state, staged_rev)
     else
       {:skip, state}
     end
   end
 
-  defp stage_single_item({:command, from, cmd}, state) do
-    stage_command(from, cmd, state)
+  defp stage_single_item({:command, from, cmd}, state, staged_rev) do
+    stage_command(from, cmd, state, staged_rev)
   end
 
-  defp stage_single_item({:worker_done, tid, attempt_id, result}, state) do
+  defp stage_single_item({:worker_done, tid, attempt_id, result}, state, _staged_rev) do
     stage_worker_done(tid, attempt_id, result, state)
   end
 
-  defp stage_single_item({:worker_crashed, tid, attempt_id, reason}, state) do
+  defp stage_single_item({:worker_crashed, tid, attempt_id, reason}, state, _staged_rev) do
     stage_worker_crashed(tid, attempt_id, reason, state)
   end
 
-  defp stage_single_item({:flush_live, cid}, state) do
+  defp stage_single_item({:flush_live, cid}, state, _staged_rev) do
     stage_flush_live(cid, state)
   end
 
-  defp stage_single_item({:wake_task, tid}, state) do
+  defp stage_single_item({:wake_task, tid}, state, _staged_rev) do
     stage_wake_task(tid, state)
   end
 
   # Command staging
 
-  defp stage_command(from, cmd, state) do
+  defp stage_command(from, cmd, state, staged_rev) do
     req_id = cmd.request_id
     cid = cmd.conversation_id
     command = cmd.command
@@ -904,14 +928,23 @@ defmodule H.Session.Server do
 
       {:not_found, next_state} ->
         if Map.has_key?(next_state.conversations, cid) do
-          dispatch_command_stage(from, command, cid, req_id, fingerprint, args, next_state)
+          dispatch_command_stage(
+            from,
+            command,
+            cid,
+            req_id,
+            fingerprint,
+            args,
+            next_state,
+            staged_rev
+          )
         else
           {:immediate, from, {:error, :not_found}, [], next_state}
         end
     end
   end
 
-  defp dispatch_command_stage(from, "submit", cid, req_id, fp, args, state) do
+  defp dispatch_command_stage(from, "submit", cid, req_id, fp, args, state, _staged_rev) do
     now = System.system_time(:millisecond)
 
     case args.type do
@@ -926,20 +959,24 @@ defmodule H.Session.Server do
     end
   end
 
-  defp dispatch_command_stage(from, "fork", cid, req_id, fp, args, state) do
+  defp dispatch_command_stage(from, "fork", cid, req_id, fp, args, state, _staged_rev) do
     stage_fork(from, cid, req_id, fp, args, state, false)
   end
 
-  defp dispatch_command_stage(from, "fork_and_submit", cid, req_id, fp, args, state) do
+  defp dispatch_command_stage(from, "fork_and_submit", cid, req_id, fp, args, state, _staged_rev) do
     stage_fork(from, cid, req_id, fp, args, state, true)
   end
 
-  defp dispatch_command_stage(from, "configure", cid, req_id, fp, args, state) do
+  defp dispatch_command_stage(from, "configure", cid, req_id, fp, args, state, _staged_rev) do
     stage_configure(from, cid, req_id, fp, args, state)
   end
 
-  defp dispatch_command_stage(from, "abort", cid, req_id, fp, args, state) do
+  defp dispatch_command_stage(from, "abort", cid, req_id, fp, args, state, _staged_rev) do
     stage_abort(from, cid, req_id, fp, args, state)
+  end
+
+  defp dispatch_command_stage(from, "withdraw", cid, req_id, fp, args, state, staged_rev) do
+    stage_withdraw(from, cid, req_id, fp, args, state, staged_rev)
   end
 
   defp stage_submit_write(from, cid, req_id, fp, args, state, now) do
@@ -1554,6 +1591,84 @@ defmodule H.Session.Server do
     }
 
     {:batch, staged, state}
+  end
+
+  defp stage_withdraw(from, cid, req_id, fp, args, state, staged_rev) do
+    inbox = state.docs[cid]["inbox"] || []
+    requested_ids = MapSet.new(args.submission_ids, &to_string/1)
+
+    {withdrawn_items, remaining_inbox} =
+      Enum.split_with(inbox, fn item ->
+        MapSet.member?(requested_ids, Map.get(item, "submission_id"))
+      end)
+
+    found_ids = MapSet.new(withdrawn_items, &Map.get(&1, "submission_id"))
+
+    if MapSet.size(found_ids) != MapSet.size(requested_ids) do
+      {:immediate, from, {:error, {:conflict, "submission_not_queued"}}, [], state}
+    else
+      now = System.system_time(:millisecond)
+      {:ok, sub_id, store} = Storage.mint_id(state.store)
+      state = %{state | store: store}
+
+      pending_subs =
+        staged_rev
+        |> Enum.flat_map(& &1.submissions)
+        |> Map.new(&{&1.request_id, &1})
+
+      {orig_sub_writes, state} =
+        Enum.reduce(withdrawn_items, {[], state}, fn item, {acc_w, acc_st} ->
+          orig_req_id = Map.get(item, "request_id")
+
+          case lookup_submission_with_pending(acc_st, orig_req_id, pending_subs) do
+            {:ok, orig_sub, next_st} ->
+              withdrawn_orig = Submission.mark_withdrawn(orig_sub, now)
+              next_st = cache_submissions(next_st, [withdrawn_orig], withdrawn_orig.seq)
+              {acc_w ++ [{:put_submission, withdrawn_orig}], next_st}
+
+            {:not_found, next_st} ->
+              {acc_w, next_st}
+          end
+        end)
+
+      sub =
+        Submission.new(%{
+          id: sub_id,
+          request_id: req_id,
+          fingerprint: fp,
+          kind: "withdraw",
+          status: "done",
+          conversation_id: cid,
+          withdrawn: withdrawn_items,
+          created_at: now
+        })
+
+      state = put_doc_in_state(state, cid, "inbox", remaining_inbox)
+
+      writes =
+        [{:check, {:unique_request_id, req_id, fp}}] ++
+          orig_sub_writes ++
+          [
+            {:put_submission, sub},
+            {:put_doc, {:conversation, cid, "inbox"}, Document.wrap("inbox", remaining_inbox)}
+          ]
+
+      staged = %{
+        raw_item:
+          {:command, from,
+           %{command: "withdraw", conversation_id: cid, request_id: req_id, args: args}},
+        writes: writes,
+        conv_events: %{
+          cid => %{entries: [], doc_ops: %{"inbox" => [["replace", remaining_inbox]]}}
+        },
+        submissions: [sub],
+        effects: [],
+        reply_from: from,
+        receipt: Submission.to_receipt(sub, state.seq)
+      }
+
+      {:batch, staged, state}
+    end
   end
 
   defp abort_generation_run(gen_task, cid, reason, state, now) do
@@ -2797,6 +2912,18 @@ defmodule H.Session.Server do
   # Let's finish reviewing before writing, and fix lines around `init`, `run_items`, and `run_effects` right now before saving.
 
   # Submission, context, visibility & workspace lease helpers
+
+  defp lookup_submission_with_pending(state, req_id, _pending_subs)
+       when not is_binary(req_id) do
+    {:not_found, state}
+  end
+
+  defp lookup_submission_with_pending(state, req_id, pending_subs) do
+    case Map.fetch(pending_subs, req_id) do
+      {:ok, sub} -> {:ok, sub, state}
+      :error -> lookup_submission(state, req_id)
+    end
+  end
 
   defp lookup_submission(state, req_id) do
     case Map.fetch(state.recent_submissions, req_id) do
