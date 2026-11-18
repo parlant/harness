@@ -8,6 +8,7 @@ Detailed engineering blueprints for each slice live under [`docs/roadmap/`](./ro
 - [Slice 2 — `Bandit` + `Plug` HTTP/SSE Daemon, Web Client, and Early `Req` / `ReqLLM` Connection](./roadmap/02-http-sse-and-web-client.md)
 - [Slice 3 — Durable Multi-Turn Generation, `ReqLLM.Context` Projection, and Crash-Retry Recovery](./roadmap/03-provider-and-streaming.md)
 - [Slice 4 — `H.ExecutionEnv`, Coding Tools, and Self-Hosting Bootstrap](./roadmap/04-tools-and-self-hosting.md)
+- [Client, Harness, and Workspace Architecture (Phoenix `HWeb.*`, `HTUI.*`, `H.Harness`, Folder Browser)](./client-and-harness-architecture.md)
 - [Slice 5 — Post-Self-Hosting Evolution & SQLite Adapter (`exqlite`, Compaction, Signals/Gates)](./roadmap/05-post-self-hosting-and-hex.md)
 
 ---

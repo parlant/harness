@@ -2,6 +2,7 @@
 
 **Status:**
 - **Implemented (Slices 0–4 Self-Hosting Core):** Pure history (`H.Session`, `H.Conversation`, `H.Entry`), pluggable storage (`H.Storage.Memory`, `H.Storage.File`, `H.Storage.Conformance`), `H.StoreLock`, `H.Catalog`, `H.Auth`, `H.Schema`, supervised per-session coordinator (`H.Session.Supervisor`, `H.Session.Server`, `H.Daemon`), `Bandit` + `Plug` HTTP/SSE daemon + zero-build web client (`H.HTTP.*`, `priv/static/*`), `Req` + `ReqLLM` streaming loop (`H.Provider.Fake`, `H.Provider.ReqLLM`, `H.Context`, `H.Credentials`), and `H.ExecutionEnv.Local` + `H.WorkspaceLease` + `JSV`-validated coding tools (`read`, `write`, `edit`, `bash`, `search_history`).
+- **Next Architecture & Vertical Slice Proposal:** [Client, Harness, and Workspace Architecture (`docs/client-and-harness-architecture.md`)](./client-and-harness-architecture.md) — separating the durable host (`H.*`), harness profiles (`H.Harness`, e.g. `Pi`), and synchronized multi-surface clients (`HWeb.*` Phoenix Web/Mobile + `HTUI.*` terminal client), starting with the workspace directory browser & folder-scoped session discovery.
 - **Post-Self-Hosting Proposal (Slice 5+):** Background/blocking compaction, subagents & suspendable work (`sleeping` on `signals`, parked tools, 4-stage hooks/gates, `WakeScheduler`), `H.Storage.SQLite` (`exqlite`), and session share grants.
 
 ---
