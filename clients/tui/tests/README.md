@@ -32,6 +32,6 @@ H_BIN="$(pwd)/clients/tui/target/debug/h" \
 python3 -m unittest discover -s clients/tui/tests -p 'test_*.py' -v
 ```
 
-(`HI_BIN` is also auto-discovered from `CARGO_TARGET_DIR/{debug,release}/hi`, `clients/tui/target/{debug,release}/hi`, or `PATH`.)
+(`HI_BIN` is also auto-discovered from `CARGO_TARGET_DIR/{debug,release}/hi` or `clients/tui/target/{debug,release}/hi`, never from `PATH`.)
 
 Without `HI_PTY_REQUIRE_BIN=1`, `test_hi_pty.py` skips cleanly when `hi` is not yet built while `test_fake_daemon_and_pty.py` runs in full.
