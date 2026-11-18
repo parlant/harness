@@ -268,7 +268,14 @@ defmodule H.Session.Server do
           H.ExecutionEnv.env_id(execution_env)
 
       initial_title =
-        Keyword.get(opts, :title) || Map.get(meta, :title) || Map.get(meta, "title")
+        cond do
+          Map.has_key?(meta, :title) -> Map.get(meta, :title)
+          Map.has_key?(meta, "title") -> Map.get(meta, "title")
+          true -> Keyword.get(opts, :title)
+        end
+
+      title_explicit =
+        Map.get(meta, :title_explicit, Map.get(meta, "title_explicit", false)) == true
 
       prev_clean = Map.get(meta, :clean_close, Map.get(meta, "clean_close"))
       prev_inc = Map.get(meta, :incarnation, Map.get(meta, "incarnation", 0)) || 0
@@ -312,12 +319,14 @@ defmodule H.Session.Server do
         session_meta:
           meta
           |> Map.delete("title")
+          |> Map.delete("title_explicit")
           |> Map.delete("env_id")
           |> Map.merge(%{
             session_id: session_id,
             env_id: env_id,
             cwd: cwd,
             title: initial_title,
+            title_explicit: title_explicit,
             incarnation: incarnation,
             clean_close: false
           }),
@@ -811,12 +820,21 @@ defmodule H.Session.Server do
               | store: committed_store
             })
 
+          if accepted_staged != [] and is_nil(refused) do
+            maybe_report_catalog_runtime(state, state_after_accepted)
+          end
+
+          reply_committed_batches(accepted_staged, seqs)
+
           # Send immediate replies that belonged before any refused batch
           Enum.each(immediate_replies, fn {from, reply} -> GenServer.reply(from, reply) end)
 
           accepted_effects = Enum.flat_map(accepted_staged, & &1.effects) ++ post_effects
           state_after_effects = apply_effects_list(accepted_effects, state_after_accepted)
-          maybe_report_catalog_runtime(state, state_after_effects)
+
+          if accepted_staged == [] or not is_nil(refused) do
+            maybe_report_catalog_runtime(state, state_after_effects)
+          end
 
           case refused do
             nil ->
@@ -841,13 +859,14 @@ defmodule H.Session.Server do
   end
 
   defp stage_items(
-         [{:command, _from, %{request_id: req_id}} = item | rest] = all,
+         [{:command, _from, %{request_id: req_id, args: args}} = item | rest] = all,
          state,
          staged_rev,
          replies_rev,
          effects_rev
        ) do
-    if staged_request_id?(staged_rev, req_id) do
+    if staged_request_id?(staged_rev, req_id) or
+         (staged_rev != [] and Map.get(args, :expected_seq) != nil) do
       {Enum.reverse(staged_rev), Enum.reverse(replies_rev), Enum.reverse(effects_rev), state, all}
     else
       stage_next_item(item, rest, state, staged_rev, replies_rev, effects_rev)
@@ -977,6 +996,10 @@ defmodule H.Session.Server do
 
   defp dispatch_command_stage(from, "withdraw", cid, req_id, fp, args, state, staged_rev) do
     stage_withdraw(from, cid, req_id, fp, args, state, staged_rev)
+  end
+
+  defp dispatch_command_stage(from, "rename", cid, req_id, fp, args, state, _staged_rev) do
+    stage_rename(from, cid, req_id, fp, args, state)
   end
 
   defp stage_submit_write(from, cid, req_id, fp, args, state, now) do
@@ -1661,6 +1684,59 @@ defmodule H.Session.Server do
         conv_events: %{
           cid => %{entries: [], doc_ops: %{"inbox" => [["replace", remaining_inbox]]}}
         },
+        submissions: [sub],
+        effects: [],
+        reply_from: from,
+        receipt: Submission.to_receipt(sub, state.seq)
+      }
+
+      {:batch, staged, state}
+    end
+  end
+
+  defp stage_rename(from, cid, req_id, fp, args, state) do
+    expected_seq = Map.get(args, :expected_seq)
+
+    if not is_nil(expected_seq) and expected_seq != state.seq do
+      {:immediate, from, {:error, {:conflict, "expected_seq mismatch"}}, [], state}
+    else
+      now = System.system_time(:millisecond)
+      {:ok, sub_id, store} = Storage.mint_id(state.store)
+      state = %{state | store: store}
+
+      next_title = Map.get(args, :title)
+
+      next_meta =
+        state.session_meta
+        |> Map.put(:title, next_title)
+        |> Map.put(:title_explicit, true)
+
+      state = %{state | session_meta: next_meta}
+
+      sub =
+        Submission.new(%{
+          id: sub_id,
+          request_id: req_id,
+          fingerprint: fp,
+          kind: "rename",
+          status: "done",
+          conversation_id: cid,
+          title: next_title,
+          created_at: now
+        })
+
+      writes = [
+        {:check, {:unique_request_id, req_id, fp}},
+        {:put_session_meta, next_meta},
+        {:put_submission, sub}
+      ]
+
+      staged = %{
+        raw_item:
+          {:command, from,
+           %{command: "rename", conversation_id: cid, request_id: req_id, args: args}},
+        writes: writes,
+        conv_events: %{cid => %{entries: [], doc_ops: %{}}},
         submissions: [sub],
         effects: [],
         reply_from: from,
@@ -2820,11 +2896,17 @@ defmodule H.Session.Server do
         broadcast_commit_frame(acc_state, cid, batch_seq, wire_entries, ev.doc_ops)
       end)
 
+    apply_committed_batches(rest_s, rest_q, state)
+  end
+
+  defp reply_committed_batches([], []), do: :ok
+
+  defp reply_committed_batches([staged | rest_s], [batch_seq | rest_q]) do
     if staged.reply_from do
       GenServer.reply(staged.reply_from, {:ok, Map.put(staged.receipt, :seq, batch_seq)})
     end
 
-    apply_committed_batches(rest_s, rest_q, state)
+    reply_committed_batches(rest_s, rest_q)
   end
 
   defp broadcast_commit_frame(state, cid, batch_seq, wire_entries, doc_ops) do
@@ -3258,17 +3340,11 @@ defmodule H.Session.Server do
   defp report_catalog_active(state) do
     if not is_nil(state.catalog) and GenServer.whereis(state.catalog) != nil do
       try do
-        fields =
-          %{
-            active: session_active?(state),
-            updated_at: System.system_time(:millisecond)
-          }
-          |> then(fn map ->
-            case state.session_meta[:title] do
-              t when is_binary(t) and t != "" -> Map.put(map, :title, t)
-              _ -> map
-            end
-          end)
+        fields = %{
+          title: state.session_meta[:title],
+          active: session_active?(state),
+          updated_at: System.system_time(:millisecond)
+        }
 
         H.Catalog.report_runtime(state.catalog, state.session_id, fields)
       catch
@@ -3279,8 +3355,9 @@ defmodule H.Session.Server do
 
   defp maybe_derive_initial_title(content, state) do
     current = state.session_meta[:title]
+    explicit? = state.session_meta[:title_explicit] == true
 
-    if is_binary(current) and String.trim(current) != "" do
+    if explicit? or (is_binary(current) and String.trim(current) != "") do
       {[], state}
     else
       case extract_prompt_title(content) do

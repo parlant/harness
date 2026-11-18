@@ -201,6 +201,7 @@ defmodule H.Daemon do
              {:request_id, :non_empty_string, required: false}
            ]),
          {:ok, agent_opts} <- validate_optional_agent(Map.get(validated, :agent)),
+         {:ok, validated} <- normalize_optional_title(validated),
          {:ok, harness_mod} <- resolve_harness(validated.harness_id, opts),
          {:ok, ws} <- resolve_session_workspace(validated.env_id, validated.cwd, opts) do
       catalog = Keyword.get(opts, :catalog, @default_catalog)
@@ -221,7 +222,13 @@ defmodule H.Daemon do
             true ->
               with {:ok, server} <- ensure_session_started(existing, opts, nil),
                    {:ok, seq} <- Server.get_seq(server) do
-                {:ok, %{session: wire_session(existing), seq: seq}}
+                latest_entry =
+                  case Catalog.get_session(session_id, table) do
+                    {:ok, e} -> e
+                    _ -> existing
+                  end
+
+                {:ok, %{session: wire_session(latest_entry), seq: seq}}
               end
           end
 
@@ -271,9 +278,16 @@ defmodule H.Daemon do
          :ok <- ensure_not_quarantined(entry),
          {:ok, server} <- ensure_session_started(entry, opts, nil),
          {:ok, detail} <- Server.get_detail(server) do
+      session_entry =
+        if is_map(detail.session_meta) and Map.has_key?(detail.session_meta, :title) do
+          %{entry | title: detail.session_meta.title}
+        else
+          entry
+        end
+
       {:ok,
        %{
-         session: wire_session(entry),
+         session: wire_session(session_entry),
          conversations: Enum.map(detail.conversations, &wire_conversation/1),
          tasks: Enum.map(detail.tasks, &H.Task.to_wire/1)
        }}
@@ -597,7 +611,8 @@ defmodule H.Daemon do
              {:version, {:literal, 1}, required: true},
              {:request_id, :non_empty_string, required: true},
              {:command,
-              {:enum, ["submit", "fork", "fork_and_submit", "configure", "abort", "withdraw"]},
+              {:enum,
+               ["submit", "fork", "fork_and_submit", "configure", "abort", "withdraw", "rename"]},
               required: true},
              {:conversation_id, :pos_int, required: true},
              {:args, :map, default: %{}}
@@ -686,6 +701,33 @@ defmodule H.Daemon do
            ]),
          :ok <- validate_non_empty_list(args.submission_ids, "submission_ids") do
       {:ok, %{args | submission_ids: Enum.uniq(args.submission_ids)}}
+    end
+  end
+
+  defp validate_command_args("rename", raw_args) do
+    with {:ok, args} <-
+           Schema.validate_map(raw_args, [
+             {:title, :string, required: true, nullable: true},
+             {:expected_seq, {:int, min: 0}, required: false, nullable: true}
+           ]),
+         {:ok, normalized_title} <- normalize_title_arg(args.title) do
+      {:ok, %{args | title: normalized_title}}
+    end
+  end
+
+  defp normalize_optional_title(%{title: title} = validated) do
+    case normalize_title_arg(title) do
+      {:ok, normalized} -> {:ok, %{validated | title: normalized}}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp normalize_optional_title(validated), do: {:ok, validated}
+
+  defp normalize_title_arg(title) do
+    case Schema.normalize_title(title) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, reason} -> {:error, "title: #{reason}"}
     end
   end
 

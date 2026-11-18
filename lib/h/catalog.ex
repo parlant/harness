@@ -276,10 +276,20 @@ defmodule H.Catalog do
              {:pending_edits, {:list, :any}, required: false},
              {:applied_edit_rev, :int, required: false}
            ]),
-         {:ok, normalized_cwd} <- validate_and_normalize_cwd(base.env_id, base.cwd) do
-      {:ok, %{base | cwd: normalized_cwd}}
+         {:ok, normalized_cwd} <- validate_and_normalize_cwd(base.env_id, base.cwd),
+         {:ok, normalized_base} <- normalize_optional_title(base) do
+      {:ok, %{normalized_base | cwd: normalized_cwd}}
     end
   end
+
+  defp normalize_optional_title(%{title: title} = map) do
+    case Schema.normalize_title(title) do
+      {:ok, normalized} -> {:ok, %{map | title: normalized}}
+      {:error, reason} -> {:error, "title: #{reason}"}
+    end
+  end
+
+  defp normalize_optional_title(map), do: {:ok, map}
 
   defp build_entry(nil, validated, now) do
     %{

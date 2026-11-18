@@ -40,6 +40,7 @@ defmodule H.Submission do
       notify: Map.get(attrs, :notify),
       when_busy: Map.get(attrs, :when_busy),
       when_idle: Map.get(attrs, :when_idle),
+      title: Map.get(attrs, :title),
       withdrawn: Map.get(attrs, :withdrawn),
       seq: Map.get(attrs, :seq),
       created_at: now,
@@ -63,6 +64,7 @@ defmodule H.Submission do
       notify: field(raw, :notify, "notify"),
       when_busy: field(raw, :when_busy, "when_busy"),
       when_idle: field(raw, :when_idle, "when_idle"),
+      title: field(raw, :title, "title"),
       withdrawn: field(raw, :withdrawn, "withdrawn"),
       seq: field(raw, :seq, "seq"),
       created_at: field(raw, :created_at, "created_at"),
@@ -134,6 +136,11 @@ defmodule H.Submission do
         base
         |> Map.put(:status, s.status)
         |> Map.put(:withdrawn, s.withdrawn || [])
+
+      "rename" ->
+        base
+        |> Map.put(:status, s.status)
+        |> Map.put(:title, s.title)
 
       _submit_kind ->
         base

@@ -10,6 +10,7 @@ defmodule H.Schema do
 
   @session_id_regex ~r/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/
   @pos_int_regex ~r/^[0-9]+$/
+  @max_title_length 200
 
   @type field_type ::
           :string
@@ -95,6 +96,41 @@ defmodule H.Schema do
   end
 
   def parse_pos_int(_), do: {:error, "must be a positive integer"}
+
+  @doc """
+  Normalizes a session title: converts `nil` or blank strings to `nil`,
+  collapses CR/LF/tabs to spaces, trims whitespace, and rejects NUL bytes,
+  control characters, or titles exceeding #{@max_title_length} characters.
+  """
+  @spec normalize_title(term()) :: {:ok, nil | String.t()} | {:error, String.t()}
+  def normalize_title(nil), do: {:ok, nil}
+
+  def normalize_title(value) when is_binary(value) do
+    if String.contains?(value, <<0>>) do
+      {:error, "must not contain NUL bytes"}
+    else
+      cleaned =
+        value
+        |> String.replace(~r/[\r\n\t]+/, " ")
+        |> String.trim()
+
+      cond do
+        cleaned == "" ->
+          {:ok, nil}
+
+        Regex.match?(~r/[\x00-\x1F\x7F]/u, cleaned) ->
+          {:error, "must not contain control characters"}
+
+        String.length(cleaned) > @max_title_length ->
+          {:error, "must be at most #{@max_title_length} characters"}
+
+        true ->
+          {:ok, cleaned}
+      end
+    end
+  end
+
+  def normalize_title(_), do: {:error, "must be a string"}
 
   defp normalize_spec({key, type}) when is_atom(key), do: {key, type, []}
 

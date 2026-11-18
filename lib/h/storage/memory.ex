@@ -9,6 +9,7 @@ defmodule H.Storage.Memory do
     "session_id" => :session_id,
     "cwd" => :cwd,
     "title" => :title,
+    "title_explicit" => :title_explicit,
     "root_conversation_id" => :root_conversation_id,
     "incarnation" => :incarnation,
     "clean_close" => :clean_close,
@@ -41,6 +42,7 @@ defmodule H.Storage.Memory do
   }
 
   @submission_keys %{
+    "id" => :id,
     "request_id" => :request_id,
     "fingerprint" => :fingerprint,
     "kind" => :kind,
@@ -52,6 +54,9 @@ defmodule H.Storage.Memory do
     "notify" => :notify,
     "when_busy" => :when_busy,
     "when_idle" => :when_idle,
+    "title" => :title,
+    "withdrawn" => :withdrawn,
+    "seq" => :seq,
     "created_at" => :created_at,
     "updated_at" => :updated_at
   }
@@ -274,8 +279,12 @@ defmodule H.Storage.Memory do
     end
   end
 
-  defp apply_write({:put_submission, sub}, _seq, state) when is_map(sub) do
-    normalized = normalize_map(sub, @submission_keys)
+  defp apply_write({:put_submission, sub}, batch_seq, state) when is_map(sub) do
+    normalized =
+      sub
+      |> normalize_map(@submission_keys)
+      |> Map.update(:seq, batch_seq, &(&1 || batch_seq))
+
     {:ok, %{state | submissions: Map.put(state.submissions, normalized.request_id, normalized)}}
   end
 

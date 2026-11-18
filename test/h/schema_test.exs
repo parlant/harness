@@ -135,4 +135,22 @@ defmodule H.SchemaTest do
       assert {:error, _} = Schema.parse_pos_int(nil)
     end
   end
+
+  describe "normalize_title/1" do
+    test "normalizes whitespace/newlines, converts blank strings to nil, and rejects invalid titles" do
+      assert {:ok, nil} = Schema.normalize_title(nil)
+      assert {:ok, nil} = Schema.normalize_title("")
+      assert {:ok, nil} = Schema.normalize_title("  \r\n\t ")
+      assert {:ok, "Hello World"} = Schema.normalize_title("  Hello\r\nWorld\t ")
+      assert {:ok, "Café 🚀"} = Schema.normalize_title("Café 🚀")
+
+      max_title = String.duplicate("a", 200)
+      assert {:ok, ^max_title} = Schema.normalize_title(max_title)
+
+      assert {:error, _} = Schema.normalize_title(String.duplicate("a", 201))
+      assert {:error, _} = Schema.normalize_title("bad\0title")
+      assert {:error, _} = Schema.normalize_title("bad\e[31mtitle")
+      assert {:error, _} = Schema.normalize_title(123)
+    end
+  end
 end

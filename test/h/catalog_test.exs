@@ -166,6 +166,27 @@ defmodule H.CatalogTest do
       assert {:ok, ^updated} = Catalog.get_session("s1", table)
     end
 
+    test "persists explicit title clearing to nil across restart", %{
+      data_dir: data_dir,
+      table: table,
+      server: server
+    } do
+      start_supervised!({Catalog, data_dir: data_dir, name: server, table: table})
+      {:ok, _} = Catalog.put_session(server, %{session_id: "s1", cwd: "/tmp/s1", title: "Named"})
+
+      assert {:ok, cleared} = Catalog.report_runtime(server, "s1", %{title: nil, updated_at: 900})
+      assert cleared.title == nil
+      assert {:ok, %{title: nil}} = Catalog.get_session("s1", table)
+
+      stop_supervised!(Catalog)
+
+      table2 = :"#{table}_cleared"
+      server2 = :"#{server}.Cleared"
+      start_supervised!({Catalog, data_dir: data_dir, name: server2, table: table2})
+
+      assert {:ok, ^cleared} = Catalog.get_session("s1", table2)
+    end
+
     test "returns {:error, :not_found} for unknown session", %{
       data_dir: data_dir,
       table: table,
