@@ -7,7 +7,13 @@ Target: pinned pi coding-agent and pi-tui in [the parity ledger](hi.md). Harness
 3. **Reconcile, then parallelize daily workflows.** Review each commit before integrating. Run Cargo suite and real daemon/Phoenix sync, then exercise editing during stream, steer vs follow-up, detach, resize, disconnect and fork. Layer regular mode, external editor, searchable history, settings/keybindings, environment file completion and attachments around the verified loop. Shared server operations (withdrawal, rename, user shell, compaction) require separate dependency-ordered changes and restart/conflict tests; never fake them in the UI.
 4. **Cutover audit.** Compare the ledger row by row against pi at the pin, classify implemented/partial/not shipped, port required user workflows and verify both terminal modes. Validate clean install, migration and rollback. Actual daily-driver trial and performance/terminal matrix are release gates, not unit-test results. Keep `h` until the cutover gate passes.
 
-## Reconciliation: preview works; pi cutover is not yet approved
+## Daily-driver trial candidate
+
+Verified implementation at `7a4d71c`. `/name`, workspace `@` completion and `/file`, explicitly client-local `/attach`, predecessor `/fork` and after-entry `/branch` are integrated. Root-prompt editing offers a new session rather than appending after the old root. User shell (`!` / `!!`) and manual `/compact [instructions]` use guarded daemon commands with committed intent; neither runs in the TUI. Restart tests cover interrupted shell effects and a single committed compaction boundary. Raw history remains available after compaction.
+
+Release checks: 146 Rust tests, strict Clippy, 24 PTY tests, 375 engine tests (one live-provider exclusion), 12 Phoenix tests per terminal mode, and a fresh isolated install/print/resume/rollback smoke test. See [10k trace](hi-performance.md), [terminal checks](hi-terminal.md) and [trial commands and fallback log](hi-trial.md). Real IME, native selection, the user's SSH path, required skills/scripts and a working week of actual use remain user gates. Keep pi installed; no history import or alias switch.
+
+## Historical reconciliation at the preview (before the trial candidate)
 
 Reference for this reconciliation: `packages/coding-agent/src/modes/interactive/interactive-mode.ts`, `docs/usage.md`, `docs/keybindings.md` and `packages/tui/src/{tui-alt-screen,tui-main-screen}.ts` in the [pinned checkout](hi.md). The language/runtime and packaging goals are not a reason to remove `h` or alias `pi` yet.
 
@@ -18,7 +24,7 @@ Reference for this reconciliation: `packages/coding-agent/src/modes/interactive/
 | Durable interaction | Enter sends `steer/start`, Alt-Enter sends `follow_up/start`. Esc interrupts the active conversation after dismissing overlays. `/quit`, Ctrl-D and lost PTY detach. `withdraw` atomically restores selected queued submissions or conflicts; Alt-Up requests queued items. Snapshot/replay subscription is cancellable, queue-bounded, with committed vs ephemeral state separate. | Reconnect and withdraw have isolated wire/storage tests. Test user workflows with multiple real attached terminals as well. An unsafe effect still has no exactly-once guarantee. |
 | Navigate and share | Session, conversation, model, and thinking pickers; `/fork`, `/earlier`, `/latest`, search of loaded messages, bounded client-local file completion/attachment, `/copy` and explicit local `/export`. `h` and Phoenix still operate on the same sessions. | Export is H JSONL/HTML, **not** a pi session importer. Attachments are explicitly client-local; not environment-wide `@file` discovery. `/tree` selects conversations, not pi's full entry tree editor. |
 
-**Ordered remaining batches (not part of the accepted preview):**
+**Original batch order at preview time** (see trial status above for what subsequently shipped):
 
 1. **UI-only, parallel:** large-session cache/perf regression with the 10k trace; real-terminal encoding/IME/selection matrix; refine Markdown, settings/theme and editor completion parity. Re-run the same PTY journeys with both render modes.
 2. **Workspace/session workflows:** environment-scoped file discovery/read with size and auth policy; edit/fork at the predecessor, labels and session naming. Give each shared operation explicit conflict/retry semantics; don't edit history from the display. Local attachment must remain a distinct gesture.

@@ -1,6 +1,6 @@
 # `hi` Release Trial, Compatibility & Cutover Log
 
-Status: **Pre-cutover trial (H5 gate OPEN — not approved as `pi` default yet).**
+Status: **Automated trial gates passed at `7a4d71c`; pi remains the fallback.** See the [current build ledger](hi-build.md) for final verification. Tables in sections 1–2 record the earlier `e9da729` baseline, not the limits of the current build.
 
 This document records isolated install/smoke verification, measured differences against pinned `pi` (`~/Projects/JavaScript/pi` at `d15b2cf43`), a metadata-only inventory of local skills/templates/scripts, exact run/rollback commands, the workweek fallback log, and remaining cutover blockers.
 
@@ -212,8 +212,8 @@ Per `docs/roadmap.md` (H5), `hi` cannot be recommended as the default until requ
 
 1. **H5 live working-week validation:** Complete 5 real working days on the target terminal with zero unlogged fallbacks, terminal corruptions, or ambiguous writes.
 2. **H0 sign-off on local resources:** Classify which items in Section 3 (skills, scripts, `tmux-session`, `notify`, `auto-profile`, `multicodex`, `google-token-exchange`, `retry`, `empty-response-guard`) are required for cutover vs optional/deferred.
-3. **Daemon-discovered resources & workspace `@file` search (`docs/hi-build.md` Batch 2):** `hi` currently supports client-local `@` / `/attach` only; daemon-owned skill/template discovery (`/skill:name`) and environment-scoped file search/read are missing.
-4. **Session lifecycle & context parity (`docs/hi-build.md` Batches 2–3):** Missing `/name` (rename), `/clone`, `/compact` (persisted compaction intent/recovery), `/fork`-before-edit (`fork_and_submit` for editing an earlier prompt), user shell `!` / `!!` in `H.ExecutionEnv`, and a validated `pi` JSONL `/import` tool.
+3. **Resources:** `@` + Tab and `/file` use the session workspace; `/attach` is client-local. Dynamic pi `/skill:name`, templates and extension commands are not automatically ported.
+4. **History migration:** `/name`, predecessor fork-and-edit, user shell and manual compaction shipped. `/clone` and pi JSONL import did not. Start a new H session; keep old work in pi.
 5. **Auth / provider UX parity:** Missing interactive `/login` / `/logout`, `/model` capability details (context window / cost metadata), and `/scoped-models` cycling (`Shift+Tab` thinking cycle, `Ctrl+P` model cycle).
-6. **H2 performance & terminal matrix:** Measure p95 key-to-paint `<50 ms` on the recorded 10k-entry trace and complete manual verification across macOS/Linux, `tmux`, SSH, and real IME / CJK / Kitty-vs-legacy key chords.
+6. **Terminal sign-off:** The [10k key-to-paint gate](hi-performance.md) passed. Run the [manual checks](hi-terminal.md) in your actual terminal and SSH path, including IME pre-edit, selection and modifier keys, before depending on them.
 7. **CLI / help / packaging polish:** Fix `hi --help` positional `[PROMPT]...` description (claims headless print mode even though TTY `hi "msg"` starts the interactive TUI), drop or gate unused `--tui-mode` from `h --help`, reconcile `-v` vs `-V` and piped-stdin `-p` expectations if scripts require them, and package locked release binaries for macOS/Linux.
