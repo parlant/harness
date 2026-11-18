@@ -29,6 +29,7 @@ const dom = {
   newSessionForm: document.getElementById("new-session-form"),
   newSessionId: document.getElementById("new-session-id"),
   newSessionCwd: document.getElementById("new-session-cwd"),
+  newSessionModel: document.getElementById("new-session-model"),
   cancelNewSessionBtn: document.getElementById("cancel-new-session-btn"),
 
   refreshSessionsBtn: document.getElementById("refresh-sessions-btn"),
@@ -793,7 +794,70 @@ function renderBranchTree() {
   dom.branchesTree.replaceChildren(buildList(roots));
 }
 
+const PROVIDER_LABELS = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google_vertex: "Google Vertex",
+  google: "Google",
+  deepseek: "DeepSeek",
+  openrouter: "OpenRouter",
+  ollama: "Ollama"
+};
+
+function populateModelSelect(selectEl, selectedId = "") {
+  if (!selectEl) return;
+  selectEl.replaceChildren();
+  const seenModels = new Set();
+  const groups = new Map();
+
+  for (const model of state.models) {
+    const id = model.id;
+    if (!id) continue;
+    seenModels.add(id);
+    const providerKey = model.provider || id.split(":")[0] || "other";
+    if (!groups.has(providerKey)) {
+      groups.set(providerKey, []);
+    }
+    const shortId = id.includes(":") ? id.split(":").slice(1).join(":") : id;
+    const label =
+      model.name && model.name !== shortId ? `${model.name} (${shortId})` : id;
+    const opt = el("option", { text: label });
+    opt.value = id;
+    groups.get(providerKey).push(opt);
+  }
+
+  if (groups.size <= 1) {
+    for (const opts of groups.values()) {
+      for (const opt of opts) selectEl.appendChild(opt);
+    }
+  } else {
+    for (const [providerKey, opts] of groups.entries()) {
+      const groupLabel = PROVIDER_LABELS[providerKey] || providerKey;
+      const optgroup = el("optgroup", { attrs: { label: groupLabel } });
+      for (const opt of opts) optgroup.appendChild(opt);
+      selectEl.appendChild(optgroup);
+    }
+  }
+
+  if (selectedId && !seenModels.has(selectedId)) {
+    const opt = el("option", { text: selectedId });
+    opt.value = selectedId;
+    selectEl.appendChild(opt);
+  }
+
+  if (selectedId) {
+    selectEl.value = selectedId;
+  } else if (state.models.length > 0 && state.models[0].id) {
+    selectEl.value = state.models[0].id;
+  }
+}
+
 function renderConfigSelectors() {
+  populateModelSelect(
+    dom.newSessionModel,
+    dom.newSessionModel?.value || state.models[0]?.id || ""
+  );
+
   if (!state.selectedSessionId) {
     dom.configSection.hidden = true;
     return;
@@ -801,31 +865,10 @@ function renderConfigSelectors() {
   dom.configSection.hidden = false;
 
   const agent = state.transcript?.docs?.agent || {};
-  const currentModel = agent.model || "";
+  const currentModel = agent.model || state.models[0]?.id || "";
   const currentThinking = agent.thinking || "off";
 
-  dom.modelSelect.replaceChildren();
-  const seenModels = new Set();
-
-  for (const model of state.models) {
-    const id = model.id;
-    if (!id) continue;
-    seenModels.add(id);
-    const label = model.name ? `${model.name} (${model.provider || id})` : id;
-    const opt = el("option", { text: label });
-    opt.value = id;
-    dom.modelSelect.appendChild(opt);
-  }
-
-  if (currentModel && !seenModels.has(currentModel)) {
-    const opt = el("option", { text: currentModel });
-    opt.value = currentModel;
-    dom.modelSelect.appendChild(opt);
-  }
-
-  if (currentModel) {
-    dom.modelSelect.value = currentModel;
-  }
+  populateModelSelect(dom.modelSelect, currentModel);
 
   if (
     Array.from(dom.thinkingSelect.options).some((opt) => opt.value === currentThinking)
@@ -1297,11 +1340,13 @@ dom.newSessionForm.addEventListener("submit", async (event) => {
 
   clearError();
   try {
+    const selectedModel = dom.newSessionModel?.value || state.models[0]?.id || "";
     const body = {
       version: 1,
       request_id: generateRequestId(),
       session_id: sessionId,
-      cwd
+      cwd,
+      ...(selectedModel ? { agent: { model: selectedModel } } : {})
     };
     const res = await apiFetch("/api/v1/sessions", {
       method: "POST",

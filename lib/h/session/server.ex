@@ -265,7 +265,12 @@ defmodule H.Session.Server do
       now = System.system_time(:millisecond)
 
       tools = resolve_tools(Keyword.get(opts, :tools, @default_tools))
-      default_model = Keyword.get(opts, :default_model)
+      provider_mod = Keyword.get(opts, :provider, H.Provider.ReqLLM)
+      provider_config = Keyword.get(opts, :provider_config, %{})
+
+      default_model =
+        resolve_default_model(Keyword.get(opts, :default_model), provider_mod, provider_config)
+
       initial_agent = Keyword.get(opts, :initial_agent)
 
       conversations =
@@ -315,8 +320,8 @@ defmodule H.Session.Server do
         catalog: Keyword.get(opts, :catalog, H.Catalog),
         task_sup: Keyword.fetch!(opts, :task_sup),
         workspace_lease: Keyword.get(opts, :workspace_lease, H.WorkspaceLease),
-        provider_mod: Keyword.get(opts, :provider, H.Provider.ReqLLM),
-        provider_config: Keyword.get(opts, :provider_config, %{}),
+        provider_mod: provider_mod,
+        provider_config: provider_config,
         execution_env: Keyword.get(opts, :execution_env) || H.ExecutionEnv.Local.new(cwd),
         tools: tools,
         default_model: default_model,
@@ -424,6 +429,27 @@ defmodule H.Session.Server do
 
   defp init_conv_last_seq(conversations, seq) do
     Map.new(Map.keys(conversations), fn cid -> {cid, seq} end)
+  end
+
+  defp resolve_default_model(model, _provider_mod, _provider_config)
+       when is_binary(model) and model != "" do
+    model
+  end
+
+  defp resolve_default_model(_nil, provider_mod, provider_config) do
+    cond do
+      function_exported?(provider_mod, :default_model, 1) ->
+        provider_mod.default_model(provider_config)
+
+      function_exported?(provider_mod, :list_models, 1) ->
+        case provider_mod.list_models(provider_config) do
+          [%{id: id} | _] when is_binary(id) -> id
+          _ -> "openai:gpt-5.4"
+        end
+
+      true ->
+        "openai:gpt-5.4"
+    end
   end
 
   defp reconcile_on_open(state, true, _now) do

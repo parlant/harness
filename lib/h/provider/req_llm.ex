@@ -18,6 +18,7 @@ defmodule H.Provider.ReqLLM do
     :low => :low,
     :medium => :medium,
     :high => :high,
+    :xhigh => :xhigh,
     :max => :max,
     :none => :none,
     :off => :none,
@@ -25,9 +26,47 @@ defmodule H.Provider.ReqLLM do
     "low" => :low,
     "medium" => :medium,
     "high" => :high,
+    "xhigh" => :xhigh,
     "max" => :max,
     "none" => :none,
     "off" => :none
+  }
+
+  @default_providers [:openai, :anthropic, :google_vertex, :google, :deepseek]
+
+  @curated_model_ids %{
+    openai: [
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex",
+      "gpt-5.4-pro",
+      "gpt-6.2-sol",
+      "gpt-6.2-astra"
+    ],
+    anthropic: [
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+      "claude-haiku-5-5",
+      "claude-fable-5-2",
+      "claude-sonnet-4-6",
+      "claude-opus-4-8"
+    ],
+    google_vertex: [
+      "gemini-4-hydrogen",
+      "gemini-4-carbon",
+      "gemini-4-argon",
+      "gemini-3.8-flash"
+    ],
+    google: [
+      "gemini-4-hydrogen",
+      "gemini-4-carbon",
+      "gemini-4-argon",
+      "gemini-3.8-flash"
+    ],
+    deepseek: [
+      "deepseek-v4-pro",
+      "deepseek-flash"
+    ]
   }
 
   @impl H.Provider
@@ -47,20 +86,47 @@ defmodule H.Provider.ReqLLM do
 
   @impl H.Provider
   def list_models(config) when is_map(config) do
-    models =
-      case Map.get(config, :models) do
-        list when is_list(list) -> list
-        nil -> fetch_llmdb_models(config)
-      end
+    case Map.get(config, :models) do
+      list when is_list(list) ->
+        list
+        |> Enum.map(&project_model/1)
+        |> Enum.sort_by(& &1.id)
 
-    models
-    |> Enum.map(&project_model/1)
-    |> Enum.sort_by(& &1.id)
+      nil ->
+        fetch_curated_models(config)
+    end
+  end
+
+  @doc """
+  Returns the recommended default model ID (`"provider:model_id"`) for the
+  currently configured credentials.
+  """
+  @spec default_model(map()) :: String.t()
+  def default_model(config \\ %{}) when is_map(config) do
+    case Map.get(config, :default_model) || Application.get_env(:harness, :default_model) do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        case list_models(config) do
+          [first | _] -> first.id
+          [] -> "openai:gpt-5.4"
+        end
+    end
   end
 
   # Model & Request preparation
 
   defp resolve_model(nil), do: {:error, {:invalid_model, "model is required"}}
+
+  defp resolve_model("google_vertex:" <> id) do
+    case lookup_llmdb_model(:google_vertex, id) || lookup_llmdb_model(:google, id) do
+      %LLMDB.Model{} = model -> {:ok, %{model | provider: :google_vertex}}
+      nil -> ReqLLM.model(%{provider: :google_vertex, id: id})
+    end
+  end
+
+  defp resolve_model("google-vertex:" <> id), do: resolve_model("google_vertex:" <> id)
 
   defp resolve_model(model_spec) do
     ReqLLM.model(model_spec)
@@ -84,6 +150,7 @@ defmodule H.Provider.ReqLLM do
     with {:ok, cred_opts} <- resolve_credential_opts(config, model) do
       opts =
         cred_opts
+        |> Keyword.put(:on_unsupported, Map.get(config, :on_unsupported, :ignore))
         |> maybe_put_tools(req_tools)
         |> maybe_put_max_tokens(request)
         |> maybe_put_reasoning_effort(request, config)
@@ -333,7 +400,7 @@ defmodule H.Provider.ReqLLM do
   end
 
   defp handle_event(%StreamEvent{type: :usage, data: usage}, acc, emit) when is_map(usage) do
-    normalized = Credentials.sanitize(usage)
+    normalized = usage |> Credentials.sanitize() |> compact_usage()
     emit.(%{type: :usage, usage: normalized})
     {:cont, %{acc | usage: normalized}}
   end
@@ -341,8 +408,13 @@ defmodule H.Provider.ReqLLM do
   defp handle_event(%StreamEvent{type: :provider_event, data: data}, acc, _emit) do
     provider_meta =
       case data do
-        %{} = map -> Map.merge(acc.provider_meta, Credentials.sanitize(map))
-        _ -> acc.provider_meta
+        %{} = map ->
+          acc.provider_meta
+          |> Map.merge(Credentials.sanitize(map))
+          |> compact_provider_meta()
+
+        _ ->
+          acc.provider_meta
       end
 
     {:cont, %{acc | provider_meta: provider_meta}}
@@ -354,6 +426,7 @@ defmodule H.Provider.ReqLLM do
     provider_meta =
       acc.provider_meta
       |> Map.merge(safe_event_meta(meta))
+      |> compact_provider_meta()
 
     {:halt, %{acc | finish_reason: finish_reason, provider_meta: provider_meta, terminal: :ok}}
   end
@@ -463,18 +536,86 @@ defmodule H.Provider.ReqLLM do
 
   # Model catalog listing
 
-  defp fetch_llmdb_models(config) do
+  defp fetch_curated_models(config) do
+    providers = resolve_target_providers(config)
+
+    Enum.flat_map(providers, fn provider ->
+      curated_models_for_provider(provider)
+    end)
+  end
+
+  defp resolve_target_providers(config) do
     case Map.get(config, :provider) do
       nil ->
-        LLMDB.models()
+        cred_opts = Map.get(config, :credentials_opts, [])
+
+        case Credentials.configured_providers(cred_opts) do
+          [] -> @default_providers
+          configured -> configured
+        end
 
       provider when is_atom(provider) ->
-        LLMDB.models(provider)
+        [provider]
 
       provider when is_binary(provider) ->
-        LLMDB.models()
-        |> Enum.filter(&(Atom.to_string(&1.provider) == provider))
+        case normalize_provider_name(provider) do
+          nil -> []
+          atom -> [atom]
+        end
     end
+  end
+
+  defp normalize_provider_name("openai"), do: :openai
+  defp normalize_provider_name("anthropic"), do: :anthropic
+  defp normalize_provider_name("google_vertex"), do: :google_vertex
+  defp normalize_provider_name("google-vertex"), do: :google_vertex
+  defp normalize_provider_name("google"), do: :google
+  defp normalize_provider_name("deepseek"), do: :deepseek
+  defp normalize_provider_name("openrouter"), do: :openrouter
+  defp normalize_provider_name("ollama"), do: :ollama
+
+  defp normalize_provider_name(other) when is_binary(other) do
+    Enum.find(@default_providers, &(Atom.to_string(&1) == other))
+  end
+
+  defp curated_models_for_provider(provider) do
+    case Map.get(@curated_model_ids, provider) do
+      ids when is_list(ids) ->
+        ids
+        |> Enum.flat_map(fn id ->
+          case lookup_llmdb_model(provider, id) ||
+                 if(provider == :google_vertex, do: lookup_llmdb_model(:google, id), else: nil) do
+            %LLMDB.Model{} = m -> [project_model(%{m | provider: provider})]
+            nil -> []
+          end
+        end)
+
+      nil ->
+        provider
+        |> LLMDB.models()
+        |> Enum.filter(&active_tool_chat_model?/1)
+        |> Enum.sort_by(&{&1.release_date || "", &1.id}, :desc)
+        |> Enum.take(10)
+        |> Enum.map(&project_model/1)
+    end
+  end
+
+  defp lookup_llmdb_model(provider, id) when is_atom(provider) and is_binary(id) do
+    case LLMDB.model(provider, id) do
+      {:ok, %LLMDB.Model{} = model} -> model
+      _ -> Enum.find(LLMDB.models(provider), &(&1.id == id))
+    end
+  end
+
+  defp active_tool_chat_model?(%LLMDB.Model{} = m) do
+    caps = m.capabilities || %{}
+    out_mod = get_nested(m.modalities, [:output])
+
+    get_nested(caps, [:tools, :enabled]) == true and
+      Map.get(caps, :chat) == true and
+      m.deprecated != true and
+      m.retired != true and
+      (out_mod == [:text] or is_nil(out_mod))
   end
 
   defp project_model(%LLMDB.Model{} = model) do
@@ -594,6 +735,40 @@ defmodule H.Provider.ReqLLM do
 
   defp safe_event_meta(meta) when is_map(meta), do: Credentials.sanitize(meta)
   defp safe_event_meta(_), do: %{}
+
+  defp compact_provider_meta(meta) when is_map(meta) do
+    meta
+    |> Map.drop([
+      :provider_meta,
+      "provider_meta",
+      :tools,
+      "tools",
+      :tool_usage,
+      "tool_usage",
+      :input_transformations,
+      "input_transformations"
+    ])
+  end
+
+  defp compact_provider_meta(other), do: other
+
+  defp compact_usage(usage) when is_map(usage) do
+    case Map.get(usage, :cost) || Map.get(usage, "cost") do
+      %{} = cost_map ->
+        cleaned_cost = Map.drop(cost_map, [:line_items, "line_items"])
+
+        if Map.has_key?(usage, :cost) do
+          Map.put(usage, :cost, cleaned_cost)
+        else
+          Map.put(usage, "cost", cleaned_cost)
+        end
+
+      _ ->
+        usage
+    end
+  end
+
+  defp compact_usage(other), do: other
 
   defp merge_block_meta(left, right) when map_size(right) == 0, do: left
   defp merge_block_meta(left, right), do: Map.merge(left, right)

@@ -136,6 +136,17 @@ defmodule H.CredentialsTest do
       assert {:error, {:unsupported_provider, "never_seen_provider_xyz"}} =
                Credentials.resolve("never_seen_provider_xyz")
     end
+
+    test "configured_providers/1 returns only providers with credentials in priority order" do
+      env = %{
+        "OPENAI_API_KEY" => "sk-openai-1",
+        "DEEPSEEK_API_KEY" => "sk-ds-1"
+      }
+
+      assert Credentials.configured_providers(env: env) == [:openai, :deepseek]
+      assert Credentials.configured?(:openai, env: env)
+      refute Credentials.configured?(:anthropic, env: env)
+    end
   end
 
   describe "sanitize/1" do

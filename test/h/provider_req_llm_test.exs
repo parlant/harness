@@ -290,19 +290,20 @@ defmodule H.Provider.ReqLLMTest do
           Adapter.stream_turn(%{stream_fn: stream_fn}, request, fn _ -> :ok end)
         end)
 
-      assert_receive {:stream_gated, ^gate_ref}
+      assert_receive {:stream_gated, ^gate_ref}, 1_000
       # Untrappable :kill still closes StreamResponse via monitor watcher
       Process.exit(worker_pid, :kill)
-      assert_receive {:DOWN, ^monitor_ref, :process, ^worker_pid, :killed}
-      assert_receive {:closed_on_kill, ^closed_ref}
+      assert_receive {:DOWN, ^monitor_ref, :process, ^worker_pid, :killed}, 1_000
+      assert_receive {:closed_on_kill, ^closed_ref}, 1_000
     end
   end
 
   describe "list_models/1" do
-    test "returns JSON-serializable catalog maps from LLMDB" do
+    test "returns curated JSON-serializable catalog maps from LLMDB" do
       models = Adapter.list_models(%{provider: :anthropic})
 
       assert models != []
+      assert length(models) <= 10
       first = hd(models)
 
       assert Map.keys(first) |> Enum.sort() == [
@@ -315,11 +316,25 @@ defmodule H.Provider.ReqLLMTest do
                :supports_tools
              ]
 
+      assert first.id == "anthropic:claude-sonnet-5-5"
       assert first.provider == "anthropic"
-      assert String.starts_with?(first.id, "anthropic:")
-      assert is_boolean(first.supports_tools)
-      assert is_boolean(first.supports_reasoning)
+      assert first.supports_tools == true
+      assert first.supports_reasoning == true
       assert is_binary(JSON.encode!(models))
+    end
+
+    test "filters model list to configured providers and selects default_model/1" do
+      models =
+        Adapter.list_models(%{
+          credentials_opts: [env: %{"OPENAI_API_KEY" => "sk-test-openai"}]
+        })
+
+      assert Enum.all?(models, &(&1.provider == "openai"))
+      assert hd(models).id == "openai:gpt-5.4"
+
+      assert Adapter.default_model(%{
+               credentials_opts: [env: %{"OPENAI_API_KEY" => "sk-test-openai"}]
+             }) == "openai:gpt-5.4"
     end
   end
 end

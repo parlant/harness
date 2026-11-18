@@ -13,6 +13,15 @@ defmodule H.Credentials do
   @default_ttl_ms 3_600_000
   @default_ttl_margin_ms 60_000
 
+  @provider_priority [
+    :openai,
+    :anthropic,
+    :google_vertex,
+    :google,
+    :deepseek,
+    :openrouter
+  ]
+
   @env_vars %{
     "anthropic" => "ANTHROPIC_API_KEY",
     "openai" => "OPENAI_API_KEY",
@@ -126,6 +135,43 @@ defmodule H.Credentials do
 
       :error ->
         {:error, {:unsupported_provider, sanitize(to_string(provider))}}
+    end
+  end
+
+  @doc """
+  Returns the list of providers that currently have credentials configured in
+  `opts` or the environment, ordered by `@provider_priority`.
+  """
+  @spec configured_providers(keyword()) :: [atom()]
+  def configured_providers(opts \\ []) when is_list(opts) do
+    Enum.filter(@provider_priority, &configured?(&1, opts))
+  end
+
+  @doc """
+  Returns `true` if `provider` has credentials available in `opts` or the
+  environment without executing external token helpers.
+  """
+  @spec configured?(atom() | String.t(), keyword()) :: boolean()
+  def configured?(provider, opts \\ []) when is_list(opts) do
+    case normalize_provider(provider) do
+      {:ok, "google_vertex"} ->
+        match?({:ok, _}, resolve_project_id(opts)) and
+          (is_binary(presence(Keyword.get(opts, :access_token))) or
+             is_function(Keyword.get(opts, :fetcher)) or
+             not is_nil(System.find_executable("token-exchange")) or
+             not is_nil(System.find_executable("google-adc")))
+
+      {:ok, "ollama"} ->
+        true
+
+      {:ok, name} ->
+        env_var = Map.fetch!(@env_vars, name)
+
+        is_binary(presence(Keyword.get(opts, :api_key))) or
+          is_binary(presence(get_env(env_var, opts)))
+
+      :error ->
+        false
     end
   end
 
