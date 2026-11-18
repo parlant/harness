@@ -177,7 +177,7 @@ class HiTerminalBothModesTests(unittest.TestCase):
 
                         # Clear `/` and open `@` client-local file completion + drill into `sub/`
                         pty.send_ctrl("u")
-                        pty.send_text("@su")
+                        pty.send_text("/attach su")
                         pty.send_bytes(b"\t")
                         pty.wait_for_output("client files · Search:")
                         pty.wait_for_output("sub/")
