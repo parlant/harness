@@ -4,6 +4,20 @@ if System.get_env("PHX_SERVER") do
   config :harness_web, HWeb.Endpoint, server: true
 end
 
+if config_env() != :test do
+  data_dir =
+    (System.get_env("H_DATA_DIR") || "~/.local/share/h")
+    |> Path.expand()
+
+  config :harness,
+    data_dir: data_dir,
+    start_daemon: true,
+    api_socket: true
+
+  config :harness_web,
+    daemon_opts: [data_dir: data_dir]
+end
+
 if config_env() == :prod do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||

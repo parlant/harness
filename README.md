@@ -6,7 +6,7 @@ The aim is Pi Durable's execution semantics, p2's shared session/history surface
 
 ## Current state
 
-Implemented self-hosting core (**Slices 0–4**, 180 ExUnit + Node ESM tests passing under `--no-start`):
+Implemented self-hosting core, workspace browsing, and two clients. See the [roadmap](docs/roadmap.md) for features still planned.
 
 - **Pure history & fork forest (`H.Session`, `H.Conversation`, `H.Entry`):** Root, independent, and nested forked conversations sharing immutable entry prefixes (`entry.id <= cutoff`).
 - **Pluggable dependency-free storage (`H.Storage`, `H.Storage.Memory`, `H.Storage.File`):** Atomic multi-batch commits with per-batch `seq`, prefix-refusal checks, `:raw` CRC32-framed `commit.log`, atomic temp/rename snapshots, torn-tail recovery, OS Unix-socket single-daemon `H.StoreLock`, and ETS-backed `H.Catalog`.
@@ -16,20 +16,26 @@ Implemented self-hosting core (**Slices 0–4**, 180 ExUnit + Node ESM tests pas
 
 ## Start here
 
-Development target: Elixir 1.20 / OTP 29.
+Development target: Elixir 1.20 / OTP 29 (plus Rust for `clients/tui`).
 
 ```sh
-cd ~/Projects/diy-harness
+# From repo root: standalone daemon with the reference web client
 mix deps.get
-mix format --check-formatted
-mix compile --warnings-as-errors
-mix test
+mix run --no-halt -e 'H.serve()'
+
+# Alternatively, from repo root: Phoenix and daemon in one VM
+(cd clients/web && mix deps.get && PHX_SERVER=true mix run --no-halt)
 ```
 
-Start the local daemon and web client:
+Run only one server per data directory. For Phoenix, open `http://127.0.0.1:4000` and sign in with the owner token in `${H_DATA_DIR:-$HOME/.local/share/h}/auth.token`.
+
+Build the terminal client from the repository, then run it from your project directory. It attaches to either server; it does not start one:
 
 ```sh
-mix run --no-halt -e 'H.serve()'
+cargo install --locked --path clients/tui
+cd /path/to/project
+h -r                       # select a session in this folder
+h -s SESSION_ID            # attach by ID, including when using a symlink to the workspace
 ```
 
 In IEx:
@@ -78,7 +84,7 @@ See the [proposed protocol](docs/protocol.md) and the [self-hosting roadmap](doc
   - [Phoenix Web & Mobile Client (`clients/web/`, `HWeb.*`)](docs/architecture/client-web.md)
   - [Cooperative Non-BEAM Terminal Client (`clients/tui/`, `h`)](docs/architecture/client-tui.md)
 - [HTTP/JSON + SSE wire protocol](docs/protocol.md)
-- [Roadmap (Slices 0–4 implemented, Slices 5–9 next)](docs/roadmap.md)
+- [Roadmap](docs/roadmap.md)
 - [Pinned upstream references](docs/references.md)
 
 The architecture/protocol documents distinguish proposals from implemented behavior. Storage is pluggable (`H.Storage`): we start with dependency-free `H.Storage.Memory` and `H.Storage.File` (atomic framed commit logs + snapshots using Elixir's stdlib `JSON`), with `H.Storage.SQLite` agreed as the relational backend to plug in later behind the same conformance suite.

@@ -1,8 +1,8 @@
 # Cooperative Terminal Client Architecture (`clients/tui/` — `h`)
 
 **Status:**
-- **Planned Bootstrap (Slice 5):** Lightweight `pwd`-aware CLI verification client (`mix h`) proving directory-scoped session lookup and live SSE sync alongside Web.
-- **Proposed Dedicated TUI Subproject (Slice 7):** Standalone **non-BEAM** terminal client under `clients/tui/` compiling to a fast `h` binary that communicates cooperatively with the `:harness` durable daemon over Unix domain socket / loopback HTTP+SSE.
+- **Implemented:** Standalone Rust `h` client under `clients/tui/`. Line-oriented interaction, folder-scoped session lookup, and print mode over a Unix socket or loopback HTTP/SSE. Start the daemon separately. Use `h -s SESSION_ID` when the same folder is reached under a different path spelling.
+- **Planned:** The auto-start, raw-mode renderer, richer keybindings, and completion features discussed below. Timing and binary-size figures are design estimates, not measured results.
 
 ---
 
@@ -78,7 +78,7 @@ Starting `h` from a shell directory mirrors `pi` while leveraging `H.Catalog`'s 
 `h` implements the exact same pure 3-event state reducer (`TranscriptState`) as `priv/static/transcript.js` and `HWeb.SessionLive`:
 
 1. **`snapshot`:** Initializes `cursor_seq`, visible `entries`, `before_entry_id`, and `committed_docs` (`agent`, `live`, `inbox`, `usage`).
-2. **`commit` (`id: <seq>`):** Requires `seq == cursor_seq + 1` (reconnects with `Last-Event-ID` or fresh snapshot on gap); flushes newly committed entries into the static scrollback/timeline above the active viewport, applies `doc_ops`, resets `ephemeral_live`, and sets `cursor_seq = seq`.
+2. **`commit` (`id: <seq>`):** Requires `prev_seq == cursor_seq` for a newer commit (reconnects with `Last-Event-ID` or fresh snapshot on gap); flushes newly committed entries into the static scrollback/timeline above the active viewport, applies `doc_ops`, resets `ephemeral_live`, and sets `cursor_seq = seq`.
 3. **`ephemeral` (no `id:`, carries `base_seq`):** Applied when `base_seq == cursor_seq`; updates the live active region (streaming thinking summary, streaming markdown text, live `bash` tail output) redrawing only the dynamic bottom viewport lines inside `CSI ? 2026 h ... CSI ? 2026 l`.
 
 ### Live Multi-Surface Co-Editing Behavior

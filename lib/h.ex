@@ -112,7 +112,11 @@ defmodule H do
     payload = %{
       "version" => 1,
       "pid" => String.to_integer(System.pid()),
-      "http_url" => if(is_integer(bound_port), do: "http://127.0.0.1:#{bound_port}", else: nil),
+      "http_url" =>
+        if(is_integer(bound_port) and bound_port > 0,
+          do: "http://127.0.0.1:#{bound_port}",
+          else: nil
+        ),
       "api_socket" => sock_path
     }
 

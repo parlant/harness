@@ -36,7 +36,8 @@ defmodule HWeb do
   def live_view do
     quote do
       use Phoenix.LiveView,
-        layout: {HWeb.Layouts, :app}
+        layout: {HWeb.Layouts, :app},
+        log: false
 
       unquote(html_helpers())
     end

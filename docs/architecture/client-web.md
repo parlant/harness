@@ -2,7 +2,7 @@
 
 **Status:**
 - **Implemented Today (Slice 2 Reference UI):** Zero-build vanilla ES-module client (`priv/static/*`) served directly by `:harness` (`H.HTTP.Router`) for bootstrap and API verification.
-- **Proposed (Slice 6):** Dedicated Phoenix + LiveView application (`clients/web/`, OTP app `:harness_web`, namespace `HWeb.*`) targeting **Desktop and Mobile browsers**, isolated from `:harness` (`H.*`) at the namespace and Mix project level while able to run inside the **same BEAM VM** as a single monolith.
+- **Implemented (Slice 6):** Dedicated Phoenix + LiveView application (`clients/web/`, OTP app `:harness_web`, namespace `HWeb.*`) targeting **Desktop and Mobile browsers**, isolated from `:harness` (`H.*`) at the namespace and Mix project level while able to run inside the **same BEAM VM** as a single monolith.
 
 ---
 
@@ -71,8 +71,8 @@ When `{:ephemeral_event, sid, cid, frame}` arrives (~20 times/sec during token o
 - Only `ephemeral_live` changes (validated against `base_seq == cursor_seq`, identical to `ConversationTranscript` rules).
 - LiveView diffs **only** the active `<.live_region>` at the bottom of the transcript—zero committed entry cards are re-evaluated or re-sent.
 - When `{:commit_event, sid, cid, seq, frame}` arrives:
-  - If `seq == cursor_seq + 1`: new entries are appended to `@streams.entries`, `doc_ops` update `committed_docs`, `ephemeral_live` resets to `committed_docs["live"]`, and `cursor_seq` advances to `seq`.
-  - If `seq > cursor_seq + 1` (missed frame): `HWeb.SessionLive` calls `resnapshot` (`stream(..., reset: true)`) to converge cleanly.
+  - If `seq` is newer and `prev_seq == cursor_seq`: new entries are appended to `@streams.entries`, `doc_ops` update `committed_docs`, `ephemeral_live` resets to `committed_docs["live"]`, and `cursor_seq` advances to `seq`.
+  - If a newer frame's `prev_seq` does not match the cursor (missed frame): `HWeb.SessionLive` calls `resnapshot` (`stream(..., reset: true)`) to converge cleanly.
 
 ---
 
