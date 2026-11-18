@@ -800,8 +800,16 @@ defmodule H.Daemon do
              {:request_id, :non_empty_string, required: true},
              {:command,
               {:enum,
-               ["submit", "fork", "fork_and_submit", "configure", "abort", "withdraw", "rename"]},
-              required: true},
+               [
+                 "submit",
+                 "fork",
+                 "fork_and_submit",
+                 "configure",
+                 "abort",
+                 "withdraw",
+                 "rename",
+                 "user_shell"
+               ]}, required: true},
              {:conversation_id, :pos_int, required: true},
              {:args, :map, default: %{}}
            ]),
@@ -901,6 +909,10 @@ defmodule H.Daemon do
          {:ok, normalized_title} <- normalize_title_arg(args.title) do
       {:ok, %{args | title: normalized_title}}
     end
+  end
+
+  defp validate_command_args("user_shell", raw_args) do
+    H.Session.UserShell.validate_args(raw_args)
   end
 
   defp normalize_optional_title(%{title: title} = validated) do

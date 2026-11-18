@@ -13,6 +13,7 @@ defmodule H.Session.Server do
   require Logger
 
   alias H.{Context, Document, Storage, Submission, Task, WorkspaceLease}
+  alias H.Session.UserShell
 
   @max_drain 31
   @max_replay_ring 64
@@ -185,6 +186,14 @@ defmodule H.Session.Server do
   def handle_info({:tool_output, inc, tid, attempt_id, cid, call_id, chunk}, state) do
     if inc == state.incarnation and Map.has_key?(state.workers, attempt_id) do
       {:noreply, handle_tool_output(state, cid, tid, call_id, chunk)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:user_shell_output, inc, tid, attempt_id, cid, chunk}, state) do
+    if inc == state.incarnation and Map.has_key?(state.workers, attempt_id) do
+      {:noreply, UserShell.handle_output(state, cid, tid, chunk)}
     else
       {:noreply, state}
     end
@@ -479,21 +488,28 @@ defmodule H.Session.Server do
   end
 
   defp reconcile_on_open(state, clean?, now) do
-    # Clean close leaves only potentially interrupted unsafe tools running.
+    # Clean close leaves only potentially interrupted unsafe tools/user_shell running.
     # Do not charge those attempts against the restart budget.
     running_tasks =
       state.tasks
       |> Map.values()
-      |> Enum.filter(&(&1.status == "running"))
+      |> Enum.filter(fn t ->
+        t.status == "running" or (UserShell.unsafe_task?(t) and t.status == "pending")
+      end)
       |> Enum.sort_by(& &1.id)
 
     {writes, next_state} =
       Enum.reduce(running_tasks, {[], state}, fn task, {acc_writes, acc_state} ->
         {w, st} =
-          if clean? == true and unsafe_running_tool?(task) do
-            recover_unclean_tool_call(task, acc_state, now)
-          else
-            recover_unclean_task(task, acc_state, now)
+          cond do
+            UserShell.unsafe_task?(task) ->
+              UserShell.recover_on_open(task, acc_state, now)
+
+            clean? == true and unsafe_running_tool?(task) ->
+              recover_unclean_tool_call(task, acc_state, now)
+
+            true ->
+              recover_unclean_task(task, acc_state, now)
           end
 
         {acc_writes ++ w, st}
@@ -834,6 +850,8 @@ defmodule H.Session.Server do
 
           if accepted_staged == [] or not is_nil(refused) do
             maybe_report_catalog_runtime(state, state_after_effects)
+          else
+            maybe_report_catalog_runtime(state_after_accepted, state_after_effects)
           end
 
           case refused do
@@ -1000,6 +1018,10 @@ defmodule H.Session.Server do
 
   defp dispatch_command_stage(from, "rename", cid, req_id, fp, args, state, _staged_rev) do
     stage_rename(from, cid, req_id, fp, args, state)
+  end
+
+  defp dispatch_command_stage(from, "user_shell", cid, req_id, fp, args, state, _staged_rev) do
+    UserShell.stage(from, cid, req_id, fp, args, state)
   end
 
   defp stage_submit_write(from, cid, req_id, fp, args, state, now) do
@@ -1568,11 +1590,27 @@ defmodule H.Session.Server do
         t.kind == "generation" and t.owner == {:conversation, cid} and t.status != "terminal"
       end)
 
+    active_shells =
+      state.tasks
+      |> Map.values()
+      |> Enum.filter(fn t ->
+        t.kind == "user_shell" and t.owner == {:conversation, cid} and t.status != "terminal"
+      end)
+
     {abort_writes, state, kill_effects} =
       Enum.reduce(active_gens, {[], state, []}, fn gen_task, {acc_w, acc_s, acc_eff} ->
         {w, st, eff} = abort_generation_run(gen_task, cid, reason, acc_s, now)
         {acc_w ++ w, st, acc_eff ++ eff}
       end)
+
+    {shell_writes, state, shell_kills} =
+      Enum.reduce(active_shells, {[], state, []}, fn shell_task, {acc_w, acc_s, acc_eff} ->
+        {w, st, eff} = UserShell.stage_abort(shell_task, cid, reason, acc_s, now)
+        {acc_w ++ w, st, acc_eff ++ eff}
+      end)
+
+    all_abort_writes = abort_writes ++ shell_writes
+    all_kill_effects = kill_effects ++ shell_kills
 
     sub =
       Submission.new(%{
@@ -1586,17 +1624,18 @@ defmodule H.Session.Server do
         created_at: now
       })
 
-    writes = [{:check, {:unique_request_id, req_id, fp}}, {:put_submission, sub}] ++ abort_writes
+    writes =
+      [{:check, {:unique_request_id, req_id, fp}}, {:put_submission, sub}] ++ all_abort_writes
 
     next_live = state.docs[cid]["live"]
 
     doc_ops =
-      if active_gens == [],
+      if active_gens == [] and active_shells == [],
         do: %{},
         else: %{"live" => [["replace", next_live]]}
 
     appended =
-      Enum.flat_map(abort_writes, fn
+      Enum.flat_map(all_abort_writes, fn
         {:append_entry, e} -> [e]
         _ -> []
       end)
@@ -1608,7 +1647,7 @@ defmodule H.Session.Server do
       writes: writes,
       conv_events: %{cid => %{entries: appended, doc_ops: doc_ops}},
       submissions: [sub],
-      effects: kill_effects,
+      effects: all_kill_effects,
       reply_from: from,
       receipt: Submission.to_receipt(sub, state.seq)
     }
@@ -1854,6 +1893,16 @@ defmodule H.Session.Server do
     end
   end
 
+  defp stage_worker_done(tid, attempt_id, {:user_shell_result, _dur, _res} = result, state) do
+    case UserShell.stage_done(tid, attempt_id, result, state) do
+      {:skip, next_state} ->
+        {:skip, next_state}
+
+      {:batch, staged, next_state} ->
+        maybe_drain_inbox_after_user_shell(tid, staged, next_state)
+    end
+  end
+
   defp stage_worker_done(tid, attempt_id, {:tool_result, duration_ms, tool_res}, state) do
     {worker, workers} = Map.pop(state.workers, attempt_id)
     Process.demonitor(worker.monitor_ref, [:flush])
@@ -1912,7 +1961,95 @@ defmodule H.Session.Server do
     end
   end
 
-  defp stage_worker_crashed(tid, attempt_id, _reason, state) do
+  defp maybe_drain_inbox_after_user_shell(tid, staged, state) do
+    task = Map.get(state.tasks, tid)
+    cid = task && task.checkpoint["conversation_id"]
+    inbox = (cid && get_in(state.docs, [cid, "inbox"])) || []
+
+    if is_nil(task) or task.cancelled == true or inbox == [] do
+      {:batch, staged, state}
+    else
+      now = System.system_time(:millisecond)
+
+      {drained_entries, drained_sub_writes, next_sub_ids, inbox_ops, state} =
+        drain_inbox_items(cid, state, now, nil)
+
+      {:ok, next_gen_id, store} = Storage.mint_id(state.store)
+      state = %{state | store: store}
+
+      next_gen =
+        Task.new(%{
+          id: next_gen_id,
+          kind: "generation",
+          owner: {:conversation, cid},
+          status: "pending",
+          checkpoint: %{
+            "conversation_id" => cid,
+            "turns" => 1,
+            "retry_count" => 0,
+            "phase" => "stream",
+            "submission_ids" => next_sub_ids
+          },
+          created_at: now
+        })
+
+      next_live = %{
+        "run" => %{"task_id" => to_string(next_gen_id), "turns" => 1},
+        "generation" => %{"message" => %{"thinking" => "", "text" => "", "tool_calls" => []}}
+      }
+
+      state =
+        state
+        |> put_task_in_state(next_gen)
+        |> put_doc_in_state(cid, "live", next_live)
+
+      base_writes =
+        Enum.reject(staged.writes, fn
+          {:put_doc, {:conversation, ^cid, "live"}, _} -> true
+          _ -> false
+        end)
+
+      next_writes =
+        base_writes ++
+          Enum.map(drained_entries, &{:append_entry, &1}) ++
+          drained_sub_writes ++
+          [
+            {:put_task, next_gen},
+            {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)},
+            {:put_doc, {:conversation, cid, "inbox"}, Document.wrap("inbox", [])}
+          ]
+
+      prev_ev = Map.get(staged.conv_events, cid, %{entries: [], doc_ops: %{}})
+
+      next_doc_ops =
+        prev_ev.doc_ops
+        |> Map.put("live", [["replace", next_live]])
+        |> Map.put("inbox", inbox_ops)
+
+      next_staged = %{
+        staged
+        | writes: next_writes,
+          conv_events:
+            Map.put(staged.conv_events, cid, %{
+              entries: prev_ev.entries ++ drained_entries,
+              doc_ops: next_doc_ops
+            }),
+          effects: staged.effects ++ [{:spawn_generation, cid, next_gen_id}]
+      }
+
+      {:batch, next_staged, state}
+    end
+  end
+
+  defp stage_worker_crashed(tid, attempt_id, reason, state) do
+    if UserShell.unsafe_task?(Map.get(state.tasks, tid)) do
+      UserShell.stage_crashed(tid, attempt_id, reason, state)
+    else
+      do_stage_worker_crashed(tid, attempt_id, reason, state)
+    end
+  end
+
+  defp do_stage_worker_crashed(tid, attempt_id, _reason, state) do
     {worker, workers} = Map.pop(state.workers, attempt_id)
     if worker, do: Process.demonitor(worker.monitor_ref, [:flush])
     state = %{state | workers: workers}
@@ -2786,6 +2923,7 @@ defmodule H.Session.Server do
           tool_calls: %{},
           tool_order: [],
           tool_outputs: %{},
+          user_shell_output: nil,
           dirty: false,
           pending_ops: [],
           emit_timer: nil,
@@ -2873,13 +3011,17 @@ defmodule H.Session.Server do
         live
       end
 
-    Enum.reduce(eph.tool_outputs, live, fn {call_id, output}, acc ->
-      if get_in(acc, ["tools", call_id]) do
-        put_in(acc, ["tools", call_id, "output"], output)
-      else
-        acc
-      end
+    live
+    |> then(fn acc ->
+      Enum.reduce(eph.tool_outputs, acc, fn {call_id, output}, inner_acc ->
+        if get_in(inner_acc, ["tools", call_id]) do
+          put_in(inner_acc, ["tools", call_id, "output"], output)
+        else
+          inner_acc
+        end
+      end)
     end)
+    |> UserShell.merge_ephemeral(eph)
   end
 
   # Commit broadcasting & replay ring
@@ -3129,14 +3271,26 @@ defmodule H.Session.Server do
         entries
         |> Enum.reverse()
         |> Enum.find(fn e ->
-          not (e.kind == "assistant" and
-                 Map.get(e.data, "aborted", Map.get(e.data, :aborted)) == true)
+          cond do
+            e.kind == "assistant" ->
+              Map.get(e.data, "aborted", Map.get(e.data, :aborted)) != true
+
+            e.kind == "user_shell" ->
+              Map.get(e.data, "include_in_context", Map.get(e.data, :include_in_context)) == true
+
+            true ->
+              true
+          end
         end)
 
       answerable? =
         case last_non_aborted do
-          %{kind: kind} when kind in ["user", "tool_result", "compaction", "reset"] -> true
-          _ -> false
+          %{kind: kind}
+          when kind in ["user", "user_shell", "tool_result", "compaction", "reset"] ->
+            true
+
+          _ ->
+            false
         end
 
       {:ok, answerable?, state}
@@ -3199,12 +3353,7 @@ defmodule H.Session.Server do
   end
 
   defp conversation_busy?(state, cid) do
-    live = get_in(state.docs, [cid, "live"]) || %{}
-
-    Map.get(live, "run") != nil or
-      Enum.any?(state.tasks, fn {_id, t} ->
-        t.kind == "generation" and t.owner == {:conversation, cid} and t.status != "terminal"
-      end)
+    UserShell.busy?(state, cid)
   end
 
   defp maybe_append_aborted_partial(cid, live, state, now) do
@@ -3308,7 +3457,10 @@ defmodule H.Session.Server do
     reset_writes =
       state.tasks
       |> Map.values()
-      |> Enum.filter(&(&1.status == "running" and not unsafe_running_tool?(&1)))
+      |> Enum.filter(
+        &(&1.status == "running" and not unsafe_running_tool?(&1) and
+            not UserShell.unsafe_task?(&1))
+      )
       |> Enum.map(&{:put_task, Task.reset_clean(&1, now)})
 
     meta_write = {:put_session_meta, Map.put(state.session_meta, :clean_close, true)}
@@ -3604,6 +3756,10 @@ defmodule H.Session.Server do
 
   defp apply_effect({:spawn_tool, cid, tid}, state) do
     spawn_tool_worker(cid, tid, state)
+  end
+
+  defp apply_effect({:spawn_user_shell, cid, tid}, state) do
+    UserShell.spawn_worker(cid, tid, state)
   end
 
   defp apply_effect({:arm_wake_timer, tid, delay_ms}, state) do
