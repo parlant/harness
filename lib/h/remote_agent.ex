@@ -59,6 +59,12 @@ defmodule H.RemoteAgent do
     call_agent(agent, {:resolve_path, path, opts})
   end
 
+  @doc "Remotely canonicalizes `path` by resolving symlinks on the target agent."
+  @spec canonical_path(server(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def canonical_path(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+    call_agent(agent, {:canonical_path, path, opts})
+  end
+
   @doc "Reads bounded UTF-8 lines from a remote file."
   @spec read_file_lines(server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def read_file_lines(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
@@ -82,6 +88,13 @@ defmodule H.RemoteAgent do
           {:ok, %{entries: [map()], next_cursor: nil | non_neg_integer()}} | {:error, term()}
   def list_dir(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:list_dir, path, opts})
+  end
+
+  @doc "Recursively discovers bounded files and directories on the remote agent."
+  @spec list_files(server(), String.t(), keyword()) ::
+          {:ok, %{entries: [map()], truncated: boolean()}} | {:error, term()}
+  def list_files(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+    call_agent(agent, {:list_files, path, opts})
   end
 
   @doc """
@@ -196,6 +209,15 @@ defmodule H.RemoteAgent do
     {:reply, reply, state}
   end
 
+  def handle_call({:canonical_path, path, opts}, _from, state) do
+    reply =
+      with {:ok, target_env, _op_opts} <- scoped_env(state.env, opts) do
+        ExecutionEnv.canonical_path(target_env, path)
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:bind_cwd, path, opts}, _from, state) do
     reply =
       with {:ok, target_env, _op_opts} <- scoped_env(state.env, opts),
@@ -237,6 +259,15 @@ defmodule H.RemoteAgent do
     reply =
       with {:ok, target_env, op_opts} <- scoped_env(state.env, opts) do
         ExecutionEnv.list_dir(target_env, path, op_opts)
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_files, path, opts}, _from, state) do
+    reply =
+      with {:ok, target_env, op_opts} <- scoped_env(state.env, opts) do
+        ExecutionEnv.list_files(target_env, path, op_opts)
       end
 
     {:reply, reply, state}

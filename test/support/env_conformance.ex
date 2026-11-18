@@ -275,6 +275,123 @@ defmodule H.ExecutionEnv.Conformance do
         end
       end
 
+      describe "canonical_path/2 and list_files/3" do
+        test "resolves symlinks and detects symlink loops in canonical_path/2", %{
+          env: env,
+          tmp_dir: tmp_dir
+        } do
+          :ok = H.ExecutionEnv.write_file(env, "real_dir/target.txt", "ok\n")
+          File.ln_s!(Path.join(tmp_dir, "real_dir"), Path.join(tmp_dir, "dir_link"))
+
+          assert {:ok, real_root} = H.ExecutionEnv.canonical_path(env, ".")
+
+          assert {:ok, Path.join(real_root, "real_dir/target.txt")} ==
+                   H.ExecutionEnv.canonical_path(env, "dir_link/target.txt")
+
+          loop_a = Path.join(tmp_dir, "loop_a")
+          loop_b = Path.join(tmp_dir, "loop_b")
+          File.ln_s!(loop_b, loop_a)
+          File.ln_s!(loop_a, loop_b)
+
+          assert {:error, :eloop} = H.ExecutionEnv.canonical_path(env, "loop_a")
+          assert {:error, :enoent} = H.ExecutionEnv.canonical_path(env, "does_not_exist")
+        end
+
+        test "discovers files recursively with bounds, skips .git and symlink traversal", %{
+          env: env,
+          tmp_dir: tmp_dir
+        } do
+          :ok = H.ExecutionEnv.write_file(env, ".git/config", "[core]")
+          :ok = H.ExecutionEnv.write_file(env, ".hidden/secret.txt", "shh")
+          :ok = H.ExecutionEnv.write_file(env, "README.md", "# hi")
+          :ok = H.ExecutionEnv.write_file(env, "lib/app.ex", "defmodule App do end")
+          :ok = H.ExecutionEnv.write_file(env, "lib/nested/deep.ex", "defmodule Deep do end")
+          :ok = H.ExecutionEnv.write_file(env, "node_modules/pkg/index.js", "module.exports = 1")
+
+          outside_dir = Path.join(tmp_dir, "_outside_target")
+          File.mkdir_p!(outside_dir)
+          File.write!(Path.join(outside_dir, "escaped.txt"), "secret")
+          # Put outside dir outside workspace subdir and test symlink non-traversal inside sub
+          sub_ws = Path.join(tmp_dir, "ws")
+          File.mkdir_p!(sub_ws)
+          File.write!(Path.join(sub_ws, "inside.txt"), "in")
+          File.ln_s!(outside_dir, Path.join(sub_ws, "escape_link"))
+
+          {:ok, ws_env} = H.ExecutionEnv.bind_cwd(env, "ws")
+
+          assert {:ok, %{entries: ws_entries, truncated: false}} =
+                   H.ExecutionEnv.list_files(ws_env, ".")
+
+          ws_paths = Enum.map(ws_entries, & &1.path)
+          assert "escape_link" in ws_paths
+          assert "inside.txt" in ws_paths
+          refute Enum.any?(ws_paths, &String.contains?(&1, "escaped.txt"))
+
+          assert {:ok, %{entries: all_entries, truncated: false}} =
+                   H.ExecutionEnv.list_files(env, ".",
+                     include_hidden: false,
+                     exclude: ["node_modules", "_outside_target"]
+                   )
+
+          paths = Enum.map(all_entries, & &1.path)
+          assert "README.md" in paths
+          assert "lib" in paths
+          assert "lib/app.ex" in paths
+          assert "lib/nested/deep.ex" in paths
+          refute Enum.any?(paths, &String.starts_with?(&1, ".git"))
+          refute Enum.any?(paths, &String.starts_with?(&1, ".hidden"))
+          refute Enum.any?(paths, &String.starts_with?(&1, "node_modules"))
+
+          assert {:ok, %{entries: filtered, truncated: false}} =
+                   H.ExecutionEnv.list_files(env, ".",
+                     include_hidden: false,
+                     include_dirs: false,
+                     exclude: ["node_modules"],
+                     query: "DEEP"
+                   )
+
+          assert [%{path: "lib/nested/deep.ex", type: "file"}] = filtered
+
+          assert {:ok, %{entries: limited, truncated: true}} =
+                   H.ExecutionEnv.list_files(env, ".", limit: 2, include_dirs: false)
+
+          assert length(limited) == 2
+
+          assert {:ok, %{entries: depth1, truncated: false}} =
+                   H.ExecutionEnv.list_files(env, ".",
+                     include_hidden: false,
+                     exclude: ["node_modules", "_outside_target", "ws"],
+                     max_depth: 1
+                   )
+
+          depth1_paths = Enum.map(depth1, & &1.path)
+          assert "README.md" in depth1_paths
+          assert "lib" in depth1_paths
+          refute "lib/app.ex" in depth1_paths
+        end
+
+        test "rejects non-regular files such as FIFOs without blocking", %{
+          env: env,
+          tmp_dir: tmp_dir
+        } do
+          fifo_path = Path.join(tmp_dir, "named_pipe")
+
+          case System.find_executable("mkfifo") do
+            nil ->
+              :ok
+
+            mkfifo ->
+              {_, 0} = System.cmd(mkfifo, [fifo_path])
+
+              assert {:error, :not_regular_file} =
+                       H.ExecutionEnv.read_file_lines(env, "named_pipe", no_follow: true)
+
+              assert {:error, :not_regular_file} =
+                       H.ExecutionEnv.read_file_bytes(env, "named_pipe", no_follow: true)
+          end
+        end
+      end
+
       describe "env_id/1, kind/1, and bind_cwd/2" do
         test "reports env_id and kind and binds cwd to existing directories", %{
           env: env,

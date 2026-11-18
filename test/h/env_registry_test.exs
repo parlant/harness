@@ -205,5 +205,26 @@ defmodule H.EnvRegistryTest do
       assert {:error, :enoent} = EnvRegistry.resolve_workspace("host", Path.join(tmp_dir, "nope"))
       assert {:error, :unknown_environment} = EnvRegistry.resolve_workspace("nope", tmp_dir, opts)
     end
+
+    test "returns :workspace_unavailable when a configured environment builder exits or returns nil" do
+      opts = [
+        environments: %{
+          "dead-vm" => %{
+            kind: "remote",
+            label: "Dead VM",
+            default_cwd: "/srv/app",
+            build: fn _cwd -> exit(:noproc) end
+          },
+          "nil-vm" => %{
+            kind: "remote",
+            label: "Nil VM",
+            default_cwd: "/srv/app"
+          }
+        }
+      ]
+
+      assert {:error, :workspace_unavailable} = EnvRegistry.fetch_env("dead-vm", opts)
+      assert {:error, :workspace_unavailable} = EnvRegistry.fetch_env("nil-vm", opts)
+    end
   end
 end

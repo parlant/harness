@@ -9,6 +9,12 @@ defmodule H.ExecutionEnv.Host do
   @default_read_bytes 51_200
   @default_byte_read_limit 5_242_880
   @default_list_limit 200
+  @default_list_files_limit 200
+  @default_list_files_bytes 262_144
+  @default_list_files_depth 32
+  @default_list_files_scanned 20_000
+  @default_list_files_timeout_ms 5_000
+  @max_symlink_hops 40
   @default_timeout_ms 120_000
   @read_chunk_bytes 65_536
   @term_grace_ms 500
@@ -67,6 +73,14 @@ defmodule H.ExecutionEnv.Host do
       {:error, :einval}
     else
       {:ok, Path.expand(path, cwd)}
+    end
+  end
+
+  @impl true
+  def canonical_path(state, path) when is_binary(path) do
+    with {:ok, resolved} <- resolve_path(state, path) do
+      ["/" | segments] = Path.split(resolved)
+      resolve_realpath_segments(segments, "/", @max_symlink_hops)
     end
   end
 
@@ -203,6 +217,79 @@ defmodule H.ExecutionEnv.Host do
   end
 
   @impl true
+  def list_files(state, path, opts \\ []) when is_binary(path) and is_list(opts) do
+    limit = Keyword.get(opts, :limit, @default_list_files_limit)
+    max_bytes = Keyword.get(opts, :max_bytes, @default_list_files_bytes)
+    max_depth = Keyword.get(opts, :max_depth, @default_list_files_depth)
+    max_scanned = Keyword.get(opts, :max_scanned, @default_list_files_scanned)
+    timeout_ms = Keyword.get(opts, :timeout_ms, @default_list_files_timeout_ms)
+    include_hidden = Keyword.get(opts, :include_hidden, true)
+    include_dirs = Keyword.get(opts, :include_dirs, true)
+    exclude = Keyword.get(opts, :exclude, [".git"])
+    query = Keyword.get(opts, :query)
+    no_follow = Keyword.get(opts, :no_follow, false)
+
+    cond do
+      not (is_integer(limit) and limit >= 1) ->
+        {:error, :invalid_limit}
+
+      not (is_integer(max_bytes) and max_bytes >= 1) ->
+        {:error, :invalid_max_bytes}
+
+      not (is_nil(max_depth) or (is_integer(max_depth) and max_depth >= 1)) ->
+        {:error, :invalid_max_depth}
+
+      not (is_integer(max_scanned) and max_scanned >= 1) ->
+        {:error, :invalid_max_scanned}
+
+      not (is_integer(timeout_ms) and timeout_ms >= 1) ->
+        {:error, :invalid_timeout_ms}
+
+      not is_boolean(include_hidden) ->
+        {:error, :invalid_include_hidden}
+
+      not is_boolean(include_dirs) ->
+        {:error, :invalid_include_dirs}
+
+      not (is_list(exclude) and Enum.all?(exclude, &is_binary/1)) ->
+        {:error, :invalid_exclude}
+
+      not (is_nil(query) or is_binary(query)) ->
+        {:error, :invalid_query}
+
+      not is_boolean(no_follow) ->
+        {:error, :invalid_no_follow}
+
+      true ->
+        with {:ok, resolved} <- resolve_path(state, path),
+             :ok <- check_dir_for_list_files(resolved, no_follow) do
+          exclude_set = MapSet.new([".git" | exclude])
+          query_down = if is_binary(query) and query != "", do: String.downcase(query), else: nil
+          deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+          walk_ctx = %{
+            limit: limit,
+            max_bytes: max_bytes,
+            max_depth: max_depth,
+            max_scanned: max_scanned,
+            deadline: deadline,
+            include_hidden: include_hidden,
+            include_dirs: include_dirs,
+            exclude_set: exclude_set,
+            query_down: query_down,
+            entries_rev: [],
+            count: 0,
+            bytes_acc: 0,
+            scanned: 0,
+            truncated: false
+          }
+
+          bfs_walk(:queue.in({resolved, "", 0}, :queue.new()), walk_ctx)
+        end
+    end
+  end
+
+  @impl true
   def exec(state, command, opts \\ []) when is_list(opts) do
     with {:ok, exe_path, args} <- resolve_command(command),
          :ok <- ensure_cwd_dir(state.cwd) do
@@ -276,21 +363,198 @@ defmodule H.ExecutionEnv.Host do
     end)
   end
 
-  # --- Line scanning ---
+  # --- Recursive bounded file discovery & canonical_path ---
 
-  defp check_stat_for_read(resolved, no_follow) do
-    case File.lstat(resolved) do
-      {:ok, %File.Stat{type: :symlink}} when no_follow ->
-        {:error, :symlink_not_followed}
+  defp resolve_realpath_segments([], current, _hops), do: {:ok, current}
 
-      {:ok, %File.Stat{type: :directory}} ->
-        {:error, :eisdir}
+  defp resolve_realpath_segments(["." | tail], current, hops),
+    do: resolve_realpath_segments(tail, current, hops)
 
-      {:ok, _stat} ->
-        :ok
+  defp resolve_realpath_segments([".." | tail], current, hops) do
+    resolve_realpath_segments(tail, Path.dirname(current), hops)
+  end
+
+  defp resolve_realpath_segments([seg | tail], current, hops) do
+    candidate = if current == "/", do: "/" <> seg, else: current <> "/" <> seg
+
+    case :file.read_link(candidate) do
+      {:ok, target_charlist} when hops > 0 ->
+        target = List.to_string(target_charlist)
+
+        if Path.type(target) == :absolute do
+          ["/" | target_segs] = Path.split(target)
+          resolve_realpath_segments(target_segs ++ tail, "/", hops - 1)
+        else
+          target_segs = Path.split(target)
+          resolve_realpath_segments(target_segs ++ tail, current, hops - 1)
+        end
+
+      {:ok, _target_charlist} ->
+        {:error, :eloop}
+
+      {:error, :einval} ->
+        case File.lstat(candidate) do
+          {:ok, _stat} -> resolve_realpath_segments(tail, candidate, hops)
+          {:error, reason} -> {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp check_dir_for_list_files(resolved, true) do
+    case File.lstat(resolved) do
+      {:ok, %File.Stat{type: :directory}} -> :ok
+      {:ok, %File.Stat{type: :symlink}} -> {:error, :symlink_not_followed}
+      {:ok, _other} -> {:error, :enotdir}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp check_dir_for_list_files(resolved, false) do
+    case File.stat(resolved) do
+      {:ok, %File.Stat{type: :directory}} -> :ok
+      {:ok, _other} -> {:error, :enotdir}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp bfs_walk(queue, ctx) do
+    if ctx.truncated do
+      {:ok, %{entries: Enum.reverse(ctx.entries_rev), truncated: true}}
+    else
+      case :queue.out(queue) do
+        {:empty, _} ->
+          {:ok, %{entries: Enum.reverse(ctx.entries_rev), truncated: false}}
+
+        {{:value, {dir_abs, rel_prefix, depth}}, rest_queue} ->
+          if System.monotonic_time(:millisecond) >= ctx.deadline do
+            {:ok, %{entries: Enum.reverse(ctx.entries_rev), truncated: true}}
+          else
+            case File.ls(dir_abs) do
+              {:ok, names} ->
+                filtered =
+                  names
+                  |> Enum.sort()
+                  |> Enum.reject(fn name ->
+                    MapSet.member?(ctx.exclude_set, name) or
+                      (not ctx.include_hidden and String.starts_with?(name, "."))
+                  end)
+
+                {next_queue, next_ctx} =
+                  process_dir_names(filtered, dir_abs, rel_prefix, depth, rest_queue, ctx)
+
+                bfs_walk(next_queue, next_ctx)
+
+              {:error, reason} when depth == 0 ->
+                {:error, reason}
+
+              {:error, _reason} ->
+                bfs_walk(rest_queue, ctx)
+            end
+          end
+      end
+    end
+  end
+
+  defp process_dir_names([], _dir_abs, _rel_prefix, _depth, queue, ctx), do: {queue, ctx}
+
+  defp process_dir_names(_names, _dir_abs, _rel_prefix, _depth, queue, %{truncated: true} = ctx),
+    do: {queue, ctx}
+
+  defp process_dir_names([name | rest], dir_abs, rel_prefix, depth, queue, ctx) do
+    cond do
+      ctx.scanned >= ctx.max_scanned ->
+        {queue, %{ctx | truncated: true}}
+
+      System.monotonic_time(:millisecond) >= ctx.deadline ->
+        {queue, %{ctx | truncated: true}}
+
+      true ->
+        ctx = %{ctx | scanned: ctx.scanned + 1}
+        full = Path.join(dir_abs, name)
+        rel = if rel_prefix == "", do: name, else: rel_prefix <> "/" <> name
+
+        case File.lstat(full) do
+          {:ok, %File.Stat{type: :regular, size: size}} ->
+            next_ctx = maybe_collect_entry(ctx, rel, "file", size)
+            process_dir_names(rest, dir_abs, rel_prefix, depth, queue, next_ctx)
+
+          {:ok, %File.Stat{type: :directory}} ->
+            next_queue =
+              if is_nil(ctx.max_depth) or depth + 1 < ctx.max_depth do
+                :queue.in({full, rel, depth + 1}, queue)
+              else
+                queue
+              end
+
+            next_ctx =
+              if ctx.include_dirs do
+                maybe_collect_entry(ctx, rel, "dir", 0)
+              else
+                ctx
+              end
+
+            process_dir_names(rest, dir_abs, rel_prefix, depth, next_queue, next_ctx)
+
+          {:ok, %File.Stat{type: :symlink, size: size}} ->
+            next_ctx = maybe_collect_entry(ctx, rel, "symlink", size)
+            process_dir_names(rest, dir_abs, rel_prefix, depth, queue, next_ctx)
+
+          _ ->
+            process_dir_names(rest, dir_abs, rel_prefix, depth, queue, ctx)
+        end
+    end
+  end
+
+  defp maybe_collect_entry(ctx, rel, type, size) do
+    if matches_query?(rel, ctx.query_down) do
+      entry_bytes = byte_size(rel)
+
+      cond do
+        ctx.count >= ctx.limit ->
+          %{ctx | truncated: true}
+
+        ctx.bytes_acc + entry_bytes > ctx.max_bytes ->
+          %{ctx | truncated: true}
+
+        true ->
+          entry = %{path: rel, type: type, size: size}
+
+          %{
+            ctx
+            | entries_rev: [entry | ctx.entries_rev],
+              count: ctx.count + 1,
+              bytes_acc: ctx.bytes_acc + entry_bytes
+          }
+      end
+    else
+      ctx
+    end
+  end
+
+  defp matches_query?(_rel, nil), do: true
+  defp matches_query?(rel, query_down), do: String.contains?(String.downcase(rel), query_down)
+
+  # --- Line scanning ---
+
+  defp check_stat_for_read(resolved, true) do
+    case File.lstat(resolved) do
+      {:ok, %File.Stat{type: :regular}} -> :ok
+      {:ok, %File.Stat{type: :symlink}} -> {:error, :symlink_not_followed}
+      {:ok, %File.Stat{type: :directory}} -> {:error, :eisdir}
+      {:ok, _other} -> {:error, :not_regular_file}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp check_stat_for_read(resolved, false) do
+    case File.stat(resolved) do
+      {:ok, %File.Stat{type: :regular}} -> :ok
+      {:ok, %File.Stat{type: :directory}} -> {:error, :eisdir}
+      {:ok, _other} -> {:error, :not_regular_file}
+      {:error, reason} -> {:error, reason}
     end
   end
 

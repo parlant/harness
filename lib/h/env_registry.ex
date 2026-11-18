@@ -26,14 +26,12 @@ defmodule H.EnvRegistry do
 
   @doc "Fetches the base `H.ExecutionEnv.t()` at its `default_cwd` and its descriptor."
   @spec fetch_env(term(), keyword()) ::
-          {:ok, ExecutionEnv.t(), descriptor()} | {:error, :unknown_environment}
+          {:ok, ExecutionEnv.t(), descriptor()}
+          | {:error, :unknown_environment | :workspace_unavailable}
   def fetch_env(env_id, opts \\ []) when is_list(opts) do
     with id when is_binary(id) and id != "" <- env_id,
          {:ok, spec} <- Map.fetch(resolve_specs(opts), id) do
-      case build_env(spec, spec.default_cwd) do
-        {mod, _state} = env when is_atom(mod) -> {:ok, env, to_descriptor(spec)}
-        _ -> {:error, :unknown_environment}
-      end
+      safe_build_env(spec)
     else
       _ -> {:error, :unknown_environment}
     end
@@ -146,6 +144,15 @@ defmodule H.EnvRegistry do
       {:ok, val} -> val
       :error -> Map.get(spec, str_key)
     end
+  end
+
+  defp safe_build_env(spec) do
+    case build_env(spec, spec.default_cwd) do
+      {mod, _state} = env when is_atom(mod) -> {:ok, env, to_descriptor(spec)}
+      _ -> {:error, :workspace_unavailable}
+    end
+  catch
+    :exit, _reason -> {:error, :workspace_unavailable}
   end
 
   defp build_env(%{build: build}, cwd) when is_function(build, 1), do: build.(cwd)

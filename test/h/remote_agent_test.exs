@@ -89,6 +89,16 @@ defmodule H.RemoteAgentTest do
                  only_dirs: true,
                  markers: ExecutionEnv.default_markers()
                )
+
+      assert {:ok,
+              %{
+                entries: [%{path: "mix.exs", type: "file"}, %{path: "notes.txt", type: "file"}],
+                truncated: false
+              }} =
+               RemoteAgent.list_files(agent, ".", cwd: sub_dir)
+
+      assert {:ok, real_sub} = RemoteAgent.canonical_path(agent, ".", cwd: sub_dir)
+      assert String.ends_with?(real_sub, "/workspace")
     end
   end
 

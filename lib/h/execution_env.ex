@@ -41,6 +41,10 @@ defmodule H.ExecutionEnv do
               :ok | {:error, term()}
   @callback list_dir(state :: term(), path :: String.t(), opts :: keyword()) ::
               {:ok, %{entries: [map()], next_cursor: nil | non_neg_integer()}} | {:error, term()}
+  @callback list_files(state :: term(), path :: String.t(), opts :: keyword()) ::
+              {:ok, %{entries: [map()], truncated: boolean()}} | {:error, term()}
+  @callback canonical_path(state :: term(), path :: String.t()) ::
+              {:ok, String.t()} | {:error, term()}
   @callback exec(state :: term(), command(), opts :: keyword()) ::
               {:ok, exec_result()} | {:error, term()}
   @callback env_id(state :: term()) :: String.t()
@@ -48,7 +52,7 @@ defmodule H.ExecutionEnv do
   @callback bind_cwd(state :: term(), cwd :: String.t()) ::
               {:ok, state :: term()} | {:error, term()}
 
-  @optional_callbacks [env_id: 1, kind: 1, bind_cwd: 2]
+  @optional_callbacks [env_id: 1, kind: 1, bind_cwd: 2, list_files: 3, canonical_path: 2]
 
   @doc "Standardized project marker filenames used when browsing directories."
   @spec default_markers() :: [String.t()]
@@ -111,6 +115,25 @@ defmodule H.ExecutionEnv do
   @spec list_dir(t(), String.t(), keyword()) ::
           {:ok, %{entries: [map()], next_cursor: nil | non_neg_integer()}} | {:error, term()}
   def list_dir({mod, state}, path, opts \\ []), do: mod.list_dir(state, path, opts)
+
+  @spec list_files(t(), String.t(), keyword()) ::
+          {:ok, %{entries: [map()], truncated: boolean()}} | {:error, term()}
+  def list_files({mod, state}, path, opts \\ []) when is_binary(path) and is_list(opts) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :list_files, 3) do
+      mod.list_files(state, path, opts)
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  @spec canonical_path(t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def canonical_path({mod, state} = env, path) when is_binary(path) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :canonical_path, 2) do
+      mod.canonical_path(state, path)
+    else
+      resolve_path(env, path)
+    end
+  end
 
   @spec exec(t(), command(), keyword()) :: {:ok, exec_result()} | {:error, term()}
   def exec({mod, state}, command, opts \\ []), do: mod.exec(state, command, opts)

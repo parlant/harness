@@ -15,9 +15,13 @@
 | `GET /models` | `models` from the configured provider. |
 | `GET /environments` | Configured `environments` and their default directories. |
 | `GET /fs` | Browse `env_id` and `path`; returns the resolved path, parent, annotated directories and sessions rooted there. |
+| `GET /fs/files` | Bounded read-only workspace file discovery. Required `env_id` and absolute `cwd` (never falls back to daemon cwd); optional `query`, `include_hidden` (default `false`), `include_dirs` (default `true`), `exclude`, `limit` 1–500 (default 200), `max_depth` 1–32 (default 32). Skips `.git` and does not traverse symlinks. |
+| `GET /fs/file` | Bounded read-only UTF-8 file reader. Required `env_id`, absolute `cwd`, and `path`; optional `offset` (default 1), `limit` 1–2000 (default 200), `max_bytes` 1–65536 (default 51200). Confined within workspace (`403` on traversal, `~`, or symlinks; `422` on dirs, non-regular files, or binary/non-UTF-8). |
 | `GET /sessions` | Catalog `sessions`; optional filters `env_id`, `cwd`, `subtree`. |
 | `POST /sessions` | Required absolute `cwd`; optional `env_id` (default `host`), `harness_id` (default `coding`), `title`, `agent`, `session_id`. Returns `session` and `seq`. Supply a stable `session_id` for create-or-attach; a different workspace conflicts. Omitting the ID can create a second session on retry. |
 | `GET /sessions/:sid` | `session`, `conversations` with ancestry, and `tasks`. No open-waits API. |
+| `GET /sessions/:sid/files` | Same bounded file discovery as `GET /fs/files`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |
+| `GET /sessions/:sid/file` | Same bounded UTF-8 file read as `GET /fs/file`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |
 | `GET /sessions/:sid/conversations/:cid/entries` | `items` and `next_cursor` through the visible lineage. `order=desc` (default) or `asc`; `cursor` optional, `limit` 1–200 (default 50). |
 | `GET /sessions/:sid/conversations/:cid/events` | Conversation view as `text/event-stream` (below). |
 | `POST /sessions/:sid/commands` | Command envelope → receipt. |

@@ -28,6 +28,9 @@ defmodule H.ExecutionEnv.Local do
   defdelegate resolve_path(state, path), to: Host
 
   @impl true
+  defdelegate canonical_path(state, path), to: Host
+
+  @impl true
   defdelegate read_file_lines(state, path, opts \\ []), to: Host
 
   @impl true
@@ -38,6 +41,9 @@ defmodule H.ExecutionEnv.Local do
 
   @impl true
   defdelegate list_dir(state, path, opts \\ []), to: Host
+
+  @impl true
+  defdelegate list_files(state, path, opts \\ []), to: Host
 
   @impl true
   defdelegate exec(state, command, opts \\ []), to: Host

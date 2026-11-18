@@ -24,6 +24,20 @@ defmodule H.Daemon do
   @default_catalog_table :h_catalog
   @default_workspace_lease H.WorkspaceLease
 
+  @default_discovery_limit 200
+  @max_discovery_limit 500
+  @default_discovery_depth 32
+  @max_discovery_depth 32
+  @max_discovery_bytes 262_144
+  @max_discovery_scanned 20_000
+  @max_discovery_timeout_ms 2_000
+  @max_discovery_query_bytes 512
+
+  @default_read_file_limit 200
+  @max_read_file_limit 2_000
+  @default_read_file_bytes 51_200
+  @max_read_file_bytes 65_536
+
   @doc "Lists configured execution environments (`\"host\"` plus any custom/remote environments)."
   @spec list_environments(keyword()) :: [map()]
   def list_environments(opts \\ []) when is_list(opts) do
@@ -37,7 +51,11 @@ defmodule H.Daemon do
   """
   @spec browse_workspace(map(), keyword()) ::
           {:ok, map()}
-          | {:error, :not_found | :unknown_environment | {:bad_request, String.t()}}
+          | {:error,
+             :not_found
+             | :unknown_environment
+             | :workspace_unavailable
+             | {:bad_request, String.t()}}
   def browse_workspace(query_params \\ %{}, opts \\ [])
       when is_map(query_params) and is_list(opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
@@ -100,9 +118,179 @@ defmodule H.Daemon do
            directories: directories,
            sessions: sessions
          }}
+      else
+        {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
+        {:error, _} = err -> err
       end
     end
   end
+
+  @doc """
+  Environment-scoped bounded recursive file discovery (`GET /api/v1/fs/files`).
+
+  Requires explicit `env_id` and absolute `cwd` and never falls back to the
+  daemon's local process `cwd`.
+  """
+  @spec list_files(map(), keyword()) ::
+          {:ok, map()}
+          | {:error,
+             :not_found
+             | :unknown_environment
+             | :workspace_unavailable
+             | {:forbidden, String.t()}
+             | {:bad_request, String.t()}}
+  def list_files(query_params \\ %{}, opts \\ [])
+
+  def list_files(query_params, opts) when is_map(query_params) and is_list(opts) do
+    with {:ok, params} <- parse_list_files_params(query_params),
+         {:ok, base_env, desc} <- EnvRegistry.fetch_env(params.env_id, opts),
+         {:ok, bound_env} <- bind_workspace_cwd(base_env, params.cwd),
+         canonical_cwd = ExecutionEnv.cwd(bound_env),
+         {:ok, %{entries: entries, truncated: truncated}} <-
+           ExecutionEnv.list_files(bound_env, canonical_cwd,
+             include_hidden: params.include_hidden,
+             include_dirs: params.include_dirs,
+             exclude: params.exclude,
+             query: params.query,
+             limit: params.limit,
+             max_bytes: @max_discovery_bytes,
+             max_depth: params.max_depth,
+             max_scanned: @max_discovery_scanned,
+             timeout_ms: @max_discovery_timeout_ms
+           ) do
+      {:ok,
+       %{
+         env_id: desc.id,
+         cwd: canonical_cwd,
+         entries: entries,
+         truncated: truncated
+       }}
+    else
+      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
+      {:error, :unsupported} -> {:error, :workspace_unavailable}
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, :enotdir} -> {:error, {:bad_request, "cwd is not a directory"}}
+      {:error, :eacces} -> {:error, {:forbidden, "permission denied"}}
+      {:error, _} = err -> err
+    end
+  end
+
+  def list_files(_query_params, _opts), do: {:error, {:bad_request, "expected a map"}}
+
+  @doc """
+  Environment-scoped bounded read-only UTF-8 file reader (`GET /api/v1/fs/file`).
+
+  Requires explicit `env_id`, absolute `cwd`, and `path`. Enforces workspace
+  boundary containment (lexical + canonical symlink checks) and `no_follow: true`.
+  """
+  @spec read_file(map(), keyword()) ::
+          {:ok, map()}
+          | {:error,
+             :not_found
+             | :unknown_environment
+             | :workspace_unavailable
+             | {:forbidden, String.t()}
+             | {:bad_request, String.t()}}
+  def read_file(query_params \\ %{}, opts \\ [])
+
+  def read_file(query_params, opts) when is_map(query_params) and is_list(opts) do
+    with {:ok, params} <- parse_read_file_params(query_params),
+         {:ok, base_env, desc} <- EnvRegistry.fetch_env(params.env_id, opts),
+         {:ok, bound_env} <- bind_workspace_cwd(base_env, params.cwd),
+         canonical_cwd = ExecutionEnv.cwd(bound_env),
+         {:ok, resolved_path} <- resolve_target_path(bound_env, params.path),
+         :ok <- verify_lexical_containment(canonical_cwd, resolved_path),
+         {:ok, canonical_root} <- fetch_canonical_root(bound_env, canonical_cwd),
+         :ok <-
+           verify_canonical_containment(bound_env, canonical_cwd, canonical_root, resolved_path),
+         {:ok, result} <-
+           ExecutionEnv.read_file_lines(bound_env, resolved_path,
+             offset: params.offset,
+             limit: params.limit,
+             max_bytes: params.max_bytes,
+             no_follow: true
+           ) do
+      {:ok,
+       %{
+         env_id: desc.id,
+         cwd: canonical_cwd,
+         path: relative_display_path(canonical_cwd, resolved_path),
+         resolved_path: resolved_path,
+         lines: result.lines,
+         start_line: result.start_line,
+         total_lines_read: result.total_lines_read,
+         has_more: result.has_more,
+         truncated_by_bytes: result.truncated_by_bytes
+       }}
+    else
+      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
+      {:error, :symlink_not_followed} -> {:error, {:forbidden, "symlinks are not followed"}}
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, :enotdir} -> {:error, {:bad_request, "parent path is not a directory"}}
+      {:error, :eacces} -> {:error, {:forbidden, "permission denied"}}
+      {:error, :eisdir} -> {:error, {:bad_request, "path is a directory"}}
+      {:error, :not_regular_file} -> {:error, {:bad_request, "path is not a regular file"}}
+      {:error, :binary_file} -> {:error, {:bad_request, "binary or invalid UTF-8 file"}}
+      {:error, :einval} -> {:error, {:bad_request, "invalid path"}}
+      {:error, _} = err -> err
+    end
+  end
+
+  def read_file(_query_params, _opts), do: {:error, {:bad_request, "expected a map"}}
+
+  @doc """
+  Session-scoped bounded recursive file discovery (`GET /api/v1/sessions/:sid/files`).
+
+  Resolves `{env_id, cwd}` strictly from the session's `H.Catalog` record.
+  """
+  @spec list_session_files(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def list_session_files(session_id, query_params \\ %{}, opts \\ [])
+
+  def list_session_files(session_id, query_params, opts)
+      when is_binary(session_id) and is_map(query_params) and is_list(opts) do
+    with {:ok, entry} <- lookup_active_session_entry(session_id, opts) do
+      scoped_params =
+        query_params
+        |> Map.drop(["env_id", :env_id, "cwd", :cwd])
+        |> Map.put("env_id", Map.get(entry, :env_id) || "host")
+        |> Map.put("cwd", entry.cwd)
+
+      case list_files(scoped_params, opts) do
+        {:error, :unknown_environment} -> {:error, :workspace_unavailable}
+        other -> other
+      end
+    end
+  end
+
+  def list_session_files(_session_id, _query_params, _opts),
+    do: {:error, {:bad_request, "expected a map"}}
+
+  @doc """
+  Session-scoped bounded read-only UTF-8 file reader (`GET /api/v1/sessions/:sid/file`).
+
+  Resolves `{env_id, cwd}` strictly from the session's `H.Catalog` record.
+  """
+  @spec read_session_file(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def read_session_file(session_id, query_params \\ %{}, opts \\ [])
+
+  def read_session_file(session_id, query_params, opts)
+      when is_binary(session_id) and is_map(query_params) and is_list(opts) do
+    with {:ok, entry} <- lookup_active_session_entry(session_id, opts) do
+      scoped_params =
+        query_params
+        |> Map.drop(["env_id", :env_id, "cwd", :cwd])
+        |> Map.put("env_id", Map.get(entry, :env_id) || "host")
+        |> Map.put("cwd", entry.cwd)
+
+      case read_file(scoped_params, opts) do
+        {:error, :unknown_environment} -> {:error, :workspace_unavailable}
+        other -> other
+      end
+    end
+  end
+
+  def read_session_file(_session_id, _query_params, _opts),
+    do: {:error, {:bad_request, "expected a map"}}
 
   @doc "Lists models from the configured `H.Provider`."
   @spec list_models(keyword()) :: [map()]
@@ -849,10 +1037,316 @@ defmodule H.Daemon do
   defp bind_browse_cwd(base_env, target_path) do
     case ExecutionEnv.bind_cwd(base_env, target_path) do
       {:ok, bound} -> {:ok, bound}
+      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
       {:error, :enoent} -> {:error, :not_found}
       {:error, :enotdir} -> {:error, {:bad_request, "path is not a directory"}}
       {:error, reason} -> {:error, {:bad_request, "invalid path: #{inspect(reason)}"}}
     end
+  end
+
+  defp lookup_active_session_entry(session_id, opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+    with {:ok, _sid} <- validate_sid_or_not_found(session_id),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- ensure_not_quarantined(entry) do
+      {:ok, entry}
+    end
+  end
+
+  defp parse_list_files_params(params) do
+    with {:ok, env_id} <- parse_required_env_id(param_get(params, "env_id", :env_id)),
+         {:ok, cwd} <- parse_required_abs_cwd(param_get(params, "cwd", :cwd)),
+         {:ok, query} <- parse_optional_query(param_get(params, "query", :query)),
+         {:ok, include_hidden} <-
+           parse_strict_bool(
+             param_get(params, "include_hidden", :include_hidden),
+             false,
+             "include_hidden"
+           ),
+         {:ok, include_dirs} <-
+           parse_strict_bool(
+             param_get(params, "include_dirs", :include_dirs),
+             true,
+             "include_dirs"
+           ),
+         {:ok, exclude} <- parse_exclude_list(param_get(params, "exclude", :exclude)),
+         {:ok, limit} <-
+           parse_bounded_int(
+             param_get(params, "limit", :limit),
+             @default_discovery_limit,
+             1,
+             @max_discovery_limit,
+             "limit"
+           ),
+         {:ok, max_depth} <-
+           parse_bounded_int(
+             param_get(params, "max_depth", :max_depth),
+             @default_discovery_depth,
+             1,
+             @max_discovery_depth,
+             "max_depth"
+           ) do
+      {:ok,
+       %{
+         env_id: env_id,
+         cwd: cwd,
+         query: query,
+         include_hidden: include_hidden,
+         include_dirs: include_dirs,
+         exclude: exclude,
+         limit: limit,
+         max_depth: max_depth
+       }}
+    end
+  end
+
+  defp parse_read_file_params(params) do
+    with {:ok, env_id} <- parse_required_env_id(param_get(params, "env_id", :env_id)),
+         {:ok, cwd} <- parse_required_abs_cwd(param_get(params, "cwd", :cwd)),
+         {:ok, path} <- parse_required_file_path(param_get(params, "path", :path)),
+         {:ok, offset} <-
+           parse_bounded_int(param_get(params, "offset", :offset), 1, 1, 10_000_000, "offset"),
+         {:ok, limit} <-
+           parse_bounded_int(
+             param_get(params, "limit", :limit),
+             @default_read_file_limit,
+             1,
+             @max_read_file_limit,
+             "limit"
+           ),
+         {:ok, max_bytes} <-
+           parse_bounded_int(
+             param_get(params, "max_bytes", :max_bytes),
+             @default_read_file_bytes,
+             1,
+             @max_read_file_bytes,
+             "max_bytes"
+           ) do
+      {:ok,
+       %{
+         env_id: env_id,
+         cwd: cwd,
+         path: path,
+         offset: offset,
+         limit: limit,
+         max_bytes: max_bytes
+       }}
+    end
+  end
+
+  defp parse_required_env_id(val) when is_binary(val) do
+    if String.trim(val) == "" or String.contains?(val, <<0>>) do
+      {:error, {:bad_request, "env_id is required"}}
+    else
+      {:ok, val}
+    end
+  end
+
+  defp parse_required_env_id(_), do: {:error, {:bad_request, "env_id is required"}}
+
+  defp parse_required_abs_cwd(val) when is_binary(val) do
+    if val != "" and String.starts_with?(val, "/") and not String.contains?(val, <<0>>) do
+      {:ok, val}
+    else
+      {:error, {:bad_request, "cwd must be an absolute path"}}
+    end
+  end
+
+  defp parse_required_abs_cwd(_), do: {:error, {:bad_request, "cwd must be an absolute path"}}
+
+  defp parse_required_file_path(val) when is_binary(val) do
+    cond do
+      String.trim(val) == "" ->
+        {:error, {:bad_request, "path is required"}}
+
+      String.contains?(val, <<0>>) ->
+        {:error, {:bad_request, "invalid path"}}
+
+      val == "~" or String.starts_with?(val, "~/") ->
+        {:error, {:forbidden, "path outside workspace"}}
+
+      true ->
+        {:ok, val}
+    end
+  end
+
+  defp parse_required_file_path(_), do: {:error, {:bad_request, "path is required"}}
+
+  defp parse_optional_query(nil), do: {:ok, nil}
+  defp parse_optional_query(""), do: {:ok, nil}
+
+  defp parse_optional_query(val) when is_binary(val) do
+    cond do
+      String.contains?(val, <<0>>) ->
+        {:error, {:bad_request, "query contains invalid bytes"}}
+
+      byte_size(val) > @max_discovery_query_bytes ->
+        {:error, {:bad_request, "query exceeds #{@max_discovery_query_bytes} bytes"}}
+
+      true ->
+        {:ok, val}
+    end
+  end
+
+  defp parse_optional_query(_), do: {:error, {:bad_request, "query must be a string"}}
+
+  defp parse_strict_bool(nil, default, _field), do: {:ok, default}
+  defp parse_strict_bool("", default, _field), do: {:ok, default}
+  defp parse_strict_bool(true, _default, _field), do: {:ok, true}
+  defp parse_strict_bool("true", _default, _field), do: {:ok, true}
+  defp parse_strict_bool("1", _default, _field), do: {:ok, true}
+  defp parse_strict_bool(false, _default, _field), do: {:ok, false}
+  defp parse_strict_bool("false", _default, _field), do: {:ok, false}
+  defp parse_strict_bool("0", _default, _field), do: {:ok, false}
+  defp parse_strict_bool(_, _default, field), do: {:error, {:bad_request, "invalid #{field}"}}
+
+  defp parse_exclude_list(nil), do: {:ok, []}
+  defp parse_exclude_list(""), do: {:ok, []}
+
+  defp parse_exclude_list(val) when is_binary(val) do
+    val
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> parse_exclude_list()
+  end
+
+  defp parse_exclude_list(items) when is_list(items) do
+    if Enum.all?(items, fn item ->
+         is_binary(item) and item != "" and not String.contains?(item, ["/", <<0>>])
+       end) do
+      {:ok, items}
+    else
+      {:error, {:bad_request, "invalid exclude"}}
+    end
+  end
+
+  defp parse_exclude_list(_), do: {:error, {:bad_request, "invalid exclude"}}
+
+  defp parse_bounded_int(nil, default, _min, _max, _field), do: {:ok, default}
+  defp parse_bounded_int("", default, _min, _max, _field), do: {:ok, default}
+
+  defp parse_bounded_int(val, _default, min, max, field) do
+    case Schema.parse_pos_int(val) do
+      {:ok, n} when n >= min and n <= max -> {:ok, n}
+      {:ok, _} -> {:error, {:bad_request, "#{field} must be between #{min} and #{max}"}}
+      {:error, reason} -> {:error, {:bad_request, "#{field}: #{reason}"}}
+    end
+  end
+
+  defp bind_workspace_cwd(base_env, cwd) do
+    case ExecutionEnv.bind_cwd(base_env, cwd) do
+      {:ok, bound} -> {:ok, bound}
+      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, :enotdir} -> {:error, {:bad_request, "cwd is not a directory"}}
+      {:error, :einval} -> {:error, {:bad_request, "invalid cwd"}}
+      {:error, reason} -> {:error, {:bad_request, "invalid cwd: #{inspect(reason)}"}}
+    end
+  end
+
+  defp resolve_target_path(env, path) do
+    case ExecutionEnv.resolve_path(env, path) do
+      {:ok, resolved} -> {:ok, resolved}
+      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
+      {:error, :einval} -> {:error, {:bad_request, "invalid path"}}
+      {:error, reason} -> {:error, {:bad_request, "invalid path: #{inspect(reason)}"}}
+    end
+  end
+
+  defp verify_lexical_containment(canonical_cwd, resolved_path) do
+    cond do
+      resolved_path == canonical_cwd -> {:error, {:bad_request, "path is a directory"}}
+      within_workspace?(canonical_cwd, resolved_path) -> :ok
+      true -> {:error, {:forbidden, "path outside workspace"}}
+    end
+  end
+
+  defp fetch_canonical_root(env, canonical_cwd) do
+    case ExecutionEnv.canonical_path(env, ".") do
+      {:ok, root} -> {:ok, root}
+      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
+      {:error, _} -> {:ok, canonical_cwd}
+    end
+  end
+
+  defp verify_canonical_containment(env, canonical_cwd, canonical_root, resolved_path) do
+    case ExecutionEnv.canonical_path(env, resolved_path) do
+      {:ok, real_target} ->
+        cond do
+          real_target == canonical_root -> {:error, {:bad_request, "path is a directory"}}
+          within_workspace?(canonical_root, real_target) -> :ok
+          true -> {:error, {:forbidden, "path outside workspace"}}
+        end
+
+      {:error, :enoent} ->
+        verify_ancestor_containment(
+          env,
+          canonical_cwd,
+          canonical_root,
+          Path.dirname(resolved_path)
+        )
+
+      {:error, :eloop} ->
+        {:error, {:forbidden, "symlink loop detected"}}
+
+      {:error, :eacces} ->
+        {:error, {:forbidden, "permission denied"}}
+
+      {:error, {:agent_down, _}} ->
+        {:error, :workspace_unavailable}
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp verify_ancestor_containment(env, canonical_cwd, canonical_root, dir) do
+    if not within_workspace?(canonical_cwd, dir) do
+      {:error, {:forbidden, "path outside workspace"}}
+    else
+      case ExecutionEnv.canonical_path(env, dir) do
+        {:ok, real_dir} ->
+          if within_workspace?(canonical_root, real_dir) do
+            :ok
+          else
+            {:error, {:forbidden, "path outside workspace"}}
+          end
+
+        {:error, :enoent} when dir != canonical_cwd ->
+          verify_ancestor_containment(env, canonical_cwd, canonical_root, Path.dirname(dir))
+
+        {:error, :eloop} ->
+          {:error, {:forbidden, "symlink loop detected"}}
+
+        {:error, :eacces} ->
+          {:error, {:forbidden, "permission denied"}}
+
+        {:error, {:agent_down, _}} ->
+          {:error, :workspace_unavailable}
+
+        {:error, _reason} ->
+          :ok
+      end
+    end
+  end
+
+  defp within_workspace?(root, target) do
+    normalized_root = if root == "/", do: "/", else: String.trim_trailing(root, "/")
+
+    cond do
+      normalized_root == "/" -> String.starts_with?(target, "/")
+      target == normalized_root -> true
+      true -> String.starts_with?(target, normalized_root <> "/")
+    end
+  end
+
+  defp relative_display_path("/", resolved_path), do: String.trim_leading(resolved_path, "/")
+
+  defp relative_display_path(canonical_cwd, resolved_path) do
+    prefix = String.trim_trailing(canonical_cwd, "/") <> "/"
+    String.replace_prefix(resolved_path, prefix, "")
   end
 
   defp ensure_string_path(p) when is_binary(p), do: :ok

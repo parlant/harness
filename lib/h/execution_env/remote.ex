@@ -95,6 +95,11 @@ defmodule H.ExecutionEnv.Remote do
   end
 
   @impl true
+  def canonical_path(state, path) when is_binary(path) do
+    RemoteAgent.canonical_path(state.agent, path, cwd: state.cwd)
+  end
+
+  @impl true
   def read_file_lines(state, path, opts \\ []) when is_binary(path) and is_list(opts) do
     RemoteAgent.read_file_lines(state.agent, path, Keyword.put(opts, :cwd, state.cwd))
   end
@@ -112,6 +117,11 @@ defmodule H.ExecutionEnv.Remote do
   @impl true
   def list_dir(state, path, opts \\ []) when is_binary(path) and is_list(opts) do
     RemoteAgent.list_dir(state.agent, path, Keyword.put(opts, :cwd, state.cwd))
+  end
+
+  @impl true
+  def list_files(state, path, opts \\ []) when is_binary(path) and is_list(opts) do
+    RemoteAgent.list_files(state.agent, path, Keyword.put(opts, :cwd, state.cwd))
   end
 
   @impl true

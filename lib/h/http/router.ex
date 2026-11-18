@@ -34,17 +34,28 @@ defmodule H.HTTP.Router do
     {daemon, daemon_opts} = daemon_config(conn)
 
     case apply(daemon, :browse_workspace, [conn.query_params, daemon_opts]) do
-      {:ok, payload_map} ->
-        send_json(conn, 200, payload_map)
+      {:ok, payload_map} -> send_json(conn, 200, payload_map)
+      {:error, reason} -> send_fs_error(conn, reason)
+    end
+  end
 
-      {:error, :not_found} ->
-        send_json(conn, 404, %{"error" => "path not found"})
+  get "/api/v1/fs/files" do
+    conn = fetch_query_params(conn)
+    {daemon, daemon_opts} = daemon_config(conn)
 
-      {:error, :unknown_environment} ->
-        send_json(conn, 404, %{"error" => "unknown environment"})
+    case apply(daemon, :list_files, [conn.query_params, daemon_opts]) do
+      {:ok, payload_map} -> send_json(conn, 200, payload_map)
+      {:error, reason} -> send_fs_error(conn, reason)
+    end
+  end
 
-      {:error, {:bad_request, msg}} ->
-        send_json(conn, 422, %{"error" => msg})
+  get "/api/v1/fs/file" do
+    conn = fetch_query_params(conn)
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :read_file, [conn.query_params, daemon_opts]) do
+      {:ok, payload_map} -> send_json(conn, 200, payload_map)
+      {:error, reason} -> send_fs_error(conn, reason)
     end
   end
 
@@ -109,6 +120,26 @@ defmodule H.HTTP.Router do
     end
   end
 
+  get "/api/v1/sessions/:sid/files" do
+    conn = fetch_query_params(conn)
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :list_session_files, [sid, conn.query_params, daemon_opts]) do
+      {:ok, payload_map} -> send_json(conn, 200, payload_map)
+      {:error, reason} -> send_fs_error(conn, reason)
+    end
+  end
+
+  get "/api/v1/sessions/:sid/file" do
+    conn = fetch_query_params(conn)
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :read_session_file, [sid, conn.query_params, daemon_opts]) do
+      {:ok, payload_map} -> send_json(conn, 200, payload_map)
+      {:error, reason} -> send_fs_error(conn, reason)
+    end
+  end
+
   get "/api/v1/sessions/:sid/conversations/:cid/entries" do
     conn = fetch_query_params(conn)
     {daemon, daemon_opts} = daemon_config(conn)
@@ -169,6 +200,21 @@ defmodule H.HTTP.Router do
     opts = router_opts(conn)
     {Keyword.get(opts, :daemon, H.Daemon), Keyword.get(opts, :daemon_opts, [])}
   end
+
+  defp send_fs_error(conn, :not_found),
+    do: send_json(conn, 404, %{"error" => "path not found"})
+
+  defp send_fs_error(conn, :unknown_environment),
+    do: send_json(conn, 404, %{"error" => "unknown environment"})
+
+  defp send_fs_error(conn, {:forbidden, msg}),
+    do: send_json(conn, 403, %{"error" => msg})
+
+  defp send_fs_error(conn, {:bad_request, msg}),
+    do: send_json(conn, 422, %{"error" => msg})
+
+  defp send_fs_error(conn, reason),
+    do: send_session_error(conn, reason)
 
   defp send_session_error(conn, {:quarantined, reason}),
     do: send_json(conn, 503, %{"error" => "session quarantined", "reason" => reason})
