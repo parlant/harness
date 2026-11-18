@@ -517,8 +517,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = PathBuf::from(format!(
-                "/private/tmp/hi-files-test-{label}-{}-{nanos}",
+            let path = std::env::temp_dir().join(format!(
+                "hi-files-test-{label}-{}-{nanos}",
                 std::process::id()
             ));
             fs::create_dir_all(&path).unwrap();

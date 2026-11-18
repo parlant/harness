@@ -649,7 +649,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let sock_path = PathBuf::from(format!("/private/tmp/hi-actions-{tag}-{nanos}.sock"));
+        let sock_path = PathBuf::from(format!("/tmp/hi-actions-{tag}-{nanos}.sock"));
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
         let client = DaemonClient::new(
@@ -1192,7 +1192,7 @@ mod tests {
     #[test]
     fn validation_and_target_mismatch_checks() {
         let client = DaemonClient::new(
-            DaemonTarget::UnixSocket(PathBuf::from("/private/tmp/does-not-exist-hi-actions.sock")),
+            DaemonTarget::UnixSocket(PathBuf::from("/tmp/does-not-exist-hi-actions.sock")),
             SecretToken::new("tok").unwrap(),
         );
         let target = test_target();

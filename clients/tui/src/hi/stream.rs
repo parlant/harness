@@ -620,7 +620,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let sock_path = PathBuf::from(format!("/private/tmp/h-stream-offline-{nanos}.sock"));
+        let sock_path = PathBuf::from(format!("/tmp/h-stream-offline-{nanos}.sock"));
         let _ = std::fs::remove_file(&sock_path);
 
         let client = DaemonClient::new(
