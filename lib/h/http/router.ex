@@ -9,6 +9,7 @@ defmodule H.HTTP.Router do
     * `:daemon` - transport-agnostic backend module (default `H.Daemon`)
     * `:daemon_opts` - keyword list forwarded to `daemon` calls (default `[]`)
     * `:allow_localhost` - allow `localhost:<port>` in `Host`/`Origin` checks (default `false`)
+    * `:unix_socket` - treat connections as Unix domain socket requests (default `false`; also auto-detected via `conn.remote_ip`)
     * `:sse_keepalive_ms` - SSE `: keepalive` interval in ms (default `15_000`)
     * `:sse_max_queue_len` - max mailbox messages before SSE snapshot reset (default `128`)
     * `:sse_max_queue_bytes` - max process memory bytes before SSE snapshot reset (default `2_097_152`)
@@ -39,6 +40,31 @@ defmodule H.HTTP.Router do
     |> send_file(200, Application.app_dir(:harness, "priv/static/index.html"))
   end
 
+  get "/api/v1/environments" do
+    {daemon, daemon_opts} = daemon_config(conn)
+    envs = apply(daemon, :list_environments, [daemon_opts])
+    send_json(conn, 200, %{"environments" => envs})
+  end
+
+  get "/api/v1/fs" do
+    conn = fetch_query_params(conn)
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :browse_workspace, [conn.query_params, daemon_opts]) do
+      {:ok, payload_map} ->
+        send_json(conn, 200, payload_map)
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "path not found"})
+
+      {:error, :unknown_environment} ->
+        send_json(conn, 404, %{"error" => "unknown environment"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+    end
+  end
+
   get "/api/v1/models" do
     {daemon, daemon_opts} = daemon_config(conn)
     models = apply(daemon, :list_models, [daemon_opts])
@@ -46,9 +72,25 @@ defmodule H.HTTP.Router do
   end
 
   get "/api/v1/sessions" do
+    conn = fetch_query_params(conn)
     {daemon, daemon_opts} = daemon_config(conn)
-    sessions = apply(daemon, :list_sessions, [daemon_opts])
-    send_json(conn, 200, %{"sessions" => sessions})
+
+    if conn.query_params != %{} and Code.ensure_loaded?(daemon) and
+         function_exported?(daemon, :list_sessions, 2) do
+      case apply(daemon, :list_sessions, [conn.query_params, daemon_opts]) do
+        {:ok, sessions} ->
+          send_json(conn, 200, %{"sessions" => sessions})
+
+        sessions when is_list(sessions) ->
+          send_json(conn, 200, %{"sessions" => sessions})
+
+        {:error, {:bad_request, msg}} ->
+          send_json(conn, 422, %{"error" => msg})
+      end
+    else
+      sessions = apply(daemon, :list_sessions, [daemon_opts])
+      send_json(conn, 200, %{"sessions" => sessions})
+    end
   end
 
   post "/api/v1/sessions" do

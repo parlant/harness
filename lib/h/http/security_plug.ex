@@ -28,15 +28,29 @@ defmodule H.HTTP.SecurityPlug do
   @impl true
   def call(conn, opts) do
     allow_localhost = Keyword.get(opts, :allow_localhost, false)
+    unix_socket? = unix_socket_conn?(conn, opts)
     port = effective_port(conn, opts)
 
-    with :ok <- check_host(conn, port, allow_localhost) do
+    with :ok <- check_host(conn, port, allow_localhost, unix_socket?) do
       conn
       |> put_security_headers()
       |> enforce_route_security(opts, port, allow_localhost)
     else
       {:error, status, msg} -> send_json_halt(conn, status, %{"error" => msg})
     end
+  end
+
+  @doc """
+  Returns `true` when the request arrived over a local Unix domain socket
+  (or `:unix_socket` is explicitly set in `opts`).
+  """
+  @spec unix_socket_conn?(Plug.Conn.t(), keyword()) :: boolean()
+  def unix_socket_conn?(conn, opts \\ []) when is_list(opts) do
+    Keyword.get(opts, :unix_socket, false) == true or
+      match?({:local, _}, conn.remote_ip) or
+      conn.remote_ip == :unspec or
+      match?({:unspec, _}, conn.remote_ip) or
+      match?({:undefined, _}, conn.remote_ip)
   end
 
   defp effective_port(conn, opts) do
@@ -46,7 +60,21 @@ defmodule H.HTTP.SecurityPlug do
     end
   end
 
-  defp check_host(conn, port, allow_localhost) do
+  defp check_host(conn, _port, _allow_localhost, true) do
+    case get_req_header(conn, "host") do
+      [host] when is_binary(host) ->
+        if String.trim(host) != "" do
+          :ok
+        else
+          {:error, 421, "invalid host header"}
+        end
+
+      _ ->
+        {:error, 421, "invalid host header"}
+    end
+  end
+
+  defp check_host(conn, port, allow_localhost, false) do
     case get_req_header(conn, "host") do
       [host] ->
         if H.Auth.allowed_host?(host, port, allow_localhost: allow_localhost) do
