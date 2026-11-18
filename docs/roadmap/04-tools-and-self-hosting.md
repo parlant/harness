@@ -87,5 +87,5 @@ Every tool call executes inside its own durable `tool_call` task owned by the `g
 2. **Self-Hosting Bootstrap Acceptance Drill:**
    - Start `:harness` pointed at a private `<data_dir>` and open the web client in a browser.
    - Create a session with `cwd: "/Users/partenkirchen/Projects/diy-harness"`.
-   - From the browser UI, ask `H` to read `docs/roadmap/05-post-self-hosting-and-hex.md`, implement the first post-self-hosting feature + unit test in `lib/h/` and `test/h/` (using `MIX_BUILD_PATH=/private/tmp/h-selfhost-build`), and run `mix format --check-formatted`, `mix compile --warnings-as-errors`, and `mix test --no-start` via its `bash` tool.
+   - From the browser UI, ask `H` to read `docs/roadmap/05-workspace-browser-and-harness-seam.md`, implement the first post-self-hosting feature + unit test in `lib/h/` and `test/h/` (using `MIX_BUILD_PATH=/private/tmp/h-selfhost-build`), and run `mix format --check-formatted`, `mix compile --warnings-as-errors`, and `mix test --no-start` via its `bash` tool.
    - Force-kill (`kill -9`) and restart the `:harness` daemon mid-bash call in a disposable scratch branch, reload the browser tab, verify the interrupted `bash` call is reported honestly (not blindly re-executed), click **Continue**, and let `H` inspect and finish the task.

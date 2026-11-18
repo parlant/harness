@@ -1,6 +1,6 @@
-# Slice 5: Post-Self-Hosting Evolution and Optional Hex Adapters
+# Slice 8: Compaction, Suspendable Work (`Signals` & Hooks), and `H.Storage.SQLite`
 
-**Prerequisite:** Slice 4 self-hosting milestone complete. Everything in this slice is developed **using `H` itself** through its web client.
+**Prerequisite:** Slices 4–6 self-hosting and client architecture in place.
 
 ---
 
@@ -26,11 +26,11 @@ Extend `H.Task` and `H.Tool` so sessions can wait hours or days for people, webh
 2. **Signals & parked tools:**
    - `H.Signal` (`define_signal` with version + `H.Schema`): delivered idempotently via `H.Daemon.signal(sid, task_id, token, key, value)` (first-writer-wins; early signals arriving before `sleeping` are buffered on the task).
    - Tools return `{:park, {:sleep, signals: [...], until: ts, checkpoint: state} | {:wait, on: [...], policy: p, checkpoint: state}}`. Waking commits wake intent before invoking tool code again so unsafe tools never execute twice; `cancel/3` cleans up parked external work on abort.
-3. **4-Stage hooks & web approval gates:**
+3. **4-Stage hooks & approval gates:**
    - Compose registered hooks strictly as `transform -> check -> claim -> observe` (observers muted; per-conversation tool filtering never disables `check`/`observe` hooks).
-   - An approval `check` hook sleeps on an `approvals.decision` signal (keyed by canonical argument digest) and registers an open `PersonWait` in `H.Catalog` / `H.WakeScheduler`, rendered as an **Allow / Deny** card directly in the web client.
+   - An approval `check` hook sleeps on an `approvals.decision` signal (keyed by canonical argument digest) and registers an open `PersonWait` in `H.Catalog` / `H.WakeScheduler`, rendered as an **Allow / Deny** prompt in both `HWeb` and `HTUI`.
 4. **`H.WakeScheduler` & idle session unloading:**
-   - `H.Session.Server` reports `wake() -> %{active: boolean(), at: integer() | nil}` to `H.WakeScheduler`. When `active == false` and no SSE watchers remain past the idle grace window, `H.Session.Server` unloads (`{:stop, :normal, state}`); `H.WakeScheduler` restarts the session automatically when `at` arrives or a `signal` is delivered.
+   - `H.Session.Server` reports `wake() -> %{active: boolean(), at: integer() | nil}` to `H.WakeScheduler`. When `active == false` and no watchers remain past the idle grace window, `H.Session.Server` unloads (`{:stop, :normal, state}`); `H.WakeScheduler` restarts the session automatically when `at` arrives or a `signal` is delivered.
 
 ---
 
@@ -44,12 +44,11 @@ When single-file SQLite session stores, lower working-set memory on 100k+ entry 
 - Add `{:exqlite, "~> 0.43"}` (direct SQLite3 NIF without pulling in full Ecto SQL migrations unless desired).
 - Configure `PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL` (or `FULL` per durability setting), `PRAGMA busy_timeout = 5000`, and `PRAGMA foreign_keys = ON`.
 - Implement `H.Storage.SQLite` behind `H.Storage` (multi-row batched writes per table in one `BEGIN IMMEDIATE ... COMMIT` transaction for `commit(batches)`) and verify it against the exact same **`H.Storage.Conformance`** suite as `H.Storage.Memory` and `H.Storage.File`.
-- Provide a 30-line import/export task between `H.Storage.File` and `H.Storage.SQLite` so existing self-hosted sessions migrate losslessly.
+- Provide a lossless import/export task between `H.Storage.File` and `H.Storage.SQLite`.
 
 ### 3.2 Optional Later Extensions (Only When Concrete Needs Arise)
 
 | Need | Hex Package Candidates | Seam |
 |---|---|---|
-| Bidirectional WebSockets (e.g. interactive PTY terminal or live voice) | `{:websock_adapter, "~> 0.7"}` (runs directly on Slice 2's `Bandit` server) | Upgrade route in `H.HTTP.Router` calling `H.Daemon` / `H.PubSub`. |
+| Bidirectional WebSockets (e.g. interactive PTY terminal or live voice) | `{:websock_adapter, "~> 0.7"}` | Upgrade route in `H.HTTP.Router` / `HWeb.Endpoint`. |
 | Multi-host shared relational database | `{:postgrex, "~> 0.20"}` | `H.Storage.Postgres` passing `H.Storage.Conformance` + advisory/lease fencing. |
-| Remote / sandboxed tool execution | SSH (`:ssh` OTP stdlib or RPC daemon) / container / QEMU | `H.ExecutionEnv.SSH` / `H.ExecutionEnv.Sandbox` passing `H.ExecutionEnv.Conformance`. |

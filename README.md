@@ -72,9 +72,12 @@ See the [proposed protocol](docs/protocol.md) and the [self-hosting roadmap](doc
 
 ## Design
 
-- [Architecture and OTP mapping](docs/architecture.md)
-- [Commands, observations, and clients](docs/protocol.md)
-- [Roadmap to web-based self-hosting](docs/roadmap.md)
+- [Architecture overview](docs/architecture.md)
+  - [Durable Engine (`H.*` / `:harness`)](docs/architecture/engine.md)
+  - [Harness Profiles & Pluggable `ExecutionEnv`](docs/architecture/harness.md)
+  - [Clients (`HWeb.*` Phoenix, `HTUI.*`) & Live Multi-Surface Sync](docs/architecture/client.md)
+- [HTTP/JSON + SSE wire protocol](docs/protocol.md)
+- [Roadmap (Slices 0–4 implemented, Slices 5–8 next)](docs/roadmap.md)
 - [Pinned upstream references](docs/references.md)
 
 The architecture/protocol documents distinguish proposals from implemented behavior. Storage is pluggable (`H.Storage`): we start with dependency-free `H.Storage.Memory` and `H.Storage.File` (atomic framed commit logs + snapshots using Elixir's stdlib `JSON`), with `H.Storage.SQLite` agreed as the relational backend to plug in later behind the same conformance suite.
