@@ -190,6 +190,111 @@ defmodule H.ExecutionEnv.Conformance do
 
           assert [%{name: "c_link", type: "symlink"}] = page2
         end
+
+        test "supports include_hidden: false before pagination", %{env: env} do
+          :ok = H.ExecutionEnv.write_file(env, ".hidden_dir/secret.txt", "1")
+          :ok = H.ExecutionEnv.write_file(env, ".hidden_file", "2")
+          :ok = H.ExecutionEnv.write_file(env, "alpha.txt", "3")
+          :ok = H.ExecutionEnv.write_file(env, "beta_dir/item.txt", "4")
+
+          assert {:ok, %{entries: hidden_included}} =
+                   H.ExecutionEnv.list_dir(env, ".", include_hidden: true)
+
+          assert Enum.map(hidden_included, & &1.name) == [
+                   ".hidden_dir",
+                   ".hidden_file",
+                   "alpha.txt",
+                   "beta_dir"
+                 ]
+
+          assert {:ok, %{entries: page1, next_cursor: 1}} =
+                   H.ExecutionEnv.list_dir(env, ".", include_hidden: false, limit: 1, cursor: 0)
+
+          assert [%{name: "alpha.txt", type: "file"}] = page1
+
+          assert {:ok, %{entries: page2, next_cursor: nil}} =
+                   H.ExecutionEnv.list_dir(env, ".", include_hidden: false, limit: 1, cursor: 1)
+
+          assert [%{name: "beta_dir", type: "dir"}] = page2
+        end
+
+        test "supports only_dirs: true and symlinked directories before pagination", %{
+          env: env,
+          tmp_dir: tmp_dir
+        } do
+          :ok = H.ExecutionEnv.write_file(env, "a_file.txt", "1")
+          :ok = H.ExecutionEnv.write_file(env, "b_dir/x.txt", "x")
+          :ok = H.ExecutionEnv.write_file(env, "c_file.txt", "2")
+          :ok = H.ExecutionEnv.write_file(env, "z_target_dir/y.txt", "y")
+
+          File.ln_s!(Path.join(tmp_dir, "z_target_dir"), Path.join(tmp_dir, "d_dir_link"))
+          File.ln_s!(Path.join(tmp_dir, "a_file.txt"), Path.join(tmp_dir, "e_file_link"))
+          File.ln_s!(Path.join(tmp_dir, "missing_target"), Path.join(tmp_dir, "f_broken_link"))
+
+          assert {:ok, %{entries: page1, next_cursor: 2}} =
+                   H.ExecutionEnv.list_dir(env, ".", only_dirs: true, limit: 2, cursor: 0)
+
+          assert [
+                   %{name: "b_dir", type: "dir"},
+                   %{name: "d_dir_link", type: "symlink", target_type: "dir"}
+                 ] = page1
+
+          assert {:ok, %{entries: page2, next_cursor: nil}} =
+                   H.ExecutionEnv.list_dir(env, ".", only_dirs: true, limit: 2, cursor: 2)
+
+          assert [%{name: "z_target_dir", type: "dir"}] = page2
+        end
+
+        test "reports markers for directories and symlinked directories", %{
+          env: env,
+          tmp_dir: tmp_dir
+        } do
+          :ok = H.ExecutionEnv.write_file(env, "app_one/mix.exs", "defmodule AppOne do end")
+          :ok = H.ExecutionEnv.write_file(env, "app_one/AGENTS.md", "# rules")
+          File.mkdir_p!(Path.join(tmp_dir, "app_one/.git"))
+          :ok = H.ExecutionEnv.write_file(env, "plain_dir/notes.txt", "hi")
+          File.ln_s!(Path.join(tmp_dir, "app_one"), Path.join(tmp_dir, "app_link"))
+
+          assert {:ok, %{entries: entries}} =
+                   H.ExecutionEnv.list_dir(env, ".",
+                     only_dirs: true,
+                     markers: H.ExecutionEnv.default_markers()
+                   )
+
+          by_name = Map.new(entries, &{&1.name, &1})
+
+          assert by_name["app_one"].path == Path.join(tmp_dir, "app_one")
+          assert Enum.sort(by_name["app_one"].markers) == [".git", "AGENTS.md", "mix.exs"]
+
+          assert by_name["app_link"].type == "symlink"
+          assert by_name["app_link"].target_type == "dir"
+          assert by_name["app_link"].path == Path.join(tmp_dir, "app_link")
+          assert Enum.sort(by_name["app_link"].markers) == [".git", "AGENTS.md", "mix.exs"]
+
+          assert by_name["plain_dir"].markers == []
+        end
+      end
+
+      describe "env_id/1, kind/1, and bind_cwd/2" do
+        test "reports env_id and kind and binds cwd to existing directories", %{
+          env: env,
+          tmp_dir: tmp_dir
+        } do
+          assert is_binary(H.ExecutionEnv.env_id(env))
+          assert H.ExecutionEnv.env_id(env) != ""
+          assert is_binary(H.ExecutionEnv.kind(env))
+
+          sub = Path.join(tmp_dir, "sub_workspace")
+          File.mkdir_p!(sub)
+          :ok = H.ExecutionEnv.write_file(env, "a_file.txt", "nope")
+
+          assert {:ok, rebound} = H.ExecutionEnv.bind_cwd(env, "sub_workspace")
+          assert H.ExecutionEnv.cwd(rebound) == sub
+          assert H.ExecutionEnv.env_id(rebound) == H.ExecutionEnv.env_id(env)
+
+          assert {:error, :enotdir} = H.ExecutionEnv.bind_cwd(env, "a_file.txt")
+          assert {:error, :enoent} = H.ExecutionEnv.bind_cwd(env, "does_not_exist")
+        end
       end
 
       describe "exec/3" do

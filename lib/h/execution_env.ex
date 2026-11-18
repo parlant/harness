@@ -8,6 +8,16 @@ defmodule H.ExecutionEnv do
   tool implementation and conformance suite.
   """
 
+  @default_markers [
+    ".git",
+    "mix.exs",
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+    "AGENTS.md"
+  ]
+
   @type command :: {:shell, String.t()} | {:argv, [String.t()]}
 
   @type exec_result :: %{
@@ -33,9 +43,55 @@ defmodule H.ExecutionEnv do
               {:ok, %{entries: [map()], next_cursor: nil | non_neg_integer()}} | {:error, term()}
   @callback exec(state :: term(), command(), opts :: keyword()) ::
               {:ok, exec_result()} | {:error, term()}
+  @callback env_id(state :: term()) :: String.t()
+  @callback kind(state :: term()) :: String.t()
+  @callback bind_cwd(state :: term(), cwd :: String.t()) ::
+              {:ok, state :: term()} | {:error, term()}
+
+  @optional_callbacks [env_id: 1, kind: 1, bind_cwd: 2]
+
+  @doc "Standardized project marker filenames used when browsing directories."
+  @spec default_markers() :: [String.t()]
+  def default_markers, do: @default_markers
 
   @spec new(module(), term()) :: t()
   def new(mod, state) when is_atom(mod), do: {mod, state}
+
+  @spec env_id(t()) :: String.t()
+  def env_id({mod, state}) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :env_id, 1) do
+      mod.env_id(state)
+    else
+      "host"
+    end
+  end
+
+  @spec kind(t()) :: String.t()
+  def kind({mod, state}) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :kind, 1) do
+      mod.kind(state)
+    else
+      "host"
+    end
+  end
+
+  @spec bind_cwd(t(), String.t()) :: {:ok, t()} | {:error, term()}
+  def bind_cwd({mod, state} = env, cwd) when is_binary(cwd) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :bind_cwd, 2) do
+      case mod.bind_cwd(state, cwd) do
+        {:ok, new_state} -> {:ok, {mod, new_state}}
+        {:error, _} = err -> err
+      end
+    else
+      with {:ok, resolved} <- resolve_path(env, cwd) do
+        cond do
+          function_exported?(mod, :new, 2) -> {:ok, mod.new(resolved, [])}
+          function_exported?(mod, :new, 1) -> {:ok, mod.new(resolved)}
+          true -> {:error, :unsupported}
+        end
+      end
+    end
+  end
 
   @spec cwd(t()) :: String.t()
   def cwd({mod, state}), do: mod.cwd(state)
