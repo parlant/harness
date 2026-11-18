@@ -10,10 +10,12 @@
 | 4 · Coding loop | Browser-accessible read, write, edit, shell and history tools with replay policy and workspace leases. | [Integration test](../test/h/full_stack_integration_test.exs) |
 | 5 · Workspaces | Environment-qualified directory browser and session lookup, coding harness bootstrap and Unix API socket. | [Workspace integration](../test/h/workspace_browser_integration_test.exs) |
 | 6 · Phoenix | Responsive workspace and session LiveViews; direct in-VM backend, paged history and branch controls. | [Web client](../clients/web/) · [LiveView tests](../clients/web/test/h_web/live/) |
-| 7 · Terminal | Rust `h` attaches, resumes, streams and submits in line-oriented or print mode. No raw-mode viewport or daemon auto-start. | [CLI](../clients/tui/src/main.rs) · [cross-client test](../clients/web/test/h_web/live/multi_surface_sync_test.exs) |
+| 7 · Terminal | Rust `h` attaches, resumes, streams and submits in line-oriented or print mode. No raw-mode viewport or daemon auto-start. | [CLI](../clients/tui/src/cli.rs) · [cross-client test](../clients/web/test/h_web/live/multi_surface_sync_test.exs) |
 | 8 · Remote prototype | In-VM agent and execution adapter with fences and heartbeat leases. Not a deployed remote service. | [Agent tests](../test/h/remote_agent_test.exs) · [adapter tests](../test/h/execution_env_remote_test.exs) |
 
-## Next vertical slice — hi replaces pi (planned)
+## Active vertical slice — hi replaces pi
+
+`hi` is now a working preview on the feature branch. The following table defines the target gates; [build status and next batches](hi-build.md) record what passed, what is partial, and what blocks cutover.
 
 Priority over remote deployment, SQLite and general suspendable workflows. See the [pi parity ledger, editor contract and Rust decisions](hi.md) and [profile/tool-host packaging](hi-extensions.md). Each milestone ends in a usable workflow, not a new framework.
 

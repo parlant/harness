@@ -22,7 +22,10 @@ Build the terminal client from the repository, then run it from your project dir
 ```sh
 cargo install --locked --path clients/tui
 cd /path/to/project
-h -r                       # select a session in this folder
+hi                         # fullscreen editor; Enter steers, Alt-Enter follows up
+hi --tui-mode regular      # terminal-owned scrollback
+hi -r                      # workspace session picker
+h -r                       # original line-oriented client
 h -s SESSION_ID            # attach by ID, including when using a symlink to the workspace
 ```
 
@@ -37,6 +40,7 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 - [Architecture](docs/architecture.md) — ownership, commits, recovery and client boundaries
 - [Local HTTP/JSON and SSE protocol](docs/protocol.md)
 - [Roadmap](docs/roadmap.md) — implemented milestones and remaining work
-- [hi: planned pi replacement](docs/hi.md) — interaction parity, Rust choices and durable differences
+- [hi build and cutover status](docs/hi-build.md) — shipped workflows, verification and ordered remaining batches
+- [hi design and parity target](docs/hi.md) — interaction parity, Rust choices and durable differences
 - [Bringing a harness or tool to hi](docs/hi-extensions.md) — proposed contributor boundaries
 - [Design references](docs/references.md)
