@@ -142,6 +142,12 @@ defmodule H.Submission do
         |> Map.put(:status, s.status)
         |> Map.put(:title, s.title)
 
+      "compact" ->
+        base
+        |> Map.put(:submission_id, to_string(s.id))
+        |> Map.put(:status, s.status)
+        |> maybe_put(:reason, s.reason)
+
       _submit_kind ->
         base
         |> Map.put(:submission_id, to_string(s.id))

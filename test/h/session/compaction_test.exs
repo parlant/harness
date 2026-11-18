@@ -28,6 +28,22 @@ defmodule H.Session.CompactionTest do
       refute Compaction.provider_visible_entry?(entry(7, "reset", %{"handoff" => "h"}))
       refute Compaction.provider_visible_entry?(entry(8, "user_shell", %{"command" => "ls"}))
 
+      assert Compaction.provider_visible_entry?(
+               entry(81, "user_shell", %{
+                 "command" => "git status",
+                 "output" => "clean",
+                 "include_in_context" => true
+               })
+             )
+
+      refute Compaction.provider_visible_entry?(
+               entry(82, "user_shell", %{
+                 "command" => "env",
+                 "output" => "SECRET=1",
+                 "include_in_context" => false
+               })
+             )
+
       refute Compaction.provider_visible_entry?(
                entry(9, "user", %{"text" => "secret", "exclude_from_context" => true})
              )
@@ -39,6 +55,27 @@ defmodule H.Session.CompactionTest do
       refute Compaction.provider_visible_entry?(
                entry(11, "user", %{"text" => "secret", "mode" => "!!"})
              )
+    end
+  end
+
+  describe "validate_args/1" do
+    test "validates expected_seq and optional instructions" do
+      assert {:ok, %{expected_seq: 0, instructions: nil}} =
+               Compaction.validate_args(%{"expected_seq" => 0})
+
+      assert {:ok, %{expected_seq: 7, instructions: nil}} =
+               Compaction.validate_args(%{"expected_seq" => 7, "instructions" => "   "})
+
+      assert {:ok, %{expected_seq: 7, instructions: "Focus on API"}} =
+               Compaction.validate_args(%{
+                 "expected_seq" => 7,
+                 "instructions" => " Focus on API "
+               })
+
+      assert {:error, _} = Compaction.validate_args(%{})
+      assert {:error, _} = Compaction.validate_args(%{"expected_seq" => -1})
+      assert {:error, _} = Compaction.validate_args(%{"expected_seq" => "7"})
+      assert {:error, _} = Compaction.validate_args(%{"expected_seq" => 1, "instructions" => 42})
     end
   end
 
@@ -71,9 +108,9 @@ defmodule H.Session.CompactionTest do
 
     test "selects real user/assistant boundary and keeps tool_call paired with tool_result" do
       entries = [
-        entry(1, "user", %{"text" => "old request"}),
-        entry(2, "assistant", %{"text" => "old reply"}),
-        entry(3, "user", %{"text" => "read big file"}),
+        entry(1, "user", %{"content" => [%{"type" => "text", "text" => "old request"}]}),
+        entry(2, "assistant", %{"content" => [%{"type" => "text", "text" => "old reply"}]}),
+        entry(3, "user", %{"content" => [%{"type" => "text", "text" => "read big file"}]}),
         entry(4, "assistant", %{
           "content" => [],
           "tool_calls" => [
@@ -153,6 +190,38 @@ defmodule H.Session.CompactionTest do
       refute serialized =~ "super-secret"
       refute serialized =~ "local secret command"
       refute serialized =~ "crashed partial output"
+    end
+
+    test "includes ! user_shell (include_in_context: true) and excludes !! (include_in_context: false)" do
+      entries = [
+        entry(1, "user", %{"text" => "check repo"}),
+        entry(2, "user_shell", %{
+          "command" => "git status",
+          "output" => "clean tree",
+          "exit_code" => 0,
+          "cancelled" => false,
+          "truncated" => false,
+          "include_in_context" => true
+        }),
+        entry(3, "user_shell", %{
+          "command" => "printenv",
+          "output" => "HIDDEN_TOKEN=xyz",
+          "exit_code" => 0,
+          "cancelled" => false,
+          "truncated" => false,
+          "include_in_context" => false
+        }),
+        entry(4, "user", %{"text" => String.duplicate("recent ", 30)})
+      ]
+
+      assert {:ok, prep} = Compaction.prepare(entries, keep_recent_chars: 100)
+      assert prep.kept_from_id == 4
+
+      serialized = Compaction.serialize_messages(prep.projected_messages)
+      assert serialized =~ "Ran `git status`"
+      assert serialized =~ "clean tree"
+      refute serialized =~ "printenv"
+      refute serialized =~ "HIDDEN_TOKEN"
     end
 
     test "respects reset marker and excludes pre-reset history" do

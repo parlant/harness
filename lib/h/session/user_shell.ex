@@ -27,15 +27,16 @@ defmodule H.Session.UserShell do
     ])
   end
 
-  @doc "Returns `true` if a `user_shell` or `generation` run is active in `cid`."
+  @doc "Returns `true` if a `generation`, `user_shell`, or `compaction` run is active in `cid`."
   @spec busy?(map(), pos_integer()) :: boolean()
   def busy?(state, cid) when is_map(state) and is_integer(cid) do
     live = get_in(state, [:docs, cid, "live"]) || %{}
 
     Map.get(live, "run") != nil or
       Map.get(live, "user_shell") != nil or
+      Map.get(live, "compaction") != nil or
       Enum.any?(Map.get(state, :tasks, %{}), fn {_id, t} ->
-        t.kind in ["generation", "user_shell"] and
+        t.kind in ["generation", "user_shell", "compaction"] and
           t.owner == {:conversation, cid} and
           t.status != "terminal"
       end)

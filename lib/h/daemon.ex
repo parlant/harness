@@ -692,6 +692,8 @@ defmodule H.Daemon do
         |> maybe_copy_kw(opts, :retry_limit)
         |> maybe_copy_kw(opts, :retry_backoff_ms)
         |> maybe_copy_kw(opts, :restart_limit)
+        |> maybe_copy_kw(opts, :compaction_keep_recent_chars)
+        |> maybe_copy_kw(opts, :compaction_max_tokens)
         |> maybe_copy_kw(opts, :max_restarts)
         |> maybe_copy_kw(opts, :max_seconds)
 
@@ -808,7 +810,8 @@ defmodule H.Daemon do
                  "abort",
                  "withdraw",
                  "rename",
-                 "user_shell"
+                 "user_shell",
+                 "compact"
                ]}, required: true},
              {:conversation_id, :pos_int, required: true},
              {:args, :map, default: %{}}
@@ -913,6 +916,10 @@ defmodule H.Daemon do
 
   defp validate_command_args("user_shell", raw_args) do
     H.Session.UserShell.validate_args(raw_args)
+  end
+
+  defp validate_command_args("compact", raw_args) do
+    H.Session.Compaction.validate_args(raw_args)
   end
 
   defp normalize_optional_title(%{title: title} = validated) do

@@ -11,7 +11,7 @@ defmodule H.Session.Compaction do
   before returning `"compaction"` entry data for `H.Context`.
   """
 
-  alias H.Context
+  alias H.{Context, Schema}
 
   @default_keep_recent_chars 20_000
   @default_max_summary_tokens 4_096
@@ -55,6 +55,19 @@ defmodule H.Session.Compaction do
           instructions: String.t() | nil,
           usage: map()
         }
+
+  @doc "Validates external `compact` command arguments."
+  @spec validate_args(term()) :: {:ok, map()} | {:error, String.t()}
+  def validate_args(raw_args) do
+    with {:ok, args} <-
+           Schema.validate_map(raw_args, [
+             {:expected_seq, {:int, min: 0}, required: true},
+             {:instructions, :string, required: false, nullable: true}
+           ]) do
+      instructions = non_empty_string(Map.get(args, :instructions))
+      {:ok, %{expected_seq: args.expected_seq, instructions: instructions}}
+    end
+  end
 
   @doc """
   Prepares a manual compaction plan from ordered transcript `entries` without
@@ -235,6 +248,7 @@ defmodule H.Session.Compaction do
     not excluded_entry?(data) and
       case entry_kind(entry) do
         "user" -> true
+        "user_shell" -> fetch(data, :include_in_context) == true
         "assistant" -> fetch(data, :aborted) != true
         "tool_result" -> true
         _ -> false
@@ -266,9 +280,7 @@ defmodule H.Session.Compaction do
 
             cond do
               kind in ["compaction", "reset"] -> true
-              kind == "system" -> false
-              excluded_entry?(entry_data_map(entry)) -> false
-              is_integer(id) and id < kept_from_id -> true
+              is_integer(id) and id < kept_from_id -> provider_visible_entry?(entry)
               true -> false
             end
           end)
@@ -332,7 +344,7 @@ defmodule H.Session.Compaction do
             {:error, :invalid_boundary}
 
           idx ->
-            if entry_kind(Enum.at(active_entries, idx)) in ["user", "assistant"] do
+            if entry_kind(Enum.at(active_entries, idx)) in ["user", "user_shell", "assistant"] do
               {:ok, idx}
             else
               {:error, :invalid_boundary}
@@ -347,9 +359,10 @@ defmodule H.Session.Compaction do
           active_entries
           |> Enum.with_index()
           |> Enum.flat_map(fn {entry, idx} ->
-            if entry_kind(entry) in ["user", "assistant"] and is_integer(entry_id(entry)),
-              do: [idx],
-              else: []
+            if entry_kind(entry) in ["user", "user_shell", "assistant"] and
+                 is_integer(entry_id(entry)),
+               do: [idx],
+               else: []
           end)
 
         case cut_points do
@@ -518,27 +531,36 @@ defmodule H.Session.Compaction do
     data = entry_data_map(entry)
 
     content_chars =
-      case fetch(data, :content) do
-        blocks when is_list(blocks) ->
-          Enum.reduce(blocks, 0, fn
-            t when is_binary(t) -> String.length(t)
-            %{type: "text", text: t} when is_binary(t) -> String.length(t)
-            %{"type" => "text", "text" => t} when is_binary(t) -> String.length(t)
-            _ -> 0
-          end)
+      if entry_kind(entry) == "user_shell" do
+        cmd = fetch(data, :command) || ""
+        out = fetch(data, :output) || ""
+        byte_size_or_len(cmd) + byte_size_or_len(out)
+      else
+        case fetch(data, :content) do
+          blocks when is_list(blocks) ->
+            Enum.reduce(blocks, 0, fn
+              t, acc when is_binary(t) -> acc + String.length(t)
+              %{type: "text", text: t}, acc when is_binary(t) -> acc + String.length(t)
+              %{"type" => "text", "text" => t}, acc when is_binary(t) -> acc + String.length(t)
+              _, acc -> acc
+            end)
 
-        t when is_binary(t) ->
-          String.length(t)
+          t when is_binary(t) ->
+            String.length(t)
 
-        _ ->
-          case fetch_any(data, [:text, :output]) do
-            t when is_binary(t) -> String.length(t)
-            _ -> 0
-          end
+          _ ->
+            case fetch_any(data, [:text, :output]) do
+              t when is_binary(t) -> String.length(t)
+              _ -> 0
+            end
+        end
       end
 
     max(1, content_chars)
   end
+
+  defp byte_size_or_len(val) when is_binary(val), do: String.length(val)
+  defp byte_size_or_len(_), do: 0
 
   defp extract_visible_text(blocks) when is_list(blocks) do
     blocks

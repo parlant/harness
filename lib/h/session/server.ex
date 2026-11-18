@@ -13,7 +13,7 @@ defmodule H.Session.Server do
   require Logger
 
   alias H.{Context, Document, Storage, Submission, Task, WorkspaceLease}
-  alias H.Session.UserShell
+  alias H.Session.{Compaction, UserShell}
 
   @max_drain 31
   @max_replay_ring 64
@@ -365,7 +365,9 @@ defmodule H.Session.Server do
           Keyword.get(opts, :ephemeral_interval_ms, @default_ephemeral_interval_ms),
         retry_limit: Keyword.get(opts, :retry_limit, @default_retry_limit),
         retry_backoff_ms: Keyword.get(opts, :retry_backoff_ms, @default_retry_backoff_ms),
-        restart_limit: Keyword.get(opts, :restart_limit, @default_restart_limit)
+        restart_limit: Keyword.get(opts, :restart_limit, @default_restart_limit),
+        compaction_keep_recent_chars: Keyword.get(opts, :compaction_keep_recent_chars, 20_000),
+        compaction_max_tokens: Keyword.get(opts, :compaction_max_tokens, 4_096)
       }
 
       base_meta_write = {:put_session_meta, state.session_meta}
@@ -531,6 +533,7 @@ defmodule H.Session.Server do
     else
       case incremented.kind do
         "generation" -> recover_unclean_generation(incremented, state, now)
+        "compaction" -> recover_unclean_compaction(incremented, state, now)
         "tool_call" -> recover_unclean_tool_call(incremented, state, now)
         _ -> {[{:put_task, incremented}], put_task_in_state(state, incremented)}
       end
@@ -570,11 +573,21 @@ defmodule H.Session.Server do
     {live_writes, state} =
       if cid do
         live =
-          state.docs[cid]["live"]
-          |> Map.delete("run")
-          |> Map.delete("generation")
-          |> Map.delete("tools")
-          |> Map.put("run_failure", %{"reason" => "restart_limit"})
+          if task.kind == "compaction" do
+            state.docs[cid]["live"]
+            |> Map.delete("compaction")
+            |> Map.put("compaction_failure", %{
+              "reason" => "restart_limit",
+              "code" => "restart_limit",
+              "message" => "Compaction exceeded restart limit"
+            })
+          else
+            state.docs[cid]["live"]
+            |> Map.delete("run")
+            |> Map.delete("generation")
+            |> Map.delete("tools")
+            |> Map.put("run_failure", %{"reason" => "restart_limit"})
+          end
 
         state = put_doc_in_state(state, cid, "live", live)
         {[{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}], state}
@@ -643,6 +656,69 @@ defmodule H.Session.Server do
       writes =
         partial_entry_writes ++
           [{:put_task, failed_task}] ++
+          sub_writes ++
+          [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
+
+      {writes, state}
+    end
+  end
+
+  defp recover_unclean_compaction(comp_task, state, now) do
+    cid = comp_task.checkpoint["conversation_id"]
+    live = state.docs[cid]["live"] || %{}
+    retry_count = (comp_task.checkpoint["retry_count"] || 0) + 1
+
+    if retry_count <= state.retry_limit do
+      until_ms = now + state.retry_backoff_ms
+
+      sleeping_task =
+        Task.sleep_until(comp_task, until_ms, "retry", now, %{
+          "retry_count" => retry_count
+        })
+
+      comp_live =
+        (Map.get(live, "compaction") || %{})
+        |> Map.put("task_id", to_string(comp_task.id))
+        |> Map.put("kept_from_id", comp_task.checkpoint["kept_from_id"])
+        |> Map.put("status", "retrying")
+        |> Map.put("retry", %{"attempt" => retry_count, "until" => until_ms})
+
+      next_live = Map.put(live, "compaction", comp_live)
+
+      state =
+        state
+        |> put_task_in_state(sleeping_task)
+        |> put_doc_in_state(cid, "live", next_live)
+
+      writes = [
+        {:put_task, sleeping_task},
+        {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+      ]
+
+      {writes, state}
+    else
+      failed_task =
+        Task.complete(comp_task, %{"status" => "unanswered", "reason" => "interrupted"}, now)
+
+      sub_ids = comp_task.checkpoint["submission_ids"] || []
+      {sub_writes, state} = settle_submissions(sub_ids, :unanswered, "interrupted", state, now)
+
+      next_live =
+        live
+        |> Map.delete("compaction")
+        |> Map.put("compaction_failure", %{
+          "reason" => "interrupted",
+          "code" => "interrupted",
+          "message" => "Compaction interrupted across restart"
+        })
+
+      state =
+        state
+        |> put_task_in_state(failed_task)
+        |> put_doc_in_state(cid, "live", next_live)
+
+      writes =
+        [{:put_task, failed_task}] ++
           sub_writes ++
           [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
 
@@ -778,7 +854,25 @@ defmodule H.Session.Server do
         end
       end)
 
-    gen_effects ++ tool_effects
+    comp_effects =
+      state.tasks
+      |> Map.values()
+      |> Enum.filter(&(&1.kind == "compaction" and &1.status in ["pending", "sleeping"]))
+      |> Enum.flat_map(fn t ->
+        cid = t.checkpoint["conversation_id"]
+
+        case t.status do
+          "pending" ->
+            [{:spawn_compaction, cid, t.id}]
+
+          "sleeping" ->
+            until_ms = get_in(t.wake, ["until"]) || now
+            delay = max(0, until_ms - now)
+            [{:arm_wake_timer, t.id, delay}]
+        end
+      end)
+
+    gen_effects ++ comp_effects ++ tool_effects
   end
 
   # Drain-batch execution loop
@@ -1022,6 +1116,10 @@ defmodule H.Session.Server do
 
   defp dispatch_command_stage(from, "user_shell", cid, req_id, fp, args, state, _staged_rev) do
     UserShell.stage(from, cid, req_id, fp, args, state)
+  end
+
+  defp dispatch_command_stage(from, "compact", cid, req_id, fp, args, state, _staged_rev) do
+    stage_compact(from, cid, req_id, fp, args, state)
   end
 
   defp stage_submit_write(from, cid, req_id, fp, args, state, now) do
@@ -1597,6 +1695,13 @@ defmodule H.Session.Server do
         t.kind == "user_shell" and t.owner == {:conversation, cid} and t.status != "terminal"
       end)
 
+    active_compactions =
+      state.tasks
+      |> Map.values()
+      |> Enum.filter(fn t ->
+        t.kind == "compaction" and t.owner == {:conversation, cid} and t.status != "terminal"
+      end)
+
     {abort_writes, state, kill_effects} =
       Enum.reduce(active_gens, {[], state, []}, fn gen_task, {acc_w, acc_s, acc_eff} ->
         {w, st, eff} = abort_generation_run(gen_task, cid, reason, acc_s, now)
@@ -1609,8 +1714,14 @@ defmodule H.Session.Server do
         {acc_w ++ w, st, acc_eff ++ eff}
       end)
 
-    all_abort_writes = abort_writes ++ shell_writes
-    all_kill_effects = kill_effects ++ shell_kills
+    {comp_writes, state, comp_kills} =
+      Enum.reduce(active_compactions, {[], state, []}, fn comp_task, {acc_w, acc_s, acc_eff} ->
+        {w, st, eff} = abort_compaction_run(comp_task, cid, reason, acc_s, now)
+        {acc_w ++ w, st, acc_eff ++ eff}
+      end)
+
+    all_abort_writes = abort_writes ++ shell_writes ++ comp_writes
+    all_kill_effects = kill_effects ++ shell_kills ++ comp_kills
 
     sub =
       Submission.new(%{
@@ -1630,7 +1741,7 @@ defmodule H.Session.Server do
     next_live = state.docs[cid]["live"]
 
     doc_ops =
-      if active_gens == [] and active_shells == [],
+      if active_gens == [] and active_shells == [] and active_compactions == [],
         do: %{},
         else: %{"live" => [["replace", next_live]]}
 
@@ -1786,6 +1897,136 @@ defmodule H.Session.Server do
     end
   end
 
+  defp stage_compact(from, cid, req_id, fp, args, state) do
+    expected_seq = Map.get(args, :expected_seq)
+    conv_seq = Map.get(state.conv_last_seq, cid, state.seq)
+    inbox = get_in(state.docs, [cid, "inbox"]) || []
+
+    cond do
+      not (is_integer(expected_seq) and expected_seq >= 0) ->
+        {:immediate, from,
+         {:error, {:bad_request, "expected_seq must be a non-negative integer"}}, [], state}
+
+      expected_seq != conv_seq and expected_seq != state.seq ->
+        {:immediate, from, {:error, {:conflict, "expected_seq mismatch"}}, [], state}
+
+      conversation_busy?(state, cid) or inbox != [] ->
+        {:immediate, from, {:error, {:conflict, "conversation_busy"}}, [], state}
+
+      true ->
+        {:ok, entries, state} = load_visible_entries(state, cid)
+
+        prep_opts = [
+          keep_recent_chars: state.compaction_keep_recent_chars,
+          max_tokens: state.compaction_max_tokens
+        ]
+
+        case Compaction.prepare(entries, prep_opts) do
+          {:error, reason} ->
+            {:immediate, from, {:error, {:conflict, Atom.to_string(reason)}}, [], state}
+
+          {:ok, prep} ->
+            now = System.system_time(:millisecond)
+            {:ok, sub_id, store} = Storage.mint_id(state.store)
+            {:ok, task_id, store} = Storage.mint_id(store)
+            state = %{state | store: store}
+
+            instructions = Map.get(args, :instructions)
+
+            sub =
+              Submission.new(%{
+                id: sub_id,
+                request_id: req_id,
+                fingerprint: fp,
+                kind: "compact",
+                status: "placed",
+                conversation_id: cid,
+                created_at: now
+              })
+
+            task =
+              Task.new(%{
+                id: task_id,
+                kind: "compaction",
+                owner: {:conversation, cid},
+                status: "pending",
+                checkpoint: %{
+                  "conversation_id" => cid,
+                  "kept_from_id" => prep.kept_from_id,
+                  "instructions" => instructions,
+                  "max_tokens" => prep.max_tokens,
+                  "retry_count" => 0,
+                  "phase" => "summarize",
+                  "submission_ids" => [sub_id]
+                },
+                created_at: now
+              })
+
+            next_live = %{
+              "compaction" => %{
+                "task_id" => to_string(task_id),
+                "kept_from_id" => prep.kept_from_id,
+                "status" => "pending"
+              }
+            }
+
+            state =
+              state
+              |> put_task_in_state(task)
+              |> put_doc_in_state(cid, "live", next_live)
+
+            writes = [
+              {:check, {:unique_request_id, req_id, fp}},
+              {:put_submission, sub},
+              {:put_task, task},
+              {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+            ]
+
+            staged = %{
+              raw_item:
+                {:command, from,
+                 %{command: "compact", conversation_id: cid, request_id: req_id, args: args}},
+              writes: writes,
+              conv_events: %{
+                cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}
+              },
+              submissions: [sub],
+              effects: [{:spawn_compaction, cid, task_id}],
+              reply_from: from,
+              receipt: Submission.to_receipt(sub, state.seq)
+            }
+
+            {:batch, staged, state}
+        end
+    end
+  end
+
+  defp abort_compaction_run(comp_task, cid, reason, state, now) do
+    aborted_task = Task.abort(comp_task, reason, now)
+    state = put_task_in_state(state, aborted_task)
+
+    sub_ids = comp_task.checkpoint["submission_ids"] || []
+    {sub_writes, state} = settle_submissions(sub_ids, :unanswered, reason, state, now)
+
+    next_live =
+      (state.docs[cid]["live"] || %{})
+      |> Map.delete("compaction")
+      |> Map.put("compaction_failure", %{
+        "reason" => reason,
+        "code" => reason,
+        "message" => "Compaction aborted"
+      })
+
+    state = put_doc_in_state(state, cid, "live", next_live)
+
+    writes =
+      [{:put_task, aborted_task}] ++
+        sub_writes ++
+        [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
+
+    {writes, state, worker_kill_effects(state, comp_task.id)}
+  end
+
   defp abort_generation_run(gen_task, cid, reason, state, now) do
     eph = Map.get(state.ephemeral, cid)
     live = merge_ephemeral_into_live(state.docs[cid]["live"], eph)
@@ -1900,6 +2141,32 @@ defmodule H.Session.Server do
 
       {:batch, staged, next_state} ->
         maybe_drain_inbox_after_user_shell(tid, staged, next_state)
+    end
+  end
+
+  defp stage_worker_done(tid, attempt_id, {:compaction_result, comp_res}, state) do
+    {worker, workers} = Map.pop(state.workers, attempt_id)
+    if worker, do: Process.demonitor(worker.monitor_ref, [:flush])
+    state = %{state | workers: workers}
+
+    case Map.get(state.tasks, tid) do
+      nil ->
+        {:skip, state}
+
+      %{status: "terminal"} ->
+        {:skip, state}
+
+      comp_task ->
+        now = System.system_time(:millisecond)
+        cid = comp_task.checkpoint["conversation_id"]
+
+        case comp_res do
+          {:ok, result} ->
+            stage_compaction_success(comp_task, cid, result, state, now)
+
+          {:error, err} ->
+            stage_compaction_error(comp_task, cid, err, state, now)
+        end
     end
   end
 
@@ -2387,6 +2654,236 @@ defmodule H.Session.Server do
     end
   end
 
+  defp stage_compaction_success(comp_task, cid, result, state, now) do
+    {:ok, entries, state} = load_visible_entries(state, cid)
+
+    case List.last(entries) do
+      %{kind: "compaction", id: existing_entry_id} ->
+        done_task =
+          Task.complete(
+            comp_task,
+            %{"status" => "done", "entry_id" => existing_entry_id},
+            now
+          )
+
+        sub_ids = comp_task.checkpoint["submission_ids"] || []
+        {sub_writes, state} = settle_submissions(sub_ids, :done, existing_entry_id, state, now)
+
+        next_live = Map.delete(state.docs[cid]["live"] || %{}, "compaction")
+
+        state =
+          state
+          |> put_task_in_state(done_task)
+          |> put_doc_in_state(cid, "live", next_live)
+
+        writes =
+          [{:put_task, done_task}] ++
+            sub_writes ++
+            [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
+
+        staged = %{
+          raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:ok, result}}},
+          writes: writes,
+          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          submissions: [],
+          effects: [],
+          reply_from: nil,
+          receipt: nil
+        }
+
+        {:batch, staged, state}
+
+      _ ->
+        {:ok, entry_id, store} = Storage.mint_id(state.store)
+        state = %{state | store: store}
+
+        entry_data = Compaction.entry_data(result)
+        entry = build_entry_record(entry_id, cid, "compaction", entry_data, now)
+        state = record_entry_in_conv(state, cid, entry_id)
+
+        usage_map = stringify_json(Map.get(result, :usage, %{}))
+        {next_usage, usage_ops} = Document.accumulate_usage(state.docs[cid]["usage"], usage_map)
+        state = put_doc_in_state(state, cid, "usage", next_usage)
+
+        usage_writes =
+          if usage_ops == [],
+            do: [],
+            else: [{:put_doc, {:conversation, cid, "usage"}, Document.wrap("usage", next_usage)}]
+
+        done_task =
+          Task.complete(
+            comp_task,
+            %{
+              "status" => "done",
+              "entry_id" => entry_id,
+              "kept_from_id" => result.kept_from_id
+            },
+            now
+          )
+
+        sub_ids = comp_task.checkpoint["submission_ids"] || []
+        {sub_writes, state} = settle_submissions(sub_ids, :done, entry_id, state, now)
+
+        {drained_entries, drained_sub_writes, next_sub_ids, inbox_ops, state} =
+          drain_inbox_items(cid, state, now, nil)
+
+        {next_run_writes, next_live, next_effects, state} =
+          if drained_entries == [] do
+            live = Map.delete(state.docs[cid]["live"] || %{}, "compaction")
+            state = state |> put_task_in_state(done_task) |> put_doc_in_state(cid, "live", live)
+            {[], live, [], state}
+          else
+            {:ok, next_gen_id, store} = Storage.mint_id(state.store)
+            state = %{state | store: store}
+
+            next_gen =
+              Task.new(%{
+                id: next_gen_id,
+                kind: "generation",
+                owner: {:conversation, cid},
+                status: "pending",
+                checkpoint: %{
+                  "conversation_id" => cid,
+                  "turns" => 1,
+                  "retry_count" => 0,
+                  "phase" => "stream",
+                  "submission_ids" => next_sub_ids
+                },
+                created_at: now
+              })
+
+            live = %{
+              "run" => %{"task_id" => to_string(next_gen_id), "turns" => 1},
+              "generation" => %{
+                "message" => %{"thinking" => "", "text" => "", "tool_calls" => []}
+              }
+            }
+
+            state =
+              state
+              |> put_task_in_state(done_task)
+              |> put_task_in_state(next_gen)
+              |> put_doc_in_state(cid, "live", live)
+
+            {[{:put_task, next_gen}], live, [{:spawn_generation, cid, next_gen_id}], state}
+          end
+
+        all_entries = [entry | drained_entries]
+
+        writes =
+          Enum.map(all_entries, &{:append_entry, &1}) ++
+            usage_writes ++
+            sub_writes ++
+            drained_sub_writes ++
+            [{:put_task, done_task}] ++
+            next_run_writes ++
+            [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}] ++
+            if(inbox_ops == [],
+              do: [],
+              else: [{:put_doc, {:conversation, cid, "inbox"}, Document.wrap("inbox", [])}]
+            )
+
+        doc_ops =
+          %{"live" => [["replace", next_live]]}
+          |> then(fn m -> if usage_ops == [], do: m, else: Map.put(m, "usage", usage_ops) end)
+          |> then(fn m -> if inbox_ops == [], do: m, else: Map.put(m, "inbox", inbox_ops) end)
+
+        staged = %{
+          raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:ok, result}}},
+          writes: writes,
+          conv_events: %{cid => %{entries: all_entries, doc_ops: doc_ops}},
+          submissions: [],
+          effects: next_effects,
+          reply_from: nil,
+          receipt: nil
+        }
+
+        {:batch, staged, state}
+    end
+  end
+
+  defp stage_compaction_error(comp_task, cid, err, state, now) do
+    retryable = Map.get(err, :retryable, false) == true
+    retry_count = (comp_task.checkpoint["retry_count"] || 0) + 1
+    live = state.docs[cid]["live"] || %{}
+
+    if retryable and retry_count <= state.retry_limit do
+      until_ms = now + state.retry_backoff_ms
+
+      sleeping_task =
+        Task.sleep_until(comp_task, until_ms, "retry", now, %{
+          "retry_count" => retry_count
+        })
+
+      comp_live =
+        (Map.get(live, "compaction") || %{})
+        |> Map.put("task_id", to_string(comp_task.id))
+        |> Map.put("kept_from_id", comp_task.checkpoint["kept_from_id"])
+        |> Map.put("status", "retrying")
+        |> Map.put("retry", %{"attempt" => retry_count, "until" => until_ms})
+
+      next_live = Map.put(live, "compaction", comp_live)
+
+      state =
+        state
+        |> put_task_in_state(sleeping_task)
+        |> put_doc_in_state(cid, "live", next_live)
+
+      staged = %{
+        raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},
+        writes: [
+          {:put_task, sleeping_task},
+          {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+        ],
+        conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+        submissions: [],
+        effects: [{:arm_wake_timer, comp_task.id, state.retry_backoff_ms}],
+        reply_from: nil,
+        receipt: nil
+      }
+
+      {:batch, staged, state}
+    else
+      code = to_string(Map.get(err, :code, "compaction_error"))
+      message = to_string(Map.get(err, :message, "Compaction failed"))
+
+      done_task =
+        Task.complete(comp_task, %{"status" => "unanswered", "reason" => code}, now)
+
+      sub_ids = comp_task.checkpoint["submission_ids"] || []
+      {sub_writes, state} = settle_submissions(sub_ids, :unanswered, code, state, now)
+
+      next_live =
+        live
+        |> Map.delete("compaction")
+        |> Map.put("compaction_failure", %{
+          "reason" => code,
+          "code" => code,
+          "message" => message
+        })
+
+      state =
+        state
+        |> put_task_in_state(done_task)
+        |> put_doc_in_state(cid, "live", next_live)
+
+      staged = %{
+        raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},
+        writes:
+          [{:put_task, done_task}] ++
+            sub_writes ++
+            [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}],
+        conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+        submissions: [],
+        effects: [],
+        reply_from: nil,
+        receipt: nil
+      }
+
+      {:batch, staged, state}
+    end
+  end
+
   defp stage_after_tool_settled(cid, done_tool_task, entry, live, state, now, base_effects) do
     {:task, gen_task_id} = done_tool_task.owner
     gen_task = Map.fetch!(state.tasks, gen_task_id)
@@ -2587,6 +3084,41 @@ defmodule H.Session.Server do
 
         {:batch, staged, state}
 
+      %{status: "sleeping", kind: "compaction"} = comp_task ->
+        now = System.system_time(:millisecond)
+        cid = comp_task.checkpoint["conversation_id"]
+        pending_task = %{comp_task | status: "pending", wake: nil, updated_at: now}
+        live = state.docs[cid]["live"] || %{}
+
+        comp_live =
+          (Map.get(live, "compaction") || %{})
+          |> Map.put("task_id", to_string(comp_task.id))
+          |> Map.put("kept_from_id", comp_task.checkpoint["kept_from_id"])
+          |> Map.put("status", "pending")
+          |> Map.delete("retry")
+
+        next_live = Map.put(live, "compaction", comp_live)
+
+        state =
+          state
+          |> put_task_in_state(pending_task)
+          |> put_doc_in_state(cid, "live", next_live)
+
+        staged = %{
+          raw_item: {:wake_task, tid},
+          writes: [
+            {:put_task, pending_task},
+            {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+          ],
+          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          submissions: [],
+          effects: [{:spawn_compaction, cid, tid}],
+          reply_from: nil,
+          receipt: nil
+        }
+
+        {:batch, staged, state}
+
       _ ->
         {:skip, state}
     end
@@ -2654,6 +3186,149 @@ defmodule H.Session.Server do
 
       _ ->
         state
+    end
+  end
+
+  defp spawn_compaction_worker(cid, comp_task_id, state) do
+    case Map.get(state.tasks, comp_task_id) do
+      %{kind: "compaction", status: status} = comp_task when status in ["pending", "sleeping"] ->
+        now = System.system_time(:millisecond)
+        cp = comp_task.checkpoint
+        kept_from_id = cp["kept_from_id"]
+        max_tokens = cp["max_tokens"] || state.compaction_max_tokens
+        instructions = cp["instructions"]
+
+        {:ok, entries, state} = load_visible_entries(state, cid)
+
+        case Compaction.prepare(entries, kept_from_id: kept_from_id, max_tokens: max_tokens) do
+          {:error, reason} ->
+            commit_immediate_compaction_failure(
+              cid,
+              comp_task,
+              Atom.to_string(reason),
+              "Compaction boundary is no longer valid (#{reason})",
+              state,
+              now
+            )
+
+          {:ok, prep} ->
+            {:ok, attempt_id, store} = Storage.mint_id(state.store)
+            state = %{state | store: store}
+
+            running_task = Task.start_running(comp_task, attempt_id, now)
+            live = state.docs[cid]["live"] || %{}
+
+            comp_live =
+              (Map.get(live, "compaction") || %{})
+              |> Map.put("task_id", to_string(comp_task_id))
+              |> Map.put("kept_from_id", kept_from_id)
+              |> Map.put("status", "running")
+              |> Map.delete("retry")
+
+            next_live = Map.put(live, "compaction", comp_live)
+
+            state =
+              state
+              |> put_task_in_state(running_task)
+              |> put_doc_in_state(cid, "live", next_live)
+
+            # Persist running intent before spawning worker!
+            case Storage.commit(state.store, [
+                   [
+                     {:put_task, running_task},
+                     {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+                   ]
+                 ]) do
+              {:error, io_err} ->
+                Logger.error(
+                  "Session #{state.session_id} compaction intent commit failed: #{inspect(io_err)}"
+                )
+
+                send(self(), {:stop_storage_failed, io_err})
+                %{state | storage_failed: true}
+
+              {:ok, %{seqs: [batch_seq]}, committed_store} ->
+                state = %{state | store: committed_store, seq: batch_seq}
+
+                state =
+                  broadcast_commit_frame(state, cid, batch_seq, [], %{
+                    "live" => [["set", ["compaction", "status"], "running"]]
+                  })
+
+                server_pid = self()
+                inc = state.incarnation
+                agent = state.docs[cid]["agent"]
+                provider_mod = state.provider_mod
+                provider_config = state.provider_config
+
+                {:ok, worker_pid} =
+                  Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
+                    res =
+                      Compaction.summarize(prep, agent, provider_mod, provider_config,
+                        instructions: instructions
+                      )
+
+                    send(
+                      server_pid,
+                      {:worker_done, inc, comp_task_id, attempt_id, {:compaction_result, res}}
+                    )
+                  end)
+
+                ref = Process.monitor(worker_pid)
+
+                worker_info = %{
+                  task_id: comp_task_id,
+                  conv_id: cid,
+                  kind: :compaction,
+                  pid: worker_pid,
+                  monitor_ref: ref,
+                  started_at: now
+                }
+
+                %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
+            end
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp commit_immediate_compaction_failure(cid, comp_task, code, message, state, now) do
+    done_task = Task.complete(comp_task, %{"status" => "unanswered", "reason" => code}, now)
+    sub_ids = comp_task.checkpoint["submission_ids"] || []
+    {sub_writes, state} = settle_submissions(sub_ids, :unanswered, code, state, now)
+
+    next_live =
+      (state.docs[cid]["live"] || %{})
+      |> Map.delete("compaction")
+      |> Map.put("compaction_failure", %{
+        "reason" => code,
+        "code" => code,
+        "message" => message
+      })
+
+    state =
+      state
+      |> put_task_in_state(done_task)
+      |> put_doc_in_state(cid, "live", next_live)
+
+    writes =
+      [{:put_task, done_task}] ++
+        sub_writes ++
+        [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
+
+    case Storage.commit(state.store, [writes]) do
+      {:ok, %{seqs: [batch_seq]}, committed_store} ->
+        state = %{state | store: committed_store, seq: batch_seq}
+
+        broadcast_commit_frame(state, cid, batch_seq, [], %{
+          "live" => [["replace", next_live]]
+        })
+
+      {:error, io_err} ->
+        send(self(), {:stop_storage_failed, io_err})
+        %{state | storage_failed: true}
     end
   end
 
@@ -3711,6 +4386,13 @@ defmodule H.Session.Server do
         delay = max(0, until_ms - System.system_time(:millisecond))
         [{:arm_wake_timer, tid, delay}]
 
+      %{kind: "compaction", status: "pending", checkpoint: %{"conversation_id" => cid}} ->
+        [{:spawn_compaction, cid, tid}]
+
+      %{kind: "compaction", status: "sleeping", wake: %{"until" => until_ms}} ->
+        delay = max(0, until_ms - System.system_time(:millisecond))
+        [{:arm_wake_timer, tid, delay}]
+
       %{kind: "tool_call", status: "pending", checkpoint: %{"conversation_id" => cid}} ->
         [{:spawn_tool, cid, tid}]
 
@@ -3760,6 +4442,10 @@ defmodule H.Session.Server do
 
   defp apply_effect({:spawn_user_shell, cid, tid}, state) do
     UserShell.spawn_worker(cid, tid, state)
+  end
+
+  defp apply_effect({:spawn_compaction, cid, tid}, state) do
+    spawn_compaction_worker(cid, tid, state)
   end
 
   defp apply_effect({:arm_wake_timer, tid, delay_ms}, state) do
