@@ -60,6 +60,9 @@ defmodule H.HTTP.SSE do
 
       {:error, {:bad_request, msg}} ->
         send_json(conn, 422, %{"error" => msg})
+
+      {:error, _} ->
+        send_json(conn, 503, %{"error" => "session unavailable"})
     end
   end
 

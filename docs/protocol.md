@@ -1,6 +1,6 @@
 # Wire Protocol and First Web Client
 
-**Status:** implemented in Slices 2–4 (`H.HTTP.SecurityPlug`, `H.HTTP.Router`, `H.HTTP.SSE`, `H.Daemon`, `priv/static/*`), except the Slice 5 `signal` command.
+**Status:** implemented through Slice 5, except features marked planned.
 
 ---
 
@@ -21,8 +21,10 @@ The first human client is a **zero-build web client** (`priv/static/index.html`,
 | `GET /` & `GET /assets/*` | Serve the local web client (`index.html`, `app.js`, `app.css`) with strict `Content-Security-Policy` (`default-src 'self'`). |
 | `POST /api/v1/auth/session` | Exchange owner token (`{"token": "..."}`) for an `HttpOnly; SameSite=Strict` cookie so browser `EventSource` authenticates without tokens in URLs. |
 | `GET /api/v1/models` | List available models, capabilities, and context limits from `LLMDB` (`ReqLLM`). |
-| `GET /api/v1/sessions` | List sessions from `H.Catalog` ETS table (`id`, `title`, `cwd`, `root_conversation_id`, `active`, `next_wake_at`, `status`) without waking unloaded sessions. |
-| `POST /api/v1/sessions` | Idempotently create a session (`request_id`, `session_id`, `cwd`, optional initial `agent`). |
+| `GET /api/v1/environments` | List configured execution environments and default folders. |
+| `GET /api/v1/fs` | Browse `env_id` and `path`, with folder markers, session counts, and sessions rooted there. |
+| `GET /api/v1/sessions` | List catalog entries without waking sessions; optionally filter with `env_id`, `cwd`, and `subtree`. |
+| `POST /api/v1/sessions` | Create from `cwd`, optional `env_id`, `harness_id`, and initial `agent`. Supply `session_id` for retryable create-or-attach; omitting it generates a fresh ID (a retry may create another session). |
 | `GET /api/v1/sessions/:sid` | Session detail: conversation ancestry forest (`id`, `parent`, `owner`), task graph summary, and open waits. |
 | `GET /api/v1/sessions/:sid/conversations/:cid/entries` | Cursor-paged raw entries (`order=desc\|asc`, `cursor`, `limit <= 200`), respecting fork cutoffs. |
 | `GET /api/v1/sessions/:sid/conversations/:cid/events` | SSE stream: atomic initial `snapshot` followed by `commit` and `ephemeral` delta frames. Supports `Last-Event-ID`. |
@@ -85,7 +87,7 @@ Receipt (`200 OK`):
 | `fork_and_submit` | 1–2 | Atomically fork at `at_entry_id` and admit the branch's first input in one commit. |
 | `configure` | 1–2 | Update `agent` document (`model`, `thinking`, `instructions`, `tools`, `max_turns`, `compaction`) for subsequent turns; optional `expected_seq` guard. |
 | `abort` | 1–2 | Persist cancellation of a conversation or task scope (`background: true` optional in Slice 5). |
-| `signal` | 5 | Deliver a typed external signal (`{task_id, token, key, value}`) to wake a parked task/gate (`delivered \| duplicate \| invalid \| closed \| not_found`). |
+| `signal` (planned) | 9 | Deliver a typed external signal (`{task_id, token, key, value}`) to wake a parked task/gate (`delivered \| duplicate \| invalid \| closed \| not_found`). |
 
 ---
 
@@ -102,24 +104,24 @@ To keep **zero-copy `ProcBin` fan-out** across all subscribers of a conversation
    event: snapshot
    data: {"version":1,"session_id":"demo","conversation_id":"1","seq":42,"before_entry_id":"12","entries":[...],"docs":{"live":{...},"inbox":[...],"agent":{...},"usage":{...}}}
    ```
-   If `Last-Event-ID: <last_seq>` hits the recent-commit ring, the SSE worker replays the exact missed `commit` frames `(last_seq + 1)..seq` with zero gap.
+   If `Last-Event-ID: <last_seq>` hits the recent-commit ring, the SSE worker replays the conversation's retained `commit` frames after that cursor, or sends a snapshot if replay is unavailable.
 
 2. **Durable commit frame (`event: commit`, `id: <seq>`):**
    For every durable batch committed on `(sid, cid)`, `H.Session.Server` encodes the commit payload **once** as a shared refc binary (`ProcBin`) and broadcasts `{:commit_frame, seq, bin}` via `H.PubSub`:
    ```text
-   id: 43
+   id: 45
    event: commit
-   data: {"version":1,"session_id":"demo","conversation_id":"1","seq":43,"appended_entries":[...],"doc_ops":{"live":[...],"usage":[...]}}
+   data: {"version":1,"session_id":"demo","conversation_id":"1","prev_seq":42,"seq":45,"appended_entries":[...],"doc_ops":{"live":[...],"usage":[...]}}
    ```
-   Every live watcher receives the exact same `ProcBin` pointer (zero re-encoding, zero copying) and appends `appended_entries` / applies `doc_ops` to its local `ConversationTranscript`.
+   Sequence numbers are session-wide; unrelated branches and internal commits can cause numerical jumps. Ignore already-applied frames. For a newer frame, `prev_seq` must equal the conversation cursor; on mismatch, fetch a fresh snapshot. Otherwise append `appended_entries`, apply `doc_ops`, and advance the cursor.
 
 3. **Deferred streaming progress (`event: ephemeral`, NO `id:` line):**
    Between durable flushes (`persist_within_ms`, default 1,000 ms), throttled LLM token chunks and tool output chunks broadcast as `event: ephemeral` **without an SSE `id:` field**:
    ```text
    event: ephemeral
-   data: {"version":1,"session_id":"demo","conversation_id":"1","base_seq":43,"doc_ops":{"live":[...]}}
+   data: {"version":1,"session_id":"demo","conversation_id":"1","base_seq":45,"doc_ops":{"live":[...]}}
    ```
-   Per the SSE standard, omitting `id:` leaves `EventSource.lastEventId` at `43` (the last durable commit on disk). If the BEAM VM crashes before the 1-second flush, `EventSource` reconnects with `Last-Event-ID: 43`—never colliding with post-recovery `seq` numbers.
+   Per the SSE standard, omitting `id:` leaves `EventSource.lastEventId` at `45` (the last visible durable commit). If the BEAM VM crashes before the 1-second flush, `EventSource` reconnects with `Last-Event-ID: 45`—never colliding with post-recovery `seq` numbers.
 
 4. **Bounded slow-client backpressure (state replacement, never producer blocking):**
    Each SSE connection worker bounds its pending queue by frame count (e.g. 128 frames) and byte size (e.g. 2 MiB). If a slow browser tab exceeds either bound, the SSE worker drops its queued deltas, fetches a fresh committed `snapshot` from `H.Session.Server`, and sends `event: snapshot` (`id: <newest_seq>`). `H.Session.Server` never blocks on a slow client.

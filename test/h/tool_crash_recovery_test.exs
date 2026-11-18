@@ -272,7 +272,17 @@ defmodule H.ToolCrashRecoveryTest do
       assert Agent.get(counter, & &1) == 2
     end
 
-    test "replay: :unsafe tool does NOT replay after crash and records interrupted result with partial output" do
+    @tag close_reason: :kill
+    test "unsafe tool is interrupted on crash", context do
+      assert_unsafe_tool_interruption(context.close_reason)
+    end
+
+    @tag close_reason: :shutdown
+    test "unsafe tool is interrupted on clean shutdown", context do
+      assert_unsafe_tool_interruption(context.close_reason)
+    end
+
+    defp assert_unsafe_tool_interruption(close_reason) do
       sid = "s-unsafe-#{System.unique_integer([:positive])}"
       counter = start_supervised!({Agent, fn -> 0 end})
       :ets.insert(@test_ets, {{:gate_pid, sid}, self()})
@@ -332,9 +342,17 @@ defmodule H.ToolCrashRecoveryTest do
         if out == "partial-out-deploy", do: true, else: nil
       end)
 
-      # Crash Session.Server mid-unsafe-tool
       [{pid1, _}] = Registry.lookup(opts[:registry], {:session, sid})
-      Process.exit(pid1, :kill)
+
+      case close_reason do
+        :kill ->
+          Process.exit(pid1, :kill)
+
+        :shutdown ->
+          [{_, sup_pid, _, _}] = DynamicSupervisor.which_children(opts[:runtime_sup])
+          :ok = DynamicSupervisor.terminate_child(opts[:runtime_sup], sup_pid)
+          assert {:ok, _} = Daemon.get_session_detail(sid, opts)
+      end
 
       items =
         wait_until(fn ->

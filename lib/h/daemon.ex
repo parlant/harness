@@ -415,22 +415,25 @@ defmodule H.Daemon do
         end
 
       [] ->
-        sup_opts = build_session_sup_opts(entry, opts, initial_agent)
-
-        case DynamicSupervisor.start_child(runtime_sup, {Supervisor, sup_opts}) do
-          {:ok, _sup_pid} ->
-            lookup_started_server(registry, session_id)
-
-          {:error, {:already_started, _}} ->
-            lookup_started_server(registry, session_id)
-
-          {:error,
-           {:shutdown, {:failed_to_start_child, H.Session.Server, {:already_started, pid}}}} ->
-            {:ok, pid}
-
-          {:error, reason} ->
-            {:error, reason}
+        with {:ok, sup_opts} <- build_session_sup_opts(entry, opts, initial_agent) do
+          start_session(runtime_sup, registry, session_id, sup_opts)
         end
+    end
+  end
+
+  defp start_session(runtime_sup, registry, session_id, sup_opts) do
+    case DynamicSupervisor.start_child(runtime_sup, {Supervisor, sup_opts}) do
+      {:ok, _sup_pid} ->
+        lookup_started_server(registry, session_id)
+
+      {:error, {:already_started, _}} ->
+        lookup_started_server(registry, session_id)
+
+      {:error, {:shutdown, {:failed_to_start_child, H.Session.Server, {:already_started, pid}}}} ->
+        {:ok, pid}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -452,56 +455,49 @@ defmodule H.Daemon do
     env_id = Map.get(entry, :env_id) || "host"
     harness_id = Map.get(entry, :harness_id) || "coding"
 
-    execution_env =
+    workspace =
       case Keyword.fetch(opts, :execution_env) do
-        {:ok, env} ->
-          env
-
-        :error ->
-          case EnvRegistry.resolve_workspace(env_id, entry.cwd, opts) do
-            {:ok, %{env: env}} -> env
-            _ -> H.ExecutionEnv.Host.new(entry.cwd, env_id: env_id)
-          end
+        {:ok, env} -> {:ok, %{env: env, cwd: entry.cwd}}
+        :error -> EnvRegistry.resolve_workspace(env_id, entry.cwd, opts)
       end
 
-    tools =
-      case Keyword.fetch(opts, :tools) do
-        {:ok, explicit_tools} ->
-          explicit_tools
+    with {:ok, %{env: execution_env, cwd: cwd}} when cwd == entry.cwd <- workspace,
+         {:ok, harness} <- Harness.resolve(harness_id, opts) do
+      tools = Keyword.get_lazy(opts, :tools, fn -> harness.tools(opts) end)
 
-        :error ->
-          case Harness.resolve(harness_id, opts) do
-            {:ok, mod} -> mod.tools(opts)
-            _ -> H.Harness.Coding.tools(opts)
-          end
-      end
+      sup_opts =
+        [
+          session_id: entry.session_id,
+          env_id: env_id,
+          cwd: entry.cwd,
+          title: entry.title,
+          registry: registry,
+          pubsub: pubsub,
+          catalog: catalog,
+          workspace_lease: workspace_lease,
+          storage_mod: storage_mod,
+          storage_opts: storage_opts,
+          data_dir: data_dir,
+          execution_env: execution_env,
+          tools: tools
+        ]
+        |> maybe_put_kw(:initial_agent, initial_agent)
+        |> maybe_copy_kw(opts, :provider)
+        |> maybe_copy_kw(opts, :provider_config)
+        |> maybe_copy_kw(opts, :default_model)
+        |> maybe_copy_kw(opts, :persist_within_ms)
+        |> maybe_copy_kw(opts, :ephemeral_interval_ms)
+        |> maybe_copy_kw(opts, :retry_limit)
+        |> maybe_copy_kw(opts, :retry_backoff_ms)
+        |> maybe_copy_kw(opts, :restart_limit)
+        |> maybe_copy_kw(opts, :max_restarts)
+        |> maybe_copy_kw(opts, :max_seconds)
 
-    [
-      session_id: entry.session_id,
-      env_id: env_id,
-      cwd: entry.cwd,
-      title: entry.title,
-      registry: registry,
-      pubsub: pubsub,
-      catalog: catalog,
-      workspace_lease: workspace_lease,
-      storage_mod: storage_mod,
-      storage_opts: storage_opts,
-      data_dir: data_dir,
-      execution_env: execution_env,
-      tools: tools
-    ]
-    |> maybe_put_kw(:initial_agent, initial_agent)
-    |> maybe_copy_kw(opts, :provider)
-    |> maybe_copy_kw(opts, :provider_config)
-    |> maybe_copy_kw(opts, :default_model)
-    |> maybe_copy_kw(opts, :persist_within_ms)
-    |> maybe_copy_kw(opts, :ephemeral_interval_ms)
-    |> maybe_copy_kw(opts, :retry_limit)
-    |> maybe_copy_kw(opts, :retry_backoff_ms)
-    |> maybe_copy_kw(opts, :restart_limit)
-    |> maybe_copy_kw(opts, :max_restarts)
-    |> maybe_copy_kw(opts, :max_seconds)
+      {:ok, sup_opts}
+    else
+      {:error, :unknown_harness} -> {:error, :harness_unavailable}
+      _ -> {:error, :workspace_unavailable}
+    end
   end
 
   # Boundary Validation

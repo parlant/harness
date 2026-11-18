@@ -105,6 +105,9 @@ defmodule H.HTTP.Router do
 
       {:error, {:conflict, msg}} ->
         send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
     end
   end
 
@@ -118,11 +121,8 @@ defmodule H.HTTP.Router do
       {:error, :not_found} ->
         send_json(conn, 404, %{"error" => "session not found"})
 
-      {:error, {:quarantined, reason}} ->
-        send_json(conn, 503, %{
-          "error" => "session quarantined",
-          "reason" => normalize_reason(reason)
-        })
+      {:error, reason} ->
+        send_session_error(conn, reason)
     end
   end
 
@@ -139,6 +139,9 @@ defmodule H.HTTP.Router do
 
       {:error, {:bad_request, msg}} ->
         send_json(conn, 422, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
     end
   end
 
@@ -161,6 +164,9 @@ defmodule H.HTTP.Router do
 
       {:error, {:conflict, msg}} ->
         send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
     end
   end
 
@@ -181,12 +187,15 @@ defmodule H.HTTP.Router do
     {Keyword.get(opts, :daemon, H.Daemon), Keyword.get(opts, :daemon_opts, [])}
   end
 
-  defp normalize_reason(reason)
-       when is_binary(reason) or is_atom(reason) or is_number(reason) or is_map(reason) or
-              is_list(reason),
-       do: reason
+  defp send_session_error(conn, {:quarantined, reason}),
+    do: send_json(conn, 503, %{"error" => "session quarantined", "reason" => reason})
 
-  defp normalize_reason(reason), do: inspect(reason)
+  defp send_session_error(conn, reason)
+       when reason in [:workspace_unavailable, :harness_unavailable],
+       do: send_json(conn, 503, %{"error" => Atom.to_string(reason)})
+
+  defp send_session_error(conn, _reason),
+    do: send_json(conn, 503, %{"error" => "session unavailable"})
 
   defp send_json(conn, status, payload) do
     conn

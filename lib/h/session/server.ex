@@ -469,14 +469,9 @@ defmodule H.Session.Server do
     end
   end
 
-  defp reconcile_on_open(state, true, _now) do
-    # Clean close: no restarts incremented, resume pending/sleeping/waiting work
-    effects = collect_resume_effects(state)
-    {[], state, effects}
-  end
-
-  defp reconcile_on_open(state, _unclean, now) do
-    # Unclean crash recovery
+  defp reconcile_on_open(state, clean?, now) do
+    # Clean close leaves only potentially interrupted unsafe tools running.
+    # Do not charge those attempts against the restart budget.
     running_tasks =
       state.tasks
       |> Map.values()
@@ -485,7 +480,13 @@ defmodule H.Session.Server do
 
     {writes, next_state} =
       Enum.reduce(running_tasks, {[], state}, fn task, {acc_writes, acc_state} ->
-        {w, st} = recover_unclean_task(task, acc_state, now)
+        {w, st} =
+          if clean? == true and unsafe_running_tool?(task) do
+            recover_unclean_tool_call(task, acc_state, now)
+          else
+            recover_unclean_task(task, acc_state, now)
+          end
+
         {acc_writes ++ w, st}
       end)
 
@@ -3098,7 +3099,7 @@ defmodule H.Session.Server do
     reset_writes =
       state.tasks
       |> Map.values()
-      |> Enum.filter(&(&1.status == "running"))
+      |> Enum.filter(&(&1.status == "running" and not unsafe_running_tool?(&1)))
       |> Enum.map(&{:put_task, Task.reset_clean(&1, now)})
 
     meta_write = {:put_session_meta, Map.put(state.session_meta, :clean_close, true)}
@@ -3109,6 +3110,9 @@ defmodule H.Session.Server do
       _, _ -> :ok
     end
   end
+
+  defp unsafe_running_tool?(task),
+    do: task.kind == "tool_call" and task.checkpoint["replay"] != "safe"
 
   defp clean_shutdown_reason?(:normal), do: true
   defp clean_shutdown_reason?(:shutdown), do: true

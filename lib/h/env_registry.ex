@@ -30,8 +30,10 @@ defmodule H.EnvRegistry do
   def fetch_env(env_id, opts \\ []) when is_list(opts) do
     with id when is_binary(id) and id != "" <- env_id,
          {:ok, spec} <- Map.fetch(resolve_specs(opts), id) do
-      env = build_env(spec, spec.default_cwd)
-      {:ok, env, to_descriptor(spec)}
+      case build_env(spec, spec.default_cwd) do
+        {mod, _state} = env when is_atom(mod) -> {:ok, env, to_descriptor(spec)}
+        _ -> {:error, :unknown_environment}
+      end
     else
       _ -> {:error, :unknown_environment}
     end
@@ -149,7 +151,8 @@ defmodule H.EnvRegistry do
   defp build_env(%{build: build}, cwd) when is_function(build, 1), do: build.(cwd)
   defp build_env(%{build: build}, _cwd) when is_function(build, 0), do: build.()
   defp build_env(%{env: {mod, _state} = env}, _cwd) when is_atom(mod), do: env
-  defp build_env(%{id: id}, cwd), do: Host.new(cwd, env_id: id)
+  defp build_env(%{id: id, kind: "host"}, cwd), do: Host.new(cwd, env_id: id)
+  defp build_env(_spec, _cwd), do: nil
 
   defp to_descriptor(spec) do
     %{

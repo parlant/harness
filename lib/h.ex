@@ -6,23 +6,18 @@ defmodule H do
   @max_unix_socket_bytes 100
 
   @doc """
-  Computes the local Unix domain socket path for `<data_dir>/api.sock`,
-  falling back to a deterministic short `/tmp` path if `data_dir` exceeds
-  OS `sun_path` limits.
+  Computes the local Unix domain socket path inside the private data directory.
+  Use a shorter data directory or disable the socket if the path exceeds the OS limit.
   """
   @spec api_socket_path(String.t()) :: String.t()
   def api_socket_path(data_dir) when is_binary(data_dir) do
-    expanded = Path.expand(data_dir)
-    direct = Path.join(expanded, "api.sock")
+    path = Path.join(Path.expand(data_dir), "api.sock")
 
-    if byte_size(direct) <= @max_unix_socket_bytes do
-      direct
-    else
-      digest =
-        :crypto.hash(:sha256, expanded) |> Base.encode16(case: :lower) |> binary_part(0, 16)
-
-      Path.join("/tmp", "h-api-#{digest}.sock")
+    if byte_size(path) > @max_unix_socket_bytes do
+      raise ArgumentError, "api.sock path is too long; use a shorter data directory"
     end
+
+    path
   end
 
   @doc """
@@ -93,18 +88,7 @@ defmodule H do
     sock_path =
       if bind_socket? do
         path = api_socket_path(data_dir)
-        File.rm(path)
-        unix_opts = Keyword.put(router_opts, :unix_socket, true)
-
-        {:ok, _unix_pid} =
-          ensure_started(
-            Supervisor.child_spec(
-              {Bandit, plug: {H.HTTP.Router, unix_opts}, ip: {:local, path}, port: 0},
-              id: :h_http_unix
-            )
-          )
-
-        _ = File.chmod(path, 0o600)
+        {:ok, _unix_pid} = ensure_started({H.HTTP.UnixListener, {path, router_opts}})
         path
       else
         nil

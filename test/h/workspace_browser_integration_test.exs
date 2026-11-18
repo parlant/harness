@@ -5,6 +5,7 @@ defmodule H.WorkspaceBrowserIntegrationTest do
   alias H.Provider.Fake
 
   test "Slice 5 end-to-end: /api/v1/fs folder browser, AGENTS.md discovery, auto session_id + title, and Unix-socket + TCP dual-client sync" do
+    {:ok, _} = Application.ensure_all_started(:req)
     id = System.unique_integer([:positive])
     tmp_root = Path.join(System.tmp_dir!(), "h-s5-#{id}")
     data_dir = Path.join(tmp_root, "data")
@@ -103,19 +104,12 @@ defmodule H.WorkspaceBrowserIntegrationTest do
         )
       )
 
-    File.rm(sock_path)
-
-    _unix_pid =
-      start_supervised!(
-        Supervisor.child_spec(
-          {Bandit,
-           plug: {H.HTTP.Router, Keyword.put(router_opts, :unix_socket, true)},
-           ip: {:local, sock_path},
-           port: 0,
-           thousand_island_options: [num_acceptors: 2, shutdown_timeout: 200]},
-          id: :s5_unix
-        )
-      )
+    # A stale socket can be rebound without unlinking a live listener.
+    {:ok, stale} = :gen_tcp.listen(0, ip: {:local, sock_path}, active: false)
+    :ok = :gen_tcp.close(stale)
+    start_supervised!({H.HTTP.UnixListener, {sock_path, router_opts}})
+    assert Bitwise.band(File.stat!(sock_path).mode, 0o777) == 0o600
+    assert {:error, :eaddrinuse} = H.HTTP.UnixListener.start_link(sock_path, router_opts)
 
     {:ok, {_ip, port}} = ThousandIsland.listener_info(tcp_pid)
     base_url = "http://127.0.0.1:#{port}"
@@ -258,6 +252,13 @@ defmodule H.WorkspaceBrowserIntegrationTest do
 
     Task.shutdown(web_sse, :brutal_kill)
     Task.shutdown(tui_sse, :brutal_kill)
+
+    # An existing catalog entry must not silently run against the host filesystem
+    # when its configured execution environment is absent.
+    {:ok, _} =
+      Catalog.put_session(catalog, %{session_id: "offline-vm", cwd: repo_dir, env_id: "vm"})
+
+    assert {:error, :workspace_unavailable} = Daemon.get_session_detail("offline-vm", daemon_opts)
   end
 
   defp fold_sse_chunks(chunks, transcript) do

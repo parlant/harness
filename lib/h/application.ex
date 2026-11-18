@@ -84,15 +84,7 @@ defmodule H.Application do
       unix_children =
         if api_socket? do
           sock_path = H.api_socket_path(data_dir)
-          File.rm(sock_path)
-          unix_opts = Keyword.put(base_router_opts, :unix_socket, true)
-
-          [
-            Supervisor.child_spec(
-              {Bandit, plug: {H.HTTP.Router, unix_opts}, ip: {:local, sock_path}, port: 0},
-              id: :h_http_unix
-            )
-          ]
+          [{H.HTTP.UnixListener, {sock_path, base_router_opts}}]
         else
           []
         end
