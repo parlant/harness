@@ -1,0 +1,907 @@
+use crate::config::{DaemonTarget, LoopbackHost, SecretToken};
+use crate::protocol::{
+    CommandEnvelope, CommandReceipt, CreateSessionRequest, CreateSessionResponse,
+    EntriesPageResponse, EnvironmentInfo, EnvironmentsResponse, ErrorResponse, ModelInfo,
+    ModelsResponse, SessionDetailResponse, SessionSummary, SessionsResponse, SseEvent, SseParser,
+};
+use std::collections::VecDeque;
+use std::fmt;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
+
+const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_UNARY_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug)]
+pub enum ClientError {
+    InvalidInput(String),
+    ConnectionFailed { endpoint: String, message: String },
+    RedirectDisabled { status: u16 },
+    HttpStatus { status: u16, message: String },
+    InvalidResponse(String),
+    Io(String),
+}
+
+impl fmt::Display for ClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClientError::InvalidInput(msg) => write!(f, "invalid request input: {msg}"),
+            ClientError::ConnectionFailed { endpoint, message } => {
+                write!(f, "failed to connect to daemon at {endpoint}: {message}")
+            }
+            ClientError::RedirectDisabled { status } => write!(
+                f,
+                "refusing HTTP {status} redirect (redirects are disabled for security)"
+            ),
+            ClientError::HttpStatus { status, message } => {
+                write!(f, "daemon returned HTTP {status}: {message}")
+            }
+            ClientError::InvalidResponse(msg) => write!(f, "invalid daemon response: {msg}"),
+            ClientError::Io(msg) => write!(f, "transport I/O error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {}
+
+enum TransportStream {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl Read for TransportStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            TransportStream::Unix(s) => s.read(buf),
+            TransportStream::Tcp(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for TransportStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            TransportStream::Unix(s) => s.write(buf),
+            TransportStream::Tcp(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            TransportStream::Unix(s) => s.flush(),
+            TransportStream::Tcp(s) => s.flush(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DaemonClient {
+    target: DaemonTarget,
+    token: SecretToken,
+}
+
+impl fmt::Debug for DaemonClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DaemonClient")
+            .field("target", &self.target.display_endpoint())
+            .field("token", &self.token)
+            .finish()
+    }
+}
+
+impl DaemonClient {
+    pub fn new(target: DaemonTarget, token: SecretToken) -> Self {
+        Self { target, token }
+    }
+
+    pub fn target(&self) -> &DaemonTarget {
+        &self.target
+    }
+
+    pub fn get_environments(&self) -> Result<Vec<EnvironmentInfo>, ClientError> {
+        let resp: EnvironmentsResponse = self.get_json("/api/v1/environments")?;
+        Ok(resp.environments)
+    }
+
+    pub fn list_models(&self) -> Result<Vec<ModelInfo>, ClientError> {
+        let resp: ModelsResponse = self.get_json("/api/v1/models")?;
+        Ok(resp.models)
+    }
+
+    pub fn list_sessions(
+        &self,
+        env_id: Option<&str>,
+        cwd: Option<&str>,
+        subtree: Option<bool>,
+    ) -> Result<Vec<SessionSummary>, ClientError> {
+        let mut params = Vec::new();
+        if let Some(env) = env_id.filter(|s| !s.is_empty()) {
+            params.push(format!("env_id={}", percent_encode(env)));
+        }
+        if let Some(c) = cwd.filter(|s| !s.is_empty()) {
+            params.push(format!("cwd={}", percent_encode(c)));
+        }
+        if let Some(sub) = subtree {
+            params.push(format!("subtree={}", if sub { "true" } else { "false" }));
+        }
+
+        let path = if params.is_empty() {
+            "/api/v1/sessions".to_string()
+        } else {
+            format!("/api/v1/sessions?{}", params.join("&"))
+        };
+
+        let resp: SessionsResponse = self.get_json(&path)?;
+        Ok(resp.sessions)
+    }
+
+    pub fn create_session(
+        &self,
+        req: &CreateSessionRequest,
+    ) -> Result<CreateSessionResponse, ClientError> {
+        self.post_json("/api/v1/sessions", req)
+    }
+
+    pub fn get_session_detail(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionDetailResponse, ClientError> {
+        validate_path_segment("session_id", session_id)?;
+        let path = format!("/api/v1/sessions/{}", percent_encode(session_id));
+        self.get_json(&path)
+    }
+
+    pub fn get_entries(
+        &self,
+        session_id: &str,
+        conversation_id: &str,
+        order: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<EntriesPageResponse, ClientError> {
+        validate_path_segment("session_id", session_id)?;
+        validate_path_segment("conversation_id", conversation_id)?;
+
+        let mut params = Vec::new();
+        if let Some(o) = order {
+            params.push(format!("order={}", percent_encode(o)));
+        }
+        if let Some(c) = cursor {
+            params.push(format!("cursor={}", percent_encode(c)));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={l}"));
+        }
+
+        let base = format!(
+            "/api/v1/sessions/{}/conversations/{}/entries",
+            percent_encode(session_id),
+            percent_encode(conversation_id)
+        );
+        let path = if params.is_empty() {
+            base
+        } else {
+            format!("{base}?{}", params.join("&"))
+        };
+        self.get_json(&path)
+    }
+
+    pub fn post_command(
+        &self,
+        session_id: &str,
+        envelope: &CommandEnvelope,
+    ) -> Result<CommandReceipt, ClientError> {
+        validate_path_segment("session_id", session_id)?;
+        let path = format!("/api/v1/sessions/{}/commands", percent_encode(session_id));
+        self.post_json(&path, envelope)
+    }
+
+    pub fn subscribe_events(
+        &self,
+        session_id: &str,
+        conversation_id: &str,
+        last_event_id: Option<u64>,
+    ) -> Result<SseStream, ClientError> {
+        validate_path_segment("session_id", session_id)?;
+        validate_path_segment("conversation_id", conversation_id)?;
+
+        let path = format!(
+            "/api/v1/sessions/{}/conversations/{}/events",
+            percent_encode(session_id),
+            percent_encode(conversation_id)
+        );
+
+        let mut stream = self.connect(None)?;
+        let mut extra_headers = Vec::new();
+        if let Some(seq) = last_event_id {
+            extra_headers.push(("Last-Event-ID", seq.to_string()));
+        }
+        write_request(
+            &mut stream,
+            "GET",
+            &path,
+            &self.target.host_header(),
+            self.token.expose(),
+            "text/event-stream",
+            &extra_headers,
+            None,
+        )?;
+
+        let mut reader = BufReader::new(stream);
+        let head = read_response_head(&mut reader)?;
+        if (300..400).contains(&head.status) {
+            return Err(ClientError::RedirectDisabled {
+                status: head.status,
+            });
+        }
+        if head.status != 200 {
+            let body = read_unary_body(&mut reader, &head)?;
+            return Err(http_status_error(head.status, &body));
+        }
+        if let Some(ct) = head.content_type.as_deref() {
+            if !ct.to_ascii_lowercase().starts_with("text/event-stream") {
+                return Err(ClientError::InvalidResponse(format!(
+                    "expected text/event-stream content-type, got {ct}"
+                )));
+            }
+        }
+
+        Ok(SseStream::new(reader, head.chunked))
+    }
+
+    fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
+        self.request_json::<T>("GET", path, None)
+    }
+
+    fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
+        let json_bytes = serde_json::to_vec(body)
+            .map_err(|e| ClientError::InvalidInput(format!("JSON encode failed: {e}")))?;
+        self.request_json::<T>("POST", path, Some(&json_bytes))
+    }
+
+    fn request_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+    ) -> Result<T, ClientError> {
+        let mut stream = self.connect(Some(DEFAULT_IO_TIMEOUT))?;
+        write_request(
+            &mut stream,
+            method,
+            path,
+            &self.target.host_header(),
+            self.token.expose(),
+            "application/json",
+            &[],
+            body,
+        )?;
+
+        let mut reader = BufReader::new(stream);
+        let head = read_response_head(&mut reader)?;
+        if (300..400).contains(&head.status) {
+            return Err(ClientError::RedirectDisabled {
+                status: head.status,
+            });
+        }
+
+        let body_bytes = read_unary_body(&mut reader, &head)?;
+        if !(200..300).contains(&head.status) {
+            return Err(http_status_error(head.status, &body_bytes));
+        }
+
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| ClientError::InvalidResponse(format!("JSON decode error: {e}")))
+    }
+
+    fn connect(&self, read_timeout: Option<Duration>) -> Result<TransportStream, ClientError> {
+        let endpoint = self.target.display_endpoint();
+        match &self.target {
+            DaemonTarget::UnixSocket(path) => {
+                let stream =
+                    UnixStream::connect(path).map_err(|e| ClientError::ConnectionFailed {
+                        endpoint,
+                        message: e.to_string(),
+                    })?;
+                stream
+                    .set_read_timeout(read_timeout)
+                    .map_err(|e| ClientError::Io(e.to_string()))?;
+                stream
+                    .set_write_timeout(Some(DEFAULT_IO_TIMEOUT))
+                    .map_err(|e| ClientError::Io(e.to_string()))?;
+                Ok(TransportStream::Unix(stream))
+            }
+            DaemonTarget::LoopbackHttp { host, port } => {
+                let addr = match host {
+                    LoopbackHost::Ipv4 => SocketAddr::from(([127, 0, 0, 1], *port)),
+                    LoopbackHost::Ipv6 => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], *port)),
+                };
+                let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|e| {
+                    ClientError::ConnectionFailed {
+                        endpoint,
+                        message: e.to_string(),
+                    }
+                })?;
+                stream
+                    .set_read_timeout(read_timeout)
+                    .map_err(|e| ClientError::Io(e.to_string()))?;
+                stream
+                    .set_write_timeout(Some(DEFAULT_IO_TIMEOUT))
+                    .map_err(|e| ClientError::Io(e.to_string()))?;
+                Ok(TransportStream::Tcp(stream))
+            }
+        }
+    }
+}
+
+pub struct SseStream {
+    reader: BufReader<TransportStream>,
+    chunked: bool,
+    chunk_remaining: usize,
+    chunk_eof: bool,
+    parser: SseParser,
+    queued: VecDeque<SseEvent>,
+    stream_done: bool,
+}
+
+impl SseStream {
+    fn new(reader: BufReader<TransportStream>, chunked: bool) -> Self {
+        Self {
+            reader,
+            chunked,
+            chunk_remaining: 0,
+            chunk_eof: false,
+            parser: SseParser::new(),
+            queued: VecDeque::new(),
+            stream_done: false,
+        }
+    }
+
+    pub fn next_event(&mut self) -> Result<Option<SseEvent>, ClientError> {
+        loop {
+            if let Some(ev) = self.queued.pop_front() {
+                return Ok(Some(ev));
+            }
+            if self.stream_done {
+                return Ok(None);
+            }
+
+            let mut buf = [0u8; 4096];
+            let n = if self.chunked {
+                self.read_chunked_slice(&mut buf)?
+            } else {
+                read_retry_intr(&mut self.reader, &mut buf)
+                    .map_err(|e| ClientError::Io(e.to_string()))?
+            };
+
+            if n == 0 {
+                self.stream_done = true;
+                if let Some(ev) = self.parser.finish() {
+                    self.queued.push_back(ev);
+                }
+            } else {
+                for ev in self.parser.push_bytes(&buf[..n]) {
+                    self.queued.push_back(ev);
+                }
+            }
+        }
+    }
+
+    fn read_chunked_slice(&mut self, out: &mut [u8]) -> Result<usize, ClientError> {
+        if self.chunk_eof {
+            return Ok(0);
+        }
+
+        while self.chunk_remaining == 0 {
+            let line = read_crlf_line(&mut self.reader)?;
+            let size_hex = line.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(size_hex, 16).map_err(|_| {
+                ClientError::InvalidResponse(format!("invalid chunk size: {size_hex}"))
+            })?;
+            if size == 0 {
+                // Drain trailing headers/empty line after final 0-length chunk
+                loop {
+                    let trailer = read_crlf_line(&mut self.reader)?;
+                    if trailer.is_empty() {
+                        break;
+                    }
+                }
+                self.chunk_eof = true;
+                return Ok(0);
+            }
+            self.chunk_remaining = size;
+        }
+
+        let to_read = out.len().min(self.chunk_remaining);
+        let n = read_retry_intr(&mut self.reader, &mut out[..to_read])
+            .map_err(|e| ClientError::Io(e.to_string()))?;
+        if n == 0 {
+            return Err(ClientError::InvalidResponse(
+                "unexpected EOF inside HTTP chunk".to_string(),
+            ));
+        }
+        self.chunk_remaining -= n;
+        if self.chunk_remaining == 0 {
+            consume_crlf(&mut self.reader)?;
+        }
+        Ok(n)
+    }
+}
+
+struct ResponseHead {
+    status: u16,
+    content_length: Option<usize>,
+    chunked: bool,
+    content_type: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_request(
+    stream: &mut TransportStream,
+    method: &str,
+    path: &str,
+    host: &str,
+    token: &str,
+    accept: &str,
+    extra_headers: &[(&str, String)],
+    body: Option<&[u8]>,
+) -> Result<(), ClientError> {
+    if path.contains(['\r', '\n', '\0']) || host.contains(['\r', '\n', '\0']) {
+        return Err(ClientError::InvalidInput(
+            "request target or host contains invalid control characters".to_string(),
+        ));
+    }
+
+    let mut req = Vec::with_capacity(512 + body.map_or(0, <[u8]>::len));
+    let _ = write!(req, "{method} {path} HTTP/1.1\r\n");
+    let _ = write!(req, "Host: {host}\r\n");
+    let _ = write!(req, "Authorization: Bearer {token}\r\n");
+    let _ = write!(req, "Accept: {accept}\r\n");
+    for (name, value) in extra_headers {
+        if !name.contains(['\r', '\n', ':']) && !value.contains(['\r', '\n']) {
+            let _ = write!(req, "{name}: {value}\r\n");
+        }
+    }
+    if let Some(bytes) = body {
+        let _ = write!(req, "Content-Type: application/json\r\n");
+        let _ = write!(req, "Content-Length: {}\r\n", bytes.len());
+    }
+    req.extend_from_slice(b"Connection: close\r\n\r\n");
+    if let Some(bytes) = body {
+        req.extend_from_slice(bytes);
+    }
+
+    stream
+        .write_all(&req)
+        .and_then(|()| stream.flush())
+        .map_err(|e| ClientError::Io(e.to_string()))
+}
+
+fn read_response_head(
+    reader: &mut BufReader<TransportStream>,
+) -> Result<ResponseHead, ClientError> {
+    let status_line = read_crlf_line(reader)?;
+    let mut parts = status_line.splitn(3, ' ');
+    let version = parts.next().unwrap_or("");
+    let status_str = parts.next().unwrap_or("");
+    if !version.starts_with("HTTP/1.") {
+        return Err(ClientError::InvalidResponse(format!(
+            "unexpected HTTP status line: {status_line}"
+        )));
+    }
+    let status: u16 = status_str.parse().map_err(|_| {
+        ClientError::InvalidResponse(format!("invalid HTTP status code: {status_str}"))
+    })?;
+
+    let mut total_header_bytes = status_line.len();
+    let mut content_length = None;
+    let mut chunked = false;
+    let mut content_type = None;
+
+    loop {
+        let line = read_crlf_line(reader)?;
+        total_header_bytes += line.len() + 2;
+        if total_header_bytes > MAX_HEADER_BYTES {
+            return Err(ClientError::InvalidResponse(
+                "HTTP response headers too large".to_string(),
+            ));
+        }
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, val)) = line.split_once(':') {
+            let lower = name.trim().to_ascii_lowercase();
+            let val = val.trim();
+            match lower.as_str() {
+                "content-length" => {
+                    content_length = val.parse::<usize>().ok();
+                }
+                "transfer-encoding" => {
+                    if val.to_ascii_lowercase().contains("chunked") {
+                        chunked = true;
+                    }
+                }
+                "content-type" => {
+                    content_type = Some(val.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(ResponseHead {
+        status,
+        content_length,
+        chunked,
+        content_type,
+    })
+}
+
+fn read_unary_body(
+    reader: &mut BufReader<TransportStream>,
+    head: &ResponseHead,
+) -> Result<Vec<u8>, ClientError> {
+    if head.chunked {
+        let mut body = Vec::new();
+        loop {
+            let size_line = read_crlf_line(reader)?;
+            let size_hex = size_line.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(size_hex, 16).map_err(|_| {
+                ClientError::InvalidResponse(format!("invalid chunk size: {size_hex}"))
+            })?;
+            if size == 0 {
+                loop {
+                    let trailer = read_crlf_line(reader)?;
+                    if trailer.is_empty() {
+                        break;
+                    }
+                }
+                break;
+            }
+            if body.len().saturating_add(size) > MAX_UNARY_BODY_BYTES {
+                return Err(ClientError::InvalidResponse(
+                    "HTTP response body exceeds size limit".to_string(),
+                ));
+            }
+            let start = body.len();
+            body.resize(start + size, 0);
+            reader
+                .read_exact(&mut body[start..])
+                .map_err(|e| ClientError::Io(e.to_string()))?;
+            consume_crlf(reader)?;
+        }
+        return Ok(body);
+    }
+
+    if let Some(len) = head.content_length {
+        if len > MAX_UNARY_BODY_BYTES {
+            return Err(ClientError::InvalidResponse(
+                "HTTP response body exceeds size limit".to_string(),
+            ));
+        }
+        let mut body = vec![0u8; len];
+        reader
+            .read_exact(&mut body)
+            .map_err(|e| ClientError::Io(e.to_string()))?;
+        return Ok(body);
+    }
+
+    let mut body = Vec::new();
+    reader
+        .take((MAX_UNARY_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(|e| ClientError::Io(e.to_string()))?;
+    if body.len() > MAX_UNARY_BODY_BYTES {
+        return Err(ClientError::InvalidResponse(
+            "HTTP response body exceeds size limit".to_string(),
+        ));
+    }
+    Ok(body)
+}
+
+fn read_crlf_line(reader: &mut BufReader<TransportStream>) -> Result<String, ClientError> {
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => {
+                if buf.is_empty() {
+                    return Err(ClientError::InvalidResponse(
+                        "unexpected EOF while reading HTTP line".to_string(),
+                    ));
+                }
+                break;
+            }
+            Ok(_) => break,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(ClientError::Io(e.to_string())),
+        }
+    }
+    while buf.last().is_some_and(|&b| b == b'\n' || b == b'\r') {
+        buf.pop();
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn consume_crlf(reader: &mut BufReader<TransportStream>) -> Result<(), ClientError> {
+    let mut crlf = [0u8; 2];
+    reader
+        .read_exact(&mut crlf)
+        .map_err(|e| ClientError::Io(e.to_string()))?;
+    if &crlf != b"\r\n" {
+        return Err(ClientError::InvalidResponse(
+            "missing CRLF after HTTP chunk".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_retry_intr<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match reader.read(buf) {
+            Ok(n) => return Ok(n),
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn http_status_error(status: u16, body: &[u8]) -> ClientError {
+    if let Ok(err_resp) = serde_json::from_slice::<ErrorResponse>(body) {
+        if let Some(msg) = err_resp.error {
+            let full = match err_resp.reason {
+                Some(reason) => format!("{msg} ({reason})"),
+                None => msg,
+            };
+            return ClientError::HttpStatus {
+                status,
+                message: full,
+            };
+        }
+    }
+    let raw = String::from_utf8_lossy(body).trim().to_string();
+    let message = if raw.is_empty() {
+        format!("status {status}")
+    } else {
+        raw
+    };
+    ClientError::HttpStatus { status, message }
+}
+
+fn validate_path_segment(name: &str, value: &str) -> Result<(), ClientError> {
+    if value.is_empty() || value.contains(['/', '\\', '\r', '\n', '\0']) {
+        return Err(ClientError::InvalidInput(format!(
+            "invalid {name} path segment"
+        )));
+    }
+    Ok(())
+}
+
+pub fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            _ => {
+                let _ = fmt::Write::write_fmt(&mut out, format_args!("%{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::ServerFrame;
+    use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn read_http_req(mut stream: impl Read) -> String {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head_end = pos + 4;
+                let head_str = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let content_len = head_str
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        if k.eq_ignore_ascii_case("content-length") {
+                            v.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                while buf.len() < head_end + content_len {
+                    let m = stream.read(&mut tmp).unwrap();
+                    if m == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..m]);
+                }
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[test]
+    fn unix_socket_client_handles_api_and_chunked_sse() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock_path = PathBuf::from(format!("/private/tmp/h-cli-test-{nanos}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let handle = thread::spawn(move || {
+            // 1. GET /api/v1/environments
+            let (mut s1, _) = listener.accept().unwrap();
+            let req1 = read_http_req(&mut s1);
+            assert!(req1.starts_with("GET /api/v1/environments HTTP/1.1"));
+            assert!(req1.contains("Authorization: Bearer tok-test\r\n"));
+            assert!(req1.contains("Host: localhost\r\n"));
+            let body1 = r#"{"environments":[{"id":"host","kind":"host"}]}"#;
+            write!(
+                s1,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body1.len(),
+                body1
+            )
+            .unwrap();
+
+            // 2. GET /api/v1/sessions?env_id=host&cwd=%2Ftmp%2Fmy%20proj
+            let (mut s2, _) = listener.accept().unwrap();
+            let req2 = read_http_req(&mut s2);
+            assert!(req2.starts_with("GET /api/v1/sessions?env_id=host&cwd=%2Ftmp%2Fmy%20proj "));
+            let body2 = r#"{"sessions":[{"session_id":"s1","cwd":"/tmp/my proj","active":false}]}"#;
+            write!(
+                s2,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body2.len(),
+                body2
+            )
+            .unwrap();
+
+            // 3. POST /api/v1/sessions
+            let (mut s3, _) = listener.accept().unwrap();
+            let req3 = read_http_req(&mut s3);
+            assert!(req3.starts_with("POST /api/v1/sessions HTTP/1.1"));
+            let body3 = r#"{"session":{"session_id":"s1","cwd":"/tmp/my proj","root_conversation_id":"1"},"seq":1}"#;
+            write!(
+                s3,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body3.len(),
+                body3
+            )
+            .unwrap();
+
+            // 4. POST /api/v1/sessions/s1/commands
+            let (mut s4, _) = listener.accept().unwrap();
+            let req4 = read_http_req(&mut s4);
+            assert!(req4.starts_with("POST /api/v1/sessions/s1/commands HTTP/1.1"));
+            assert!(req4.contains(r#""request_id":"req-123""#));
+            let body4 = r#"{"version":1,"request_id":"req-123","seq":2,"submission_id":"sub-1","status":"placed"}"#;
+            write!(
+                s4,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body4.len(),
+                body4
+            )
+            .unwrap();
+
+            // 5. GET SSE events (chunked)
+            let (mut s5, _) = listener.accept().unwrap();
+            let req5 = read_http_req(&mut s5);
+            assert!(req5.starts_with("GET /api/v1/sessions/s1/conversations/1/events HTTP/1.1"));
+            write!(
+                s5,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+            )
+            .unwrap();
+
+            let chunk1 = "id: 1\nevent: snapshot\ndata: {\"seq\":1,\"entries\":[],\"docs\":{}}\n\n";
+            write!(s5, "{:x}\r\n{}\r\n", chunk1.len(), chunk1).unwrap();
+            let chunk2 = ": keepalive\n\nid: 2\nevent: commit\ndata: {\"seq\":2,\"prev_seq\":1,\"appended_entries\":[],\"doc_ops\":{}}\n\n";
+            write!(s5, "{:x}\r\n{}\r\n", chunk2.len(), chunk2).unwrap();
+            write!(s5, "0\r\n\r\n").unwrap();
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::UnixSocket(sock_path.clone()),
+            SecretToken::new("tok-test").unwrap(),
+        );
+
+        let envs = client.get_environments().unwrap();
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].id, "host");
+
+        let sessions = client
+            .list_sessions(Some("host"), Some("/tmp/my proj"), None)
+            .unwrap();
+        assert_eq!(sessions[0].session_id, "s1");
+
+        let created = client
+            .create_session(&CreateSessionRequest {
+                version: 1,
+                request_id: "c1".to_string(),
+                env_id: "host".to_string(),
+                cwd: "/tmp/my proj".to_string(),
+                session_id: None,
+                title: None,
+                agent: None,
+            })
+            .unwrap();
+        assert_eq!(created.seq, 1);
+
+        let cmd = CommandEnvelope::submit_input(
+            "req-123",
+            1,
+            "hi",
+            crate::protocol::WhenBusy::FollowUp,
+            crate::protocol::WhenIdle::Start,
+        );
+        let receipt = client.post_command("s1", &cmd).unwrap();
+        assert_eq!(receipt.seq, Some(2));
+
+        let mut sse = client.subscribe_events("s1", "1", None).unwrap();
+        let ev1 = sse.next_event().unwrap().unwrap();
+        assert!(matches!(ev1.decode_frame().unwrap(), ServerFrame::Snapshot(s) if s.seq == 1));
+        let ev2 = sse.next_event().unwrap().unwrap();
+        assert!(matches!(ev2.decode_frame().unwrap(), ServerFrame::Commit(c) if c.seq == 2));
+        assert!(sse.next_event().unwrap().is_none());
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn tcp_loopback_client_refuses_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let handle = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let req = read_http_req(&mut s);
+            assert!(req.contains(&format!("Host: 127.0.0.1:{port}\r\n")));
+            write!(
+                s,
+                "HTTP/1.1 302 Found\r\nLocation: http://evil.example/steal\r\nContent-Length: 0\r\n\r\n"
+            )
+            .unwrap();
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::LoopbackHttp {
+                host: LoopbackHost::Ipv4,
+                port,
+            },
+            SecretToken::new("tok-secret").unwrap(),
+        );
+
+        let err = client.get_environments().unwrap_err();
+        assert!(matches!(err, ClientError::RedirectDisabled { status: 302 }));
+        handle.join().unwrap();
+    }
+}
