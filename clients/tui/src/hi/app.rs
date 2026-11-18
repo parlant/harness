@@ -432,6 +432,10 @@ impl Ui {
             return;
         }
         let text = self.draft.editor.expanded_text();
+        if text.trim_start().starts_with('!') {
+            self.note = "Shell unavailable; draft retained, nothing sent".into();
+            return;
+        }
         if text.trim().is_empty() && self.draft.attachments.is_empty() {
             return;
         }

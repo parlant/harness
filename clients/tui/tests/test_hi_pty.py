@@ -84,6 +84,21 @@ class HiPtyAcceptanceTests(unittest.TestCase):
                 _assert_balanced_terminal_modes(self, pty.raw_text())
                 self.assertEqual(daemon.abort_commands(), [])
 
+    def test_shell_prefix_never_falls_through_to_model_input(self) -> None:
+        for mode in ("fullscreen", "regular"):
+            with self.subTest(mode=mode), FakeDaemon(cwd=self.workdir) as daemon:
+                with PtySession([self.hi_bin, "--tui-mode", mode, "-s", "demo"], env=daemon.env(), cwd=self.workdir) as pty:
+                    daemon.wait_for_sse_connect()
+                    pty.wait_for_output("Ready")
+                    pty.send_text("!!private-marker")
+                    pty.send_enter()
+                    pty.wait_for_output("Shell unavailable")
+                    pty.send_alt_enter()
+                    pty.send_ctrl("c")
+                    pty.send_ctrl("d")
+                    self.assertEqual(pty.wait(), 0)
+                    self.assertEqual(daemon.recorded_commands, [])
+
     def test_raw_mode_restore_on_ctrl_d_when_empty(self) -> None:
         with FakeDaemon(transport="uds", cwd=self.workdir, session_id="demo") as daemon:
             with PtySession([self.hi_bin, "-s", "demo"], env=daemon.env(), cwd=self.workdir) as pty:
