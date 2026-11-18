@@ -40,7 +40,9 @@ A `200` receipt acknowledges the command, not a completed model reply. It includ
 | `fork` | `at_entry_id`: visible entry at which to branch. |
 | `fork_and_submit` | `at_entry_id` and input `content` in one commit; accepts input busy/idle policies. |
 | `configure` | `model`, `thinking`, `system_prompt`, `instructions`, `tools`, `max_turns`; optional `expected_seq` conflict guard. |
-| `abort` | Abort active generation work in the conversation, optionally with `reason`. Although validation accepts `task_id`, the handler does **not** narrow cancellation to that task. |
+| `rename` | `title` sets the session display name; optional session-wide `expected_seq` rejects stale writes. |
+| `user_shell` | `command`, boolean `include_in_context`, and required `expected_seq`. Requires an idle conversation. Runs in the bound environment after intent is committed, under the workspace lease. Interrupted unsafe commands are not replayed. Excluded commands and results stay out of model history and `search_history`. |
+| `abort` | Abort active generation or user-shell work in the conversation, optionally with `reason`. Although validation accepts `task_id`, the handler does **not** narrow cancellation to that task. |
 | `withdraw` | `submission_ids`: non-empty array of queued submission IDs to withdraw atomically from the conversation's `inbox`. All-or-conflict (`409` `"submission_not_queued"` if any ID is missing, already consumed, already withdrawn, or belongs to another conversation). Receipt returns `status: "done"` and `withdrawn`: array of withdrawn inbox items (`submission_id`, `request_id`, `when_busy`, `content`) in original `inbox` order; idempotent retries return the stored `withdrawn` array. |
 
 ## SSE cursor rules
