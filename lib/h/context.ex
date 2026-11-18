@@ -204,9 +204,74 @@ defmodule H.Context do
 
         [msg]
 
+      "user_shell" ->
+        if fetch(data, :include_in_context) == true do
+          text = format_user_shell_text(data)
+          [%{role: "user", content: [%{type: "text", text: text}]} |> maybe_put_meta(data)]
+        else
+          []
+        end
+
       _other ->
         []
     end
+  end
+
+  defp format_user_shell_text(data) do
+    command = fetch(data, :command) || ""
+    output = fetch(data, :output)
+    cancelled? = fetch(data, :cancelled, false) == true
+    exit_code = fetch(data, :exit_code)
+    truncated? = fetch(data, :truncated, false) == true
+    skipped_bytes = fetch(data, :skipped_bytes)
+    full_output_path = fetch(data, :full_output_path)
+    diagnostic = fetch(data, :diagnostic)
+
+    body =
+      if is_binary(output) and output != "" do
+        "```\n#{output}\n```"
+      else
+        "(no output)"
+      end
+
+    status_note =
+      cond do
+        cancelled? ->
+          "\n\n(command cancelled)"
+
+        diagnostic == "interrupted" ->
+          "\n\n(command interrupted)"
+
+        diagnostic == "timeout" ->
+          "\n\n(command timed out)"
+
+        is_integer(exit_code) and exit_code != 0 ->
+          "\n\nCommand exited with code #{exit_code}"
+
+        is_binary(diagnostic) and diagnostic != "" and diagnostic != "exit_code" ->
+          "\n\n(command failed: #{diagnostic})"
+
+        true ->
+          ""
+      end
+
+    trunc_note =
+      cond do
+        truncated? and is_binary(full_output_path) and full_output_path != "" and
+          is_integer(skipped_bytes) and skipped_bytes > 0 ->
+          "\n\n[Output truncated: #{skipped_bytes} bytes omitted. Full output: #{full_output_path}]"
+
+        truncated? and is_binary(full_output_path) and full_output_path != "" ->
+          "\n\n[Output truncated. Full output: #{full_output_path}]"
+
+        truncated? ->
+          "\n\n[Output truncated]"
+
+        true ->
+          ""
+      end
+
+    "Ran `#{command}`\n" <> body <> status_note <> trunc_note
   end
 
   defp extract_content_blocks(data) do

@@ -145,26 +145,42 @@ defmodule H.Tools.SearchHistory do
   end
 
   defp match_entry(entry, down_query) do
-    id = entry_field(entry, :id, "id")
+    if excluded_from_provider?(entry) do
+      :nomatch
+    else
+      id = entry_field(entry, :id, "id")
+      kind = entry_field(entry, :kind, "kind") |> to_string()
+      data = entry_field(entry, :data, "data")
+
+      serialized =
+        %{"kind" => kind, "data" => sanitize_json(data)}
+        |> JSON.encode!()
+
+      readable = extract_readable_text(data)
+
+      cond do
+        String.contains?(String.downcase(readable), down_query) ->
+          {:match,
+           %{"id" => id, "kind" => kind, "snippet" => build_snippet(readable, down_query)}}
+
+        String.contains?(String.downcase(serialized), down_query) ->
+          {:match,
+           %{"id" => id, "kind" => kind, "snippet" => build_snippet(serialized, down_query)}}
+
+        true ->
+          :nomatch
+      end
+    end
+  end
+
+  defp excluded_from_provider?(entry) do
     kind = entry_field(entry, :kind, "kind") |> to_string()
-    data = entry_field(entry, :data, "data")
 
-    serialized =
-      %{"kind" => kind, "data" => sanitize_json(data)}
-      |> JSON.encode!()
-
-    readable = extract_readable_text(data)
-
-    cond do
-      String.contains?(String.downcase(readable), down_query) ->
-        {:match, %{"id" => id, "kind" => kind, "snippet" => build_snippet(readable, down_query)}}
-
-      String.contains?(String.downcase(serialized), down_query) ->
-        {:match,
-         %{"id" => id, "kind" => kind, "snippet" => build_snippet(serialized, down_query)}}
-
-      true ->
-        :nomatch
+    if kind == "user_shell" do
+      data = entry_field(entry, :data, "data")
+      not is_map(data) or entry_field(data, :include_in_context, "include_in_context") != true
+    else
+      false
     end
   end
 

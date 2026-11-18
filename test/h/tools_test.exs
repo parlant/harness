@@ -388,5 +388,77 @@ defmodule H.ToolsTest do
       assert {:error, %{is_error: true, diagnostic: "unavailable"}} =
                SearchHistory.execute(%{"query" => "anything"}, context)
     end
+
+    test "never exposes excluded user_shell command or output while still returning included ones",
+         %{context: context} do
+      entries =
+        [
+          %Entry{
+            id: 1,
+            conversation_id: 1,
+            kind: "user_shell",
+            data: %{
+              "command" => "echo needle_secret_cmd",
+              "output" => "needle_secret_output",
+              "full_output_path" => "/tmp/needle_secret_path.log",
+              "include_in_context" => false
+            }
+          },
+          %Entry{
+            id: 2,
+            conversation_id: 1,
+            kind: "compaction",
+            data: %{"summary" => "Compacted"}
+          },
+          %Entry{
+            id: 3,
+            conversation_id: 1,
+            kind: "user_shell",
+            data: %{
+              "command" => "echo needle_missing_flag",
+              "output" => "needle_missing_output"
+            }
+          },
+          %Entry{
+            id: 4,
+            conversation_id: 1,
+            kind: "user_shell",
+            data: %{
+              "command" => "echo needle_public_cmd",
+              "output" => "needle_public_output",
+              "include_in_context" => true
+            }
+          }
+        ]
+        |> Enum.reverse()
+
+      scan_entries = fn %{order: :desc, cursor: cursor, limit: limit} ->
+        filtered =
+          if cursor do
+            Enum.filter(entries, &(&1.id < cursor))
+          else
+            entries
+          end
+
+        page = Enum.take(filtered, limit)
+        next_cursor = if length(filtered) > limit, do: List.last(page).id, else: nil
+        {:ok, %{items: page, next_cursor: next_cursor}}
+      end
+
+      ctx = Map.put(context, :scan_entries, scan_entries)
+
+      assert {:ok, res} = SearchHistory.execute(%{"query" => "needle"}, ctx)
+      assert res.details["count"] == 1
+      assert [%{"id" => 4, "kind" => "user_shell", "snippet" => snippet}] = res.details["matches"]
+      assert snippet =~ "needle_public"
+      refute snippet =~ "secret"
+
+      assert {:ok, secret_res} = SearchHistory.execute(%{"query" => "secret"}, ctx)
+      assert secret_res.details["count"] == 0
+      assert secret_res.details["matches"] == []
+
+      assert {:ok, kind_res} = SearchHistory.execute(%{"query" => "include_in_context"}, ctx)
+      assert Enum.map(kind_res.details["matches"], & &1["id"]) == [4]
+    end
   end
 end

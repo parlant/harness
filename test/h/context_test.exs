@@ -223,6 +223,132 @@ defmodule H.ContextTest do
                %{role: "tool", tool_call_id: "tc_1", name: "tag"}
              ] = req.messages
     end
+
+    test "projects included user_shell entries and omits excluded ones" do
+      agent = %{model: "anthropic:claude-sonnet-4-5"}
+
+      entries = [
+        %{id: 1, kind: "user", data: %{text: "Start"}},
+        %{
+          id: 2,
+          kind: "user_shell",
+          data: %{
+            "command" => "echo SECRET_EXCLUDED",
+            "output" => "SECRET_OUTPUT",
+            "exit_code" => 0,
+            "cancelled" => false,
+            "truncated" => false,
+            "full_output_path" => "/tmp/secret-excluded.log",
+            "include_in_context" => false
+          }
+        },
+        %{
+          id: 3,
+          kind: "user_shell",
+          data: %{
+            "command" => "git status",
+            "output" => "clean\n",
+            "exit_code" => 0,
+            "cancelled" => false,
+            "truncated" => false,
+            "include_in_context" => true
+          }
+        },
+        %{
+          id: 4,
+          kind: "user_shell",
+          data: %{
+            "command" => "make test",
+            "output" => "failed line",
+            "exit_code" => 2,
+            "cancelled" => false,
+            "truncated" => true,
+            "skipped_bytes" => 512,
+            "full_output_path" => "/tmp/make.log",
+            "include_in_context" => true
+          }
+        },
+        %{
+          id: 5,
+          kind: "user_shell",
+          data: %{
+            "command" => "sleep 30",
+            "output" => "",
+            "exit_code" => nil,
+            "cancelled" => true,
+            "truncated" => false,
+            "include_in_context" => true
+          }
+        },
+        %{
+          id: 6,
+          kind: "user_shell",
+          data: %{
+            "command" => "deploy",
+            "output" => "partial",
+            "exit_code" => nil,
+            "cancelled" => false,
+            "diagnostic" => "interrupted",
+            "include_in_context" => true
+          }
+        },
+        %{
+          id: 7,
+          kind: "user_shell",
+          data: %{
+            "command" => "missing_flag",
+            "output" => "SHOULD_NOT_LEAK"
+          }
+        }
+      ]
+
+      req = Context.build_request(entries, agent)
+
+      assert [
+               %{role: "user", content: [%{type: "text", text: "Start"}]},
+               %{
+                 role: "user",
+                 content: [%{type: "text", text: "Ran `git status`\n```\nclean\n\n```"}]
+               },
+               %{
+                 role: "user",
+                 content: [
+                   %{
+                     type: "text",
+                     text:
+                       "Ran `make test`\n```\nfailed line\n```\n\nCommand exited with code 2\n\n[Output truncated: 512 bytes omitted. Full output: /tmp/make.log]"
+                   }
+                 ]
+               },
+               %{
+                 role: "user",
+                 content: [
+                   %{type: "text", text: "Ran `sleep 30`\n(no output)\n\n(command cancelled)"}
+                 ]
+               },
+               %{
+                 role: "user",
+                 content: [
+                   %{
+                     type: "text",
+                     text: "Ran `deploy`\n```\npartial\n```\n\n(command interrupted)"
+                   }
+                 ]
+               }
+             ] = req.messages
+
+      rendered =
+        req.messages
+        |> Enum.flat_map(& &1.content)
+        |> Enum.map(& &1.text)
+        |> Enum.join("\n")
+
+      refute rendered =~ "SECRET_EXCLUDED"
+      refute rendered =~ "SECRET_OUTPUT"
+      refute rendered =~ "secret-excluded.log"
+      refute rendered =~ "missing_flag"
+      refute rendered =~ "SHOULD_NOT_LEAK"
+    end
   end
 
   describe "to_req_llm/1" do
