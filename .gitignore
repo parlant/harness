@@ -4,3 +4,7 @@
 /.elixir_ls/
 /erl_crash.dump
 /.env
+/clients/web/_build/
+/clients/web/deps/
+/clients/web/.elixir_ls/
+/clients/tui/target/
