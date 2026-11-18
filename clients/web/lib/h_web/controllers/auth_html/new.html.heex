@@ -1,0 +1,33 @@
+<main class="auth-page">
+  <section class="auth-card">
+    <header class="auth-card-header">
+      <span class="brand-mark">H</span>
+      <div>
+        <h1>Owner Sign In</h1>
+        <p class="muted">
+          Enter the owner token from <code>auth.token</code> in your data directory.
+        </p>
+      </div>
+    </header>
+
+    <div :if={@error} role="alert" class="flash-banner flash-error">
+      <span>{@error}</span>
+    </div>
+
+    <form action={~p"/login"} method="post" class="auth-login-form">
+      <input type="hidden" name="_csrf_token" value={get_csrf_token()} />
+      <label for="owner-token-input" class="field-label">Owner Token</label>
+      <input
+        id="owner-token-input"
+        type="password"
+        name="token"
+        autocomplete="current-password"
+        placeholder="Paste owner token…"
+        required
+        autofocus
+        class="input mono"
+      />
+      <button type="submit" class="btn btn-primary">Sign in</button>
+    </form>
+  </section>
+</main>
