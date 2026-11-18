@@ -1,0 +1,69 @@
+defmodule HWeb.Endpoint do
+  @moduledoc """
+  Phoenix Endpoint for `:harness_web`.
+
+  Binds loopback by default (`127.0.0.1`), enforces encrypted `HttpOnly`
+  `SameSite=Strict` session cookies, LiveView CSRF/origin checks, and strict
+  security response headers.
+  """
+  use Phoenix.Endpoint, otp_app: :harness_web
+
+  @session_options [
+    store: :cookie,
+    key: "_harness_web_key",
+    signing_salt: "hweb_sess_sign_8a1d",
+    encryption_salt: "hweb_sess_enc_4c7e",
+    http_only: true,
+    same_site: "Strict"
+  ]
+
+  @csp "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self'; script-src 'self'"
+
+  socket("/live", Phoenix.LiveView.Socket,
+    websocket: [connect_info: [session: @session_options]],
+    longpoll: [connect_info: [session: @session_options]]
+  )
+
+  plug(Plug.Static,
+    at: "/assets",
+    from: :harness_web,
+    gzip: false,
+    only: ~w(app.css app.js favicon.ico)
+  )
+
+  plug(Plug.Static,
+    at: "/assets/vendor",
+    from: {:phoenix, "priv/static"},
+    gzip: false,
+    only: ~w(phoenix.min.js)
+  )
+
+  plug(Plug.Static,
+    at: "/assets/vendor",
+    from: {:phoenix_live_view, "priv/static"},
+    gzip: false,
+    only: ~w(phoenix_live_view.min.js)
+  )
+
+  plug(:security_headers)
+  plug(Plug.RequestId)
+
+  plug(Plug.Parsers,
+    parsers: [:urlencoded, :multipart, :json],
+    pass: ["*/*"],
+    json_decoder: Phoenix.json_library()
+  )
+
+  plug(Plug.MethodOverride)
+  plug(Plug.Head)
+  plug(Plug.Session, @session_options)
+  plug(HWeb.Router)
+
+  defp security_headers(conn, _opts) do
+    conn
+    |> Plug.Conn.put_resp_header("x-content-type-options", "nosniff")
+    |> Plug.Conn.put_resp_header("x-frame-options", "DENY")
+    |> Plug.Conn.put_resp_header("referrer-policy", "same-origin")
+    |> Plug.Conn.put_resp_header("content-security-policy", @csp)
+  end
+end
