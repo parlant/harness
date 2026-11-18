@@ -49,6 +49,11 @@ const ACTION_SPECS: &[ActionSpec] = &[
         description: "Toggle thinking blocks",
     },
     ActionSpec {
+        name: "copy",
+        defaults: &["ctrl+x"],
+        description: "Copy last assistant message",
+    },
+    ActionSpec {
         name: "follow_up",
         defaults: &["alt+enter"],
         description: "Queue follow-up message",
@@ -752,7 +757,7 @@ mod tests {
         assert_eq!(active, snapshot);
 
         // Subsequent valid reload applies cleanly
-        temp.write(r#"{ "interrupt": "f5", "clear": "ctrl+x" }"#);
+        temp.write(r#"{ "interrupt": "f5", "clear": "ctrl+x", "copy": [] }"#);
         active = Preferences::load(&temp.path).expect("valid reload");
         assert_eq!(
             active.action(key(KeyCode::F(5), KeyModifiers::NONE)),

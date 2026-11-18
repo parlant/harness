@@ -316,6 +316,8 @@ pub struct CommandReceipt {
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
+    pub withdrawn: Vec<Value>,
+    #[serde(default)]
     pub reason: Option<String>,
 }
 

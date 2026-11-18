@@ -53,15 +53,26 @@ defmodule HWeb.MultiSurfaceSyncTest do
 
     h_bin = System.fetch_env!("H_NATIVE_TEST_BIN") |> Path.expand()
 
-    {tui_out, 0} =
-      System.cmd(
-        h_bin,
-        ["--data-dir", data_dir, "--session", sid, "--print", "Hello from Rust TUI"],
-        cd: repo_dir,
-        env: [{"H_DAEMON_URL", nil}]
-      )
+    if interactive_bin = System.get_env("H_INTERACTIVE_TEST_BIN") do
+      driver = Path.expand("../../../../tui/tests/live_session.py", __DIR__)
 
-    assert tui_out =~ "Synced reply to both TUI and Phoenix!"
+      assert {_, 0} =
+               System.cmd(
+                 "python3",
+                 [driver, Path.expand(interactive_bin), data_dir, sid, repo_dir],
+                 env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
+               )
+    else
+      {tui_out, 0} =
+        System.cmd(
+          h_bin,
+          ["--data-dir", data_dir, "--session", sid, "--print", "Hello from Rust TUI"],
+          cd: repo_dir,
+          env: [{"H_DAEMON_URL", nil}]
+        )
+
+      assert tui_out =~ "Synced reply to both TUI and Phoenix!"
+    end
 
     # 3. Verify Phoenix LiveView automatically received the TUI's prompt & streamed assistant reply!
     wait_until(fn ->

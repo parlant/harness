@@ -1,6 +1,6 @@
 use crate::{client, config, protocol, render, transcript};
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use client::{ClientError, DaemonClient};
 use config::{resolve_config, ConfigError};
 use protocol::{
@@ -37,6 +37,10 @@ struct Cli {
     /// Override daemon URL (literal loopback http://127.0.0.1:<port> or http://[::1]:<port>)
     #[arg(long, value_name = "URL")]
     daemon_url: Option<String>,
+
+    /// hi terminal layout (interactive TTY only)
+    #[arg(long, value_parser = ["fullscreen", "regular"], default_value="fullscreen")]
+    tui_mode: String,
 
     /// Execution environment ID
     #[arg(long = "env", value_name = "ID", default_value = "host")]
@@ -98,8 +102,23 @@ impl From<ClientError> for AppError {
 }
 
 pub fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli) {
+    entry(false)
+}
+
+pub fn hi_main() -> ExitCode {
+    entry(true)
+}
+
+fn entry(hi: bool) -> ExitCode {
+    let cmd = if hi {
+        Cli::command()
+            .name("hi")
+            .about("Interactive terminal for the durable H daemon")
+    } else {
+        Cli::command()
+    };
+    let cli = Cli::from_arg_matches(&cmd.get_matches()).unwrap_or_else(|err| err.exit());
+    match run(cli, hi) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             let _ = writeln!(io::stderr(), "error: {err}");
@@ -108,11 +127,39 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), AppError> {
+fn run(cli: Cli, hi: bool) -> Result<(), AppError> {
     let cfg = resolve_config(cli.data_dir.as_deref(), cli.daemon_url.as_deref())?;
     let client = DaemonClient::new(cfg.target, cfg.token);
     let cwd = current_cwd_string()?;
 
+    let fullscreen = hi
+        && cli.print_prompt.is_none()
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && std::env::var("TERM").as_deref() != Ok("dumb");
+    if fullscreen {
+        let target = resolve_session_for_run(
+            &client,
+            &cli.env_id,
+            &cwd,
+            cli.session.as_deref(),
+            cli.continue_latest || cli.resume,
+        )?;
+        return crate::hi::app::run(
+            client,
+            crate::hi::actions::Target {
+                sid: target.session_id,
+                cid: target.conversation_id,
+                cwd: target.cwd,
+                env_id: target.env_id,
+            },
+            &cfg.data_dir,
+            cli.resume,
+            &cli.prompt.join(" "),
+            cli.tui_mode == "regular",
+        )
+        .map_err(AppError::Message);
+    }
     let headless_prompt = resolve_prompt(&cli);
 
     if cli.resume && headless_prompt.is_some() {
@@ -276,7 +323,7 @@ fn create_auto_session(
         request_id: generate_request_id(),
         env_id: env_id.to_string(),
         cwd: cwd.to_string(),
-        session_id: None,
+        session_id: Some(generate_request_id()),
         title: None,
         agent: None,
     };

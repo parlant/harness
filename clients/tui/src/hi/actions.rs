@@ -36,6 +36,9 @@ pub enum Effect {
     Continue,
     Environments,
     Branch(String),
+    Export { last: String, path: String },
+    Files(String),
+    AttachFile(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +48,7 @@ pub enum Reply {
     Page(EntriesPageResponse),
     Target(Target),
     Message(String),
+    Attachment(String, Value),
 }
 
 pub fn execute(
@@ -54,6 +58,16 @@ pub fn execute(
     effect: Effect,
 ) -> Result<Reply, String> {
     match effect {
+        Effect::Export { last, path } => {
+            super::export::export(client, &target.sid, &target.cid, &last, path.as_ref())
+                .map(|n| Reply::Message(format!("Exported {n} entries to {path}")))
+        }
+        Effect::Files(prefix) => super::files::list(std::path::Path::new("."), &prefix)
+            .map(|v| Reply::Menu("client files".into(), v))
+            .map_err(|e| e.to_string()),
+        Effect::AttachFile(path) => super::files::attach(std::path::Path::new("."), &path)
+            .map(|v| Reply::Attachment(path, v))
+            .map_err(|e| e.to_string()),
         Effect::Submit(envelope) => {
             if target.sid.trim().is_empty() {
                 return Err("cannot submit command: missing session_id".to_string());
