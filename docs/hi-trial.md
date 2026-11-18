@@ -132,7 +132,7 @@ h --version && hi --version
 Keep `H_DATA_DIR` short on macOS so `<H_DATA_DIR>/api.sock` stays within the 104-byte Unix `sun_path` limit, and use `MIX_BUILD_PATH=/private/tmp/<unique>` per `AGENTS.md`:
 
 ```sh
-H_DATA_DIR="$(mktemp -d /tmp/hdata.XXXXXX)"
+export H_DATA_DIR="$(mktemp -d /tmp/hdata.XXXXXX)"
 WORKDIR="$(mktemp -d /tmp/hwork.XXXXXX)"
 MIX_BUILD_PATH=/private/tmp/h-smoke-mix mix run --no-halt -e '
   {:ok, _} = Application.ensure_all_started(:harness)
@@ -183,7 +183,7 @@ python3 scripts/hi-release-smoke.py --with-elixir
 
 ### Rollback Procedure
 
-`h` and `hi` never read or write `~/.pi` (`H_DATA_DIR` defaults to `~/.local/share/h`). To roll back from `hi`:
+H session history lives in `H_DATA_DIR` (default `~/.local/share/h`), not in pi's session store. To roll back from `hi`:
 
 1. Detach from `hi` (`/quit` or `Ctrl-D`) and stop any running `H.serve` / Phoenix process if no longer needed.
 2. Remove the installed `hi`/`h` binary directory or leave it off `PATH` (do **not** alias `pi` to `hi` during the trial).
