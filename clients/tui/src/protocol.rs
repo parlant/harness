@@ -434,13 +434,47 @@ impl SseEvent {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SseLimitError {
+    LineTooLarge { max_bytes: usize },
+    EventTooLarge { max_bytes: usize },
+}
+
+impl fmt::Display for SseLimitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SseLimitError::LineTooLarge { max_bytes } => {
+                write!(f, "SSE line exceeds {max_bytes} byte limit")
+            }
+            SseLimitError::EventTooLarge { max_bytes } => {
+                write!(f, "SSE event exceeds {max_bytes} byte limit")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SseLimitError {}
+
+pub const DEFAULT_MAX_SSE_LINE_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_SSE_EVENT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SSE_META_BYTES: usize = 4096;
+
+#[derive(Debug)]
 pub struct SseParser {
     line_buf: Vec<u8>,
     event_name: Option<String>,
     event_id: Option<String>,
     data_lines: Vec<String>,
     has_fields: bool,
+    event_bytes: usize,
+    max_line_bytes: usize,
+    max_event_bytes: usize,
+}
+
+impl Default for SseParser {
+    fn default() -> Self {
+        Self::with_limits(DEFAULT_MAX_SSE_LINE_BYTES, DEFAULT_MAX_SSE_EVENT_BYTES)
+    }
 }
 
 impl SseParser {
@@ -448,7 +482,24 @@ impl SseParser {
         Self::default()
     }
 
+    pub fn with_limits(max_line_bytes: usize, max_event_bytes: usize) -> Self {
+        Self {
+            line_buf: Vec::new(),
+            event_name: None,
+            event_id: None,
+            data_lines: Vec::new(),
+            has_fields: false,
+            event_bytes: 0,
+            max_line_bytes: max_line_bytes.max(1),
+            max_event_bytes: max_event_bytes.max(1),
+        }
+    }
+
     pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<SseEvent> {
+        self.try_push_bytes(bytes).unwrap_or_default()
+    }
+
+    pub fn try_push_bytes(&mut self, bytes: &[u8]) -> Result<Vec<SseEvent>, SseLimitError> {
         let mut out = Vec::new();
         for &b in bytes {
             if b == b'\n' {
@@ -457,36 +508,55 @@ impl SseParser {
                 }
                 let line = String::from_utf8_lossy(&self.line_buf).into_owned();
                 self.line_buf.clear();
-                if let Some(ev) = self.process_line(&line) {
+                if let Some(ev) = self.process_line(&line)? {
                     out.push(ev);
                 }
             } else {
+                if self.line_buf.len() >= self.max_line_bytes {
+                    self.reset_state();
+                    return Err(SseLimitError::LineTooLarge {
+                        max_bytes: self.max_line_bytes,
+                    });
+                }
                 self.line_buf.push(b);
             }
         }
-        out
+        Ok(out)
     }
 
     pub fn finish(&mut self) -> Option<SseEvent> {
+        self.try_finish().ok().flatten()
+    }
+
+    pub fn try_finish(&mut self) -> Result<Option<SseEvent>, SseLimitError> {
         if !self.line_buf.is_empty() {
             if self.line_buf.last() == Some(&b'\r') {
                 self.line_buf.pop();
             }
             let line = String::from_utf8_lossy(&self.line_buf).into_owned();
             self.line_buf.clear();
-            if let Some(ev) = self.process_line(&line) {
-                return Some(ev);
+            if let Some(ev) = self.process_line(&line)? {
+                return Ok(Some(ev));
             }
         }
-        self.flush_event()
+        Ok(self.flush_event())
     }
 
-    fn process_line(&mut self, line: &str) -> Option<SseEvent> {
+    fn reset_state(&mut self) {
+        self.line_buf.clear();
+        self.event_name = None;
+        self.event_id = None;
+        self.data_lines.clear();
+        self.has_fields = false;
+        self.event_bytes = 0;
+    }
+
+    fn process_line(&mut self, line: &str) -> Result<Option<SseEvent>, SseLimitError> {
         if line.is_empty() {
-            return self.flush_event();
+            return Ok(self.flush_event());
         }
         if line.starts_with(':') {
-            return None;
+            return Ok(None);
         }
         let (field, raw_val) = match line.split_once(':') {
             Some((f, v)) => (f, v.strip_prefix(' ').unwrap_or(v)),
@@ -495,28 +565,77 @@ impl SseParser {
 
         match field {
             "event" => {
+                if raw_val.len() > MAX_SSE_META_BYTES.min(self.max_event_bytes) {
+                    self.reset_state();
+                    return Err(SseLimitError::EventTooLarge {
+                        max_bytes: self.max_event_bytes,
+                    });
+                }
+                let prev_len = self.event_name.as_ref().map_or(0, String::len);
+                let next_bytes = self
+                    .event_bytes
+                    .saturating_sub(prev_len)
+                    .saturating_add(raw_val.len());
+                if next_bytes > self.max_event_bytes {
+                    self.reset_state();
+                    return Err(SseLimitError::EventTooLarge {
+                        max_bytes: self.max_event_bytes,
+                    });
+                }
+                self.event_bytes = next_bytes;
                 self.event_name = Some(raw_val.to_string());
                 self.has_fields = true;
             }
             "id" => {
                 if !raw_val.contains('\0') {
+                    if raw_val.len() > MAX_SSE_META_BYTES.min(self.max_event_bytes) {
+                        self.reset_state();
+                        return Err(SseLimitError::EventTooLarge {
+                            max_bytes: self.max_event_bytes,
+                        });
+                    }
+                    let prev_len = self.event_id.as_ref().map_or(0, String::len);
+                    let next_bytes = self
+                        .event_bytes
+                        .saturating_sub(prev_len)
+                        .saturating_add(raw_val.len());
+                    if next_bytes > self.max_event_bytes {
+                        self.reset_state();
+                        return Err(SseLimitError::EventTooLarge {
+                            max_bytes: self.max_event_bytes,
+                        });
+                    }
+                    self.event_bytes = next_bytes;
                     self.event_id = Some(raw_val.to_string());
                     self.has_fields = true;
                 }
             }
             "data" => {
+                let sep = usize::from(!self.data_lines.is_empty());
+                let next_bytes = self
+                    .event_bytes
+                    .saturating_add(raw_val.len())
+                    .saturating_add(sep);
+                if next_bytes > self.max_event_bytes {
+                    self.reset_state();
+                    return Err(SseLimitError::EventTooLarge {
+                        max_bytes: self.max_event_bytes,
+                    });
+                }
+                self.event_bytes = next_bytes;
                 self.data_lines.push(raw_val.to_string());
                 self.has_fields = true;
             }
             _ => {}
         }
-        None
+        Ok(None)
     }
 
     fn flush_event(&mut self) -> Option<SseEvent> {
         if !self.has_fields && self.data_lines.is_empty() {
             self.event_name = None;
             self.event_id = None;
+            self.event_bytes = 0;
             return None;
         }
         let event = self.event_name.take();
@@ -524,6 +643,7 @@ impl SseParser {
         let data = self.data_lines.join("\n");
         self.data_lines.clear();
         self.has_fields = false;
+        self.event_bytes = 0;
         Some(SseEvent { id, event, data })
     }
 }
@@ -608,5 +728,31 @@ mod tests {
         let entry: TranscriptEntry = serde_json::from_str(entry_json).unwrap();
         assert_eq!(entry.id, "12");
         assert_eq!(entry.conversation_id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn sse_parser_enforces_line_and_event_bounds() {
+        let mut line_parser = SseParser::with_limits(16, 128);
+        let err = line_parser
+            .try_push_bytes(b"data: 0123456789abcdef")
+            .unwrap_err();
+        assert_eq!(err, SseLimitError::LineTooLarge { max_bytes: 16 });
+
+        // State is clean after error and can parse a valid bounded event.
+        let ok = line_parser
+            .try_push_bytes(b"event: commit\ndata: ok\n\n")
+            .unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].data, "ok");
+
+        let mut ev_parser = SseParser::with_limits(64, 20);
+        let err = ev_parser
+            .try_push_bytes(b"data: 1234567890\ndata: 1234567890\n\n")
+            .unwrap_err();
+        assert_eq!(err, SseLimitError::EventTooLarge { max_bytes: 20 });
+
+        let ok2 = ev_parser.try_push_bytes(b"data: small\n\n").unwrap();
+        assert_eq!(ok2.len(), 1);
+        assert_eq!(ok2[0].data, "small");
     }
 }

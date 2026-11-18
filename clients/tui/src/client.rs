@@ -7,13 +7,15 @@ use crate::protocol::{
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_CHUNK_LINE_BYTES: usize = 8 * 1024;
 const MAX_UNARY_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -51,6 +53,111 @@ impl std::error::Error for ClientError {}
 enum TransportStream {
     Unix(UnixStream),
     Tcp(TcpStream),
+}
+
+impl TransportStream {
+    fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            TransportStream::Unix(s) => Ok(TransportStream::Unix(s.try_clone()?)),
+            TransportStream::Tcp(s) => Ok(TransportStream::Tcp(s.try_clone()?)),
+        }
+    }
+
+    fn shutdown_both(&self) {
+        match self {
+            TransportStream::Unix(s) => {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+            TransportStream::Tcp(s) => {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            TransportStream::Unix(s) => s.set_read_timeout(timeout),
+            TransportStream::Tcp(s) => s.set_read_timeout(timeout),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CancelState {
+    cancelled: bool,
+    active: Option<TransportStream>,
+}
+
+#[derive(Clone, Default)]
+pub struct StreamCancel {
+    inner: Arc<(Mutex<CancelState>, Condvar)>,
+}
+
+impl fmt::Debug for StreamCancel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamCancel")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl StreamCancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        let (lock, cvar) = &*self.inner;
+        let active = {
+            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+            state.cancelled = true;
+            let active = state.active.take();
+            cvar.notify_all();
+            active
+        };
+        if let Some(stream) = active {
+            stream.shutdown_both();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        let (lock, _) = &*self.inner;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).cancelled
+    }
+
+    pub fn wait_timeout(&self, dur: Duration) -> bool {
+        let (lock, cvar) = &*self.inner;
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.cancelled {
+            return false;
+        }
+        let (guard, _) = cvar
+            .wait_timeout_while(guard, dur, |s| !s.cancelled)
+            .unwrap_or_else(|e| e.into_inner());
+        !guard.cancelled
+    }
+
+    pub fn clear_active(&self) {
+        let (lock, _) = &*self.inner;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        state.active = None;
+    }
+
+    fn attach(&self, stream: &TransportStream) -> Result<(), ClientError> {
+        let cloned = stream
+            .try_clone()
+            .map_err(|e| ClientError::Io(e.to_string()))?;
+        let (lock, _) = &*self.inner;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if state.cancelled {
+            drop(state);
+            cloned.shutdown_both();
+            stream.shutdown_both();
+            return Err(ClientError::Io("stream cancelled".to_string()));
+        }
+        state.active = Some(cloned);
+        Ok(())
+    }
 }
 
 impl Read for TransportStream {
@@ -206,8 +313,32 @@ impl DaemonClient {
         conversation_id: &str,
         last_event_id: Option<u64>,
     ) -> Result<SseStream, ClientError> {
+        self.subscribe_events_inner(session_id, conversation_id, last_event_id, None)
+    }
+
+    pub fn subscribe_events_cancellable(
+        &self,
+        session_id: &str,
+        conversation_id: &str,
+        last_event_id: Option<u64>,
+        cancel: &StreamCancel,
+    ) -> Result<SseStream, ClientError> {
+        self.subscribe_events_inner(session_id, conversation_id, last_event_id, Some(cancel))
+    }
+
+    fn subscribe_events_inner(
+        &self,
+        session_id: &str,
+        conversation_id: &str,
+        last_event_id: Option<u64>,
+        cancel: Option<&StreamCancel>,
+    ) -> Result<SseStream, ClientError> {
         validate_path_segment("session_id", session_id)?;
         validate_path_segment("conversation_id", conversation_id)?;
+
+        if cancel.is_some_and(StreamCancel::is_cancelled) {
+            return Err(ClientError::Io("stream cancelled".to_string()));
+        }
 
         let path = format!(
             "/api/v1/sessions/{}/conversations/{}/events",
@@ -215,12 +346,16 @@ impl DaemonClient {
             percent_encode(conversation_id)
         );
 
-        let mut stream = self.connect(None)?;
+        let mut stream = self.connect(Some(DEFAULT_IO_TIMEOUT))?;
+        if let Some(c) = cancel {
+            c.attach(&stream)?;
+        }
+
         let mut extra_headers = Vec::new();
         if let Some(seq) = last_event_id {
             extra_headers.push(("Last-Event-ID", seq.to_string()));
         }
-        write_request(
+        if let Err(err) = write_request(
             &mut stream,
             "GET",
             &path,
@@ -229,28 +364,52 @@ impl DaemonClient {
             "text/event-stream",
             &extra_headers,
             None,
-        )?;
+        ) {
+            if let Some(c) = cancel {
+                c.clear_active();
+            }
+            return Err(err);
+        }
 
         let mut reader = BufReader::new(stream);
-        let head = read_response_head(&mut reader)?;
+        let head = match read_response_head(&mut reader) {
+            Ok(h) => h,
+            Err(err) => {
+                if let Some(c) = cancel {
+                    c.clear_active();
+                }
+                return Err(err);
+            }
+        };
         if (300..400).contains(&head.status) {
+            if let Some(c) = cancel {
+                c.clear_active();
+            }
             return Err(ClientError::RedirectDisabled {
                 status: head.status,
             });
         }
         if head.status != 200 {
-            let body = read_unary_body(&mut reader, &head)?;
-            return Err(http_status_error(head.status, &body));
+            let body = read_unary_body(&mut reader, &head);
+            if let Some(c) = cancel {
+                c.clear_active();
+            }
+            return Err(http_status_error(head.status, &body?));
         }
         if let Some(ct) = head.content_type.as_deref() {
             if !ct.to_ascii_lowercase().starts_with("text/event-stream") {
+                if let Some(c) = cancel {
+                    c.clear_active();
+                }
                 return Err(ClientError::InvalidResponse(format!(
                     "expected text/event-stream content-type, got {ct}"
                 )));
             }
         }
 
-        Ok(SseStream::new(reader, head.chunked))
+        let _ = reader.get_ref().set_read_timeout(None);
+
+        Ok(SseStream::new(reader, head.chunked, cancel.cloned()))
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
@@ -350,10 +509,23 @@ pub struct SseStream {
     parser: SseParser,
     queued: VecDeque<SseEvent>,
     stream_done: bool,
+    cancel: Option<StreamCancel>,
+}
+
+impl Drop for SseStream {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.clear_active();
+        }
+    }
 }
 
 impl SseStream {
-    fn new(reader: BufReader<TransportStream>, chunked: bool) -> Self {
+    fn new(
+        reader: BufReader<TransportStream>,
+        chunked: bool,
+        cancel: Option<StreamCancel>,
+    ) -> Self {
         Self {
             reader,
             chunked,
@@ -362,6 +534,7 @@ impl SseStream {
             parser: SseParser::new(),
             queued: VecDeque::new(),
             stream_done: false,
+            cancel,
         }
     }
 
@@ -384,11 +557,19 @@ impl SseStream {
 
             if n == 0 {
                 self.stream_done = true;
-                if let Some(ev) = self.parser.finish() {
+                if let Some(ev) = self
+                    .parser
+                    .try_finish()
+                    .map_err(|e| ClientError::InvalidResponse(e.to_string()))?
+                {
                     self.queued.push_back(ev);
                 }
             } else {
-                for ev in self.parser.push_bytes(&buf[..n]) {
+                for ev in self
+                    .parser
+                    .try_push_bytes(&buf[..n])
+                    .map_err(|e| ClientError::InvalidResponse(e.to_string()))?
+                {
                     self.queued.push_back(ev);
                 }
             }
@@ -401,7 +582,7 @@ impl SseStream {
         }
 
         while self.chunk_remaining == 0 {
-            let line = read_crlf_line(&mut self.reader)?;
+            let line = read_crlf_line(&mut self.reader, MAX_CHUNK_LINE_BYTES)?;
             let size_hex = line.split(';').next().unwrap_or("").trim();
             let size = usize::from_str_radix(size_hex, 16).map_err(|_| {
                 ClientError::InvalidResponse(format!("invalid chunk size: {size_hex}"))
@@ -409,7 +590,7 @@ impl SseStream {
             if size == 0 {
                 // Drain trailing headers/empty line after final 0-length chunk
                 loop {
-                    let trailer = read_crlf_line(&mut self.reader)?;
+                    let trailer = read_crlf_line(&mut self.reader, MAX_CHUNK_LINE_BYTES)?;
                     if trailer.is_empty() {
                         break;
                     }
@@ -488,7 +669,7 @@ fn write_request(
 fn read_response_head(
     reader: &mut BufReader<TransportStream>,
 ) -> Result<ResponseHead, ClientError> {
-    let status_line = read_crlf_line(reader)?;
+    let status_line = read_crlf_line(reader, MAX_HEADER_BYTES)?;
     let mut parts = status_line.splitn(3, ' ');
     let version = parts.next().unwrap_or("");
     let status_str = parts.next().unwrap_or("");
@@ -507,7 +688,7 @@ fn read_response_head(
     let mut content_type = None;
 
     loop {
-        let line = read_crlf_line(reader)?;
+        let line = read_crlf_line(reader, MAX_HEADER_BYTES)?;
         total_header_bytes += line.len() + 2;
         if total_header_bytes > MAX_HEADER_BYTES {
             return Err(ClientError::InvalidResponse(
@@ -552,14 +733,14 @@ fn read_unary_body(
     if head.chunked {
         let mut body = Vec::new();
         loop {
-            let size_line = read_crlf_line(reader)?;
+            let size_line = read_crlf_line(reader, MAX_CHUNK_LINE_BYTES)?;
             let size_hex = size_line.split(';').next().unwrap_or("").trim();
             let size = usize::from_str_radix(size_hex, 16).map_err(|_| {
                 ClientError::InvalidResponse(format!("invalid chunk size: {size_hex}"))
             })?;
             if size == 0 {
                 loop {
-                    let trailer = read_crlf_line(reader)?;
+                    let trailer = read_crlf_line(reader, MAX_CHUNK_LINE_BYTES)?;
                     if trailer.is_empty() {
                         break;
                     }
@@ -607,22 +788,43 @@ fn read_unary_body(
     Ok(body)
 }
 
-fn read_crlf_line(reader: &mut BufReader<TransportStream>) -> Result<String, ClientError> {
+fn read_crlf_line(
+    reader: &mut BufReader<TransportStream>,
+    max_len: usize,
+) -> Result<String, ClientError> {
     let mut buf = Vec::new();
     loop {
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => {
-                if buf.is_empty() {
-                    return Err(ClientError::InvalidResponse(
-                        "unexpected EOF while reading HTTP line".to_string(),
-                    ));
-                }
-                break;
-            }
-            Ok(_) => break,
+        let avail = match reader.fill_buf() {
+            Ok(b) => b,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(ClientError::Io(e.to_string())),
+        };
+        if avail.is_empty() {
+            if buf.is_empty() {
+                return Err(ClientError::InvalidResponse(
+                    "unexpected EOF while reading HTTP line".to_string(),
+                ));
+            }
+            break;
         }
+        if let Some(pos) = avail.iter().position(|&b| b == b'\n') {
+            if buf.len().saturating_add(pos) > max_len {
+                return Err(ClientError::InvalidResponse(
+                    "HTTP line exceeds size limit".to_string(),
+                ));
+            }
+            buf.extend_from_slice(&avail[..pos]);
+            reader.consume(pos + 1);
+            break;
+        }
+        let n = avail.len();
+        if buf.len().saturating_add(n) > max_len {
+            return Err(ClientError::InvalidResponse(
+                "HTTP line exceeds size limit".to_string(),
+            ));
+        }
+        buf.extend_from_slice(avail);
+        reader.consume(n);
     }
     while buf.last().is_some_and(|&b| b == b'\n' || b == b'\r') {
         buf.pop();
@@ -902,6 +1104,153 @@ mod tests {
 
         let err = client.get_environments().unwrap_err();
         assert!(matches!(err, ClientError::RedirectDisabled { status: 302 }));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn stream_cancel_unblocks_blocked_unix_and_tcp_sse_reads() {
+        // 1. Unix socket
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock_path = PathBuf::from(format!("/private/tmp/h-cancel-test-{nanos}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let srv = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = read_http_req(&mut s);
+            write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+            )
+            .unwrap();
+            s.flush().unwrap();
+            // Keep server socket open without sending data until client disconnects.
+            let mut tmp = [0u8; 16];
+            let _ = s.read(&mut tmp);
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::UnixSocket(sock_path.clone()),
+            SecretToken::new("tok-cancel").unwrap(),
+        );
+        let cancel = StreamCancel::new();
+        let mut sse = client
+            .subscribe_events_cancellable("s1", "1", None, &cancel)
+            .unwrap();
+
+        let cancel_clone = cancel.clone();
+        let stopper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            cancel_clone.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let res = sse.next_event();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(res, Ok(None) | Err(_)));
+        stopper.join().unwrap();
+        srv.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+
+        // 2. TCP loopback
+        let tcp_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp_listener.local_addr().unwrap().port();
+        let tcp_srv = thread::spawn(move || {
+            let (mut s, _) = tcp_listener.accept().unwrap();
+            let _ = read_http_req(&mut s);
+            write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+            )
+            .unwrap();
+            s.flush().unwrap();
+            let mut tmp = [0u8; 16];
+            let _ = s.read(&mut tmp);
+        });
+
+        let tcp_client = DaemonClient::new(
+            DaemonTarget::LoopbackHttp {
+                host: LoopbackHost::Ipv4,
+                port,
+            },
+            SecretToken::new("tok-cancel").unwrap(),
+        );
+        let tcp_cancel = StreamCancel::new();
+        let mut tcp_sse = tcp_client
+            .subscribe_events_cancellable("s1", "1", None, &tcp_cancel)
+            .unwrap();
+
+        let tcp_cancel_clone = tcp_cancel.clone();
+        let tcp_stopper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            tcp_cancel_clone.cancel();
+        });
+
+        let tcp_started = std::time::Instant::now();
+        let tcp_res = tcp_sse.next_event();
+        assert!(tcp_started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(tcp_res, Ok(None) | Err(_)));
+        tcp_stopper.join().unwrap();
+        tcp_srv.join().unwrap();
+    }
+
+    #[test]
+    fn oversized_http_header_and_chunk_lines_are_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let handle = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = read_http_req(&mut s);
+            write!(s, "HTTP/1.1 200 OK\r\nX-Big: ").unwrap();
+            let big = vec![b'a'; MAX_HEADER_BYTES + 128];
+            let _ = s.write_all(&big);
+            let _ = s.write_all(b"\r\n\r\n");
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::LoopbackHttp {
+                host: LoopbackHost::Ipv4,
+                port,
+            },
+            SecretToken::new("tok-test").unwrap(),
+        );
+        let err = client.get_environments().unwrap_err();
+        assert!(matches!(err, ClientError::InvalidResponse(_)));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn oversized_chunk_size_line_is_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let handle = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = read_http_req(&mut s);
+            write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+            )
+            .unwrap();
+            let big_chunk_line = vec![b'0'; MAX_CHUNK_LINE_BYTES + 64];
+            let _ = s.write_all(&big_chunk_line);
+            let _ = s.write_all(b"\r\n");
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::LoopbackHttp {
+                host: LoopbackHost::Ipv4,
+                port,
+            },
+            SecretToken::new("tok-test").unwrap(),
+        );
+        let mut sse = client.subscribe_events("s1", "1", None).unwrap();
+        let err = sse.next_event().unwrap_err();
+        assert!(matches!(err, ClientError::InvalidResponse(_)));
         handle.join().unwrap();
     }
 }
