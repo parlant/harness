@@ -3,16 +3,48 @@ defmodule H do
   Top-level entry point for `:harness` (`H`).
   """
 
+  @max_unix_socket_bytes 100
+
   @doc """
-  Starts the local `H` daemon and prints the authenticated web client URL.
+  Computes the local Unix domain socket path for `<data_dir>/api.sock`,
+  falling back to a deterministic short `/tmp` path if `data_dir` exceeds
+  OS `sun_path` limits.
+  """
+  @spec api_socket_path(String.t()) :: String.t()
+  def api_socket_path(data_dir) when is_binary(data_dir) do
+    expanded = Path.expand(data_dir)
+    direct = Path.join(expanded, "api.sock")
+
+    if byte_size(direct) <= @max_unix_socket_bytes do
+      direct
+    else
+      digest =
+        :crypto.hash(:sha256, expanded) |> Base.encode16(case: :lower) |> binary_part(0, 16)
+
+      Path.join("/tmp", "h-api-#{digest}.sock")
+    end
+  end
+
+  @doc """
+  Starts the local `H` daemon (binding both loopback TCP and `<data_dir>/api.sock`
+  plus `<data_dir>/daemon.json`) and prints the authenticated web client URL.
 
   Options:
     * `:data_dir` - storage root directory (default `"~/.local/share/h"`)
     * `:port` - loopback HTTP port (default `4100`)
+    * `:api_socket` - bind local Unix domain socket (default `true`)
     * `:provider` - `H.Provider` module (default `H.Provider.ReqLLM`)
     * `:provider_config` - map forwarded to provider (default `%{}`)
+    * `:environments` - optional map/list of `H.EnvRegistry` specs
   """
-  @spec serve(keyword()) :: {:ok, %{url: String.t(), port: pos_integer(), data_dir: String.t()}}
+  @spec serve(keyword()) ::
+          {:ok,
+           %{
+             url: String.t(),
+             port: non_neg_integer(),
+             api_socket: nil | String.t(),
+             data_dir: String.t()
+           }}
   def serve(opts \\ []) when is_list(opts) do
     {:ok, _} = Application.ensure_all_started(:harness)
 
@@ -22,6 +54,7 @@ defmodule H do
       |> Path.expand()
 
     port = Keyword.get(opts, :port, 4100)
+    bind_socket? = Keyword.get(opts, :api_socket, true)
     provider = Keyword.get(opts, :provider, H.Provider.ReqLLM)
     provider_config = Keyword.get(opts, :provider_config, %{})
 
@@ -29,11 +62,13 @@ defmodule H do
     {:ok, _} = ensure_started({H.Auth, data_dir: data_dir, name: H.Auth, table: :h_auth})
     {:ok, _} = ensure_started({H.Catalog, data_dir: data_dir, name: H.Catalog, table: :h_catalog})
 
-    daemon_opts = [
-      data_dir: data_dir,
-      provider: provider,
-      provider_config: provider_config
-    ]
+    daemon_opts =
+      [
+        data_dir: data_dir,
+        provider: provider,
+        provider_config: provider_config
+      ]
+      |> maybe_put_kw(:environments, Keyword.get(opts, :environments))
 
     :ok = H.Daemon.recover_active_sessions(daemon_opts)
 
@@ -46,17 +81,60 @@ defmodule H do
     ]
 
     {:ok, bandit_pid} =
-      Supervisor.start_child(
-        H.Supervisor,
-        {Bandit, plug: {H.HTTP.Router, router_opts}, ip: {127, 0, 0, 1}, port: port}
+      ensure_started(
+        Supervisor.child_spec(
+          {Bandit, plug: {H.HTTP.Router, router_opts}, ip: {127, 0, 0, 1}, port: port},
+          id: :h_http_tcp
+        )
       )
 
     {:ok, {_ip, bound_port}} = ThousandIsland.listener_info(bandit_pid)
+
+    sock_path =
+      if bind_socket? do
+        path = api_socket_path(data_dir)
+        File.rm(path)
+        unix_opts = Keyword.put(router_opts, :unix_socket, true)
+
+        {:ok, _unix_pid} =
+          ensure_started(
+            Supervisor.child_spec(
+              {Bandit, plug: {H.HTTP.Router, unix_opts}, ip: {:local, path}, port: 0},
+              id: :h_http_unix
+            )
+          )
+
+        _ = File.chmod(path, 0o600)
+        path
+      else
+        nil
+      end
+
+    write_daemon_manifest!(data_dir, bound_port, sock_path)
+
     token = H.Auth.owner_token(:h_auth)
     url = "http://127.0.0.1:#{bound_port}/#token=#{token}"
     IO.puts("H web client listening at #{url}")
 
-    {:ok, %{url: url, port: bound_port, data_dir: data_dir}}
+    {:ok, %{url: url, port: bound_port, api_socket: sock_path, data_dir: data_dir}}
+  end
+
+  @doc false
+  @spec write_daemon_manifest!(String.t(), nil | non_neg_integer(), nil | String.t()) :: :ok
+  def write_daemon_manifest!(data_dir, bound_port, sock_path) do
+    manifest_path = Path.join(data_dir, "daemon.json")
+    tmp_path = "#{manifest_path}.tmp.#{System.unique_integer([:positive])}"
+
+    payload = %{
+      "version" => 1,
+      "pid" => String.to_integer(System.pid()),
+      "http_url" => if(is_integer(bound_port), do: "http://127.0.0.1:#{bound_port}", else: nil),
+      "api_socket" => sock_path
+    }
+
+    File.write!(tmp_path, JSON.encode!(payload))
+    File.chmod!(tmp_path, 0o600)
+    File.rename!(tmp_path, manifest_path)
   end
 
   defp ensure_started(child_spec) do
@@ -66,4 +144,7 @@ defmodule H do
       other -> other
     end
   end
+
+  defp maybe_put_kw(opts, _key, nil), do: opts
+  defp maybe_put_kw(opts, key, val), do: Keyword.put(opts, key, val)
 end

@@ -29,8 +29,8 @@ defmodule H.Harness.Coding do
   end
 
   @impl true
-  def tools(_opts \\ []) do
-    [Read, Write, Edit, Bash, SearchHistory]
+  def tools(opts \\ []) do
+    Keyword.get(opts, :tools, [Read, Write, Edit, Bash, SearchHistory])
   end
 
   @impl true

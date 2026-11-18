@@ -40,17 +40,16 @@
 
         <form id="new-session-form" class="new-session-form" hidden>
           <div class="field">
-            <label for="new-session-id">Session ID</label>
-            <input
-              id="new-session-id"
-              class="input"
-              type="text"
-              placeholder="demo-session"
-              required
-            />
+            <label for="new-session-env">Environment</label>
+            <select id="new-session-env" class="select"></select>
           </div>
           <div class="field">
-            <label for="new-session-cwd">Working Directory (abs path)</label>
+            <div class="section-title-row">
+              <label for="new-session-cwd">Workspace Folder</label>
+              <button id="fs-up-btn" type="button" class="btn btn-sm btn-ghost" title="Parent folder">
+                ↑ Up
+              </button>
+            </div>
             <input
               id="new-session-cwd"
               class="input mono"
@@ -58,13 +57,24 @@
               placeholder="/path/to/repo"
               required
             />
+            <div id="fs-folder-sessions" class="fs-folder-sessions" hidden></div>
+            <ul id="fs-dirs-list" class="fs-dirs-list"></ul>
           </div>
           <div class="field">
             <label for="new-session-model">Model</label>
             <select id="new-session-model" class="select"></select>
           </div>
+          <div class="field">
+            <label for="new-session-id">Session ID (optional)</label>
+            <input
+              id="new-session-id"
+              class="input"
+              type="text"
+              placeholder="auto-generated from folder"
+            />
+          </div>
           <div class="form-actions">
-            <button type="submit" class="btn btn-sm btn-primary">Create</button>
+            <button type="submit" class="btn btn-sm btn-primary">Start Here</button>
             <button id="cancel-new-session-btn" type="button" class="btn btn-sm btn-ghost">
               Cancel
             </button>

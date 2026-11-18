@@ -121,12 +121,20 @@ defmodule H.Transcript do
   def apply_commit(%__MODULE__{} = transcript, payload) do
     with {:ok, frame} <- decode_frame(payload, :invalid_commit),
          {:ok, frame_seq} <- fetch_seq(frame, "seq", :seq, :invalid_commit) do
+      prev_seq = frame_field(frame, "prev_seq", :prev_seq)
+
       cond do
-        is_nil(transcript.seq) or frame_seq > transcript.seq + 1 ->
+        is_nil(transcript.seq) ->
           {:gap, transcript}
 
         frame_seq <= transcript.seq ->
           {:stale, transcript}
+
+        is_integer(prev_seq) and prev_seq != transcript.seq ->
+          {:gap, transcript}
+
+        is_nil(prev_seq) and frame_seq > transcript.seq + 1 ->
+          {:gap, transcript}
 
         true ->
           apply_next_commit(transcript, frame, frame_seq)

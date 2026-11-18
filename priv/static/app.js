@@ -8,6 +8,8 @@ class AuthRequiredError extends Error {
 }
 
 const state = {
+  environments: [],
+  fsView: null,
   models: [],
   sessions: [],
   sessionDetail: null,
@@ -27,9 +29,13 @@ const dom = {
 
   toggleNewSessionBtn: document.getElementById("toggle-new-session-btn"),
   newSessionForm: document.getElementById("new-session-form"),
+  newSessionEnv: document.getElementById("new-session-env"),
   newSessionId: document.getElementById("new-session-id"),
   newSessionCwd: document.getElementById("new-session-cwd"),
   newSessionModel: document.getElementById("new-session-model"),
+  fsUpBtn: document.getElementById("fs-up-btn"),
+  fsFolderSessions: document.getElementById("fs-folder-sessions"),
+  fsDirsList: document.getElementById("fs-dirs-list"),
   cancelNewSessionBtn: document.getElementById("cancel-new-session-btn"),
 
   refreshSessionsBtn: document.getElementById("refresh-sessions-btn"),
@@ -272,6 +278,131 @@ async function bootstrapAuthFromHash() {
     hideAuthBar();
   } catch (err) {
     showAuthBar(err.message);
+  }
+}
+
+async function loadEnvironments() {
+  try {
+    const data = await apiFetch("/api/v1/environments");
+    state.environments = Array.isArray(data?.environments) ? data.environments : [];
+    renderEnvironmentSelector();
+  } catch (err) {
+    if (!(err instanceof AuthRequiredError)) {
+      showError(`Failed to load environments: ${err.message}`);
+    }
+  }
+}
+
+function renderEnvironmentSelector() {
+  if (!dom.newSessionEnv) return;
+  const current = dom.newSessionEnv.value || "host";
+  dom.newSessionEnv.replaceChildren();
+  const envs =
+    state.environments.length > 0
+      ? state.environments
+      : [{ id: "host", label: "Local Host", default_cwd: "" }];
+
+  for (const env of envs) {
+    const opt = el("option", { text: env.label ? `${env.label} (${env.id})` : env.id });
+    opt.value = env.id;
+    dom.newSessionEnv.appendChild(opt);
+  }
+  dom.newSessionEnv.value = envs.some((e) => e.id === current) ? current : envs[0].id;
+}
+
+async function browseDirectory(path = "", envId = null) {
+  const targetEnv = envId || dom.newSessionEnv?.value || "host";
+  const qs = new URLSearchParams({ env_id: targetEnv });
+  if (path) qs.set("path", path);
+
+  try {
+    const view = await apiFetch(`/api/v1/fs?${qs.toString()}`);
+    state.fsView = view;
+    if (view?.path && dom.newSessionCwd) {
+      dom.newSessionCwd.value = view.path;
+    }
+    renderFolderBrowser();
+  } catch (err) {
+    if (!(err instanceof AuthRequiredError)) {
+      showError(`Browse failed: ${err.message}`);
+    }
+  }
+}
+
+function renderFolderBrowser() {
+  const view = state.fsView;
+  if (!view || !dom.fsDirsList) return;
+
+  if (dom.fsUpBtn) {
+    dom.fsUpBtn.disabled = !view.parent_path;
+  }
+
+  if (dom.fsFolderSessions) {
+    dom.fsFolderSessions.replaceChildren();
+    const direct = Array.isArray(view.sessions) ? view.sessions : [];
+    if (direct.length > 0) {
+      dom.fsFolderSessions.hidden = false;
+      dom.fsFolderSessions.appendChild(
+        el("div", {
+          className: "fs-sessions-head",
+          text: `Sessions in this folder (${direct.length})`
+        })
+      );
+      for (const s of direct.slice(0, 5)) {
+        const resumeBtn = el(
+          "button",
+          { type: "button", className: "fs-session-btn" },
+          [
+            el("span", { className: "session-title", text: s.title || s.session_id }),
+            el("span", { className: "badge mono", text: s.active ? "active" : "resume" })
+          ]
+        );
+        resumeBtn.addEventListener("click", async () => {
+          dom.newSessionForm.hidden = true;
+          await selectSession(s.session_id);
+        });
+        dom.fsFolderSessions.appendChild(resumeBtn);
+      }
+    } else {
+      dom.fsFolderSessions.hidden = true;
+    }
+  }
+
+  dom.fsDirsList.replaceChildren();
+  const dirs = Array.isArray(view.directories) ? view.directories : [];
+  if (dirs.length === 0) {
+    dom.fsDirsList.appendChild(
+      el("li", { className: "session-cwd", text: "No subdirectories." })
+    );
+    return;
+  }
+
+  for (const dir of dirs) {
+    const badges = [];
+    if (Array.isArray(dir.markers) && dir.markers.length > 0) {
+      badges.push(
+        el("span", { className: "fs-marker mono", text: dir.markers.slice(0, 2).join(" ") })
+      );
+    }
+    if (dir.subtree_session_count > 0) {
+      badges.push(
+        el("span", {
+          className: `badge mono${dir.active_session_count > 0 ? " badge-ok" : ""}`,
+          text: `${dir.subtree_session_count} sess`
+        })
+      );
+    }
+
+    const row = el(
+      "button",
+      { type: "button", className: "fs-dir-btn" },
+      [
+        el("span", { className: "mono", text: `${dir.name}/` }),
+        el("span", { className: "fs-dir-badges" }, badges)
+      ]
+    );
+    row.addEventListener("click", () => browseDirectory(dir.path, view.env_id));
+    dom.fsDirsList.appendChild(el("li", {}, [row]));
   }
 }
 
@@ -1307,8 +1438,7 @@ dom.authForm.addEventListener("submit", async (event) => {
   try {
     await exchangeOwnerToken(token);
     hideAuthBar();
-    await loadModels();
-    await loadSessions();
+    await Promise.all([loadEnvironments(), loadModels(), loadSessions()]);
     if (state.selectedSessionId && state.selectedConversationId) {
       connectEventStream(state.selectedSessionId, state.selectedConversationId);
     }
@@ -1317,16 +1447,30 @@ dom.authForm.addEventListener("submit", async (event) => {
   }
 });
 
-dom.toggleNewSessionBtn.addEventListener("click", () => {
+dom.toggleNewSessionBtn.addEventListener("click", async () => {
   dom.newSessionForm.hidden = !dom.newSessionForm.hidden;
   if (!dom.newSessionForm.hidden) {
     const active = state.sessions.find((s) => s.session_id === state.selectedSessionId);
-    if (!dom.newSessionCwd.value && active?.cwd) {
-      dom.newSessionCwd.value = active.cwd;
-    }
-    dom.newSessionId.focus();
+    const startPath = dom.newSessionCwd.value.trim() || active?.cwd || "";
+    const startEnv = active?.env_id || dom.newSessionEnv?.value || "host";
+    if (dom.newSessionEnv) dom.newSessionEnv.value = startEnv;
+    await browseDirectory(startPath, startEnv);
   }
 });
+
+if (dom.fsUpBtn) {
+  dom.fsUpBtn.addEventListener("click", () => {
+    if (state.fsView?.parent_path) {
+      browseDirectory(state.fsView.parent_path, state.fsView.env_id);
+    }
+  });
+}
+
+if (dom.newSessionEnv) {
+  dom.newSessionEnv.addEventListener("change", () => {
+    browseDirectory("", dom.newSessionEnv.value);
+  });
+}
 
 dom.cancelNewSessionBtn.addEventListener("click", () => {
   dom.newSessionForm.hidden = true;
@@ -1336,7 +1480,8 @@ dom.newSessionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const sessionId = dom.newSessionId.value.trim();
   const cwd = dom.newSessionCwd.value.trim();
-  if (!sessionId || !cwd) return;
+  const envId = dom.newSessionEnv?.value || "host";
+  if (!cwd) return;
 
   clearError();
   try {
@@ -1344,8 +1489,9 @@ dom.newSessionForm.addEventListener("submit", async (event) => {
     const body = {
       version: 1,
       request_id: generateRequestId(),
-      session_id: sessionId,
+      env_id: envId,
       cwd,
+      ...(sessionId ? { session_id: sessionId } : {}),
       ...(selectedModel ? { agent: { model: selectedModel } } : {})
     };
     const res = await apiFetch("/api/v1/sessions", {
@@ -1413,7 +1559,7 @@ window.__H_APP__ = { state, forkAndSubmit };
 
 async function init() {
   await bootstrapAuthFromHash();
-  await Promise.all([loadModels(), loadSessions({ autoSelect: true })]);
+  await Promise.all([loadEnvironments(), loadModels(), loadSessions({ autoSelect: true })]);
 }
 
 init();

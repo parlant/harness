@@ -40,6 +40,9 @@ defmodule H.Application do
       store_lock = Keyword.get(args, :store_lock, H.StoreLock)
       http_port = Keyword.get(args, :http_port, Application.get_env(:harness, :http_port))
 
+      api_socket? =
+        Keyword.get(args, :api_socket, Application.get_env(:harness, :api_socket, false))
+
       daemon_opts = [
         data_dir: data_dir,
         registry: registry,
@@ -57,17 +60,39 @@ defmodule H.Application do
           restart: :temporary
         )
 
+      base_router_opts = [
+        auth_server: auth,
+        auth_table: auth_table,
+        daemon: H.Daemon,
+        daemon_opts: daemon_opts
+      ]
+
       http_children =
         if is_integer(http_port) and http_port >= 0 do
-          router_opts = [
-            port: http_port,
-            auth_server: auth,
-            auth_table: auth_table,
-            daemon: H.Daemon,
-            daemon_opts: daemon_opts
-          ]
+          router_opts = Keyword.put(base_router_opts, :port, http_port)
 
-          [{Bandit, plug: {H.HTTP.Router, router_opts}, ip: {127, 0, 0, 1}, port: http_port}]
+          [
+            Supervisor.child_spec(
+              {Bandit, plug: {H.HTTP.Router, router_opts}, ip: {127, 0, 0, 1}, port: http_port},
+              id: :h_http_tcp
+            )
+          ]
+        else
+          []
+        end
+
+      unix_children =
+        if api_socket? do
+          sock_path = H.api_socket_path(data_dir)
+          File.rm(sock_path)
+          unix_opts = Keyword.put(base_router_opts, :unix_socket, true)
+
+          [
+            Supervisor.child_spec(
+              {Bandit, plug: {H.HTTP.Router, unix_opts}, ip: {:local, sock_path}, port: 0},
+              id: :h_http_unix
+            )
+          ]
         else
           []
         end
@@ -81,7 +106,7 @@ defmodule H.Application do
         {H.WorkspaceLease, name: workspace_lease},
         {DynamicSupervisor, strategy: :one_for_one, name: runtime_sup},
         recovery_child
-      ] ++ http_children
+      ] ++ http_children ++ unix_children
     else
       [
         {Registry, keys: :unique, name: registry},

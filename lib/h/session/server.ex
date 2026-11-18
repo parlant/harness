@@ -259,6 +259,17 @@ defmodule H.Session.Server do
     with {:ok, bootstrap, store} <- Storage.read_bootstrap(store) do
       meta = bootstrap.session_meta || %{}
       cwd = Keyword.get(opts, :cwd) || Map.get(meta, :cwd) || Map.get(meta, "cwd")
+      execution_env = Keyword.get(opts, :execution_env) || H.ExecutionEnv.Local.new(cwd)
+
+      env_id =
+        Keyword.get(opts, :env_id) ||
+          Map.get(meta, :env_id) ||
+          Map.get(meta, "env_id") ||
+          H.ExecutionEnv.env_id(execution_env)
+
+      initial_title =
+        Keyword.get(opts, :title) || Map.get(meta, :title) || Map.get(meta, "title")
+
       prev_clean = Map.get(meta, :clean_close, Map.get(meta, "clean_close"))
       prev_inc = Map.get(meta, :incarnation, Map.get(meta, "incarnation", 0)) || 0
       incarnation = prev_inc + 1
@@ -293,14 +304,20 @@ defmodule H.Session.Server do
 
       state = %{
         session_id: session_id,
+        env_id: env_id,
         cwd: cwd,
         store: store,
         seq: bootstrap.seq || 0,
         incarnation: incarnation,
         session_meta:
-          Map.merge(meta, %{
+          meta
+          |> Map.delete("title")
+          |> Map.delete("env_id")
+          |> Map.merge(%{
             session_id: session_id,
+            env_id: env_id,
             cwd: cwd,
+            title: initial_title,
             incarnation: incarnation,
             clean_close: false
           }),
@@ -322,7 +339,7 @@ defmodule H.Session.Server do
         workspace_lease: Keyword.get(opts, :workspace_lease, H.WorkspaceLease),
         provider_mod: provider_mod,
         provider_config: provider_config,
-        execution_env: Keyword.get(opts, :execution_env) || H.ExecutionEnv.Local.new(cwd),
+        execution_env: execution_env,
         tools: tools,
         default_model: default_model,
         persist_within_ms: Keyword.get(opts, :persist_within_ms, @default_persist_within_ms),
@@ -1086,8 +1103,11 @@ defmodule H.Session.Server do
 
         all_entries = drained_entries ++ [entry]
 
+        {title_writes, state} = maybe_derive_initial_title(content, state)
+
         writes =
           [{:check, {:unique_request_id, req_id, fp}}] ++
+            title_writes ++
             Enum.map(all_entries, &{:append_entry, &1}) ++
             drained_sub_writes ++
             [
@@ -2692,10 +2712,13 @@ defmodule H.Session.Server do
   end
 
   defp broadcast_commit_frame(state, cid, batch_seq, wire_entries, doc_ops) do
+    prev_conv_seq = Map.get(state.conv_last_seq, cid, 0)
+
     frame = %{
       "version" => 1,
       "session_id" => state.session_id,
       "conversation_id" => to_string(cid),
+      "prev_seq" => prev_conv_seq,
       "seq" => batch_seq,
       "appended_entries" => wire_entries,
       "doc_ops" => doc_ops
@@ -3016,8 +3039,9 @@ defmodule H.Session.Server do
     if tool_mod.mutating?() and not is_nil(state.workspace_lease) and
          GenServer.whereis(state.workspace_lease) != nil do
       holder_key = {state.session_id, cid}
+      ws_key = {state.env_id || "host", state.cwd}
 
-      case WorkspaceLease.acquire(state.workspace_lease, state.cwd, holder_key, self()) do
+      case WorkspaceLease.acquire(state.workspace_lease, ws_key, holder_key, self()) do
         :ok -> {:ok, %{state | held_leases: MapSet.put(state.held_leases, cid)}}
         {:error, _} = err -> err
       end
@@ -3029,7 +3053,8 @@ defmodule H.Session.Server do
   defp maybe_release_lease(cid, state) do
     if MapSet.member?(state.held_leases, cid) and not is_nil(state.workspace_lease) and
          GenServer.whereis(state.workspace_lease) != nil do
-      WorkspaceLease.release(state.workspace_lease, state.cwd, {state.session_id, cid})
+      ws_key = {state.env_id || "host", state.cwd}
+      WorkspaceLease.release(state.workspace_lease, ws_key, {state.session_id, cid})
       %{state | held_leases: MapSet.delete(state.held_leases, cid)}
     else
       state
@@ -3037,10 +3062,12 @@ defmodule H.Session.Server do
   end
 
   defp release_all_leases(state) do
+    ws_key = {state.env_id || "host", state.cwd}
+
     Enum.each(state.held_leases, fn cid ->
       if not is_nil(state.workspace_lease) and GenServer.whereis(state.workspace_lease) != nil do
         try do
-          WorkspaceLease.release(state.workspace_lease, state.cwd, {state.session_id, cid})
+          WorkspaceLease.release(state.workspace_lease, ws_key, {state.session_id, cid})
         catch
           :exit, _ -> :ok
         end
@@ -3091,7 +3118,8 @@ defmodule H.Session.Server do
   defp clean_shutdown_reason?(_), do: false
 
   defp maybe_report_catalog_runtime(prev_state, next_state) do
-    if session_active?(prev_state) != session_active?(next_state) do
+    if session_active?(prev_state) != session_active?(next_state) or
+         prev_state.session_meta[:title] != next_state.session_meta[:title] do
       report_catalog_active(next_state)
     end
   end
@@ -3099,13 +3127,69 @@ defmodule H.Session.Server do
   defp report_catalog_active(state) do
     if not is_nil(state.catalog) and GenServer.whereis(state.catalog) != nil do
       try do
-        H.Catalog.report_runtime(state.catalog, state.session_id, %{
-          active: session_active?(state),
-          updated_at: System.system_time(:millisecond)
-        })
+        fields =
+          %{
+            active: session_active?(state),
+            updated_at: System.system_time(:millisecond)
+          }
+          |> then(fn map ->
+            case state.session_meta[:title] do
+              t when is_binary(t) and t != "" -> Map.put(map, :title, t)
+              _ -> map
+            end
+          end)
+
+        H.Catalog.report_runtime(state.catalog, state.session_id, fields)
       catch
         :exit, _ -> :ok
       end
+    end
+  end
+
+  defp maybe_derive_initial_title(content, state) do
+    current = state.session_meta[:title]
+
+    if is_binary(current) and String.trim(current) != "" do
+      {[], state}
+    else
+      case extract_prompt_title(content) do
+        nil ->
+          {[], state}
+
+        derived ->
+          next_meta = Map.put(state.session_meta, :title, derived)
+          {[{:put_session_meta, next_meta}], %{state | session_meta: next_meta}}
+      end
+    end
+  end
+
+  defp extract_prompt_title(blocks) when is_list(blocks) do
+    blocks
+    |> Enum.flat_map(fn
+      %{"type" => "text", "text" => t} when is_binary(t) -> [t]
+      %{type: "text", text: t} when is_binary(t) -> [t]
+      t when is_binary(t) -> [t]
+      _ -> []
+    end)
+    |> Enum.join(" ")
+    |> format_title_line()
+  end
+
+  defp extract_prompt_title(text) when is_binary(text), do: format_title_line(text)
+  defp extract_prompt_title(_), do: nil
+
+  defp format_title_line(raw) do
+    line =
+      raw
+      |> String.split(~r/\R/, parts: 2)
+      |> hd()
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    cond do
+      line == "" -> nil
+      String.length(line) <= 72 -> line
+      true -> String.slice(line, 0, 69) <> "..."
     end
   end
 

@@ -7,7 +7,15 @@ defmodule H.Daemon do
   full `H.HTTP` daemon share the exact same contract.
   """
 
-  alias H.{Catalog, Schema, Session.Server, Session.Supervisor}
+  alias H.{
+    Catalog,
+    EnvRegistry,
+    ExecutionEnv,
+    Harness,
+    Schema,
+    Session.Server,
+    Session.Supervisor
+  }
 
   @default_registry H.Registry
   @default_pubsub H.PubSub
@@ -15,6 +23,86 @@ defmodule H.Daemon do
   @default_catalog H.Catalog
   @default_catalog_table :h_catalog
   @default_workspace_lease H.WorkspaceLease
+
+  @doc "Lists configured execution environments (`\"host\"` plus any custom/remote environments)."
+  @spec list_environments(keyword()) :: [map()]
+  def list_environments(opts \\ []) when is_list(opts) do
+    EnvRegistry.list_environments(opts)
+  end
+
+  @doc """
+  Browses directories in an execution environment (`GET /api/v1/fs`), enriching
+  each child directory with `H.Catalog` session counts/recency and listing
+  sessions rooted directly at `path`.
+  """
+  @spec browse_workspace(map(), keyword()) ::
+          {:ok, map()}
+          | {:error, :not_found | :unknown_environment | {:bad_request, String.t()}}
+  def browse_workspace(query_params \\ %{}, opts \\ [])
+      when is_map(query_params) and is_list(opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+    raw_env_id = param_get(query_params, "env_id", :env_id)
+    env_id = if raw_env_id in [nil, ""], do: "host", else: raw_env_id
+    raw_path = param_get(query_params, "path", :path)
+
+    include_hidden =
+      parse_bool_param(param_get(query_params, "include_hidden", :include_hidden), false)
+
+    if not is_binary(env_id) do
+      {:error, {:bad_request, "env_id must be a string"}}
+    else
+      with {:ok, base_env, desc} <- EnvRegistry.fetch_env(env_id, opts),
+           target_path = if(raw_path in [nil, ""], do: desc.default_cwd, else: raw_path),
+           :ok <- ensure_string_path(target_path),
+           {:ok, bound_env} <- bind_browse_cwd(base_env, target_path),
+           canonical_path = ExecutionEnv.cwd(bound_env),
+           {:ok, %{entries: raw_dirs}} <-
+             ExecutionEnv.list_dir(bound_env, canonical_path,
+               only_dirs: true,
+               include_hidden: include_hidden,
+               markers: ExecutionEnv.default_markers(),
+               limit: 500
+             ) do
+        annotated =
+          Catalog.annotate_directories(desc.id, raw_dirs,
+            table: table,
+            parent_path: canonical_path
+          )
+
+        directories =
+          Enum.map(annotated, fn dir ->
+            dir_path = Map.get(dir, :path) || Path.join(canonical_path, dir.name)
+
+            %{
+              name: dir.name,
+              path: dir_path,
+              type: dir.type,
+              markers: Map.get(dir, :markers, []),
+              direct_session_count: Map.get(dir, :direct_session_count, 0),
+              subtree_session_count: Map.get(dir, :subtree_session_count, 0),
+              active_session_count: Map.get(dir, :active_session_count, 0),
+              latest_session: Map.get(dir, :latest_session)
+            }
+          end)
+
+        sessions =
+          desc.id
+          |> Catalog.list_sessions_for_cwd(canonical_path, table: table, subtree: false)
+          |> Enum.map(&wire_session/1)
+
+        parent_path = if canonical_path == "/", do: nil, else: Path.dirname(canonical_path)
+
+        {:ok,
+         %{
+           env_id: desc.id,
+           path: canonical_path,
+           parent_path: parent_path,
+           directories: directories,
+           sessions: sessions
+         }}
+      end
+    end
+  end
 
   @doc "Lists models from the configured `H.Provider`."
   @spec list_models(keyword()) :: [map()]
@@ -26,7 +114,9 @@ defmodule H.Daemon do
 
   @doc "Lists sessions directly from `H.Catalog` ETS without waking unloaded sessions."
   @spec list_sessions(keyword()) :: [map()]
-  def list_sessions(opts \\ []) when is_list(opts) do
+  def list_sessions(opts \\ [])
+
+  def list_sessions(opts) when is_list(opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
 
     table
@@ -34,9 +124,63 @@ defmodule H.Daemon do
     |> Enum.map(&wire_session/1)
   end
 
+  @doc "Lists sessions filtered by `env_id`, `cwd`, and optional `subtree`."
+  @spec list_sessions(map(), keyword()) :: {:ok, [map()]} | {:error, {:bad_request, String.t()}}
+  def list_sessions(query_params, opts) when is_map(query_params) and is_list(opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+    raw_env_id = param_get(query_params, "env_id", :env_id)
+    raw_cwd = param_get(query_params, "cwd", :cwd)
+    subtree? = parse_bool_param(param_get(query_params, "subtree", :subtree), false)
+
+    cond do
+      not (is_nil(raw_env_id) or is_binary(raw_env_id)) ->
+        {:error, {:bad_request, "env_id must be a string"}}
+
+      not (is_nil(raw_cwd) or is_binary(raw_cwd)) ->
+        {:error, {:bad_request, "cwd must be a string"}}
+
+      is_binary(raw_cwd) and raw_cwd != "" ->
+        env_id = if raw_env_id in [nil, ""], do: "host", else: raw_env_id
+
+        canonical_cwd =
+          case EnvRegistry.fetch_env(env_id, opts) do
+            {:ok, base_env, _desc} ->
+              case ExecutionEnv.resolve_path(base_env, raw_cwd) do
+                {:ok, resolved} -> resolved
+                _ -> raw_cwd
+              end
+
+            _ ->
+              raw_cwd
+          end
+
+        sessions =
+          env_id
+          |> Catalog.list_sessions_for_cwd(canonical_cwd, table: table, subtree: subtree?)
+          |> Enum.map(&wire_session/1)
+
+        {:ok, sessions}
+
+      is_binary(raw_env_id) and raw_env_id != "" ->
+        sessions =
+          table
+          |> Catalog.list_sessions()
+          |> Enum.filter(&((&1.env_id || "host") == raw_env_id))
+          |> Enum.map(&wire_session/1)
+
+        {:ok, sessions}
+
+      true ->
+        {:ok, list_sessions(opts)}
+    end
+  end
+
   @doc """
   Idempotently creates (or attaches to) a session, persists it in `H.Catalog`,
   and starts its supervised `H.Session.Server`.
+
+  When `session_id` is omitted or empty, a unique `<folder-slug>-<hex>` ID is
+  minted automatically.
   """
   @spec create_session(map(), keyword()) ::
           {:ok, %{session: map(), seq: non_neg_integer()}}
@@ -44,27 +188,35 @@ defmodule H.Daemon do
   def create_session(params, opts \\ [])
 
   def create_session(params, opts) when is_map(params) and is_list(opts) do
+    normalized_params = drop_blank_optional(params, ["session_id", :session_id])
+
     with {:ok, validated} <-
-           Schema.validate_map(params, [
-             {:session_id, :session_id, required: true},
+           Schema.validate_map(normalized_params, [
+             {:session_id, :session_id, required: false},
+             {:env_id, :non_empty_string, default: "host"},
+             {:harness_id, :non_empty_string, default: "coding"},
              {:cwd, :abs_path, required: true},
              {:title, :string, required: false, nullable: true},
              {:agent, :map, required: false},
              {:request_id, :non_empty_string, required: false}
            ]),
-         {:ok, agent_opts} <- validate_optional_agent(Map.get(validated, :agent)) do
-      expanded_cwd = Path.expand(validated.cwd)
+         {:ok, agent_opts} <- validate_optional_agent(Map.get(validated, :agent)),
+         {:ok, harness_mod} <- resolve_harness(validated.harness_id, opts),
+         {:ok, ws} <- resolve_session_workspace(validated.env_id, validated.cwd, opts) do
       catalog = Keyword.get(opts, :catalog, @default_catalog)
       table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+      session_id = Map.get(validated, :session_id) || mint_session_id(ws.cwd, table)
 
-      case Catalog.get_session(validated.session_id, table) do
+      case Catalog.get_session(session_id, table) do
         {:ok, existing} ->
+          existing_env = Map.get(existing, :env_id) || "host"
+
           cond do
             existing.status == "quarantined" ->
               {:error, {:quarantined, existing.quarantine_reason || "quarantined"}}
 
-            Path.expand(existing.cwd) != expanded_cwd ->
-              {:error, {:conflict, "session already exists with different cwd"}}
+            existing_env != ws.env_id or existing.cwd != ws.cwd ->
+              {:error, {:conflict, "session already exists with different workspace"}}
 
             true ->
               with {:ok, server} <- ensure_session_started(existing, opts, nil),
@@ -74,15 +226,23 @@ defmodule H.Daemon do
           end
 
         {:error, :not_found} ->
+          {:ok, bootstrapped_agent} =
+            harness_mod.bootstrap_agent(ws.env, agent_opts || %{}, opts)
+
           attrs =
-            %{session_id: validated.session_id, cwd: expanded_cwd}
+            %{
+              session_id: session_id,
+              env_id: ws.env_id,
+              harness_id: harness_mod.id(),
+              cwd: ws.cwd
+            }
             |> maybe_put(:title, Map.get(validated, :title))
 
           with {:ok, entry} <- Catalog.put_session(catalog, attrs),
-               {:ok, server} <- ensure_session_started(entry, opts, agent_opts),
+               {:ok, server} <- ensure_session_started(entry, opts, bootstrapped_agent),
                {:ok, seq} <- Server.get_seq(server) do
             latest_entry =
-              case Catalog.get_session(validated.session_id, table) do
+              case Catalog.get_session(session_id, table) do
                 {:ok, e} -> e
                 _ -> entry
               end
@@ -289,23 +449,51 @@ defmodule H.Daemon do
     storage_mod = Keyword.get(opts, :storage_mod, H.Storage.File)
     storage_opts = Keyword.get(opts, :storage_opts, [])
     data_dir = Keyword.get(opts, :data_dir) || Application.get_env(:harness, :data_dir)
+    env_id = Map.get(entry, :env_id) || "host"
+    harness_id = Map.get(entry, :harness_id) || "coding"
+
+    execution_env =
+      case Keyword.fetch(opts, :execution_env) do
+        {:ok, env} ->
+          env
+
+        :error ->
+          case EnvRegistry.resolve_workspace(env_id, entry.cwd, opts) do
+            {:ok, %{env: env}} -> env
+            _ -> H.ExecutionEnv.Host.new(entry.cwd, env_id: env_id)
+          end
+      end
+
+    tools =
+      case Keyword.fetch(opts, :tools) do
+        {:ok, explicit_tools} ->
+          explicit_tools
+
+        :error ->
+          case Harness.resolve(harness_id, opts) do
+            {:ok, mod} -> mod.tools(opts)
+            _ -> H.Harness.Coding.tools(opts)
+          end
+      end
 
     [
       session_id: entry.session_id,
+      env_id: env_id,
       cwd: entry.cwd,
+      title: entry.title,
       registry: registry,
       pubsub: pubsub,
       catalog: catalog,
       workspace_lease: workspace_lease,
       storage_mod: storage_mod,
       storage_opts: storage_opts,
-      data_dir: data_dir
+      data_dir: data_dir,
+      execution_env: execution_env,
+      tools: tools
     ]
     |> maybe_put_kw(:initial_agent, initial_agent)
     |> maybe_copy_kw(opts, :provider)
     |> maybe_copy_kw(opts, :provider_config)
-    |> maybe_copy_kw(opts, :execution_env)
-    |> maybe_copy_kw(opts, :tools)
     |> maybe_copy_kw(opts, :default_model)
     |> maybe_copy_kw(opts, :persist_within_ms)
     |> maybe_copy_kw(opts, :ephemeral_interval_ms)
@@ -512,6 +700,8 @@ defmodule H.Daemon do
     %{
       session_id: entry.session_id,
       title: entry.title,
+      env_id: Map.get(entry, :env_id) || "host",
+      harness_id: Map.get(entry, :harness_id) || "coding",
       cwd: entry.cwd,
       root_conversation_id: to_string(entry.root_conversation_id || 1),
       created_at: entry.created_at,
@@ -575,6 +765,79 @@ defmodule H.Daemon do
     case Keyword.fetch(src, key) do
       {:ok, val} -> Keyword.put(dst, key, val)
       :error -> dst
+    end
+  end
+
+  defp resolve_harness(harness_id, opts) do
+    case Harness.resolve(harness_id, opts) do
+      {:ok, mod} -> {:ok, mod}
+      {:error, :unknown_harness} -> {:error, {:bad_request, "unknown harness: #{harness_id}"}}
+    end
+  end
+
+  defp resolve_session_workspace(env_id, raw_cwd, opts) do
+    case EnvRegistry.resolve_workspace(env_id, raw_cwd, opts) do
+      {:ok, ws} ->
+        {:ok, ws}
+
+      {:error, :unknown_environment} ->
+        {:error, {:bad_request, "unknown environment: #{env_id}"}}
+
+      {:error, :enoent} ->
+        {:error, {:bad_request, "working directory does not exist: #{raw_cwd}"}}
+
+      {:error, :enotdir} ->
+        {:error, {:bad_request, "working directory is not a directory: #{raw_cwd}"}}
+
+      {:error, reason} ->
+        {:error, {:bad_request, "invalid workspace: #{inspect(reason)}"}}
+    end
+  end
+
+  defp bind_browse_cwd(base_env, target_path) do
+    case ExecutionEnv.bind_cwd(base_env, target_path) do
+      {:ok, bound} -> {:ok, bound}
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, :enotdir} -> {:error, {:bad_request, "path is not a directory"}}
+      {:error, reason} -> {:error, {:bad_request, "invalid path: #{inspect(reason)}"}}
+    end
+  end
+
+  defp ensure_string_path(p) when is_binary(p), do: :ok
+  defp ensure_string_path(_), do: {:error, {:bad_request, "path must be a string"}}
+
+  defp parse_bool_param(true, _default), do: true
+  defp parse_bool_param("true", _default), do: true
+  defp parse_bool_param("1", _default), do: true
+  defp parse_bool_param(false, _default), do: false
+  defp parse_bool_param("false", _default), do: false
+  defp parse_bool_param("0", _default), do: false
+  defp parse_bool_param(_, default), do: default
+
+  defp drop_blank_optional(map, keys) do
+    Enum.reduce(keys, map, fn k, acc ->
+      if Map.get(acc, k) in [nil, ""], do: Map.delete(acc, k), else: acc
+    end)
+  end
+
+  defp mint_session_id(cwd, table) do
+    base =
+      cwd
+      |> Path.basename()
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9_-]+/, "-")
+      |> String.trim("-")
+      |> case do
+        "" -> "session"
+        slug -> String.slice(slug, 0, 32)
+      end
+
+    suffix = :crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower)
+    candidate = "#{base}-#{suffix}"
+
+    case Catalog.get_session(candidate, table) do
+      {:error, :not_found} -> candidate
+      {:ok, _} -> mint_session_id(cwd, table)
     end
   end
 end
