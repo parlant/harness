@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import errno
 import json
 import os
@@ -100,11 +101,13 @@ class FakeDaemon:
         self._stop_event = threading.Event()
 
         self.recorded_commands: list[dict[str, Any]] = []
+        self.entries_requests: list[dict[str, Any]] = []
         self.sse_connect_count = 0
 
         self._seq = 1
         self._next_entry_id = 1
         self._next_sub_id = 1
+        self._snapshot_limit = 50
         self._entries: list[dict[str, Any]] = []
         self._active = False
         self._aborted = False
@@ -120,6 +123,7 @@ class FakeDaemon:
 
         self._next_chunks: list[str] = ["Fake response"]
         self._next_gate: threading.Event | None = None
+        self._next_gate_timeout: float | None = 10.0
 
         self._subscribers: list[_SseSubscriber] = []
         self._turn_threads: list[threading.Thread] = []
@@ -191,12 +195,59 @@ class FakeDaemon:
 
     # --- Test controls ---
 
-    def arm_gated_stream(self, *, chunks: list[str]) -> threading.Event:
+    def arm_gated_stream(
+        self, *, chunks: list[str], gate_timeout: float | None = 10.0
+    ) -> threading.Event:
         gate = threading.Event()
         with self._lock:
             self._next_chunks = list(chunks)
             self._next_gate = gate
+            self._next_gate_timeout = gate_timeout
         return gate
+
+    def seed_history(self, count: int, *, snapshot_limit: int = 50) -> None:
+        """Seed `count` alternating user/assistant entries for paged-history tests."""
+        if count < 0:
+            raise ValueError("count must be >= 0")
+        if snapshot_limit < 1:
+            raise ValueError("snapshot_limit must be >= 1")
+        now = int(time.time())
+        entries: list[dict[str, Any]] = []
+        for idx in range(1, count + 1):
+            if idx % 2 == 1:
+                kind = "user"
+                text = (
+                    f"User turn {idx}: inspect module_{idx % 40}.rs and verify "
+                    f"cursor paging and concurrent stream rendering."
+                )
+            else:
+                kind = "assistant"
+                text = (
+                    f"## Analysis {idx}\n\n"
+                    f"Reviewed module_{idx % 40}.rs with **inline** notes and enough prose to "
+                    f"wrap across terminal columns during scrolling and paging.\n\n"
+                    f"- Verified invariant A for entry {idx}\n"
+                    f"- Verified invariant B for entry {idx}\n\n"
+                    f"```rust\n"
+                    f"fn entry_{idx}(x: usize) -> usize {{ x.saturating_add(1) }}\n"
+                    f"```"
+                )
+            entries.append(
+                {
+                    "id": str(idx),
+                    "conversation_id": "1",
+                    "seq": idx,
+                    "kind": kind,
+                    "data": {"content": [{"type": "text", "text": text}]},
+                    "created_at": now,
+                }
+            )
+        with self._lock:
+            self._entries = entries
+            self._snapshot_limit = snapshot_limit
+            self._next_entry_id = count + 1
+            self._seq = max(1, count)
+            self._cond.notify_all()
 
     def arm_auto_stream(self, *, chunks: list[str]) -> None:
         with self._lock:
@@ -345,8 +396,10 @@ class FakeDaemon:
         self._ephemerals_sent = 0
         chunks = list(self._next_chunks)
         gate = self._next_gate
+        gate_timeout = self._next_gate_timeout
         self._next_chunks = [f"Reply: {prompt_text}"]
         self._next_gate = None
+        self._next_gate_timeout = 10.0
         self._active_gate = gate
 
         user_entry = self._next_entry_locked(
@@ -360,7 +413,7 @@ class FakeDaemon:
         )
         t = threading.Thread(
             target=self._run_turn_worker,
-            args=(prompt_text, chunks, gate),
+            args=(prompt_text, chunks, gate, gate_timeout),
             daemon=True,
         )
         self._turn_threads.append(t)
@@ -368,7 +421,11 @@ class FakeDaemon:
         return seq
 
     def _run_turn_worker(
-        self, prompt_text: str, chunks: list[str], gate: threading.Event | None
+        self,
+        prompt_text: str,
+        chunks: list[str],
+        gate: threading.Event | None,
+        gate_timeout: float | None,
     ) -> None:
         parts: list[str] = []
         for idx, chunk in enumerate(chunks):
@@ -383,7 +440,12 @@ class FakeDaemon:
                 self.emit_ephemeral_chunk(chunk)
                 self._cond.notify_all()
             if gate is not None and idx == len(chunks) - 1:
-                gate.wait(timeout=10.0)
+                if gate_timeout is None:
+                    while not self._stop_event.is_set() and not self._aborted and self._active:
+                        if gate.wait(timeout=0.25):
+                            break
+                else:
+                    gate.wait(timeout=gate_timeout)
 
         with self._lock:
             if not self._active or self._aborted:
@@ -502,7 +564,8 @@ class FakeDaemon:
             def do_GET(self) -> None:
                 if not self._check_auth_and_host():
                     return
-                path = urllib.parse.urlparse(self.path).path
+                parsed = urllib.parse.urlparse(self.path)
+                path = parsed.path
                 if path == "/api/v1/environments":
                     self._send_json(
                         200,
@@ -530,10 +593,67 @@ class FakeDaemon:
                             },
                         )
                     return
+                if path == f"/api/v1/sessions/{daemon.session_id}/conversations/1/entries":
+                    self._handle_entries(parsed.query)
+                    return
                 if path == f"/api/v1/sessions/{daemon.session_id}/conversations/1/events":
                     self._handle_sse()
                     return
                 self._send_json(404, {"error": "not found"})
+
+            def _handle_entries(self, query: str) -> None:
+                qs = urllib.parse.parse_qs(query, keep_blank_values=False)
+                order = qs.get("order", ["desc"])[0]
+                if order not in ("asc", "desc"):
+                    self._send_json(422, {"error": "invalid order"})
+                    return
+                cursor_raw = qs.get("cursor", [None])[0]
+                cursor_int: int | None = None
+                if cursor_raw is not None:
+                    try:
+                        cursor_int = int(cursor_raw)
+                    except ValueError:
+                        self._send_json(422, {"error": "invalid cursor"})
+                        return
+                limit_raw = qs.get("limit", ["50"])[0]
+                try:
+                    limit = max(1, min(500, int(limit_raw)))
+                except ValueError:
+                    self._send_json(422, {"error": "invalid limit"})
+                    return
+
+                with daemon._lock:
+                    entries = daemon._entries
+                    n = len(entries)
+                    if order == "desc":
+                        end = (
+                            bisect.bisect_left(entries, cursor_int, key=lambda e: int(e["id"]))
+                            if cursor_int is not None
+                            else n
+                        )
+                        start = max(0, end - limit)
+                        items = list(reversed(entries[start:end]))
+                        has_rest = start > 0
+                    else:
+                        start = (
+                            bisect.bisect_right(entries, cursor_int, key=lambda e: int(e["id"]))
+                            if cursor_int is not None
+                            else 0
+                        )
+                        end = min(n, start + limit)
+                        items = list(entries[start:end])
+                        has_rest = end < n
+                    next_cursor = items[-1]["id"] if (has_rest and items) else None
+                    daemon.entries_requests.append(
+                        {
+                            "order": order,
+                            "cursor": cursor_raw,
+                            "limit": limit,
+                            "returned": len(items),
+                            "next_cursor": next_cursor,
+                        }
+                    )
+                self._send_json(200, {"items": items, "next_cursor": next_cursor})
 
             def do_POST(self) -> None:
                 if not self._check_auth_and_host():
@@ -558,14 +678,17 @@ class FakeDaemon:
                 with daemon._lock:
                     daemon._subscribers.append(sub)
                     daemon.sse_connect_count += 1
+                    snap_entries = list(daemon._entries[-daemon._snapshot_limit :])
+                    has_more = len(daemon._entries) > len(snap_entries) and len(snap_entries) > 0
+                    before_entry_id = snap_entries[0]["id"] if has_more else None
                     snap = {
                         "version": 1,
                         "session_id": daemon.session_id,
                         "conversation_id": "1",
                         "seq": daemon._seq,
-                        "before_entry_id": None,
-                        "has_more": False,
-                        "entries": list(daemon._entries[-50:]),
+                        "before_entry_id": before_entry_id,
+                        "has_more": has_more,
+                        "entries": snap_entries,
                         "docs": json.loads(json.dumps(daemon._docs)),
                     }
                     daemon._cond.notify_all()
