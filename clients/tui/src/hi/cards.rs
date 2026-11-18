@@ -200,6 +200,7 @@ fn render_entry(
             }
         }
         "tool_result" => render_tool_result(out, &id, &entry.data, calls_by_id, tools_expanded),
+        "user_shell" => render_user_shell(out, &id, &entry.data, tools_expanded),
         "compaction" | "reset" => {
             let body = ["summary", "handoff", "note", "reason", "text"]
                 .iter()
@@ -460,6 +461,75 @@ fn render_tool_result(
     }
 }
 
+fn render_user_shell(out: &mut Vec<String>, id: &str, data: &Value, tools_expanded: bool) {
+    let command = str_at(data, "command").unwrap_or("");
+    let include = data
+        .get("include_in_context")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let prefix = if include { "!" } else { "!!" };
+    let cancelled = data.get("cancelled").and_then(Value::as_bool) == Some(true);
+    let is_error = data.get("is_error").and_then(Value::as_bool) == Some(true);
+    let exit_code = data.get("exit_code").and_then(Value::as_i64);
+    let diagnostic = str_at(data, "diagnostic");
+
+    let mut header_parts = vec![format!("shell #{id}")];
+    if !include {
+        header_parts.push("excluded".to_string());
+    }
+    if cancelled {
+        header_parts.push("aborted".to_string());
+    } else if let Some(code) = exit_code {
+        if is_error || code != 0 {
+            header_parts.push(format!("! exit {code}"));
+        } else {
+            header_parts.push("exit 0".to_string());
+        }
+    } else if let Some(diag) = diagnostic {
+        header_parts.push(format!("! {}", sanitize_single_line(diag)));
+    } else if is_error {
+        header_parts.push("! error".to_string());
+    } else {
+        header_parts.push("ok".to_string());
+    }
+    if let Some(ms) = u64_at(data, "duration_ms") {
+        header_parts.push(format_duration(ms));
+    }
+
+    let cmd_clean = sanitize_single_line(command);
+    let cmd_shown = if tools_expanded {
+        cmd_clean
+    } else {
+        truncate(&cmd_clean, COMPACT_CHARS)
+    };
+    out.push(format!(
+        "[{}] {prefix}{cmd_shown}",
+        header_parts.join(" · ")
+    ));
+
+    let output = str_at(data, "output").unwrap_or("");
+    if !output.trim_end().is_empty() {
+        if tools_expanded {
+            push_lines(out, output.trim_end(), "  ");
+        } else {
+            push_preview(out, output, PREVIEW_LINES, true, "lines");
+        }
+    }
+
+    if data.get("truncated").and_then(Value::as_bool) == Some(true) {
+        let mut notes = Vec::new();
+        if let Some(skipped) = u64_at(data, "skipped_bytes").filter(|b| *b > 0) {
+            notes.push(format!("{skipped} bytes omitted"));
+        } else {
+            notes.push("truncated".to_string());
+        }
+        if let Some(path) = str_at(data, "full_output_path") {
+            notes.push(format!("full output: {}", sanitize_single_line(path)));
+        }
+        out.push(format!("  [{}]", notes.join(" · ")));
+    }
+}
+
 fn tool_badge(name: &str, is_error: bool, d: &Value) -> Option<String> {
     if !d.is_object() {
         return None;
@@ -696,6 +766,32 @@ fn render_live(
         )));
 
         let partial = slot.get("output").and_then(Value::as_str).unwrap_or("");
+        if !partial.trim_end().is_empty() {
+            if tools_expanded {
+                push_lines(out, partial.trim_end(), "  ");
+            } else {
+                push_preview(out, partial, PREVIEW_LINES, true, "lines");
+            }
+        }
+    }
+
+    if let Some(shell) = live.get("user_shell").and_then(Value::as_object) {
+        separate(out);
+        let cmd = shell.get("command").and_then(Value::as_str).unwrap_or("");
+        let status = shell
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("running");
+        let include = shell
+            .get("include_in_context")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let prefix = if include { "!" } else { "!!" };
+        let ctx_tag = if include { "" } else { " · excluded" };
+        out.push(sanitize_single_line(&format!(
+            "[shell (live · {status}{ctx_tag})] {prefix}{cmd}"
+        )));
+        let partial = shell.get("output").and_then(Value::as_str).unwrap_or("");
         if !partial.trim_end().is_empty() {
             if tools_expanded {
                 push_lines(out, partial.trim_end(), "  ");
@@ -1172,5 +1268,73 @@ mod tests {
         let final_view = rows(&state, false, false).join("\n");
         assert!(!final_view.contains("(live"));
         assert!(final_view.contains("[assistant #2]\nHello!"));
+    }
+
+    #[test]
+    fn user_shell_live_and_committed_cards_sanitize_and_render_results() {
+        let mut state = TranscriptState::default();
+        state.apply_snapshot(SnapshotFrame {
+            version: Some(1),
+            session_id: None,
+            conversation_id: None,
+            seq: 1,
+            before_entry_id: None,
+            has_more: Some(false),
+            entries: vec![],
+            docs: Some(json!({
+                "live": {
+                    "user_shell": {
+                        "task_id": "5",
+                        "command": "echo \u{001b}[31msecret",
+                        "include_in_context": false,
+                        "status": "running",
+                        "output": "line1\nline2"
+                    }
+                }
+            })),
+        });
+
+        let live_rows = rows(&state, false, false);
+        assert_clean_rows(&live_rows);
+        let live_text = live_rows.join("\n");
+        assert!(live_text.contains("[shell (live · running · excluded)] !!echo \\x1b[31msecret"));
+        assert!(live_text.contains("  line1\n  line2"));
+
+        state.apply_commit(CommitFrame {
+            version: Some(1),
+            session_id: None,
+            conversation_id: None,
+            prev_seq: Some(1),
+            seq: 2,
+            appended_entries: vec![make_entry(
+                "2",
+                "user_shell",
+                json!({
+                    "command": "ls -la",
+                    "output": "out1\nout2",
+                    "exit_code": 0,
+                    "cancelled": false,
+                    "truncated": true,
+                    "skipped_bytes": 512,
+                    "full_output_path": "/tmp/shell.log",
+                    "include_in_context": true,
+                    "is_error": false,
+                    "duration_ms": 120
+                }),
+            )],
+            doc_ops: Some(
+                json!({"live": [["replace", {}]]})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        });
+
+        let final_rows = rows(&state, false, false);
+        assert_clean_rows(&final_rows);
+        let final_text = final_rows.join("\n");
+        assert!(final_text.contains("[shell #2 · exit 0 · 120ms] !ls -la"));
+        assert!(final_text.contains("  out1\n  out2"));
+        assert!(final_text.contains("512 bytes omitted · full output: /tmp/shell.log"));
     }
 }

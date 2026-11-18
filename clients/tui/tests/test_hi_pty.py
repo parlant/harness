@@ -89,15 +89,54 @@ class HiPtyAcceptanceTests(unittest.TestCase):
             with self.subTest(mode=mode), FakeDaemon(cwd=self.workdir) as daemon:
                 with PtySession([self.hi_bin, "--tui-mode", mode, "-s", "demo"], env=daemon.env(), cwd=self.workdir) as pty:
                     daemon.wait_for_sse_connect()
+                    pty.wait_for_raw_mode()
                     pty.wait_for_output("Ready")
+
                     pty.send_text("!!private-marker")
                     pty.send_enter()
-                    pty.wait_for_output("Shell unavailable")
+                    cmd1 = daemon.wait_for_command(
+                        lambda c: c["command"] == "user_shell"
+                        and c["args"].get("command") == "private-marker"
+                    )
+                    self.assertEqual(cmd1["version"], 1)
+                    self.assertEqual(cmd1["conversation_id"], 1)
+                    self.assertEqual(
+                        cmd1["args"],
+                        {
+                            "command": "private-marker",
+                            "include_in_context": False,
+                            "expected_seq": 1,
+                        },
+                    )
+                    daemon.wait_for_turn_idle()
+                    pty.wait_for_output("out:private-marker")
+
+                    pty.send_text("!ctx-cmd")
                     pty.send_alt_enter()
+                    cmd2 = daemon.wait_for_command(
+                        lambda c: c["command"] == "user_shell"
+                        and c["args"].get("command") == "ctx-cmd"
+                    )
+                    self.assertEqual(
+                        cmd2["args"],
+                        {
+                            "command": "ctx-cmd",
+                            "include_in_context": True,
+                            "expected_seq": 3,
+                        },
+                    )
+                    daemon.wait_for_turn_idle()
+                    pty.wait_for_output("out:ctx-cmd")
+
+                    # Empty shell prefix never submits to model
+                    pty.send_text("!")
+                    pty.send_enter()
+                    pty.wait_for_output("Enter a shell command")
                     pty.send_ctrl("c")
                     pty.send_ctrl("d")
                     self.assertEqual(pty.wait(), 0)
-                    self.assertEqual(daemon.recorded_commands, [])
+                    submit_cmds = [c for c in daemon.recorded_commands if c["command"] == "submit"]
+                    self.assertEqual(submit_cmds, [])
 
     def test_raw_mode_restore_on_ctrl_d_when_empty(self) -> None:
         with FakeDaemon(transport="uds", cwd=self.workdir, session_id="demo") as daemon:

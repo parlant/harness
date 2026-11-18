@@ -47,6 +47,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/dequeue", "Withdraw queued prompts"),
     ("/abort", "Interrupt this conversation"),
     ("/continue", "Continue conversation"),
+    ("/compact", "Compact conversation history"),
     ("/tools", "Toggle tool details"),
     ("/thoughts", "Toggle thinking blocks"),
     ("/edit", "Open draft in external editor"),
@@ -283,9 +284,25 @@ impl Ui {
                 )
             })
             .unwrap_or_default();
+        let shell_tag = self
+            .state
+            .active_user_shell()
+            .map(|(cmd, status, include)| {
+                let prefix = if include { "!" } else { "!!" };
+                format!(
+                    " · shell {prefix}{} ({})",
+                    sanitize_single_line(cmd)
+                        .chars()
+                        .take(24)
+                        .collect::<String>(),
+                    sanitize_single_line(status)
+                )
+            })
+            .unwrap_or_default();
         let status = format!(
-            "{} · {} · {}{}{}{} · {}:{} · {}",
+            "{}{} · {} · {}{}{}{} · {}:{} · {}",
             self.note,
+            shell_tag,
             if self.online { "online" } else { "offline" },
             format_status_line(&self.state),
             if self.job.is_some() {
@@ -418,10 +435,12 @@ impl Ui {
                     if self.draft.editor.text().is_empty() {
                         self.draft.editor.set(&text);
                     }
-                    if self.draft.attachments.is_empty() {
+                    if self.draft.attachments.is_empty() && envelope.command != "user_shell" {
                         self.draft.attachments = extract_non_text_blocks(&envelope.args);
                     }
-                    if envelope.command != "fork_and_submit" || is_ambiguous_submit_error(&e) {
+                    if envelope.command != "user_shell"
+                        && (envelope.command != "fork_and_submit" || is_ambiguous_submit_error(&e))
+                    {
                         self.draft.retry = Some((text, envelope));
                         self.note.push_str(" · /retry uses same request");
                     }
@@ -622,8 +641,46 @@ impl Ui {
             return;
         }
         let text = self.draft.editor.expanded_text();
-        if text.trim_start().starts_with('!') {
-            self.note = "Shell unavailable; draft retained, nothing sent".into();
+        if let Some((include_in_context, shell_cmd)) = parse_user_shell_input(&text) {
+            if shell_cmd.is_empty() {
+                self.note = "Enter a shell command after ! or !!; draft retained".into();
+                return;
+            }
+            if self.draft.fork_edit.is_some() {
+                self.note =
+                    "Cancel fork-edit (Esc) before running a shell command; draft retained".into();
+                return;
+            }
+            if self.target.env_id.trim().is_empty()
+                || self.target.cwd.trim().is_empty()
+                || !self.target.cwd.starts_with('/')
+            {
+                self.note = "Workspace not bound; shell command not sent, draft retained".into();
+                return;
+            }
+            let Ok(cid) = self.target.cid.parse() else {
+                self.note = "Invalid conversation ID".into();
+                return;
+            };
+            if self.job.is_some() {
+                self.note = "Previous command pending; draft retained".into();
+                return;
+            }
+            let marker = CommandEnvelope {
+                version: 1,
+                request_id: String::new(),
+                command: "user_shell".to_string(),
+                conversation_id: cid,
+                args: Value::Null,
+            };
+            self.start(
+                Effect::UserShell {
+                    command: shell_cmd.to_string(),
+                    include_in_context,
+                },
+                Some((text, marker)),
+            );
+            self.draft.editor.submitted();
             return;
         }
         if text.trim().is_empty() && self.draft.attachments.is_empty() {
@@ -694,13 +751,25 @@ impl Ui {
             .iter()
             .rev()
             .map(|e| {
+                let preview = if e.kind == "user_shell" {
+                    let cmd = e.data.get("command").and_then(Value::as_str).unwrap_or("");
+                    let include = e
+                        .data
+                        .get("include_in_context")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    let prefix = if include { "!" } else { "!!" };
+                    format!("{prefix}{cmd}")
+                } else {
+                    extract_entry_text(&e.data)
+                };
                 (
                     e.id.clone(),
                     format!(
                         "#{} {} {}",
                         e.id,
                         e.kind,
-                        sanitize_single_line(&extract_entry_text(&e.data))
+                        sanitize_single_line(&preview)
                             .chars()
                             .take(140)
                             .collect::<String>()
@@ -1045,6 +1114,14 @@ impl Ui {
             "/envs" => self.start(Effect::Environments, None),
             "/abort" => self.start(Effect::Abort, None),
             "/continue" => self.start(Effect::Continue, None),
+            "/compact" => {
+                if self.state.seq.is_none() {
+                    self.note = "Not synchronized; wait for snapshot before /compact".into();
+                } else {
+                    let instructions = (!arg.is_empty()).then(|| arg.to_owned());
+                    self.start(Effect::Compact(instructions), None);
+                }
+            }
             "/file" if arg.is_empty() => self.workspace_file_menu(""),
             "/file" => self.start(Effect::ReadWorkspaceFile(arg.to_owned()), None),
             "/files" => self.workspace_file_menu(arg),
@@ -1306,6 +1383,15 @@ fn extract_non_text_blocks(args: &Value) -> Vec<Value> {
 
 fn is_ambiguous_submit_error(err: &str) -> bool {
     err.contains("outcome unknown") || err.contains("disconnected")
+}
+
+fn parse_user_shell_input(text: &str) -> Option<(bool, &str)> {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("!!") {
+        Some((false, rest.trim()))
+    } else {
+        trimmed.strip_prefix('!').map(|rest| (true, rest.trim()))
+    }
 }
 
 fn resolve_fork_target(view: &TranscriptState, entry_id: &str) -> Result<ForkResolution, String> {
@@ -2403,5 +2489,263 @@ mod tests {
         assert!(ui.note.contains("503"), "note={}", ui.note);
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn user_shell_wiring_excludes_attachments_never_falls_back_or_retries_and_supports_esc_cancel()
+    {
+        let (srv, client) = TestServer::bind("app-shell");
+        let seen_cmds = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_srv = Arc::clone(&seen_cmds);
+        let listener = srv.listener.try_clone().unwrap();
+
+        let handle = thread::spawn(move || {
+            let mut post_count = 0usize;
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, body) = read_http_request(&mut stream);
+                if head.starts_with("POST /api/v1/sessions/sess-1/commands ") {
+                    post_count += 1;
+                    let val: Value = serde_json::from_str(&body).unwrap();
+                    let req_id = val["request_id"].as_str().unwrap().to_string();
+                    seen_srv.lock().unwrap().push(val);
+                    match post_count {
+                        1 => {
+                            write_json_response(
+                                &mut stream,
+                                "200 OK",
+                                &json!({
+                                    "version": 1,
+                                    "request_id": req_id,
+                                    "seq": 11,
+                                    "submission_id": "sub-s1",
+                                    "status": "placed"
+                                })
+                                .to_string(),
+                            );
+                        }
+                        2 => {
+                            // Abort from Esc
+                            write_json_response(
+                                &mut stream,
+                                "200 OK",
+                                &json!({
+                                    "version": 1,
+                                    "request_id": req_id,
+                                    "seq": 12,
+                                    "status": "done"
+                                })
+                                .to_string(),
+                            );
+                        }
+                        3 => {
+                            // Ambiguous I/O drop on !!cmd -> must NOT set retry or fall back to submit
+                            drop(stream);
+                            break;
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    write_json_response(&mut stream, "404 Not Found", "{}");
+                }
+            }
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        load_snapshot(&mut ui, 10, vec![user_entry("1", "hi")], false);
+        ui.draft
+            .attachments
+            .push(json!({"type": "text", "text": "<file name=\"a.txt\">secret</file>"}));
+
+        // Empty ! or !! never submits to model
+        ui.draft.editor.set("!");
+        ui.send(false);
+        assert!(
+            ui.note.contains("Enter a shell command"),
+            "note={}",
+            ui.note
+        );
+        assert!(ui.job.is_none());
+        ui.draft.editor.set("!!");
+        ui.send(true);
+        assert!(
+            ui.note.contains("Enter a shell command"),
+            "note={}",
+            ui.note
+        );
+        assert!(ui.job.is_none());
+
+        // !ls -la sends user_shell with include_in_context=true, expected_seq=10, and keeps attachments excluded
+        ui.draft.editor.set("!ls -la");
+        press_enter(&mut ui, &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+        assert_eq!(
+            ui.draft.attachments.len(),
+            1,
+            "attachment kept in draft, excluded from shell"
+        );
+        assert!(ui.draft.editor.text().is_empty());
+
+        // Live user_shell commit renders active status & allows Esc abort
+        ui.update(Update::Frame(ServerFrame::Commit(
+            crate::protocol::CommitFrame {
+                version: Some(1),
+                session_id: Some("sess-1".into()),
+                conversation_id: Some("1".into()),
+                prev_seq: Some(10),
+                seq: 11,
+                appended_entries: vec![],
+                doc_ops: Some(
+                    serde_json::from_value(json!({
+                        "live": [["replace", {
+                            "user_shell": {
+                                "task_id": "5",
+                                "command": "ls -la",
+                                "include_in_context": true,
+                                "status": "running",
+                                "output": "file1\n"
+                            }
+                        }]]
+                    }))
+                    .unwrap(),
+                ),
+            },
+        )));
+        assert!(ui.state.is_run_active());
+        ui.draw(&mut screen).unwrap();
+        let rendered: String = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| {
+                        screen
+                            .test_backend()
+                            .buffer()
+                            .cell((x, y))
+                            .map(|c| c.symbol())
+                            .unwrap_or(" ")
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("shell !ls -la (running)"), "{rendered}");
+        assert!(
+            rendered.contains("[shell (live · running)] !ls -la"),
+            "{rendered}"
+        );
+
+        // Esc sends Abort while live.user_shell is active
+        press_esc(&mut ui, &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+
+        // Update state seq=12 (live cleared), then !!cmd suffers ambiguous drop -> no blind retry
+        ui.update(Update::Frame(ServerFrame::Commit(
+            crate::protocol::CommitFrame {
+                version: Some(1),
+                session_id: Some("sess-1".into()),
+                conversation_id: Some("1".into()),
+                prev_seq: Some(11),
+                seq: 12,
+                appended_entries: vec![],
+                doc_ops: Some(
+                    serde_json::from_value(json!({ "live": [["replace", {}]] })).unwrap(),
+                ),
+            },
+        )));
+        ui.draft.editor.set("!!rm -rf /tmp/x");
+        ui.send(true); // Alt-Enter path
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.note.contains("outcome unknown"), "note={}", ui.note);
+        assert!(
+            ui.draft.retry.is_none(),
+            "must NOT set retry for unsafe user_shell"
+        );
+        assert_eq!(ui.draft.editor.text(), "!!rm -rf /tmp/x");
+
+        handle.join().unwrap();
+        let cmds = seen_cmds.lock().unwrap();
+        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds[0]["command"], "user_shell");
+        assert_eq!(cmds[0]["args"]["command"], "ls -la");
+        assert_eq!(cmds[0]["args"]["include_in_context"], true);
+        assert_eq!(cmds[0]["args"]["expected_seq"], 10);
+        assert_eq!(cmds[1]["command"], "abort");
+        assert_eq!(cmds[2]["command"], "user_shell");
+        assert_eq!(cmds[2]["args"]["command"], "rm -rf /tmp/x");
+        assert_eq!(cmds[2]["args"]["include_in_context"], false);
+        assert_eq!(cmds[2]["args"]["expected_seq"], 12);
+    }
+
+    #[test]
+    fn compact_command_sends_expected_seq_and_optional_instructions() {
+        let (srv, client) = TestServer::bind("app-compact");
+        let seen_cmds = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_srv = Arc::clone(&seen_cmds);
+        let listener = srv.listener.try_clone().unwrap();
+
+        let handle = thread::spawn(move || {
+            let mut count = 0usize;
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, body) = read_http_request(&mut stream);
+                if head.starts_with("POST /api/v1/sessions/sess-1/commands ") {
+                    count += 1;
+                    let val: Value = serde_json::from_str(&body).unwrap();
+                    let req_id = val["request_id"].as_str().unwrap().to_string();
+                    seen_srv.lock().unwrap().push(val);
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        &json!({
+                            "version": 1,
+                            "request_id": req_id,
+                            "seq": 10 + count,
+                            "status": "started"
+                        })
+                        .to_string(),
+                    );
+                    if count == 2 {
+                        break;
+                    }
+                } else {
+                    write_json_response(&mut stream, "404 Not Found", "{}");
+                }
+            }
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        ui.command("/compact");
+        assert!(ui.note.contains("wait for snapshot"), "note={}", ui.note);
+
+        load_snapshot(&mut ui, 10, vec![user_entry("1", "hi")], false);
+        ui.command("/compact");
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.note.contains("seq 11"), "note={}", ui.note);
+
+        ui.update(Update::Frame(ServerFrame::Commit(
+            crate::protocol::CommitFrame {
+                version: Some(1),
+                session_id: Some("sess-1".into()),
+                conversation_id: Some("1".into()),
+                prev_seq: Some(10),
+                seq: 11,
+                appended_entries: vec![],
+                doc_ops: None,
+            },
+        )));
+        ui.command("/compact focus on API contract");
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.note.contains("seq 12"), "note={}", ui.note);
+
+        handle.join().unwrap();
+        let cmds = seen_cmds.lock().unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0]["command"], "compact");
+        assert_eq!(cmds[0]["args"], json!({"expected_seq": 10}));
+        assert_eq!(cmds[1]["command"], "compact");
+        assert_eq!(
+            cmds[1]["args"],
+            json!({"expected_seq": 11, "instructions": "focus on API contract"})
+        );
     }
 }

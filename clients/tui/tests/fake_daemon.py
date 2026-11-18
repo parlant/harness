@@ -469,6 +469,35 @@ class FakeDaemon:
                 self._active = False
                 self._cond.notify_all()
 
+    def _run_user_shell_worker(self, shell_cmd: str, include_ctx: bool) -> None:
+        time.sleep(0.02)
+        with self._lock:
+            if self._stop_event.is_set() or not self._active or self._aborted:
+                return
+            entry = self._next_entry_locked(
+                "user_shell",
+                {
+                    "command": shell_cmd,
+                    "output": f"out:{shell_cmd}",
+                    "exit_code": 0,
+                    "cancelled": False,
+                    "truncated": False,
+                    "skipped_bytes": 0,
+                    "full_output_path": None,
+                    "include_in_context": include_ctx,
+                    "is_error": False,
+                    "diagnostic": None,
+                    "duration_ms": 5,
+                },
+            )
+            self._docs["live"] = {}
+            self._commit_locked(
+                appended_entries=[entry],
+                doc_ops={"live": [["replace", {}]]},
+            )
+            self._active = False
+            self._cond.notify_all()
+
     def _execute_command_locked(self, raw: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         req_id = raw.get("request_id")
         command = raw.get("command")
@@ -513,6 +542,54 @@ class FakeDaemon:
                 "seq": seq,
                 "submission_id": sub_id,
                 "status": status,
+            }
+
+        if command == "user_shell":
+            shell_cmd = args.get("command")
+            include_ctx = args.get("include_in_context")
+            expected_seq = args.get("expected_seq")
+            if (
+                not isinstance(shell_cmd, str)
+                or not shell_cmd.strip()
+                or not isinstance(include_ctx, bool)
+                or not isinstance(expected_seq, int)
+                or expected_seq < 0
+            ):
+                return 422, {"error": "invalid user_shell args"}
+            if expected_seq != self._seq:
+                return 409, {"error": "expected_seq mismatch"}
+            if self._active:
+                return 409, {"error": "conversation_busy"}
+
+            sub_id = f"sub-{self._next_sub_id}"
+            self._next_sub_id += 1
+            self._active = True
+            self._aborted = False
+            live_doc = {
+                "user_shell": {
+                    "task_id": sub_id,
+                    "command": shell_cmd,
+                    "include_in_context": include_ctx,
+                    "status": "running",
+                    "output": "",
+                }
+            }
+            self._docs["live"] = live_doc
+            seq = self._commit_locked(doc_ops={"live": [["replace", live_doc]]})
+            t = threading.Thread(
+                target=self._run_user_shell_worker,
+                args=(shell_cmd, include_ctx),
+                daemon=True,
+            )
+            self._turn_threads.append(t)
+            t.start()
+            self._cond.notify_all()
+            return 200, {
+                "version": 1,
+                "request_id": req_id,
+                "seq": seq,
+                "submission_id": sub_id,
+                "status": "placed",
             }
 
         if command == "abort":

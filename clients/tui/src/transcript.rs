@@ -176,6 +176,20 @@ impl TranscriptState {
         self.docs.get("live").and_then(Value::as_object)
     }
 
+    pub fn active_user_shell(&self) -> Option<(&str, &str, bool)> {
+        let shell = self.live_doc()?.get("user_shell")?.as_object()?;
+        let cmd = shell.get("command").and_then(Value::as_str).unwrap_or("");
+        let status = shell
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("running");
+        let include = shell
+            .get("include_in_context")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        Some((cmd, status, include))
+    }
+
     pub fn is_run_active(&self) -> bool {
         let Some(live) = self.live_doc() else {
             return false;
@@ -184,6 +198,9 @@ impl TranscriptState {
             return true;
         }
         if live.get("generation").is_some_and(|v| !v.is_null()) {
+            return true;
+        }
+        if live.get("user_shell").is_some_and(|v| !v.is_null()) {
             return true;
         }
         if let Some(tools) = live.get("tools") {
@@ -807,5 +824,49 @@ mod tests {
         );
         assert_eq!(t.before_entry_id.as_deref(), Some("6"));
         assert!(t.has_more);
+    }
+
+    #[test]
+    fn user_shell_live_doc_marks_run_active_until_cleared() {
+        let mut t = TranscriptState::default();
+        t.apply_snapshot(SnapshotFrame {
+            version: Some(1),
+            session_id: None,
+            conversation_id: None,
+            seq: 3,
+            before_entry_id: None,
+            has_more: Some(false),
+            entries: vec![],
+            docs: Some(json!({
+                "live": {
+                    "user_shell": {
+                        "task_id": "9",
+                        "command": "echo hi",
+                        "include_in_context": false,
+                        "status": "running",
+                        "output": ""
+                    }
+                }
+            })),
+        });
+        assert!(t.is_run_active());
+        assert_eq!(t.active_user_shell(), Some(("echo hi", "running", false)));
+
+        t.apply_commit(CommitFrame {
+            version: Some(1),
+            session_id: None,
+            conversation_id: None,
+            prev_seq: Some(3),
+            seq: 4,
+            appended_entries: vec![],
+            doc_ops: Some(
+                json!({"live": [["replace", {}]]})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        });
+        assert!(!t.is_run_active());
+        assert_eq!(t.active_user_shell(), None);
     }
 }

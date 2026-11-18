@@ -37,13 +37,21 @@ pub enum Effect {
     Continue,
     Environments,
     Branch(String),
-    Export { last: String, path: String },
+    Export {
+        last: String,
+        path: String,
+    },
     Files(String),
     AttachFile(String),
     WorkspaceFiles(String),
     ReadWorkspaceFile(String),
     ReadName,
     Rename(Option<String>),
+    UserShell {
+        command: String,
+        include_in_context: bool,
+    },
+    Compact(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -543,6 +551,48 @@ pub fn execute(
             };
             Ok(Reply::Message(msg))
         }
+
+        Effect::UserShell {
+            command,
+            include_in_context,
+        } => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot run user_shell: missing session_id".to_string());
+            }
+            if target.env_id.trim().is_empty()
+                || target.cwd.trim().is_empty()
+                || !target.cwd.starts_with('/')
+            {
+                return Err("cannot run user_shell: workspace is not bound".to_string());
+            }
+            let cid_num = parse_cid(&target.cid)?;
+            let expected_seq =
+                seq.ok_or_else(|| "cannot run user_shell: missing expected_seq".to_string())?;
+            let envelope =
+                build_user_shell_envelope(cid_num, expected_seq, &command, include_in_context)?;
+            // Unsafe side effect: post once without blind retry or local fallback.
+            match client.post_command(&target.sid, &envelope) {
+                Ok(receipt) => Ok(Reply::Receipt(receipt)),
+                Err(err) if is_ambiguous_io_error(&err) => Err(format!(
+                    "user_shell outcome unknown (request_id={}): {}; check transcript before re-running",
+                    sanitize_single_line(&envelope.request_id),
+                    sanitize_single_line(&err.to_string())
+                )),
+                Err(err) => Err(format_client_error(&err)),
+            }
+        }
+
+        Effect::Compact(instructions) => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot compact: missing session_id".to_string());
+            }
+            let cid_num = parse_cid(&target.cid)?;
+            let expected_seq =
+                seq.ok_or_else(|| "cannot compact: missing expected_seq".to_string())?;
+            let envelope = build_compact_envelope(cid_num, expected_seq, instructions.as_deref())?;
+            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+            Ok(Reply::Receipt(receipt))
+        }
     }
 }
 
@@ -663,6 +713,57 @@ fn build_rename_envelope(
         version: 1,
         request_id: generate_request_id(),
         command: "rename".to_string(),
+        conversation_id,
+        args: Value::Object(args),
+    })
+}
+
+fn build_user_shell_envelope(
+    conversation_id: u64,
+    expected_seq: u64,
+    command: &str,
+    include_in_context: bool,
+) -> Result<CommandEnvelope, String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err("shell command cannot be empty".to_string());
+    }
+    if trimmed.contains('\0') {
+        return Err("shell command cannot contain NUL bytes".to_string());
+    }
+    Ok(CommandEnvelope {
+        version: 1,
+        request_id: generate_request_id(),
+        command: "user_shell".to_string(),
+        conversation_id,
+        args: json!({
+            "command": trimmed,
+            "include_in_context": include_in_context,
+            "expected_seq": expected_seq,
+        }),
+    })
+}
+
+fn build_compact_envelope(
+    conversation_id: u64,
+    expected_seq: u64,
+    instructions: Option<&str>,
+) -> Result<CommandEnvelope, String> {
+    let mut args = Map::new();
+    args.insert(
+        "expected_seq".to_string(),
+        Value::Number(expected_seq.into()),
+    );
+    if let Some(inst) = instructions.map(str::trim).filter(|s| !s.is_empty()) {
+        if inst.contains('\0') {
+            return Err("compact instructions cannot contain NUL bytes".to_string());
+        }
+        args.insert("instructions".to_string(), Value::String(inst.to_string()));
+    }
+    Ok(CommandEnvelope {
+        version: 1,
+        request_id: generate_request_id(),
+        command: "compact".to_string(),
         conversation_id,
         args: Value::Object(args),
     })
@@ -1794,6 +1895,181 @@ mod tests {
         )
         .unwrap_err();
         assert!(err_read.contains("403"), "err={err_read}");
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn user_shell_requires_seq_and_bound_workspace_and_never_blind_retries() {
+        let (sock_path, listener, client) = bind_test_socket("user-shell");
+        let calls = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let calls_srv = Arc::clone(&calls);
+
+        let handle = thread::spawn(move || {
+            // 1. Valid !cmd -> 200 receipt
+            let (mut s1, _) = listener.accept().unwrap();
+            let (_h1, b1) = read_http_request(&mut s1);
+            let v1: Value = serde_json::from_str(&b1).unwrap();
+            calls_srv.lock().unwrap().push(v1);
+            write_json_response(
+                &mut s1,
+                "200 OK",
+                r#"{"version":1,"request_id":"u1","seq":10,"submission_id":"sub-u1","status":"placed"}"#,
+            );
+
+            // 2. Ambiguous I/O drop on !!cmd -> must NOT retry!
+            let (mut s2, _) = listener.accept().unwrap();
+            let (_h2, b2) = read_http_request(&mut s2);
+            let v2: Value = serde_json::from_str(&b2).unwrap();
+            calls_srv.lock().unwrap().push(v2);
+            drop(s2);
+
+            // 3. Conflict 409 -> no retry, no fallback
+            let (mut s3, _) = listener.accept().unwrap();
+            let (_h3, b3) = read_http_request(&mut s3);
+            let v3: Value = serde_json::from_str(&b3).unwrap();
+            calls_srv.lock().unwrap().push(v3);
+            write_json_response(
+                &mut s3,
+                "409 Conflict",
+                r#"{"error":"expected_seq mismatch"}"#,
+            );
+        });
+
+        let target = test_target();
+
+        // Missing expected_seq fails before network I/O
+        let no_seq = execute(
+            &client,
+            &target,
+            None,
+            Effect::UserShell {
+                command: "echo hi".into(),
+                include_in_context: true,
+            },
+        )
+        .unwrap_err();
+        assert!(no_seq.contains("expected_seq"), "err={no_seq}");
+
+        // Unbound workspace fails before network I/O
+        let unbound = Target {
+            cwd: "relative/path".into(),
+            ..target.clone()
+        };
+        let unbound_err = execute(
+            &client,
+            &unbound,
+            Some(9),
+            Effect::UserShell {
+                command: "echo hi".into(),
+                include_in_context: true,
+            },
+        )
+        .unwrap_err();
+        assert!(unbound_err.contains("not bound"), "err={unbound_err}");
+
+        // 1. Valid !cmd
+        let ok = execute(
+            &client,
+            &target,
+            Some(9),
+            Effect::UserShell {
+                command: "echo hi".into(),
+                include_in_context: true,
+            },
+        )
+        .unwrap();
+        assert!(matches!(ok, Reply::Receipt(r) if r.seq == Some(10)));
+
+        // 2. Ambiguous I/O fails immediately without retry
+        let ambig = execute(
+            &client,
+            &target,
+            Some(10),
+            Effect::UserShell {
+                command: "touch /tmp/once".into(),
+                include_in_context: false,
+            },
+        )
+        .unwrap_err();
+        assert!(ambig.contains("outcome unknown"), "err={ambig}");
+        assert!(ambig.contains("check transcript"), "err={ambig}");
+
+        // 3. 409 conflict
+        let conflict = execute(
+            &client,
+            &target,
+            Some(10),
+            Effect::UserShell {
+                command: "ls".into(),
+                include_in_context: true,
+            },
+        )
+        .unwrap_err();
+        assert!(conflict.contains("conflict"), "err={conflict}");
+
+        handle.join().unwrap();
+        let reqs = calls.lock().unwrap();
+        assert_eq!(reqs.len(), 3, "must not auto-retry user_shell");
+        assert_eq!(reqs[0]["command"], "user_shell");
+        assert_eq!(reqs[0]["args"]["command"], "echo hi");
+        assert_eq!(reqs[0]["args"]["include_in_context"], true);
+        assert_eq!(reqs[0]["args"]["expected_seq"], 9);
+        assert_eq!(reqs[1]["command"], "user_shell");
+        assert_eq!(reqs[1]["args"]["include_in_context"], false);
+        assert_eq!(reqs[1]["args"]["expected_seq"], 10);
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn compact_sends_expected_seq_and_optional_instructions() {
+        let (sock_path, listener, client) = bind_test_socket("compact");
+
+        let handle = thread::spawn(move || {
+            let (mut s1, _) = listener.accept().unwrap();
+            let (_h1, b1) = read_http_request(&mut s1);
+            let v1: Value = serde_json::from_str(&b1).unwrap();
+            assert_eq!(v1["command"], "compact");
+            assert_eq!(v1["conversation_id"], 1);
+            assert_eq!(v1["args"], json!({"expected_seq": 20}));
+            write_json_response(
+                &mut s1,
+                "200 OK",
+                r#"{"version":1,"request_id":"c1","seq":21,"status":"started"}"#,
+            );
+
+            let (mut s2, _) = listener.accept().unwrap();
+            let (_h2, b2) = read_http_request(&mut s2);
+            let v2: Value = serde_json::from_str(&b2).unwrap();
+            assert_eq!(v2["command"], "compact");
+            assert_eq!(
+                v2["args"],
+                json!({"expected_seq": 21, "instructions": "keep paths"})
+            );
+            write_json_response(
+                &mut s2,
+                "409 Conflict",
+                r#"{"error":"expected_seq mismatch"}"#,
+            );
+        });
+
+        let target = test_target();
+        assert!(execute(&client, &target, None, Effect::Compact(None))
+            .unwrap_err()
+            .contains("expected_seq"));
+
+        let r1 = execute(&client, &target, Some(20), Effect::Compact(None)).unwrap();
+        assert!(matches!(r1, Reply::Receipt(r) if r.seq == Some(21)));
+
+        let r2 = execute(
+            &client,
+            &target,
+            Some(21),
+            Effect::Compact(Some("keep paths".into())),
+        )
+        .unwrap_err();
+        assert!(r2.contains("conflict"), "err={r2}");
 
         handle.join().unwrap();
         let _ = std::fs::remove_file(&sock_path);
