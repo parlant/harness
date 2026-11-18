@@ -32,6 +32,7 @@ use std::{
 const COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Workspace sessions"),
     ("/new", "New session"),
+    ("/name", "Show or rename session title"),
     ("/tree", "Conversations and branch history"),
     ("/fork", "Edit an earlier prompt on a new branch"),
     ("/branch", "Branch after a visible entry"),
@@ -39,6 +40,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/latest", "Return to live transcript"),
     ("/model", "Choose a model"),
     ("/thinking", "Choose thinking level"),
+    ("/file", "Read a session workspace file"),
     ("/attach", "Attach a client-local file"),
     ("/steer", "Steer the active run"),
     ("/follow-up", "Queue follow-up"),
@@ -72,6 +74,7 @@ enum PickerKind {
     Branch,
     Commands,
     ClientFiles,
+    WorkspaceFiles,
     Search,
     Info,
 }
@@ -431,11 +434,15 @@ impl Ui {
                     "branches" => PickerKind::Branches,
                     "sessions" => PickerKind::Sessions,
                     "client files" => PickerKind::ClientFiles,
+                    "workspace files" => PickerKind::WorkspaceFiles,
                     _ => PickerKind::Info,
                 };
                 let is_scoped = matches!(
                     kind,
-                    PickerKind::Models | PickerKind::Thinking | PickerKind::Branches
+                    PickerKind::Models
+                        | PickerKind::Thinking
+                        | PickerKind::Branches
+                        | PickerKind::WorkspaceFiles
                 );
                 if is_scoped && source_target != (self.target.sid.clone(), self.target.cid.clone())
                 {
@@ -461,6 +468,34 @@ impl Ui {
                 } else {
                     self.draft.attachments.push(block);
                     self.note = format!("Attached client-local {path}");
+                }
+            }
+            Ok(Reply::WorkspaceAttachment {
+                path,
+                env_id,
+                truncated,
+                block,
+            }) => {
+                if source_target != (self.target.sid.clone(), self.target.cid.clone()) {
+                    self.note = "Ignored stale workspace file after session switch".into();
+                } else if self
+                    .draft
+                    .attachments
+                    .iter()
+                    .map(|b| b.to_string().len())
+                    .sum::<usize>()
+                    .saturating_add(block.to_string().len())
+                    > 3_800_000
+                {
+                    self.note = "Attachment budget exceeded".into();
+                } else {
+                    self.draft.attachments.push(block);
+                    self.note = format!(
+                        "Attached workspace ({}) {}{}",
+                        sanitize_single_line(&env_id),
+                        sanitize_single_line(&path),
+                        if truncated { " (truncated)" } else { "" }
+                    );
                 }
             }
             Ok(Reply::Page(p)) => {
@@ -849,10 +884,16 @@ impl Ui {
                 KeyCode::PageUp => screen.scroll(10),
                 KeyCode::PageDown => screen.scroll(-10),
                 KeyCode::End if k.modifiers == Mod::CONTROL => screen.bottom(),
+                KeyCode::Tab if self.draft.editor.text().starts_with("/attach ") => {
+                    let prefix = self.draft.editor.text()["/attach ".len()..]
+                        .trim()
+                        .to_owned();
+                    self.file_menu(&prefix);
+                }
                 KeyCode::Tab if self.draft.editor.text().starts_with('/') => self.palette(),
                 KeyCode::Tab if self.draft.editor.text().starts_with('@') => {
                     let prefix = self.draft.editor.text()[1..].to_owned();
-                    self.file_menu(&prefix);
+                    self.workspace_file_menu(&prefix);
                 }
                 _ => {
                     self.draft.editor.key(k);
@@ -912,6 +953,14 @@ impl Ui {
             "/new" => {
                 self.pending_root_fork = None;
                 self.start(Effect::New, None);
+            }
+            "/name" if arg.is_empty() => self.start(Effect::ReadName, None),
+            "/name" => {
+                if self.state.seq.is_none() {
+                    self.note = "Not synchronized; wait for snapshot before /name".into();
+                } else {
+                    self.start(Effect::Rename(Some(arg.to_owned())), None);
+                }
             }
             "/tree" | "/branches" => self.start(Effect::Branches, None),
             "/conv" if arg.parse::<u64>().is_ok() => {
@@ -996,6 +1045,9 @@ impl Ui {
             "/envs" => self.start(Effect::Environments, None),
             "/abort" => self.start(Effect::Abort, None),
             "/continue" => self.start(Effect::Continue, None),
+            "/file" if arg.is_empty() => self.workspace_file_menu(""),
+            "/file" => self.start(Effect::ReadWorkspaceFile(arg.to_owned()), None),
+            "/files" => self.workspace_file_menu(arg),
             "/attach" if arg.is_empty() => self.file_menu(""),
             "/attach" => self.attach(arg),
             "/steer" | "/follow-up" => {
@@ -1072,6 +1124,9 @@ impl Ui {
     }
     fn file_menu(&mut self, prefix: &str) {
         self.start(Effect::Files(prefix.to_owned()), None);
+    }
+    fn workspace_file_menu(&mut self, prefix: &str) {
+        self.start(Effect::WorkspaceFiles(prefix.to_owned()), None);
     }
     fn attach(&mut self, path: &str) {
         self.start(Effect::AttachFile(path.to_owned()), None);
@@ -1179,10 +1234,23 @@ impl Ui {
                     }
                     PickerKind::ClientFiles if id.ends_with('/') => self.file_menu(&id),
                     PickerKind::ClientFiles => {
-                        if self.draft.editor.text().starts_with('@') {
+                        if self.draft.editor.text().starts_with('@')
+                            || self.draft.editor.text().starts_with("/attach")
+                        {
                             self.draft.editor.set("");
                         }
                         self.attach(&id);
+                    }
+                    PickerKind::WorkspaceFiles if id.ends_with('/') => {
+                        self.workspace_file_menu(&id);
+                    }
+                    PickerKind::WorkspaceFiles => {
+                        if self.draft.editor.text().starts_with('@')
+                            || self.draft.editor.text().starts_with("/file")
+                        {
+                            self.draft.editor.set("");
+                        }
+                        self.start(Effect::ReadWorkspaceFile(id), None);
                     }
                     PickerKind::Search => {
                         if let Some(e) = self.current_view().entries.iter().find(|e| e.id == id) {
@@ -2143,5 +2211,197 @@ mod tests {
         // Pressing Esc still restores the original stashed draft
         press_esc(&mut ui, &mut screen);
         assert_eq!(ui.draft.editor.text(), "keep original");
+    }
+
+    #[test]
+    fn name_command_reads_current_name_and_renames_with_expected_seq_and_conflict() {
+        let (srv, client) = TestServer::bind("name-cmd");
+        let seen_cmds = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_srv = Arc::clone(&seen_cmds);
+        let listener = srv.listener.try_clone().unwrap();
+
+        let handle = thread::spawn(move || {
+            let mut rename_calls = 0usize;
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, body) = read_http_request(&mut stream);
+                if head.starts_with("GET /api/v1/sessions/sess-1 ") {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"session":{"session_id":"sess-1","title":"Current Title","cwd":"/tmp/proj","root_conversation_id":"1"},"conversations":[],"tasks":[]}"#,
+                    );
+                } else if head.starts_with("POST /api/v1/sessions/sess-1/commands ") {
+                    rename_calls += 1;
+                    let val: Value = serde_json::from_str(&body).unwrap();
+                    let req_id = val["request_id"].as_str().unwrap().to_string();
+                    seen_srv.lock().unwrap().push(val);
+                    if rename_calls == 1 {
+                        let resp = json!({
+                            "version": 1,
+                            "request_id": req_id,
+                            "seq": 16,
+                            "status": "done",
+                            "title": "Updated Title"
+                        })
+                        .to_string();
+                        write_json_response(&mut stream, "200 OK", &resp);
+                    } else {
+                        write_json_response(
+                            &mut stream,
+                            "409 Conflict",
+                            r#"{"error":"expected_seq mismatch"}"#,
+                        );
+                        break;
+                    }
+                } else {
+                    write_json_response(&mut stream, "404 Not Found", "{}");
+                }
+            }
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+
+        // /name before snapshot sync refuses to rename without expected_seq
+        ui.command("/name Premature");
+        assert!(ui.note.contains("wait for snapshot"), "note={}", ui.note);
+        assert!(ui.job.is_none());
+
+        load_snapshot(&mut ui, 15, vec![user_entry("10", "hi")], false);
+
+        // /name with no arg reads current name from GET /sessions/:sid
+        ui.command("/name");
+        wait_job_complete(&mut ui, &mut screen);
+        assert_eq!(ui.note, "Session name: Current Title");
+
+        // /name <title> sends rename command with expected_seq=15
+        ui.command("/name Updated Title");
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(
+            ui.note.contains("Renamed session to Updated Title"),
+            "note={}",
+            ui.note
+        );
+        assert!(ui.note.contains("seq 16"), "note={}", ui.note);
+
+        // Conflict on stale seq=15 is surfaced cleanly
+        ui.command("/name Conflicting Title");
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.note.contains("conflict"), "note={}", ui.note);
+        assert!(
+            ui.note.contains("expected_seq mismatch"),
+            "note={}",
+            ui.note
+        );
+
+        handle.join().unwrap();
+        let cmds = seen_cmds.lock().unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0]["command"], "rename");
+        assert_eq!(cmds[0]["args"]["title"], "Updated Title");
+        assert_eq!(cmds[0]["args"]["expected_seq"], 15);
+        assert_eq!(cmds[1]["args"]["expected_seq"], 15);
+    }
+
+    #[test]
+    fn workspace_tab_and_file_use_session_endpoints_while_attach_stays_client_local() {
+        let (srv, client) = TestServer::bind("ws-vs-local");
+        let listener = srv.listener.try_clone().unwrap();
+
+        let handle = thread::spawn(move || {
+            let mut file_calls = 0usize;
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, _body) = read_http_request(&mut stream);
+                if head.starts_with("GET /api/v1/sessions/sess-1/files?query=su ") {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"env_id":"vm-1","cwd":"/remote","entries":[{"path":"sub","type":"dir","size":0}],"truncated":false}"#,
+                    );
+                } else if head.starts_with("GET /api/v1/sessions/sess-1/files?query=sub%2F ") {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"env_id":"vm-1","cwd":"/remote","entries":[{"path":"sub/remote.rs","type":"file","size":30}],"truncated":false}"#,
+                    );
+                } else if head.starts_with("GET /api/v1/sessions/sess-1/file?path=sub%2Fremote.rs ")
+                {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"env_id":"vm-1","cwd":"/remote","path":"sub/remote.rs","lines":["pub fn remote() {}"],"start_line":1,"total_lines_read":1,"has_more":false,"truncated_by_bytes":false}"#,
+                    );
+                } else if head.starts_with("GET /api/v1/sessions/sess-1/files") {
+                    file_calls += 1;
+                    write_json_response(
+                        &mut stream,
+                        "503 Service Unavailable",
+                        r#"{"error":"workspace unavailable"}"#,
+                    );
+                    if file_calls >= 1 {
+                        break;
+                    }
+                } else {
+                    write_json_response(&mut stream, "404 Not Found", "{}");
+                }
+            }
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        load_snapshot(&mut ui, 10, vec![user_entry("1", "hi")], false);
+
+        // 1. `@su` + Tab uses GET /sessions/sess-1/files -> workspace files picker, drill into sub/, read remote.rs
+        ui.draft.editor.set("@su");
+        ui.key(KeyEvent::new(KeyCode::Tab, Mod::NONE), &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::WorkspaceFiles);
+        press_enter(&mut ui, &mut screen); // picks "sub/" -> drills down
+        wait_job_complete(&mut ui, &mut screen);
+        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::WorkspaceFiles);
+        press_enter(&mut ui, &mut screen); // picks "sub/remote.rs" -> clears @su and reads workspace file
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.draft.editor.text().is_empty());
+        assert_eq!(ui.draft.attachments.len(), 1);
+        assert!(
+            ui.note.contains("Attached workspace (vm-1) sub/remote.rs"),
+            "note={}",
+            ui.note
+        );
+        assert!(
+            ui.draft.attachments[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("pub fn remote() {}"),
+            "attachment={:?}",
+            ui.draft.attachments[0]
+        );
+
+        // 2. `/attach Cargo` + Tab stays strictly client-local ("client files" picker)
+        ui.draft.editor.set("/attach Cargo");
+        ui.key(KeyEvent::new(KeyCode::Tab, Mod::NONE), &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+        let local_picker = ui.picker.as_ref().expect("client files picker");
+        assert_eq!(local_picker.kind, PickerKind::ClientFiles);
+        assert!(
+            local_picker
+                .picker
+                .lines()
+                .join("\n")
+                .contains("Cargo.toml"),
+            "lines={:?}",
+            local_picker.picker.lines()
+        );
+        press_esc(&mut ui, &mut screen);
+        ui.draft.editor.set("");
+
+        // 3. Failure on `@` + Tab (503) never falls back to client-local files
+        ui.draft.editor.set("@");
+        ui.key(KeyEvent::new(KeyCode::Tab, Mod::NONE), &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.picker.is_none());
+        assert!(ui.note.contains("503"), "note={}", ui.note);
+
+        handle.join().unwrap();
     }
 }

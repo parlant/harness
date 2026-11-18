@@ -4,6 +4,7 @@ use crate::protocol::{
     EntriesPageResponse, EnvironmentInfo, EnvironmentsResponse, ErrorResponse, ModelInfo,
     ModelsResponse, SessionDetailResponse, SessionSummary, SessionsResponse, SseEvent, SseParser,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -17,6 +18,48 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_CHUNK_LINE_BYTES: usize = 8 * 1024;
 const MAX_UNARY_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkspaceFileEntry {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkspaceFilesResponse {
+    pub env_id: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub entries: Vec<WorkspaceFileEntry>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+fn default_start_line() -> u64 {
+    1
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkspaceFileReadResponse {
+    pub env_id: String,
+    pub cwd: String,
+    pub path: String,
+    #[serde(default)]
+    pub resolved_path: Option<String>,
+    #[serde(default)]
+    pub lines: Vec<String>,
+    #[serde(default = "default_start_line")]
+    pub start_line: u64,
+    #[serde(default)]
+    pub total_lines_read: u64,
+    #[serde(default)]
+    pub has_more: bool,
+    #[serde(default)]
+    pub truncated_by_bytes: bool,
+}
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -259,6 +302,73 @@ impl DaemonClient {
     ) -> Result<SessionDetailResponse, ClientError> {
         validate_path_segment("session_id", session_id)?;
         let path = format!("/api/v1/sessions/{}", percent_encode(session_id));
+        self.get_json(&path)
+    }
+
+    pub fn list_session_files(
+        &self,
+        session_id: &str,
+        query: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<WorkspaceFilesResponse, ClientError> {
+        validate_path_segment("session_id", session_id)?;
+        if let Some(q) = query {
+            if q.contains('\0') {
+                return Err(ClientError::InvalidInput(
+                    "query cannot contain NUL byte".to_string(),
+                ));
+            }
+        }
+        let mut params = Vec::new();
+        if let Some(q) = query.filter(|s| !s.is_empty()) {
+            params.push(format!("query={}", percent_encode(q)));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={l}"));
+        }
+        let base = format!("/api/v1/sessions/{}/files", percent_encode(session_id));
+        let path = if params.is_empty() {
+            base
+        } else {
+            format!("{base}?{}", params.join("&"))
+        };
+        self.get_json(&path)
+    }
+
+    pub fn read_session_file(
+        &self,
+        session_id: &str,
+        file_path: &str,
+        offset: Option<u64>,
+        limit: Option<u32>,
+        max_bytes: Option<u32>,
+    ) -> Result<WorkspaceFileReadResponse, ClientError> {
+        validate_path_segment("session_id", session_id)?;
+        if file_path.trim().is_empty() {
+            return Err(ClientError::InvalidInput(
+                "file path cannot be empty".to_string(),
+            ));
+        }
+        if file_path.contains('\0') {
+            return Err(ClientError::InvalidInput(
+                "file path cannot contain NUL byte".to_string(),
+            ));
+        }
+        let mut params = vec![format!("path={}", percent_encode(file_path))];
+        if let Some(o) = offset {
+            params.push(format!("offset={o}"));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={l}"));
+        }
+        if let Some(m) = max_bytes {
+            params.push(format!("max_bytes={m}"));
+        }
+        let path = format!(
+            "/api/v1/sessions/{}/file?{}",
+            percent_encode(session_id),
+            params.join("&")
+        );
         self.get_json(&path)
     }
 
@@ -1252,5 +1362,97 @@ mod tests {
         let err = sse.next_event().unwrap_err();
         assert!(matches!(err, ClientError::InvalidResponse(_)));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn session_scoped_workspace_files_and_file_read_encode_query_and_decode_responses() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock_path = PathBuf::from(format!("/private/tmp/h-ws-client-{nanos}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let handle = thread::spawn(move || {
+            // 1. GET /sessions/s1/files?query=lib%2F&limit=50
+            let (mut s1, _) = listener.accept().unwrap();
+            let req1 = read_http_req(&mut s1);
+            assert!(
+                req1.starts_with("GET /api/v1/sessions/s1/files?query=lib%2F&limit=50 HTTP/1.1"),
+                "req1={req1}"
+            );
+            let body1 = r#"{"env_id":"vm-1","cwd":"/work","entries":[{"path":"lib","type":"dir","size":0},{"path":"lib/app.ex","type":"file","size":42}],"truncated":false}"#;
+            write!(
+                s1,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body1}",
+                body1.len()
+            )
+            .unwrap();
+
+            // 2. GET /sessions/s1/file?path=lib%2Fapp.ex&offset=1&limit=200
+            let (mut s2, _) = listener.accept().unwrap();
+            let req2 = read_http_req(&mut s2);
+            assert!(
+                req2.starts_with(
+                    "GET /api/v1/sessions/s1/file?path=lib%2Fapp.ex&offset=1&limit=200 HTTP/1.1"
+                ),
+                "req2={req2}"
+            );
+            let body2 = r#"{"env_id":"vm-1","cwd":"/work","path":"lib/app.ex","resolved_path":"/work/lib/app.ex","lines":["defmodule App do","end"],"start_line":1,"total_lines_read":2,"has_more":false,"truncated_by_bytes":false}"#;
+            write!(
+                s2,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body2}",
+                body2.len()
+            )
+            .unwrap();
+
+            // 3. 503 workspace unavailable surfaces HTTP error directly
+            let (mut s3, _) = listener.accept().unwrap();
+            let _req3 = read_http_req(&mut s3);
+            let body3 = r#"{"error":"workspace unavailable"}"#;
+            write!(
+                s3,
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body3}",
+                body3.len()
+            )
+            .unwrap();
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::UnixSocket(sock_path.clone()),
+            SecretToken::new("tok-ws").unwrap(),
+        );
+
+        assert!(matches!(
+            client.list_session_files("s1", Some("a\0b"), None),
+            Err(ClientError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            client.read_session_file("s1", "", None, None, None),
+            Err(ClientError::InvalidInput(_))
+        ));
+
+        let files = client
+            .list_session_files("s1", Some("lib/"), Some(50))
+            .unwrap();
+        assert_eq!(files.env_id, "vm-1");
+        assert_eq!(files.cwd, "/work");
+        assert_eq!(files.entries.len(), 2);
+        assert_eq!(files.entries[0].kind, "dir");
+        assert_eq!(files.entries[1].path, "lib/app.ex");
+
+        let read = client
+            .read_session_file("s1", "lib/app.ex", Some(1), Some(200), None)
+            .unwrap();
+        assert_eq!(read.env_id, "vm-1");
+        assert_eq!(read.lines, vec!["defmodule App do", "end"]);
+        assert!(!read.has_more);
+
+        let err = client.list_session_files("s1", None, None).unwrap_err();
+        assert!(matches!(err, ClientError::HttpStatus { status: 503, .. }));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
     }
 }

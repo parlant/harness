@@ -5,7 +5,7 @@ use crate::protocol::{
     EntriesPageResponse, SessionSummary,
 };
 use crate::render::sanitize_single_line;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::thread;
 use std::time::Duration;
 
@@ -40,6 +40,10 @@ pub enum Effect {
     Export { last: String, path: String },
     Files(String),
     AttachFile(String),
+    WorkspaceFiles(String),
+    ReadWorkspaceFile(String),
+    ReadName,
+    Rename(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +58,12 @@ pub enum Reply {
     Target(Target),
     Message(String),
     Attachment(String, Value),
+    WorkspaceAttachment {
+        path: String,
+        env_id: String,
+        truncated: bool,
+        block: Value,
+    },
 }
 
 pub fn execute(
@@ -406,6 +416,133 @@ pub fn execute(
                 env_id,
             }))
         }
+
+        Effect::WorkspaceFiles(query) => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot list workspace files: missing session_id".to_string());
+            }
+            let q = query.trim();
+            let resp = client
+                .list_session_files(&target.sid, (!q.is_empty()).then_some(q), None)
+                .map_err(|e| format_client_error(&e))?;
+            let env_clean = sanitize_single_line(&resp.env_id);
+            let mut choices: Vec<(String, String)> = resp
+                .entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let clean_path = sanitize_single_line(&entry.path);
+                    match entry.kind.as_str() {
+                        "dir" => {
+                            let dir_id = if entry.path.ends_with('/') {
+                                entry.path
+                            } else {
+                                format!("{}/", entry.path)
+                            };
+                            let clean_dir = if clean_path.ends_with('/') {
+                                clean_path
+                            } else {
+                                format!("{clean_path}/")
+                            };
+                            Some((dir_id, format!("{clean_dir} [dir · {env_clean}]")))
+                        }
+                        "file" => Some((
+                            entry.path,
+                            format!("{clean_path} [{env_clean} · {} B]", entry.size),
+                        )),
+                        _ => None,
+                    }
+                })
+                .collect();
+            choices.sort_by(|a, b| {
+                let a_dir = a.0.ends_with('/');
+                let b_dir = b.0.ends_with('/');
+                b_dir.cmp(&a_dir).then_with(|| a.0.cmp(&b.0))
+            });
+            Ok(Reply::Menu("workspace files".to_string(), choices))
+        }
+
+        Effect::ReadWorkspaceFile(path) => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot read workspace file: missing session_id".to_string());
+            }
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Err("cannot read workspace file: missing path".to_string());
+            }
+            let resp = client
+                .read_session_file(&target.sid, trimmed, None, None, None)
+                .map_err(|e| format_client_error(&e))?;
+            let truncated = resp.has_more || resp.truncated_by_bytes;
+            let safe_path = escape_xml_attr(&resp.path);
+            let safe_env = escape_xml_attr(&resp.env_id);
+            let trunc_attr = if truncated { " truncated=\"true\"" } else { "" };
+            let body = resp.lines.join("\n");
+            let formatted = if body.is_empty() {
+                format!(
+                    "<workspace_file env_id=\"{safe_env}\" path=\"{safe_path}\"{trunc_attr}></workspace_file>"
+                )
+            } else {
+                format!(
+                    "<workspace_file env_id=\"{safe_env}\" path=\"{safe_path}\"{trunc_attr}>\n{body}\n</workspace_file>"
+                )
+            };
+            let block = json!({
+                "type": "text",
+                "text": formatted,
+            });
+            if serde_json::to_vec(&block).map_or(true, |bytes| {
+                bytes.len() > super::files::MAX_BLOCK_JSON_BYTES
+            }) {
+                return Err(format!(
+                    "workspace file {} exceeds maximum block size",
+                    sanitize_single_line(&resp.path)
+                ));
+            }
+            Ok(Reply::WorkspaceAttachment {
+                path: resp.path,
+                env_id: resp.env_id,
+                truncated,
+                block,
+            })
+        }
+
+        Effect::ReadName => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot read session name: missing session_id".to_string());
+            }
+            let detail = client
+                .get_session_detail(&target.sid)
+                .map_err(|e| format_client_error(&e))?;
+            let msg = match detail
+                .session
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                Some(title) => format!("Session name: {}", sanitize_single_line(title)),
+                None => "Session name: (untitled)".to_string(),
+            };
+            Ok(Reply::Message(msg))
+        }
+
+        Effect::Rename(title) => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot rename: missing session_id".to_string());
+            }
+            let cid_num = parse_cid(&target.cid)?;
+            let envelope = build_rename_envelope(cid_num, seq, title.as_deref())?;
+            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+            let seq_str = receipt
+                .seq
+                .map(|s| format!(" · seq {s}"))
+                .unwrap_or_default();
+            let msg = match title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                Some(name) => format!("Renamed session to {}{seq_str}", sanitize_single_line(name)),
+                None => format!("Cleared session name{seq_str}"),
+            };
+            Ok(Reply::Message(msg))
+        }
     }
 }
 
@@ -486,6 +623,49 @@ fn normalize_cwd(path: &str) -> &str {
     } else {
         path.trim_end_matches('/')
     }
+}
+
+fn escape_xml_attr(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn build_rename_envelope(
+    conversation_id: u64,
+    expected_seq: Option<u64>,
+    title: Option<&str>,
+) -> Result<CommandEnvelope, String> {
+    let mut args = Map::new();
+    match title {
+        Some(t) => {
+            if t.contains('\0') {
+                return Err("session name cannot contain NUL bytes".to_string());
+            }
+            args.insert("title".to_string(), Value::String(t.to_string()));
+        }
+        None => {
+            args.insert("title".to_string(), Value::Null);
+        }
+    }
+    if let Some(s) = expected_seq {
+        args.insert("expected_seq".to_string(), Value::Number(s.into()));
+    }
+    Ok(CommandEnvelope {
+        version: 1,
+        request_id: generate_request_id(),
+        command: "rename".to_string(),
+        conversation_id,
+        args: Value::Object(args),
+    })
 }
 
 fn build_configure_envelope(
@@ -1420,6 +1600,202 @@ mod tests {
         assert_eq!(reqs[0], reqs[1]);
         assert_eq!(reqs[0]["command"], "fork_and_submit");
         assert_eq!(reqs[0]["args"]["at_entry_id"], 11);
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn rename_and_read_name_use_expected_seq_and_surface_conflicts() {
+        let (sock_path, listener, client) = bind_test_socket("rename");
+
+        let handle = thread::spawn(move || {
+            // 1. ReadName -> GET /sessions/sess-1
+            let (mut s1, _) = listener.accept().unwrap();
+            let (h1, _) = read_http_request(&mut s1);
+            assert!(h1.starts_with("GET /api/v1/sessions/sess-1 HTTP/1.1"));
+            write_json_response(
+                &mut s1,
+                "200 OK",
+                r#"{"session":{"session_id":"sess-1","title":"Initial Title","cwd":"/tmp/proj","root_conversation_id":"1"},"conversations":[],"tasks":[]}"#,
+            );
+
+            // 2. Rename with expected_seq=12 -> 200
+            let (mut s2, _) = listener.accept().unwrap();
+            let (_h2, b2) = read_http_request(&mut s2);
+            let v2: Value = serde_json::from_str(&b2).unwrap();
+            assert_eq!(v2["command"], "rename");
+            assert_eq!(v2["conversation_id"], 1);
+            assert_eq!(v2["args"]["title"], "New Name");
+            assert_eq!(v2["args"]["expected_seq"], 12);
+            write_json_response(
+                &mut s2,
+                "200 OK",
+                r#"{"version":1,"request_id":"r1","seq":13,"status":"done","title":"New Name"}"#,
+            );
+
+            // 3. Stale expected_seq=12 -> 409 conflict
+            let (mut s3, _) = listener.accept().unwrap();
+            let (_h3, b3) = read_http_request(&mut s3);
+            let v3: Value = serde_json::from_str(&b3).unwrap();
+            assert_eq!(v3["command"], "rename");
+            assert_eq!(v3["args"]["expected_seq"], 12);
+            write_json_response(
+                &mut s3,
+                "409 Conflict",
+                r#"{"error":"expected_seq mismatch"}"#,
+            );
+        });
+
+        let target = test_target();
+
+        let read_reply = execute(&client, &target, Some(12), Effect::ReadName).unwrap();
+        assert_eq!(
+            read_reply,
+            Reply::Message("Session name: Initial Title".to_string())
+        );
+
+        let rename_reply = execute(
+            &client,
+            &target,
+            Some(12),
+            Effect::Rename(Some("New Name".to_string())),
+        )
+        .unwrap();
+        assert_eq!(
+            rename_reply,
+            Reply::Message("Renamed session to New Name · seq 13".to_string())
+        );
+
+        let conflict = execute(
+            &client,
+            &target,
+            Some(12),
+            Effect::Rename(Some("Race Name".to_string())),
+        )
+        .unwrap_err();
+        assert!(conflict.contains("conflict"), "err={conflict}");
+        assert!(conflict.contains("expected_seq mismatch"), "err={conflict}");
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn workspace_files_and_read_never_fallback_to_local_on_failure() {
+        let (sock_path, listener, client) = bind_test_socket("workspace-files");
+
+        let handle = thread::spawn(move || {
+            // 1. WorkspaceFiles("src") -> 200
+            let (mut s1, _) = listener.accept().unwrap();
+            let (h1, _) = read_http_request(&mut s1);
+            assert!(
+                h1.starts_with("GET /api/v1/sessions/sess-1/files?query=src HTTP/1.1"),
+                "h1={h1}"
+            );
+            write_json_response(
+                &mut s1,
+                "200 OK",
+                r#"{"env_id":"vm-1","cwd":"/remote","entries":[{"path":"src","type":"dir","size":0},{"path":"src/main.rs","type":"file","size":88},{"path":"evil_link","type":"symlink","size":5}],"truncated":false}"#,
+            );
+
+            // 2. ReadWorkspaceFile("src/main.rs") -> 200 (truncated)
+            let (mut s2, _) = listener.accept().unwrap();
+            let (h2, _) = read_http_request(&mut s2);
+            assert!(
+                h2.starts_with("GET /api/v1/sessions/sess-1/file?path=src%2Fmain.rs HTTP/1.1"),
+                "h2={h2}"
+            );
+            write_json_response(
+                &mut s2,
+                "200 OK",
+                r#"{"env_id":"vm-1","cwd":"/remote","path":"src/main.rs","lines":["fn main() {}"],"start_line":1,"total_lines_read":1,"has_more":true,"truncated_by_bytes":false}"#,
+            );
+
+            // 3. WorkspaceFiles failure (503) -> must fail without local fallback
+            let (mut s3, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut s3);
+            write_json_response(
+                &mut s3,
+                "503 Service Unavailable",
+                r#"{"error":"workspace unavailable"}"#,
+            );
+
+            // 4. ReadWorkspaceFile failure (403) -> must fail without local fallback (even for Cargo.toml!)
+            let (mut s4, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut s4);
+            write_json_response(
+                &mut s4,
+                "403 Forbidden",
+                r#"{"error":"symlinks are not followed"}"#,
+            );
+        });
+
+        let target = test_target();
+
+        match execute(
+            &client,
+            &target,
+            None,
+            Effect::WorkspaceFiles("src".to_string()),
+        )
+        .unwrap()
+        {
+            Reply::Menu(title, items) => {
+                assert_eq!(title, "workspace files");
+                assert_eq!(items.len(), 2); // symlink filtered out
+                assert_eq!(items[0].0, "src/");
+                assert!(items[0].1.contains("[dir · vm-1]"));
+                assert_eq!(items[1].0, "src/main.rs");
+                assert!(items[1].1.contains("[vm-1 · 88 B]"));
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+
+        match execute(
+            &client,
+            &target,
+            None,
+            Effect::ReadWorkspaceFile("src/main.rs".to_string()),
+        )
+        .unwrap()
+        {
+            Reply::WorkspaceAttachment {
+                path,
+                env_id,
+                truncated,
+                block,
+            } => {
+                assert_eq!(path, "src/main.rs");
+                assert_eq!(env_id, "vm-1");
+                assert!(truncated);
+                let text = block["text"].as_str().unwrap();
+                assert!(text.contains(
+                    "<workspace_file env_id=\"vm-1\" path=\"src/main.rs\" truncated=\"true\">"
+                ));
+                assert!(text.contains("fn main() {}"));
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+
+        let err_list = execute(
+            &client,
+            &target,
+            None,
+            Effect::WorkspaceFiles(String::new()),
+        )
+        .unwrap_err();
+        assert!(err_list.contains("503"), "err={err_list}");
+
+        // Cargo.toml exists locally in clients/tui, so succeeding would mean local fallback happened!
+        let err_read = execute(
+            &client,
+            &target,
+            None,
+            Effect::ReadWorkspaceFile("Cargo.toml".to_string()),
+        )
+        .unwrap_err();
+        assert!(err_read.contains("403"), "err={err_read}");
+
+        handle.join().unwrap();
         let _ = std::fs::remove_file(&sock_path);
     }
 }
