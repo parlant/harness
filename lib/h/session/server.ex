@@ -20,8 +20,9 @@ defmodule H.Session.Server do
   @max_recent_submissions 256
   @default_persist_within_ms 1_000
   @default_ephemeral_interval_ms 50
-  @default_retry_limit 2
-  @default_retry_backoff_ms 250
+  @default_retry_limit 3
+  @default_retry_backoff_ms 2_000
+  @max_retry_backoff_ms 60_000
   @default_restart_limit 5
 
   @default_tools [
@@ -599,6 +600,10 @@ defmodule H.Session.Server do
     {writes, state}
   end
 
+  defp retry_delay_ms(state, attempt) do
+    min(state.retry_backoff_ms * Integer.pow(2, min(attempt - 1, 16)), @max_retry_backoff_ms)
+  end
+
   defp recover_unclean_generation(gen_task, state, now) do
     cid = gen_task.checkpoint["conversation_id"]
     live = state.docs[cid]["live"]
@@ -608,7 +613,7 @@ defmodule H.Session.Server do
     retry_count = (gen_task.checkpoint["retry_count"] || 0) + 1
 
     if retry_count <= state.retry_limit do
-      until_ms = now + state.retry_backoff_ms
+      until_ms = now + retry_delay_ms(state, retry_count)
 
       sleeping_task =
         Task.sleep_until(gen_task, until_ms, "retry", now, %{
@@ -669,7 +674,7 @@ defmodule H.Session.Server do
     retry_count = (comp_task.checkpoint["retry_count"] || 0) + 1
 
     if retry_count <= state.retry_limit do
-      until_ms = now + state.retry_backoff_ms
+      until_ms = now + retry_delay_ms(state, retry_count)
 
       sleeping_task =
         Task.sleep_until(comp_task, until_ms, "retry", now, %{
@@ -2586,7 +2591,8 @@ defmodule H.Session.Server do
     retry_count = (gen_task.checkpoint["retry_count"] || 0) + 1
 
     if retryable and retry_count <= state.retry_limit do
-      until_ms = now + state.retry_backoff_ms
+      delay_ms = retry_delay_ms(state, retry_count)
+      until_ms = now + delay_ms
 
       sleeping_task =
         Task.sleep_until(gen_task, until_ms, "retry", now, %{
@@ -2612,7 +2618,7 @@ defmodule H.Session.Server do
         ],
         conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
         submissions: [],
-        effects: [{:arm_wake_timer, gen_task.id, state.retry_backoff_ms}],
+        effects: [{:arm_wake_timer, gen_task.id, delay_ms}],
         reply_from: nil,
         receipt: nil
       }
@@ -2808,7 +2814,8 @@ defmodule H.Session.Server do
     live = state.docs[cid]["live"] || %{}
 
     if retryable and retry_count <= state.retry_limit do
-      until_ms = now + state.retry_backoff_ms
+      delay_ms = retry_delay_ms(state, retry_count)
+      until_ms = now + delay_ms
 
       sleeping_task =
         Task.sleep_until(comp_task, until_ms, "retry", now, %{
@@ -2837,7 +2844,7 @@ defmodule H.Session.Server do
         ],
         conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
         submissions: [],
-        effects: [{:arm_wake_timer, comp_task.id, state.retry_backoff_ms}],
+        effects: [{:arm_wake_timer, comp_task.id, delay_ms}],
         reply_from: nil,
         receipt: nil
       }

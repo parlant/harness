@@ -147,9 +147,18 @@ defmodule H.Provider.ReqLLM do
   end
 
   defp build_stream_opts(config, request, model, req_tools) do
+    receive_timeout =
+      Application.get_env(
+        :req_llm,
+        :stream_receive_timeout,
+        Application.get_env(:req_llm, :receive_timeout, 300_000)
+      )
+
     with {:ok, cred_opts} <- resolve_credential_opts(config, model) do
       opts =
         cred_opts
+        |> Keyword.put(:receive_timeout, Map.get(config, :receive_timeout, receive_timeout))
+        |> Keyword.put(:max_retries, 0)
         |> Keyword.put(:on_unsupported, Map.get(config, :on_unsupported, :ignore))
         |> maybe_put_tools(req_tools)
         |> maybe_put_max_tokens(request)
@@ -661,6 +670,26 @@ defmodule H.Provider.ReqLLM do
       code: to_string((status && "http_#{status}") || "api_response_error"),
       message: Credentials.sanitize(Exception.message(err)),
       retryable: retryable_status?(status)
+    }
+  end
+
+  defp normalize_error(%ReqLLM.Error.API.Stream{cause: cause})
+       when cause == :timeout or cause == :recv_timeout do
+    %{
+      code: "provider_timeout",
+      message: "Timed out waiting for the provider stream",
+      retryable: true
+    }
+  end
+
+  defp normalize_error(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Timeout{} = timeout}),
+    do: normalize_error(timeout)
+
+  defp normalize_error(%ReqLLM.Error.API.Timeout{kind: kind} = err) do
+    %{
+      code: "provider_timeout",
+      message: Exception.message(err),
+      retryable: kind in [:connect, :receive, :stream_idle]
     }
   end
 

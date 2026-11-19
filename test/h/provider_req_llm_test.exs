@@ -117,6 +117,34 @@ defmodule H.Provider.ReqLLMTest do
       assert response.usage.total_tokens == 20
     end
 
+    test "a quiet OpenAI stream gets a five-minute idle budget and returns a retryable timeout" do
+      request = Context.build_request([], %{model: "openai:gpt-5.4"})
+      owner = self()
+
+      stream_fn = fn model, ctx, opts ->
+        send(owner, {:budgets, opts[:receive_timeout], opts[:max_retries]})
+        {:ok, metadata} = MetadataHandle.start_link(fn -> %{} end)
+
+        {:ok,
+         %StreamResponse{
+           model: model,
+           context: ctx,
+           metadata_handle: metadata,
+           stream:
+             Stream.map([:timeout], fn cause ->
+               raise %ReqLLM.Error.API.Stream{reason: "Stream failed: :timeout", cause: cause}
+             end),
+           cancel: fn -> send(owner, :closed) end
+         }}
+      end
+
+      assert {:error, %{code: "provider_timeout", retryable: true}} =
+               Adapter.stream_turn(%{stream_fn: stream_fn}, request, fn _ -> :ok end)
+
+      assert_received {:budgets, 300_000, 0}
+      assert_received :closed
+    end
+
     test "injects google_vertex provider_options from H.Credentials" do
       test_pid = self()
 
