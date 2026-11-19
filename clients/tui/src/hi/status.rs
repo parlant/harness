@@ -313,6 +313,54 @@ mod tests {
     }
 
     #[test]
+    fn status_templates_format_money_and_guard_percentage_calculations() {
+        let status = StatusLines::compile(
+            Some(vec![
+                "${{ '%.2f' | format(cost) }}".into(),
+                "${{ cost | round(2) }}".into(),
+                "{% if total_tokens > 0 %}Output share: {{ '%.1f' | format(100 * output_tokens / total_tokens) }}%{% endif %}".into(),
+            ]),
+            vec![],
+        )
+        .unwrap();
+        let mut fields = StatusFields {
+            cost: 2.4305,
+            output_tokens: 253,
+            total_tokens: 1_000,
+            ..StatusFields::default()
+        };
+        assert_eq!(
+            status.render(&fields),
+            ["$2.43", "$2.43", "Output share: 25.3%"]
+        );
+        fields.cost = 2.5;
+        fields.total_tokens = 0;
+        assert_eq!(status.render(&fields), ["$2.50", "$2.5"]);
+        fields.cost = 2.439;
+        assert_eq!(status.render(&fields), ["$2.44", "$2.44"]);
+    }
+
+    #[test]
+    fn status_templates_handle_path_labels_and_missing_numbers() {
+        let status = StatusLines::compile(
+            Some(vec![
+                "{{ (cwd | trim('/') | split('/') | last) or cwd }}".into(),
+                "seq {{ seq if seq is not none else '—' }}".into(),
+            ]),
+            vec![],
+        )
+        .unwrap();
+        let mut fields = StatusFields {
+            cwd: "/remote/工作/",
+            ..StatusFields::default()
+        };
+        assert_eq!(status.render(&fields), ["工作", "seq —"]);
+        fields.cwd = "/";
+        fields.seq = Some(0);
+        assert_eq!(status.render(&fields), ["/", "seq 0"]);
+    }
+
+    #[test]
     fn default_is_compatible_and_can_be_extended() {
         let target = target();
         let mut state = TranscriptState::default();
