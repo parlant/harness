@@ -20,6 +20,7 @@ defmodule H.Provider do
           | %{type: :usage, usage: map()}
 
   @type assistant_response :: %{
+          optional(:reasoning_details) => [map()],
           content: [map()],
           tool_calls: [map()],
           finish_reason: String.t(),

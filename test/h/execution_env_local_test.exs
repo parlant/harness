@@ -35,6 +35,26 @@ defmodule H.ExecutionEnv.LocalTest do
     end
   end
 
+  describe "provider credentials" do
+    test "keeps Codex and Vertex secrets out of the inherited tool environment", %{env: env} do
+      keys = ~w(OPENAI_CODEX_ACCESS_TOKEN GOOGLE_VERTEX_API_KEY GOOGLE_CLOUD_API_KEY)
+      previous = Map.take(System.get_env(), keys)
+      System.put_env(Map.new(keys, &{&1, "fixture-secret"}))
+
+      on_exit(fn ->
+        Enum.each(keys, &System.delete_env/1)
+        System.put_env(previous)
+      end)
+
+      assert {:ok, %{exit_code: 0, output: "||"}} =
+               ExecutionEnv.exec(
+                 env,
+                 {:shell,
+                  ~s(printf '%s|%s|%s' "$OPENAI_CODEX_ACCESS_TOKEN" "$GOOGLE_VERTEX_API_KEY" "$GOOGLE_CLOUD_API_KEY")}
+               )
+    end
+  end
+
   describe "UTF-8 chunk boundary scanning" do
     test "reads multi-byte UTF-8 characters split across 64 KiB read chunks", %{env: env} do
       # Put a 3-byte UTF-8 character right across the 65536-byte boundary.

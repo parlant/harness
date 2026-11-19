@@ -33,6 +33,10 @@ h -s SESSION_ID            # attach by ID, including when using a symlink to the
 
 The standalone daemon prints its API address. Its default data directory is `~/.local/share/h`; override it with `H.serve(data_dir: "...")`. Phoenix and `h` honor `H_DATA_DIR`. Host tools run with your user's filesystem and shell access, not in a sandbox.
 
+## Model providers
+
+See [model provider setup](docs/providers.md) for OpenAI Codex with OAuth and Gemini 4 on Vertex AI with ADC or an API key.
+
 ## Test
 
 Run `mix test` at the root and in `clients/web/`; both projects default to `--no-start`. Run `cargo test --locked` in `clients/tui/`. The root suite excludes live LLM calls. To include the Phoenix/Rust sync test, build `h` first and run `H_NATIVE_TEST_BIN=/absolute/path/to/h mix test --include native_client` in `clients/web/`.

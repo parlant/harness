@@ -11,7 +11,9 @@ defmodule H.Provider.ReqLLM do
   @behaviour H.Provider
 
   alias H.{Context, Credentials}
+  alias H.Provider.{CodexModels, Settings, VertexExpress}
   alias ReqLLM.{StreamEvent, StreamResponse}
+  alias ReqLLM.StreamResponse.MetadataHandle
 
   @thinking_efforts %{
     :minimal => :minimal,
@@ -32,7 +34,7 @@ defmodule H.Provider.ReqLLM do
     "off" => :none
   }
 
-  @default_providers [:openai, :anthropic, :google_vertex, :google, :deepseek]
+  @default_providers [:openai, :openai_codex, :anthropic, :google_vertex, :google, :deepseek]
 
   @curated_model_ids %{
     openai: [
@@ -74,9 +76,11 @@ defmodule H.Provider.ReqLLM do
       when is_map(config) and is_map(request) and is_function(emit, 1) do
     model_spec = Map.get(request, :model) || Map.get(request, "model") || Map.get(config, :model)
 
+    settings = Settings.read(config)
+
     with {:ok, %LLMDB.Model{} = model} <- resolve_model(model_spec),
          {req_context, req_tools} <- build_req_llm_inputs(request),
-         {:ok, stream_opts} <- build_stream_opts(config, request, model, req_tools),
+         {:ok, stream_opts} <- build_stream_opts(config, request, model, req_tools, settings),
          {:ok, stream_or_resp} <- start_stream(config, model, req_context, stream_opts) do
       consume_stream(stream_or_resp, model, config, emit)
     else
@@ -93,7 +97,7 @@ defmodule H.Provider.ReqLLM do
         |> Enum.sort_by(& &1.id)
 
       nil ->
-        fetch_curated_models(config)
+        fetch_curated_models(config, Settings.read(config))
     end
   end
 
@@ -103,13 +107,16 @@ defmodule H.Provider.ReqLLM do
   """
   @spec default_model(map()) :: String.t()
   def default_model(config \\ %{}) when is_map(config) do
-    case Map.get(config, :default_model) || Application.get_env(:harness, :default_model) do
+    settings = Settings.read(config)
+
+    case Map.get(config, :default_model) || Application.get_env(:harness, :default_model) ||
+           settings["default_model"] do
       model when is_binary(model) and model != "" ->
         model
 
       _ ->
         case list_models(config) do
-          [first | _] -> first.id
+          [%{id: id} | _] -> id
           [] -> "openai:gpt-5.4"
         end
     end
@@ -120,16 +127,41 @@ defmodule H.Provider.ReqLLM do
   defp resolve_model(nil), do: {:error, {:invalid_model, "model is required"}}
 
   defp resolve_model("google_vertex:" <> id) do
-    case lookup_llmdb_model(:google_vertex, id) || lookup_llmdb_model(:google, id) do
-      %LLMDB.Model{} = model -> {:ok, %{model | provider: :google_vertex}}
+    case vertex_model(id) do
+      %LLMDB.Model{} = model -> ReqLLM.model(model)
       nil -> ReqLLM.model(%{provider: :google_vertex, id: id})
     end
   end
 
   defp resolve_model("google-vertex:" <> id), do: resolve_model("google_vertex:" <> id)
+  defp resolve_model("openai-codex:" <> id), do: resolve_model("openai_codex:" <> id)
 
-  defp resolve_model(model_spec) do
-    ReqLLM.model(model_spec)
+  defp resolve_model("openai_codex:" <> id) do
+    case Enum.find(CodexModels.list(), &(&1.id == id)) do
+      %LLMDB.Model{} = model -> ReqLLM.model(model)
+      nil -> ReqLLM.model("openai_codex:" <> id)
+    end
+  end
+
+  defp resolve_model(model_spec), do: ReqLLM.model(model_spec)
+
+  defp vertex_model(id) do
+    lookup_llmdb_model(:google_vertex, id) ||
+      case lookup_llmdb_model(:google, id) do
+        %LLMDB.Model{} = model ->
+          # The Developer API catalog can advertise long-decode limits; H uses
+          # ordinary synchronous Vertex streams, not long-decode continuation.
+          limits =
+            case get_nested(model.extra, [:default_synchronous_output_limit]) do
+              n when is_integer(n) and n > 0 -> Map.put(model.limits || %{}, :output, n)
+              _ -> model.limits
+            end
+
+          %{model | provider: :google_vertex, limits: limits}
+
+        nil ->
+          nil
+      end
   end
 
   defp build_req_llm_inputs(request) do
@@ -146,7 +178,7 @@ defmodule H.Provider.ReqLLM do
     end
   end
 
-  defp build_stream_opts(config, request, model, req_tools) do
+  defp build_stream_opts(config, request, model, req_tools, settings) do
     receive_timeout =
       Application.get_env(
         :req_llm,
@@ -154,7 +186,7 @@ defmodule H.Provider.ReqLLM do
         Application.get_env(:req_llm, :receive_timeout, 300_000)
       )
 
-    with {:ok, cred_opts} <- resolve_credential_opts(config, model) do
+    with {:ok, cred_opts} <- resolve_credential_opts(config, model, settings) do
       opts =
         cred_opts
         |> Keyword.put(:receive_timeout, Map.get(config, :receive_timeout, receive_timeout))
@@ -164,12 +196,13 @@ defmodule H.Provider.ReqLLM do
         |> maybe_put_max_tokens(request)
         |> maybe_put_reasoning_effort(request, config)
         |> merge_user_provider_options(config)
+        |> codex_transport(settings, model)
 
       {:ok, opts}
     end
   end
 
-  defp resolve_credential_opts(config, %LLMDB.Model{provider: provider}) do
+  defp resolve_credential_opts(config, %LLMDB.Model{provider: provider}, settings) do
     cond do
       is_map(Map.get(config, :credentials)) ->
         {:ok, credentials_to_opts(provider, Map.get(config, :credentials))}
@@ -177,14 +210,12 @@ defmodule H.Provider.ReqLLM do
       Map.get(config, :skip_credentials) == true ->
         {:ok, []}
 
-      is_function(Map.get(config, :stream_fn), 3) and not Map.has_key?(config, :credentials_opts) ->
-        case Credentials.resolve(provider, []) do
-          {:ok, creds} -> {:ok, credentials_to_opts(provider, creds)}
-          {:error, _} -> {:ok, []}
-        end
+      is_function(Map.get(config, :stream_fn), 3) and
+        not Map.has_key?(config, :credentials_opts) and settings == %{} ->
+        {:ok, []}
 
       true ->
-        cred_opts = Map.get(config, :credentials_opts, [])
+        cred_opts = Keyword.put(Map.get(config, :credentials_opts, []), :settings, settings)
 
         case Credentials.resolve(provider, cred_opts) do
           {:ok, creds} -> {:ok, credentials_to_opts(provider, creds)}
@@ -199,6 +230,18 @@ defmodule H.Provider.ReqLLM do
          region: region
        }) do
     [provider_options: [access_token: token, project_id: project, region: region]]
+  end
+
+  defp credentials_to_opts(:openai_codex, %{access_token: token} = creds) do
+    opts = [auth_mode: :oauth, access_token: token]
+
+    opts =
+      case Map.get(creds, :account_id) do
+        id when is_binary(id) and id != "" -> Keyword.put(opts, :chatgpt_account_id, id)
+        _ -> opts
+      end
+
+    [provider_options: opts]
   end
 
   defp credentials_to_opts(_provider, %{auth_mode: :none}), do: []
@@ -235,6 +278,7 @@ defmodule H.Provider.ReqLLM do
     case Map.get(config, :provider_options) do
       extra when is_list(extra) and extra != [] ->
         existing = Keyword.get(opts, :provider_options, [])
+
         Keyword.put(opts, :provider_options, Keyword.merge(extra, existing))
 
       _ ->
@@ -242,10 +286,34 @@ defmodule H.Provider.ReqLLM do
     end
   end
 
-  defp start_stream(config, model, req_context, stream_opts) do
-    stream_fn = Map.get(config, :stream_fn, &ReqLLM.stream_text/3)
+  defp codex_transport(opts, settings, %LLMDB.Model{provider: :openai_codex}) do
+    provider_opts = Keyword.get(opts, :provider_options, [])
 
-    case stream_fn.(model, req_context, stream_opts) do
+    if Keyword.has_key?(provider_opts, :openai_stream_transport) do
+      opts
+    else
+      case settings do
+        %{"openai_codex" => %{"transport" => "websocket"}} ->
+          Keyword.put(opts, :provider_options, [
+            {:openai_stream_transport, :websocket} | provider_opts
+          ])
+
+        _ ->
+          opts
+      end
+    end
+  end
+
+  defp codex_transport(opts, _settings, _model), do: opts
+
+  defp start_stream(config, model, req_context, stream_opts) do
+    result =
+      case config do
+        %{stream_fn: fun} -> fun.(model, req_context, stream_opts)
+        _ -> provider_stream(model, req_context, stream_opts)
+      end
+
+    case result do
       {:ok, _stream_or_resp} = ok -> ok
       {:error, _reason} = error -> error
       other -> {:error, {:invalid_stream_result, other}}
@@ -254,6 +322,21 @@ defmodule H.Provider.ReqLLM do
     exception ->
       {:error, exception}
   end
+
+  defp provider_stream(%LLMDB.Model{provider: :google_vertex} = model, context, opts) do
+    cond do
+      not Keyword.has_key?(opts, :api_key) ->
+        ReqLLM.stream_text(model, context, opts)
+
+      String.starts_with?(model.provider_model_id || model.id, "gemini-") ->
+        VertexExpress.stream(model, context, opts)
+
+      true ->
+        {:error, "Vertex API keys are supported for Gemini models only"}
+    end
+  end
+
+  defp provider_stream(model, context, opts), do: ReqLLM.stream_text(model, context, opts)
 
   # Stream consumption & cleanup
 
@@ -285,9 +368,21 @@ defmodule H.Provider.ReqLLM do
     end
 
     try do
-      stream_resp
-      |> StreamResponse.events()
-      |> run_event_loop(model, emit)
+      result = stream_resp |> StreamResponse.events() |> run_event_loop(model, emit)
+
+      case result do
+        {:ok, response} when model.provider == :openai_codex ->
+          case MetadataHandle.await(stream_resp.metadata_handle) do
+            %{reasoning_details: [_ | _] = details} ->
+              {:ok, Map.put(response, :reasoning_details, Credentials.sanitize(details))}
+
+            _ ->
+              result
+          end
+
+        _ ->
+          result
+      end
     after
       send(watcher, {:done, watcher_ref})
       safe_close_stream(stream_resp)
@@ -545,18 +640,16 @@ defmodule H.Provider.ReqLLM do
 
   # Model catalog listing
 
-  defp fetch_curated_models(config) do
-    providers = resolve_target_providers(config)
-
-    Enum.flat_map(providers, fn provider ->
-      curated_models_for_provider(provider)
-    end)
+  defp fetch_curated_models(config, settings) do
+    config
+    |> resolve_target_providers(settings)
+    |> Enum.flat_map(&curated_models_for_provider/1)
   end
 
-  defp resolve_target_providers(config) do
+  defp resolve_target_providers(config, settings) do
     case Map.get(config, :provider) do
       nil ->
-        cred_opts = Map.get(config, :credentials_opts, [])
+        cred_opts = Keyword.put(Map.get(config, :credentials_opts, []), :settings, settings)
 
         case Credentials.configured_providers(cred_opts) do
           [] -> @default_providers
@@ -574,6 +667,7 @@ defmodule H.Provider.ReqLLM do
     end
   end
 
+  defp normalize_provider_name("openai-codex"), do: :openai_codex
   defp normalize_provider_name("openai"), do: :openai
   defp normalize_provider_name("anthropic"), do: :anthropic
   defp normalize_provider_name("google_vertex"), do: :google_vertex
@@ -587,14 +681,22 @@ defmodule H.Provider.ReqLLM do
     Enum.find(@default_providers, &(Atom.to_string(&1) == other))
   end
 
+  defp curated_models_for_provider(:openai_codex) do
+    Enum.map(CodexModels.list(), &project_model/1)
+  end
+
   defp curated_models_for_provider(provider) do
     case Map.get(@curated_model_ids, provider) do
       ids when is_list(ids) ->
         ids
         |> Enum.flat_map(fn id ->
-          case lookup_llmdb_model(provider, id) ||
-                 if(provider == :google_vertex, do: lookup_llmdb_model(:google, id), else: nil) do
-            %LLMDB.Model{} = m -> [project_model(%{m | provider: provider})]
+          model =
+            if provider == :google_vertex,
+              do: vertex_model(id),
+              else: lookup_llmdb_model(provider, id)
+
+          case model do
+            %LLMDB.Model{} = m -> [project_model(m)]
             nil -> []
           end
         end)

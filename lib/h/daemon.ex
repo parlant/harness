@@ -296,8 +296,7 @@ defmodule H.Daemon do
   @spec list_models(keyword()) :: [map()]
   def list_models(opts \\ []) when is_list(opts) do
     provider_mod = Keyword.get(opts, :provider, H.Provider.ReqLLM)
-    provider_config = Keyword.get(opts, :provider_config, %{})
-    provider_mod.list_models(provider_config)
+    provider_mod.list_models(provider_config(opts))
   end
 
   @doc "Lists sessions directly from `H.Catalog` ETS without waking unloaded sessions."
@@ -602,6 +601,17 @@ defmodule H.Daemon do
 
   # Session supervision lookup / startup
 
+  defp provider_config(opts) do
+    config = Keyword.get(opts, :provider_config, %{})
+
+    if Keyword.get(opts, :provider, H.Provider.ReqLLM) == H.Provider.ReqLLM do
+      data_dir = Keyword.get(opts, :data_dir) || Application.get_env(:harness, :data_dir)
+      Map.put(config, :data_dir, data_dir)
+    else
+      config
+    end
+  end
+
   defp ensure_session_started(entry, opts, initial_agent) do
     session_id = entry.session_id
     registry = Keyword.get(opts, :registry, @default_registry)
@@ -685,7 +695,7 @@ defmodule H.Daemon do
         ]
         |> maybe_put_kw(:initial_agent, initial_agent)
         |> maybe_copy_kw(opts, :provider)
-        |> maybe_copy_kw(opts, :provider_config)
+        |> Keyword.put(:provider_config, provider_config(opts))
         |> maybe_copy_kw(opts, :default_model)
         |> maybe_copy_kw(opts, :persist_within_ms)
         |> maybe_copy_kw(opts, :ephemeral_interval_ms)

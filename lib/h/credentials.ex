@@ -3,7 +3,7 @@ defmodule H.Credentials do
   In-memory credential resolver for LLM providers.
 
   Credentials are resolved on demand from explicit options, environment
-  variables, or external helpers (such as `token-exchange`) and optionally
+  variables, H provider settings, or the Google Cloud CLI for ADC, and optionally
   cached in memory with a TTL safety margin. Secrets are never persisted to disk
   or included in inspected/sanitized error values.
   """
@@ -15,6 +15,7 @@ defmodule H.Credentials do
 
   @provider_priority [
     :openai,
+    :openai_codex,
     :anthropic,
     :google_vertex,
     :google,
@@ -31,13 +32,19 @@ defmodule H.Credentials do
   }
 
   @sensitive_keys MapSet.new([
+                    "access",
+                    "accesstoken",
                     "access_token",
                     "api_key",
                     "api_token",
                     "authorization",
                     "credential",
                     "credentials",
+                    "refresh",
+                    "refreshtoken",
                     "secret",
+                    "x-goog-api-key",
+                    "key",
                     "token"
                   ])
 
@@ -72,7 +79,13 @@ defmodule H.Credentials do
   @type api_key_credentials :: %{api_key: String.t()}
   @type anonymous_credentials :: %{auth_mode: :none}
 
-  @type credentials :: vertex_credentials() | api_key_credentials() | anonymous_credentials()
+  @type codex_credentials :: %{access_token: String.t(), account_id: String.t() | nil}
+
+  @type credentials ::
+          vertex_credentials()
+          | api_key_credentials()
+          | anonymous_credentials()
+          | codex_credentials()
 
   # Optional in-memory cache server
 
@@ -104,6 +117,7 @@ defmodule H.Credentials do
 
   Supported providers:
   - `:google_vertex` / `"google_vertex"` / `"google-vertex"`
+  - `:openai_codex` / `"openai-codex"` (OAuth access token)
   - `:anthropic` / `"anthropic"` (`ANTHROPIC_API_KEY`)
   - `:openai` / `"openai"` (`OPENAI_API_KEY`)
   - `:openrouter` / `"openrouter"` (`OPENROUTER_API_KEY`)
@@ -112,10 +126,13 @@ defmodule H.Credentials do
   - `:ollama` / `"ollama"` (no key required; returns `%{auth_mode: :none}`)
 
   Options:
-  - `:access_token` - Explicit bearer token for `:google_vertex`
+  - `:access_token` - Explicit bearer token for Vertex or Codex
+  - `:settings` - H-owned provider settings map (populated by the adapter)
+  - `:account_id` - Explicit Codex account ID; otherwise derived from the token
   - `:project_id` - Override `GOOGLE_CLOUD_PROJECT`
   - `:region` - Override `GOOGLE_CLOUD_REGION` (defaults to `"global"`)
-  - `:api_key` - Explicit API key override
+  - `:api_key` - Explicit API key override (Vertex uses Express Mode)
+  - `:credentials_path` - Override the Vertex ADC file path
   - `:fetcher` - Injectable 0-arity or 1-arity callback for `:google_vertex`
   - `:cache` - Cache server pid/name, or `false` to bypass cache
   - `:env` - Optional `%{String.t() => String.t()}` map overriding `System.get_env/1`
@@ -126,6 +143,16 @@ defmodule H.Credentials do
     case normalize_provider(provider) do
       {:ok, "google_vertex"} ->
         resolve_vertex(opts)
+
+      {:ok, "openai_codex"} ->
+        case codex_credentials(opts) do
+          nil ->
+            {:error,
+             "No valid Codex OAuth token. Set OPENAI_CODEX_ACCESS_TOKEN or update H providers.json."}
+
+          credentials ->
+            {:ok, credentials}
+        end
 
       {:ok, "ollama"} ->
         {:ok, %{auth_mode: :none}}
@@ -155,11 +182,16 @@ defmodule H.Credentials do
   def configured?(provider, opts \\ []) when is_list(opts) do
     case normalize_provider(provider) do
       {:ok, "google_vertex"} ->
-        match?({:ok, _}, resolve_project_id(opts)) and
-          (is_binary(presence(Keyword.get(opts, :access_token))) or
-             is_function(Keyword.get(opts, :fetcher)) or
-             not is_nil(System.find_executable("token-exchange")) or
-             not is_nil(System.find_executable("google-adc")))
+        opts = vertex_options(opts)
+
+        is_binary(vertex_key(opts)) or
+          (match?({:ok, _}, resolve_project_id(opts)) and match?({:ok, _}, resolve_region(opts)) and
+             (is_binary(presence(opts[:access_token])) or is_function(opts[:fetcher]) or
+                (adc_file_available?(opts[:credentials_path]) and
+                   not is_nil(System.find_executable("gcloud")))))
+
+      {:ok, "openai_codex"} ->
+        not is_nil(codex_credentials(opts))
 
       {:ok, "ollama"} ->
         true
@@ -199,6 +231,10 @@ defmodule H.Credentials do
   end
 
   def sanitize(list) when is_list(list), do: Enum.map(list, &sanitize/1)
+
+  def sanitize({key, value}) when is_binary(key) or is_atom(key) do
+    {key, if(sensitive_key?(key), do: "[REDACTED]", else: sanitize(value))}
+  end
 
   def sanitize(tuple) when is_tuple(tuple) do
     tuple |> Tuple.to_list() |> sanitize() |> List.to_tuple()
@@ -259,26 +295,103 @@ defmodule H.Credentials do
 
   # Resolution internals
 
-  defp resolve_vertex(opts) do
-    with {:ok, project_id} <- resolve_project_id(opts),
-         region = resolve_region(opts),
-         {:ok, access_token} <- resolve_vertex_token(project_id, opts) do
-      {:ok, %{access_token: access_token, project_id: project_id, region: region}}
+  defp codex_credentials(opts) do
+    stored = provider_settings(opts, "openai_codex")
+
+    override =
+      presence(opts[:access_token]) || presence(get_env("OPENAI_CODEX_ACCESS_TOKEN", opts))
+
+    token =
+      case stored do
+        %{"access_token" => token, "expires_at_ms" => expiry} when is_integer(expiry) ->
+          override || if(expiry > now_ms(opts), do: presence(token))
+
+        _ ->
+          override
+      end
+
+    account =
+      presence(opts[:account_id]) || presence(get_env("OPENAI_CODEX_ACCOUNT_ID", opts)) ||
+        if(is_nil(override), do: presence(stored["account_id"]))
+
+    token = if token, do: strip_bearer(token)
+
+    if token && Regex.match?(~r/\A[!-~]+\z/, token) &&
+         (is_nil(account) || Regex.match?(~r/\A[!-~]+\z/, account)) do
+      %{access_token: token, account_id: account}
     end
   end
 
+  defp provider_settings(opts, provider) do
+    case opts[:settings] do
+      %{^provider => %{} = settings} -> settings
+      _ -> %{}
+    end
+  end
+
+  defp resolve_vertex(opts) do
+    opts = vertex_options(opts)
+
+    case vertex_key(opts) do
+      nil ->
+        with {:ok, project_id} <- resolve_project_id(opts),
+             {:ok, region} <- resolve_region(opts),
+             {:ok, access_token} <- resolve_vertex_token(project_id, opts) do
+          {:ok, %{access_token: access_token, project_id: project_id, region: region}}
+        end
+
+      key ->
+        if Regex.match?(~r/\A[!-~]+\z/, key),
+          do: {:ok, %{api_key: key}},
+          else: {:error, :invalid_vertex_api_key}
+    end
+  end
+
+  defp vertex_options(opts) do
+    opts
+    |> Keyword.put(:force_adc, is_binary(presence(opts[:credentials_path])))
+    |> Keyword.put(
+      :credentials_path,
+      presence(opts[:credentials_path]) ||
+        presence(get_env("GOOGLE_APPLICATION_CREDENTIALS", opts))
+    )
+  end
+
+  defp vertex_key(opts) do
+    presence(opts[:api_key]) ||
+      if(
+        not Keyword.has_key?(opts, :access_token) and not is_function(opts[:fetcher]) and
+          not opts[:force_adc],
+        do:
+          presence(get_env("GOOGLE_VERTEX_API_KEY", opts)) ||
+            presence(get_env("GOOGLE_CLOUD_API_KEY", opts)) ||
+            presence(provider_settings(opts, "google_vertex")["api_key"])
+      )
+  end
+
   defp resolve_project_id(opts) do
-    case presence(Keyword.get(opts, :project_id)) ||
-           presence(get_env("GOOGLE_CLOUD_PROJECT", opts)) do
-      nil -> {:error, {:missing_env, "GOOGLE_CLOUD_PROJECT"}}
-      project_id -> {:ok, project_id}
+    case presence(opts[:project_id]) || presence(get_env("GOOGLE_CLOUD_PROJECT", opts)) ||
+           presence(get_env("GCLOUD_PROJECT", opts)) ||
+           presence(provider_settings(opts, "google_vertex")["project_id"]) do
+      nil ->
+        {:error, {:missing_env, "GOOGLE_CLOUD_PROJECT"}}
+
+      project_id ->
+        if Regex.match?(~r/\A[a-zA-Z0-9][a-zA-Z0-9_-]*\z/, project_id),
+          do: {:ok, project_id},
+          else: {:error, :invalid_vertex_project}
     end
   end
 
   defp resolve_region(opts) do
-    presence(Keyword.get(opts, :region)) ||
-      presence(get_env("GOOGLE_CLOUD_REGION", opts)) ||
-      "global"
+    region =
+      presence(opts[:region]) || presence(get_env("GOOGLE_CLOUD_REGION", opts)) ||
+        presence(get_env("GOOGLE_CLOUD_LOCATION", opts)) ||
+        presence(provider_settings(opts, "google_vertex")["location"]) || "global"
+
+    if Regex.match?(~r/\A[a-z][a-z0-9-]*\z/, region),
+      do: {:ok, region},
+      else: {:error, :invalid_vertex_location}
   end
 
   defp resolve_vertex_token(project_id, opts) do
@@ -309,8 +422,9 @@ defmodule H.Credentials do
         end
 
       cache ->
-        cache_key = Keyword.get(opts, :cache_key, {:google_vertex, project_id})
-        GenServer.call(cache, {:get_or_fetch, cache_key, fetcher_fn})
+        scope = {opts[:credentials_path], get_env("CLOUDSDK_CONFIG", opts), fetcher}
+        cache_key = Keyword.get(opts, :cache_key, {:google_vertex, project_id, scope})
+        GenServer.call(cache, {:get_or_fetch, cache_key, fetcher_fn}, 60_000)
     end
   end
 
@@ -364,25 +478,38 @@ defmodule H.Credentials do
   defp call_fetcher(fun, _opts) when is_function(fun, 0), do: fun.()
   defp call_fetcher(fun, opts) when is_function(fun, 1), do: fun.(opts)
 
-  defp default_vertex_fetcher(_opts) do
-    cond do
-      exe = System.find_executable("token-exchange") ->
-        run_cli_token(exe, ["google", "token", "--for", "adc", "--no-login"])
+  defp default_vertex_fetcher(opts) do
+    credentials_path = opts[:credentials_path]
 
-      exe = System.find_executable("google-adc") ->
-        run_cli_token(exe, [])
+    case System.find_executable("gcloud") do
+      exe when is_binary(exe) ->
+        env =
+          if credentials_path do
+            [
+              {"GOOGLE_APPLICATION_CREDENTIALS", Path.expand(credentials_path)},
+              {"CLOUDSDK_CONFIG", nil},
+              {"CLOUDSDK_CORE_ACCOUNT", nil},
+              {"CLOUDSDK_ACTIVE_CONFIG_NAME", nil}
+            ]
+          else
+            []
+          end
 
-      true ->
-        {:error, :credential_helper_not_found}
+        # Don't include helper output in failure records; it may contain credentials.
+        args = ["auth", "application-default", "print-access-token", "--quiet"]
+
+        case System.cmd(exe, args, env: env) do
+          {output, 0} -> {:ok, output}
+          {_output, status} -> {:error, {:credential_helper_failed, status}}
+        end
+
+      nil ->
+        {:error, "Vertex ADC requires gcloud or an explicit access token"}
     end
   end
 
-  defp run_cli_token(exe, args) do
-    case System.cmd(exe, args, stderr_to_stdout: true) do
-      {output, 0} -> {:ok, output}
-      {output, status} -> {:error, {:credential_helper_failed, status, sanitize_binary(output)}}
-    end
-  end
+  defp adc_file_available?(nil), do: true
+  defp adc_file_available?(path), do: File.regular?(Path.expand(path))
 
   defp parse_token_payload(%{access_token: token} = payload, now, default_ttl_ms)
        when is_binary(token) and token != "" do
@@ -460,6 +587,7 @@ defmodule H.Credentials do
     end
   end
 
+  defp normalize_provider(:openai_codex), do: {:ok, "openai_codex"}
   defp normalize_provider(:google_vertex), do: {:ok, "google_vertex"}
   defp normalize_provider(:anthropic), do: {:ok, "anthropic"}
   defp normalize_provider(:openai), do: {:ok, "openai"}
@@ -470,6 +598,8 @@ defmodule H.Credentials do
 
   defp normalize_provider(name) when is_binary(name) do
     case name do
+      "openai_codex" -> {:ok, "openai_codex"}
+      "openai-codex" -> {:ok, "openai_codex"}
       "google_vertex" -> {:ok, "google_vertex"}
       "google-vertex" -> {:ok, "google_vertex"}
       "anthropic" -> {:ok, "anthropic"}
@@ -520,10 +650,11 @@ defmodule H.Credentials do
     text
     |> String.replace(~r/(Bearer\s+)[A-Za-z0-9._\-\+\/=]+/i, "\\1[REDACTED]")
     |> String.replace(
-      ~r/((?:access_token|api_key|token|secret)["']?\s*[:=]\s*["']?)[^\s"',}]+/i,
+      ~r/((?:access[_-]?token|refresh[_-]?token|x-goog-api-key|api_key|key|token|secret)["']?\s*[:=]\s*["']?)[^\s"',}]+/i,
       "\\1[REDACTED]"
     )
     |> String.replace(~r/\bsk-[A-Za-z0-9._\-]{8,}\b/, "[REDACTED]")
+    |> String.replace(~r/\bAIza[A-Za-z0-9_-]{20,}\b/, "[REDACTED]")
     |> String.replace(~r/\bya29\.[A-Za-z0-9._\-]{8,}\b/, "[REDACTED]")
   end
 end

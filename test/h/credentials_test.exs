@@ -108,6 +108,98 @@ defmodule H.CredentialsTest do
       assert reason =~ "[REDACTED]"
     end
 
+    test "resolves a valid H-owned Codex token and rejects it after expiration" do
+      settings = %{
+        "openai_codex" => %{
+          "access_token" => "stored-token",
+          "account_id" => "stored-account",
+          "expires_at_ms" => 200
+        }
+      }
+
+      opts = [settings: settings, env: %{"OPENAI_API_KEY" => "ordinary-api-key"}]
+
+      assert {:ok, %{access_token: "stored-token", account_id: "stored-account"}} =
+               Credentials.resolve("openai-codex", opts ++ [now_fn: fn -> 199 end])
+
+      refute Credentials.configured?(:openai_codex, opts ++ [now_fn: fn -> 200 end])
+
+      assert {:error,
+              "No valid Codex OAuth token. Set OPENAI_CODEX_ACCESS_TOKEN or update H providers.json."} =
+               Credentials.resolve(:openai_codex, opts ++ [now_fn: fn -> 200 end])
+
+      assert {:ok, %{access_token: "override", account_id: nil}} =
+               Credentials.resolve(:openai_codex, opts ++ [access_token: "Bearer override"])
+    end
+
+    test "resolves scoped Vertex ADC using H settings and explicit overrides" do
+      settings = %{"google_vertex" => %{"project_id" => "h-project", "location" => "global"}}
+
+      fetcher = fn opts ->
+        assert opts[:credentials_path] == "/fixture/adc.json"
+        {:ok, "fake-adc-token"}
+      end
+
+      opts = [
+        settings: settings,
+        env: %{"GOOGLE_APPLICATION_CREDENTIALS" => "/fixture/adc.json"},
+        fetcher: fetcher,
+        cache: false
+      ]
+
+      assert Credentials.configured?(:google_vertex, opts)
+
+      assert {:ok, %{project_id: "h-project", access_token: "fake-adc-token", region: "global"}} =
+               Credentials.resolve(:google_vertex, opts)
+
+      assert {:ok, %{project_id: "explicit", access_token: "fake-adc-token", region: "us-east5"}} =
+               Credentials.resolve(
+                 "google-vertex",
+                 opts ++ [project_id: "explicit", region: "us-east5"]
+               )
+    end
+
+    test "rejects a malformed Vertex location before fetching a token" do
+      assert {:error, :invalid_vertex_location} =
+               Credentials.resolve(:google_vertex,
+                 env: %{},
+                 project_id: "test-project",
+                 region: "wrong.example.test/",
+                 fetcher: fn -> flunk("unexpected ADC request") end
+               )
+    end
+
+    test "uses Vertex API keys without requiring an ADC project" do
+      opts = [settings: %{"google_vertex" => %{"api_key" => "stored-key"}}, env: %{}]
+      assert Credentials.configured?(:google_vertex, opts)
+      assert {:ok, %{api_key: "stored-key"}} = Credentials.resolve(:google_vertex, opts)
+
+      assert {:ok, %{api_key: "cloud-key"}} =
+               Credentials.resolve(
+                 :google_vertex,
+                 Keyword.put(opts, :env, %{"GOOGLE_CLOUD_API_KEY" => "cloud-key"})
+               )
+
+      assert {:ok, %{api_key: "vertex-key"}} =
+               Credentials.resolve(
+                 :google_vertex,
+                 Keyword.put(opts, :env, %{
+                   "GOOGLE_VERTEX_API_KEY" => "vertex-key",
+                   "GOOGLE_CLOUD_API_KEY" => "cloud-key"
+                 })
+               )
+
+      assert {:ok, %{access_token: "adc", project_id: "test-project", region: "global"}} =
+               Credentials.resolve(
+                 :google_vertex,
+                 opts ++ [access_token: "adc", project_id: "test-project"]
+               )
+
+      refute Credentials.configured?(:google_vertex,
+               env: %{"GOOGLE_API_KEY" => "developer-api-key"}
+             )
+    end
+
     test "resolves API key providers from env map" do
       env = %{
         "ANTHROPIC_API_KEY" => "sk-ant-1",
@@ -167,6 +259,17 @@ defmodule H.CredentialsTest do
       refute clean.message =~ "my.jwt.token"
       refute clean.message =~ "sk-ant-abcdef123456"
       assert clean.message =~ "[REDACTED]"
+    end
+
+    test "redacts OAuth fields and Vertex key headers" do
+      assert Credentials.sanitize(%{
+               "access" => "access-fixture",
+               "refreshToken" => "refresh-fixture"
+             }) ==
+               %{"access" => "[REDACTED]", "refreshToken" => "[REDACTED]"}
+
+      assert Credentials.sanitize([{"x-goog-api-key", "vertex-fixture"}]) ==
+               [{"x-goog-api-key", "[REDACTED]"}]
     end
 
     test "Inspect for Redacted and CacheEntry hides secret values" do

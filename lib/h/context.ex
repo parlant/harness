@@ -717,6 +717,10 @@ defmodule H.Context do
   defp normalize_provider_atom(atom) when is_atom(atom) and not is_nil(atom), do: atom
   defp normalize_provider_atom("anthropic"), do: :anthropic
   defp normalize_provider_atom("google"), do: :google
+
+  defp normalize_provider_atom(name) when name in ["openai_codex", "openai-codex"],
+    do: :openai_codex
+
   defp normalize_provider_atom("google_vertex"), do: :google_vertex
   defp normalize_provider_atom("openai"), do: :openai
   defp normalize_provider_atom("openrouter"), do: :openrouter

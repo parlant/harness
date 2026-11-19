@@ -21,6 +21,7 @@ defmodule H.ExecutionEnv.Host do
   @kill_poll_interval_ms 20
 
   @stripped_env_prefixes ["H_AUTH", "H_TOKEN", "H_OWNER", "HARNESS_AUTH", "HARNESS_TOKEN"]
+  @provider_secret_env ~w(OPENAI_CODEX_ACCESS_TOKEN GOOGLE_VERTEX_API_KEY GOOGLE_CLOUD_API_KEY)
 
   @spec new(String.t(), keyword()) :: H.ExecutionEnv.t()
   def new(cwd \\ System.user_home!(), opts \\ []) when is_binary(cwd) and is_list(opts) do
@@ -862,7 +863,9 @@ defmodule H.ExecutionEnv.Host do
 
   defp stripped_env_key?(key) do
     upper = String.upcase(key)
-    Enum.any?(@stripped_env_prefixes, &String.starts_with?(upper, &1))
+
+    upper in @provider_secret_env or
+      Enum.any?(@stripped_env_prefixes, &String.starts_with?(upper, &1))
   end
 
   defp run_port(

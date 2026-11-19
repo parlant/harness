@@ -2393,6 +2393,12 @@ defmodule H.Session.Server do
       "provider_meta" => stringify_json(Map.get(resp, :provider_meta, %{}))
     }
 
+    entry_data =
+      case Map.get(resp, :reasoning_details) do
+        [_ | _] = details -> Map.put(entry_data, "reasoning_details", stringify_json(details))
+        _ -> entry_data
+      end
+
     entry = build_entry_record(entry_id, cid, "assistant", entry_data, now)
     state = record_entry_in_conv(state, cid, entry_id)
 

@@ -372,6 +372,61 @@ defmodule H.ContextTest do
               }, []} = Context.to_req_llm(request)
     end
 
+    test "rehydrates committed Codex reasoning details for a subsequent turn" do
+      entries = [
+        %{id: 1, kind: "user", data: %{text: "Start"}},
+        %{
+          id: 2,
+          kind: "assistant",
+          data: %{
+            "content" => [%{"type" => "text", "text" => "First answer"}],
+            "reasoning_details" => [
+              %{
+                "provider" => "openai_codex",
+                "signature" => "opaque-item",
+                "encrypted?" => true,
+                "format" => "openai-responses-v1",
+                "index" => 0,
+                "provider_data" => %{"id" => "rs_demo"}
+              }
+            ]
+          }
+        },
+        %{id: 3, kind: "user", data: %{text: "Continue"}}
+      ]
+
+      request = Context.build_request(entries, %{model: "openai_codex:gpt-6.1-sol"})
+      {context, []} = Context.to_req_llm(request)
+
+      assert [
+               _,
+               %{
+                 reasoning_details: [%ReasoningDetails{provider: :openai_codex, encrypted?: true}]
+               },
+               _
+             ] = context.messages
+
+      input =
+        ReqLLM.Providers.OpenAI.ResponsesAPI.encode_input_items(
+          context,
+          "gpt-6.1-sol",
+          :openai_codex,
+          true
+        )
+
+      assert Enum.any?(
+               input,
+               &match?(
+                 %{
+                   "type" => "reasoning",
+                   "id" => "rs_demo",
+                   "encrypted_content" => "opaque-item"
+                 },
+                 &1
+               )
+             )
+    end
+
     test "converts request map to ReqLLM.Context and non-executing ReqLLM.Tool structs" do
       agent = %{
         model: "anthropic:claude-sonnet-4-5",
