@@ -13,6 +13,40 @@ defmodule H.Session.CompactionTest do
     start_supervised!({Fake, script: script})
   end
 
+  test "automatic thresholds resolve by qualified model and exact workspace before broader scopes" do
+    entries = [
+      entry(1, "user", %{"text" => String.duplicate("a", 800)}),
+      entry(2, "user", %{"text" => "next"})
+    ]
+
+    limits =
+      Compaction.validate_limits!(%{
+        :default => :off,
+        {:provider, "one"} => 50,
+        {:model, "one:b"} => :off,
+        {:cwd, "/work"} => 50,
+        {:cwd, "/work", "one:b"} => :off
+      })
+
+    cut = fn model, cwd ->
+      Compaction.auto_boundary(
+        entries,
+        Context.build_request(entries, %{model: model}),
+        cwd,
+        limits,
+        0,
+        Fake
+      )
+    end
+
+    assert cut.("one:a", "/other") == 2
+    refute cut.("one:b", "/other")
+    refute cut.("two:a", "/work2")
+    assert cut.("two:a", "/work") == 2
+    refute cut.("one:b", "/work")
+    assert_raise ArgumentError, fn -> Compaction.validate_limits!(%{:default => -1}) end
+  end
+
   describe "provider_visible_entry?/1" do
     test "accepts user, non-aborted assistant, and tool_result entries unless excluded" do
       assert Compaction.provider_visible_entry?(entry(1, "user", %{"text" => "hi"}))

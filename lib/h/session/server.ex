@@ -367,6 +367,7 @@ defmodule H.Session.Server do
         retry_limit: Keyword.get(opts, :retry_limit, @default_retry_limit),
         retry_backoff_ms: Keyword.get(opts, :retry_backoff_ms, @default_retry_backoff_ms),
         restart_limit: Keyword.get(opts, :restart_limit, @default_restart_limit),
+        auto_compaction: Keyword.get(opts, :auto_compaction, %{}),
         compaction_keep_recent_chars: Keyword.get(opts, :compaction_keep_recent_chars, 20_000),
         compaction_max_tokens: Keyword.get(opts, :compaction_max_tokens, 4_096)
       }
@@ -2728,13 +2729,20 @@ defmodule H.Session.Server do
           )
 
         sub_ids = comp_task.checkpoint["submission_ids"] || []
-        {sub_writes, state} = settle_submissions(sub_ids, :done, entry_id, state, now)
+        automatic? = comp_task.checkpoint["automatic"] == true
+
+        {sub_writes, state} =
+          if automatic?,
+            do: {[], state},
+            else: settle_submissions(sub_ids, :done, entry_id, state, now)
 
         {drained_entries, drained_sub_writes, next_sub_ids, inbox_ops, state} =
-          drain_inbox_items(cid, state, now, nil)
+          drain_inbox_items(cid, state, now, if(automatic?, do: "steer", else: nil))
+
+        next_sub_ids = if automatic?, do: sub_ids ++ next_sub_ids, else: next_sub_ids
 
         {next_run_writes, next_live, next_effects, state} =
-          if drained_entries == [] do
+          if drained_entries == [] and not automatic? do
             live = Map.delete(state.docs[cid]["live"] || %{}, "compaction")
             state = state |> put_task_in_state(done_task) |> put_doc_in_state(cid, "live", live)
             {[], live, [], state}
@@ -2786,7 +2794,10 @@ defmodule H.Session.Server do
             [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}] ++
             if(inbox_ops == [],
               do: [],
-              else: [{:put_doc, {:conversation, cid, "inbox"}, Document.wrap("inbox", [])}]
+              else: [
+                {:put_doc, {:conversation, cid, "inbox"},
+                 Document.wrap("inbox", state.docs[cid]["inbox"])}
+              ]
             )
 
         doc_ops =
@@ -2959,78 +2970,55 @@ defmodule H.Session.Server do
   defp finish_tool_round_stage(gen_task, state, now) do
     cid = gen_task.checkpoint["conversation_id"]
     turns = gen_task.checkpoint["turns"] || 1
-    max_turns = state.docs[cid]["agent"]["max_turns"] || 50
 
-    if turns >= max_turns do
-      done_gen =
-        Task.complete(gen_task, %{"status" => "unanswered", "reason" => "turn_limit"}, now)
+    {steer_entries, steer_sub_writes, steer_sub_ids, inbox_ops, state} =
+      drain_inbox_items(cid, state, now, "steer")
 
-      sub_ids = gen_task.checkpoint["submission_ids"] || []
-      {sub_writes, state} = settle_submissions(sub_ids, :unanswered, "turn_limit", state, now)
+    next_turns = turns + 1
+    existing_sub_ids = gen_task.checkpoint["submission_ids"] || []
 
-      next_live = %{"run_failure" => %{"reason" => "turn_limit"}}
+    next_gen = %{
+      gen_task
+      | status: "pending",
+        restarts: 0,
+        checkpoint:
+          gen_task.checkpoint
+          |> Map.merge(%{
+            "turns" => next_turns,
+            "retry_count" => 0,
+            "phase" => "stream",
+            "submission_ids" => existing_sub_ids ++ steer_sub_ids
+          })
+          |> Map.delete("tool_task_ids"),
+        updated_at: now
+    }
 
-      state =
-        state
-        |> put_task_in_state(done_gen)
-        |> put_doc_in_state(cid, "live", next_live)
+    next_live = %{
+      "run" => %{"task_id" => to_string(next_gen.id), "turns" => next_turns},
+      "generation" => %{"message" => %{"thinking" => "", "text" => "", "tool_calls" => []}}
+    }
 
-      writes =
-        [{:put_task, done_gen}] ++
-          sub_writes ++
-          [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
+    state =
+      state
+      |> put_task_in_state(next_gen)
+      |> put_doc_in_state(cid, "live", next_live)
 
-      {writes, state, []}
-    else
-      {steer_entries, steer_sub_writes, steer_sub_ids, inbox_ops, state} =
-        drain_inbox_items(cid, state, now, "steer")
+    writes =
+      Enum.map(steer_entries, &{:append_entry, &1}) ++
+        steer_sub_writes ++
+        [
+          {:put_task, next_gen},
+          {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+        ] ++
+        if(inbox_ops == [],
+          do: [],
+          else: [
+            {:put_doc, {:conversation, cid, "inbox"},
+             Document.wrap("inbox", state.docs[cid]["inbox"])}
+          ]
+        )
 
-      next_turns = turns + 1
-      existing_sub_ids = gen_task.checkpoint["submission_ids"] || []
-
-      next_gen = %{
-        gen_task
-        | status: "pending",
-          restarts: 0,
-          checkpoint:
-            gen_task.checkpoint
-            |> Map.merge(%{
-              "turns" => next_turns,
-              "retry_count" => 0,
-              "phase" => "stream",
-              "submission_ids" => existing_sub_ids ++ steer_sub_ids
-            })
-            |> Map.delete("tool_task_ids"),
-          updated_at: now
-      }
-
-      next_live = %{
-        "run" => %{"task_id" => to_string(next_gen.id), "turns" => next_turns},
-        "generation" => %{"message" => %{"thinking" => "", "text" => "", "tool_calls" => []}}
-      }
-
-      state =
-        state
-        |> put_task_in_state(next_gen)
-        |> put_doc_in_state(cid, "live", next_live)
-
-      writes =
-        Enum.map(steer_entries, &{:append_entry, &1}) ++
-          steer_sub_writes ++
-          [
-            {:put_task, next_gen},
-            {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
-          ] ++
-          if(inbox_ops == [],
-            do: [],
-            else: [
-              {:put_doc, {:conversation, cid, "inbox"},
-               Document.wrap("inbox", state.docs[cid]["inbox"])}
-            ]
-          )
-
-      {writes, state, [{:spawn_generation, cid, next_gen.id}]}
-    end
+    {writes, state, [{:spawn_generation, cid, next_gen.id}]}
   end
 
   defp stage_flush_live(cid, state) do
@@ -3135,64 +3123,94 @@ defmodule H.Session.Server do
 
   defp spawn_generation_worker(cid, gen_task_id, state) do
     case Map.get(state.tasks, gen_task_id) do
-      %{status: status} = gen_task when status in ["pending", "sleeping"] ->
-        now = System.system_time(:millisecond)
-        {:ok, attempt_id, store} = Storage.mint_id(state.store)
-        state = %{state | store: store}
+      %{kind: "generation", status: status} = gen_task when status in ["pending", "sleeping"] ->
+        {:ok, entries, state} = load_visible_entries(state, cid)
 
-        running_task = Task.start_running(gen_task, attempt_id, now)
-        state = put_task_in_state(state, running_task)
+        request =
+          Context.build_request(entries, state.docs[cid]["agent"], build_tool_specs(state.tools))
 
-        # Persist running intent before spawning worker!
-        case Storage.commit(state.store, [[{:put_task, running_task}]]) do
-          {:error, io_err} ->
-            Logger.error("Session #{state.session_id} intent commit failed: #{inspect(io_err)}")
-            send(self(), {:stop_storage_failed, io_err})
-            %{state | storage_failed: true}
+        case Compaction.auto_boundary(
+               entries,
+               request,
+               state.cwd,
+               state.auto_compaction,
+               state.compaction_keep_recent_chars,
+               state.provider_mod
+             ) do
+          nil ->
+            start_generation_attempt(cid, gen_task, state, request)
 
-          {:ok, %{seqs: [batch_seq]}, committed_store} ->
-            state = %{state | store: committed_store, seq: batch_seq}
+          kept_from_id ->
+            checkpoint =
+              Map.merge(gen_task.checkpoint, %{
+                "automatic" => true,
+                "phase" => "summarize",
+                "kept_from_id" => kept_from_id,
+                "max_tokens" => state.compaction_max_tokens,
+                "retry_count" => 0
+              })
 
-            {:ok, entries, state} = load_visible_entries(state, cid)
-            agent = state.docs[cid]["agent"]
-            tool_specs = build_tool_specs(state.tools)
-            request = Context.build_request(entries, agent, tool_specs)
+            task = %{gen_task | kind: "compaction", checkpoint: checkpoint}
 
-            server_pid = self()
-            inc = state.incarnation
-            provider_mod = state.provider_mod
-            provider_config = state.provider_config
-
-            {:ok, worker_pid} =
-              Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
-                emit = fn ev ->
-                  send(server_pid, {:gen_chunk, inc, gen_task_id, attempt_id, cid, ev})
-                end
-
-                res = provider_mod.stream_turn(provider_config, request, emit)
-
-                send(
-                  server_pid,
-                  {:worker_done, inc, gen_task_id, attempt_id, {:generation_result, res}}
-                )
-              end)
-
-            ref = Process.monitor(worker_pid)
-
-            worker_info = %{
-              task_id: gen_task_id,
-              conv_id: cid,
-              kind: :generation,
-              pid: worker_pid,
-              monitor_ref: ref,
-              started_at: now
-            }
-
-            %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
+            # spawn_compaction_worker persists the new kind, boundary and live doc before calling the provider.
+            spawn_compaction_worker(cid, task.id, put_task_in_state(state, task))
         end
 
       _ ->
         state
+    end
+  end
+
+  defp start_generation_attempt(cid, gen_task, state, request) do
+    gen_task_id = gen_task.id
+    now = System.system_time(:millisecond)
+    {:ok, attempt_id, store} = Storage.mint_id(state.store)
+    state = %{state | store: store}
+
+    running_task = Task.start_running(gen_task, attempt_id, now)
+    state = put_task_in_state(state, running_task)
+
+    # Persist running intent before spawning worker!
+    case Storage.commit(state.store, [[{:put_task, running_task}]]) do
+      {:error, io_err} ->
+        Logger.error("Session #{state.session_id} intent commit failed: #{inspect(io_err)}")
+        send(self(), {:stop_storage_failed, io_err})
+        %{state | storage_failed: true}
+
+      {:ok, %{seqs: [batch_seq]}, committed_store} ->
+        state = %{state | store: committed_store, seq: batch_seq}
+
+        server_pid = self()
+        inc = state.incarnation
+        provider_mod = state.provider_mod
+        provider_config = state.provider_config
+
+        {:ok, worker_pid} =
+          Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
+            emit = fn ev ->
+              send(server_pid, {:gen_chunk, inc, gen_task_id, attempt_id, cid, ev})
+            end
+
+            res = provider_mod.stream_turn(provider_config, request, emit)
+
+            send(
+              server_pid,
+              {:worker_done, inc, gen_task_id, attempt_id, {:generation_result, res}}
+            )
+          end)
+
+        ref = Process.monitor(worker_pid)
+
+        worker_info = %{
+          task_id: gen_task_id,
+          conv_id: cid,
+          kind: :generation,
+          pid: worker_pid,
+          monitor_ref: ref,
+          started_at: now
+        }
+
+        %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
     end
   end
 
@@ -3232,7 +3250,8 @@ defmodule H.Session.Server do
               |> Map.put("status", "running")
               |> Map.delete("retry")
 
-            next_live = Map.put(live, "compaction", comp_live)
+            next_live =
+              live |> Map.drop(["run", "generation"]) |> Map.put("compaction", comp_live)
 
             state =
               state
@@ -3259,7 +3278,7 @@ defmodule H.Session.Server do
 
                 state =
                   broadcast_commit_frame(state, cid, batch_seq, [], %{
-                    "live" => [["set", ["compaction", "status"], "running"]]
+                    "live" => [["replace", next_live]]
                   })
 
                 server_pid = self()

@@ -795,20 +795,6 @@ fn build_configure_envelope(
         "instructions" => {
             args.insert("instructions".to_string(), Value::String(val.to_string()));
         }
-        "max_turns" => {
-            let n: u64 = val
-                .trim()
-                .parse()
-                .ok()
-                .filter(|&n| (1..=1000).contains(&n))
-                .ok_or_else(|| {
-                    format!(
-                        "configure max_turns must be an integer between 1 and 1000, got '{}'",
-                        sanitize_single_line(val)
-                    )
-                })?;
-            args.insert("max_turns".to_string(), Value::Number(n.into()));
-        }
         "tools" => {
             let trimmed = val.trim();
             let list: Vec<Value> = if trimmed.starts_with('[') {
@@ -1531,15 +1517,6 @@ mod tests {
         )
         .unwrap_err()
         .contains("unsupported configure key"));
-
-        assert!(execute(
-            &client,
-            &target,
-            None,
-            Effect::Configure("max_turns".to_string(), "0".to_string()),
-        )
-        .unwrap_err()
-        .contains("max_turns"));
 
         // verify_created_target rejects sid mismatch, env_id mismatch, quarantined
         let mismatch_sid = CreateSessionResponse {

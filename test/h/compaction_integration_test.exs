@@ -207,6 +207,85 @@ defmodule H.CompactionIntegrationTest do
     end
   end
 
+  test "a long tool result triggers one checkpoint and the original submission completes without replay" do
+    call = %{id: "auto-read", name: "read", arguments: %{"path" => "large.txt"}}
+
+    script = [
+      {:reply, [], %{tool_calls: [call], content: [], finish_reason: "tool_calls"}},
+      {:reply, [], %{content: [%{type: "text", text: "Keep investigating the file"}]}},
+      {:reply, [], %{content: [%{type: "text", text: "Original task complete"}]}}
+    ]
+
+    %{opts: opts, cwd: cwd, fake: fake} = start_daemon_env(script)
+
+    opts =
+      Keyword.put(opts, :auto_compaction, %{
+        :default => 100_000,
+        {:cwd, cwd, "fake:coder"} => 2_000
+      })
+
+    File.write!(Path.join(cwd, "large.txt"), String.duplicate("detail ", 2_000))
+    sid = "auto-compact"
+    {:ok, _} = Daemon.create_session(%{"session_id" => sid, "cwd" => cwd}, opts)
+    command = cmd("one", "submit", "1", %{"type" => "input", "content" => "Read large.txt"})
+    {:ok, _} = Daemon.execute_command(sid, command, opts)
+
+    entries =
+      wait_until(fn ->
+        {:ok, %{items: items}} = Daemon.scan_entries(sid, "1", %{"order" => "asc"}, opts)
+
+        if Enum.any?(items, &(&1.kind == "compaction")) and List.last(items).kind == "assistant",
+          do: items
+      end)
+
+    assert Enum.map(entries, & &1.kind) == [
+             "user",
+             "assistant",
+             "tool_result",
+             "compaction",
+             "assistant"
+           ]
+
+    assert List.last(entries).data["content"] == [
+             %{"type" => "text", "text" => "Original task complete"}
+           ]
+
+    assert [_, _, resumed] = Fake.requests(fake)
+
+    assert Enum.any?(resumed.messages, fn message ->
+             inspect(message.content) =~ "Keep investigating the file"
+           end)
+
+    assert {:ok, %{status: "done"}} = Daemon.execute_command(sid, command, opts)
+  end
+
+  test "a single prompt can run more than fifty tool rounds and finish normally" do
+    rounds =
+      for n <- 1..51 do
+        call = %{id: "read-#{n}", name: "read", arguments: %{"path" => "small.txt"}}
+        {:reply, [], %{content: [], tool_calls: [call], finish_reason: "tool_calls"}}
+      end
+
+    %{opts: opts, cwd: cwd} =
+      start_daemon_env(rounds ++ [{:reply, [], %{content: [%{type: "text", text: "Finished"}]}}])
+
+    File.write!(Path.join(cwd, "small.txt"), "ok")
+    sid = "long-tool-run"
+    {:ok, _} = Daemon.create_session(%{"session_id" => sid, "cwd" => cwd}, opts)
+    command = cmd("one", "submit", "1", %{"type" => "input", "content" => "Start"})
+    {:ok, _} = Daemon.execute_command(sid, command, opts)
+
+    wait_until(
+      fn ->
+        {:ok, %{items: items}} =
+          Daemon.scan_entries(sid, "1", %{"order" => "desc", "limit" => 1}, opts)
+
+        match?([%{data: %{"content" => [%{"text" => "Finished"}]}}], items)
+      end,
+      10_000
+    )
+  end
+
   describe "HTTP contract, idempotency, and conflict guards" do
     test "validates compact args, enforces expected_seq and idle/compactable guards, and deduplicates request_id" do
       %{opts: opts, cwd: cwd, data_dir: data_dir} =

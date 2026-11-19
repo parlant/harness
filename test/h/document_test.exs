@@ -65,19 +65,16 @@ defmodule H.DocumentTest do
         Document.configure_agent(agent, %{
           model: "fake:coder",
           thinking: "high",
-          max_turns: 12,
           ignored: "nope"
         })
 
       assert updated["model"] == "fake:coder"
       assert updated["thinking"] == "high"
-      assert updated["max_turns"] == 12
       assert updated["tools"] == ["read", "write", "edit", "bash", "search_history"]
 
       assert ops == [
                ["set", ["model"], "fake:coder"],
-               ["set", ["thinking"], "high"],
-               ["set", ["max_turns"], 12]
+               ["set", ["thinking"], "high"]
              ]
     end
 

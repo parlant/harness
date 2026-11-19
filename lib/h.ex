@@ -30,6 +30,7 @@ defmodule H do
     * `:api_socket` - bind local Unix domain socket (default `true`)
     * `:provider` - `H.Provider` module (default `H.Provider.ReqLLM`)
     * `:provider_config` - map forwarded to provider (default `%{}`)
+    * `:auto_compaction` - scoped input token thresholds (see `docs/protocol.md`)
     * `:environments` - optional map/list of `H.EnvRegistry` specs
   """
   @spec serve(keyword()) ::
@@ -41,6 +42,7 @@ defmodule H do
              data_dir: String.t()
            }}
   def serve(opts \\ []) when is_list(opts) do
+    limits = H.Session.Compaction.validate_limits!(Keyword.get(opts, :auto_compaction, %{}))
     {:ok, _} = Application.ensure_all_started(:harness)
 
     data_dir =
@@ -61,7 +63,8 @@ defmodule H do
       [
         data_dir: data_dir,
         provider: provider,
-        provider_config: provider_config
+        provider_config: provider_config,
+        auto_compaction: limits
       ]
       |> maybe_put_kw(:environments, Keyword.get(opts, :environments))
 

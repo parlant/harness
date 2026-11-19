@@ -39,12 +39,31 @@ A `200` receipt acknowledges the command, not a completed model reply. It includ
 | `submit` | `type: "input"` with nonempty `content` (string or block list). `when_busy`: `follow_up` (default), `steer`, `reject`; `when_idle`: `start` (default), `reject`. Also accepts `type: "continue"` or display-only `type: "write"`. |
 | `fork` | `at_entry_id`: visible entry at which to branch. |
 | `fork_and_submit` | `at_entry_id` and input `content` in one commit; accepts input busy/idle policies. |
-| `configure` | `model`, `thinking`, `system_prompt`, `instructions`, `tools`, `max_turns`; optional `expected_seq` conflict guard. |
+| `configure` | `model`, `thinking`, `system_prompt`, `instructions`, `tools`; optional `expected_seq` conflict guard. |
 | `compact` | Required `expected_seq`, optional `instructions`. Accepts an idle, compactable conversation; the receipt is not a completed summary. On success the daemon appends a compaction marker with the summary and retained boundary. Failure does not discard the previous context. |
 | `rename` | `title` sets the session display name; optional session-wide `expected_seq` rejects stale writes. |
 | `user_shell` | `command`, boolean `include_in_context`, and required `expected_seq`. Requires an idle conversation. Runs in the bound environment after intent is committed, under the workspace lease. Interrupted unsafe commands are not replayed. Excluded commands and results stay out of model history and `search_history`. |
 | `abort` | Abort active generation or user-shell work in the conversation, optionally with `reason`. Although validation accepts `task_id`, the handler does **not** narrow cancellation to that task. |
 | `withdraw` | `submission_ids`: non-empty array of queued submission IDs to withdraw atomically from the conversation's `inbox`. All-or-conflict (`409` `"submission_not_queued"` if any ID is missing, already consumed, already withdrawn, or belongs to another conversation). Receipt returns `status: "done"` and `withdrawn`: array of withdrawn inbox items (`submission_id`, `request_id`, `when_busy`, `content`) in original `inbox` order; idempotent retries return the stored `withdrawn` array. |
+
+## Automatic compaction and continuation
+
+Before each generation (including after a completed tool batch), the daemon estimates the size of the **projected** messages and tool schemas: roughly one token per four serialized bytes. This is not cumulative session usage or an exact provider token count. For a known ReqLLM model the default trigger is its context window minus 16,384 tokens (reserve at most half of a small window). Unknown models and other adapters default to 96,000 estimated tokens.
+
+Override thresholds at daemon startup, e.g.:
+
+```elixir
+H.serve(auto_compaction: %{
+  {:provider, "openai"} => 100_000,
+  {:model, "openai:gpt-5.4"} => 150_000,
+  {:cwd, "/work/project"} => 80_000,
+  {:cwd, "/work/project", "openai:gpt-5.4"} => 60_000
+})
+```
+
+Exact cwd + qualified model wins, then cwd, model, provider, `:default`, and finally the built-in threshold. Use positive integer token counts, or `:off` at any scope. Changing the threshold does not change the provider's actual context window. A successful automatic summary commits a boundary and resumes the original input; queued follow-ups still wait. No `/continue` or second prompt needed. If there is no safe prefix to summarize, the daemon attempts the original request instead of looping. Failed or aborted summarization does not discard history or start another turn. Manual `/compact` remains available.
+
+There is no built-in tool-round cap. An optional future extension could enforce a round, cost, or elapsed-time budget to bound unattended work or catch a looping model. That is separate from context management. Without that policy a model that keeps calling tools may keep spending until you abort it.
 
 ## SSE cursor rules
 

@@ -56,6 +56,63 @@ defmodule H.Session.Compaction do
           usage: map()
         }
 
+  @doc "Validates the daemon's scoped token budgets before accepting work."
+  def validate_limits!(limits) when is_map(limits) do
+    Enum.each(limits, fn {scope, limit} ->
+      valid_scope =
+        case scope do
+          :default -> true
+          {key, value} when key in [:cwd, :model, :provider] -> is_binary(value) and value != ""
+          {:cwd, cwd, model} -> is_binary(cwd) and cwd != "" and is_binary(model) and model != ""
+          _ -> false
+        end
+
+      unless valid_scope and (limit == :off or (is_integer(limit) and limit > 0)),
+        do: raise(ArgumentError, "invalid auto_compaction scope or threshold: #{inspect(scope)}")
+    end)
+
+    limits
+  end
+
+  def validate_limits!(_),
+    do: raise(ArgumentError, "auto_compaction must be a map of scoped thresholds")
+
+  @doc "Returns a safe cut when the projected request exceeds its scoped token budget."
+  def auto_boundary(entries, %{model: model} = request, cwd, limits, keep_chars, adapter)
+      when is_binary(model) do
+    [provider | _] = String.split(model, ":", parts: 2)
+
+    limit =
+      Enum.find_value(
+        [{:cwd, cwd, model}, {:cwd, cwd}, {:model, model}, {:provider, provider}, :default],
+        &Map.get(limits, &1)
+      ) || model_threshold(adapter, model)
+
+    # Estimate a single provider-visible request, not cumulative usage or raw history.
+    if is_integer(limit) and limit > 0 and
+         IO.iodata_length(JSON.encode_to_iodata!(Map.take(request, [:messages, :tools]))) >
+           4 * limit do
+      case prepare(entries, keep_recent_chars: min(keep_chars, 2 * limit)) do
+        {:ok, prep} -> prep.kept_from_id
+        {:error, _no_cut} -> nil
+      end
+    end
+  end
+
+  def auto_boundary(_, _, _, _, _, _), do: nil
+
+  defp model_threshold(H.Provider.ReqLLM, model) do
+    case LLMDB.model(model) do
+      {:ok, %{limits: %{context: window}}} when is_integer(window) and window > 0 ->
+        window - min(16_384, div(window, 2))
+
+      _ ->
+        96_000
+    end
+  end
+
+  defp model_threshold(_, _), do: 96_000
+
   @doc "Validates external `compact` command arguments."
   @spec validate_args(term()) :: {:ok, map()} | {:error, String.t()}
   def validate_args(raw_args) do

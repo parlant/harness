@@ -58,8 +58,7 @@ defmodule H.Document do
       "thinking" => "medium",
       "system_prompt" => nil,
       "instructions" => nil,
-      "tools" => @default_tools,
-      "max_turns" => 50
+      "tools" => @default_tools
     }
   end
 
@@ -148,7 +147,7 @@ defmodule H.Document do
   """
   @spec configure_agent(map(), map()) :: {map(), [op()]}
   def configure_agent(agent, updates) when is_map(agent) and is_map(updates) do
-    allowed = [:model, :thinking, :system_prompt, :instructions, :tools, :max_turns]
+    allowed = [:model, :thinking, :system_prompt, :instructions, :tools]
 
     Enum.reduce(allowed, {agent, []}, fn atom_key, {acc_doc, acc_ops} ->
       key = Atom.to_string(atom_key)

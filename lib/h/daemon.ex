@@ -692,6 +692,7 @@ defmodule H.Daemon do
         |> maybe_copy_kw(opts, :retry_limit)
         |> maybe_copy_kw(opts, :retry_backoff_ms)
         |> maybe_copy_kw(opts, :restart_limit)
+        |> maybe_copy_kw(opts, :auto_compaction)
         |> maybe_copy_kw(opts, :compaction_keep_recent_chars)
         |> maybe_copy_kw(opts, :compaction_max_tokens)
         |> maybe_copy_kw(opts, :max_restarts)
@@ -790,8 +791,7 @@ defmodule H.Daemon do
       {:thinking, :string, required: false, nullable: true},
       {:system_prompt, :string, required: false, nullable: true},
       {:instructions, :string, required: false, nullable: true},
-      {:tools, {:list, :string}, required: false},
-      {:max_turns, {:int, min: 1, max: 1000}, required: false}
+      {:tools, {:list, :string}, required: false}
     ])
   end
 
@@ -881,7 +881,6 @@ defmodule H.Daemon do
       {:system_prompt, :string, required: false, nullable: true},
       {:instructions, :string, required: false, nullable: true},
       {:tools, {:list, :string}, required: false},
-      {:max_turns, {:int, min: 1, max: 1000}, required: false},
       {:expected_seq, {:int, min: 0}, required: false, nullable: true}
     ])
   end

@@ -380,8 +380,8 @@ defmodule H.ToolCrashRecoveryTest do
     end
   end
 
-  describe "tool validation, workspace lease, and max_turns" do
-    test "rejects invalid arguments, enforces workspace lease, and stops at max_turns" do
+  describe "tool validation and workspace lease" do
+    test "rejects invalid arguments, enforces workspace lease, and continues to a final answer" do
       sid1 = "s-lease-1-#{System.unique_integer([:positive])}"
       sid2 = "s-lease-2-#{System.unique_integer([:positive])}"
       counter1 = start_supervised!({Agent, fn -> 0 end}, id: :c1)
@@ -411,13 +411,14 @@ defmodule H.ToolCrashRecoveryTest do
              ],
              finish_reason: "tool_calls"
            }},
-          # sid2 turn 2: tries invalid args on read -> invalid_arguments, hits max_turns: 2 -> turn_limit!
+          # sid2 turn 2: invalid arguments on read
           {:reply, [],
            %{
              content: [],
              tool_calls: [%{id: "t3", name: "read", arguments: %{"offset" => "not_an_int"}}],
              finish_reason: "tool_calls"
            }},
+          {:reply, [], %{content: [%{type: "text", text: "sid2 done"}]}},
           # sid1 turn 2: finishes after release
           {:reply, [], %{content: [%{type: "text", text: "sid1 done"}]}}
         ])
@@ -426,7 +427,7 @@ defmodule H.ToolCrashRecoveryTest do
 
       {:ok, _} =
         Daemon.create_session(
-          %{"session_id" => sid2, "cwd" => cwd, "agent" => %{"max_turns" => 2}},
+          %{"session_id" => sid2, "cwd" => cwd},
           opts
         )
 
@@ -440,7 +441,7 @@ defmodule H.ToolCrashRecoveryTest do
 
       assert_receive {:unsafe_tool_entered, tool_pid1, 1}, 1_000
 
-      # Start sid2 -> write fails workspace_busy, next turn read fails invalid_arguments, hits max_turns=2
+      # Both failures go back to the model.
       {:ok, _} =
         Daemon.execute_command(
           sid2,
@@ -452,10 +453,10 @@ defmodule H.ToolCrashRecoveryTest do
         wait_until(fn ->
           {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation(sid2, "1", self(), nil, opts)
           decoded = JSON.decode!(bin)
-          if decoded["docs"]["live"]["run_failure"], do: decoded, else: nil
+          if length(decoded["entries"]) == 6, do: decoded, else: nil
         end)
 
-      assert snap2["docs"]["live"]["run_failure"] == %{"reason" => "turn_limit"}
+      refute snap2["docs"]["live"]["run_failure"]
       tool_results2 = Enum.filter(snap2["entries"], &(&1["kind"] == "tool_result"))
       assert Enum.at(tool_results2, 0)["data"]["diagnostic"] == "workspace_busy"
       assert Enum.at(tool_results2, 1)["data"]["diagnostic"] == "invalid_arguments"
