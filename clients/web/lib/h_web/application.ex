@@ -9,6 +9,7 @@ defmodule HWeb.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      {Phoenix.PubSub, name: HWeb.PubSub},
       HWeb.Endpoint
     ]
 

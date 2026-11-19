@@ -1,0 +1,62 @@
+<aside
+  id="ui-inspector"
+  aria-label="Self-hosting inspector"
+  phx-hook="Inspector"
+>
+  <div id="inspect-launcher" phx-update="ignore">
+    <button
+      id="inspector-toggle"
+      class="btn"
+      type="button"
+      aria-expanded="false"
+      aria-controls="inspector-panel"
+    >Inspect UI</button>
+  </div>
+  <section id="inspector-panel" hidden>
+    <div id="inspect-editor" phx-update="ignore">
+      <header class="panel-header">
+        <strong>UI feedback</strong><button type="button" data-action="close" class="btn btn-sm">Minimize</button>
+      </header>
+      <p class="muted">Notes go to a separate coding session in <code>clients/web</code>.</p>
+      <div class="inspect-actions">
+        <button type="button" data-action="pick" class="btn">Pick element</button>
+        <button type="button" data-action="capture" class="btn" disabled>Capture element</button>
+      </div>
+      <output id="inspect-target" class="mono">No element selected</output>
+      <form id="inspect-form">
+        <label class="field-group">
+          What should change? <textarea
+            name="note"
+            rows="3"
+            maxlength="4000"
+            class="input"
+            required
+          ></textarea>
+        </label>
+        <label class="field-group">
+          Or attach / paste a cropped screenshot
+          <input name="attachment" type="file" accept="image/png,image/jpeg,image/webp" />
+        </label>
+        <div id="inspect-preview" hidden>
+          <img alt="Screenshot that will be included with feedback" />
+          <button type="button" data-action="remove" class="btn btn-sm">Remove image</button>
+        </div>
+        <p class="muted">
+          Review the crop for private information. Save note records only. Ask agent sends feedback to the configured model and can edit this checkout.
+        </p>
+        <div class="inspect-actions">
+          <button type="submit" value="save" class="btn btn-primary">Save note</button>
+          <button type="submit" value="ask" class="btn">Ask agent</button>
+        </div>
+      </form>
+      <p id="inspect-status" role="status" aria-live="polite"></p>
+    </div>
+    <section :if={@recent != []} id="inspect-activity" aria-label="Latest feedback activity">
+      <strong>Recent activity</strong>
+      <p :for={{role, text} <- @recent}>
+        <b>{if role == "user", do: "You", else: "Agent"}</b> · {text}
+      </p>
+    </section>
+    <.link :if={@seq} navigate={~p"/sessions/#{@session_id}"} id="inspect-session">Open feedback session ↗</.link>
+  </section>
+</aside>

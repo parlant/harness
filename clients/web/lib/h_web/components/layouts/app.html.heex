@@ -1,4 +1,7 @@
 <div class="page-root">
   <.flash_group flash={@flash} />
   {@inner_content}
+  <%= if assigns[:authenticated_owner?] && Application.get_env(:harness_web, :inspector_workspace) do %>
+    {live_render(@socket, HWeb.InspectorLive, id: "feedback-pane", sticky: true)}
+  <% end %>
 </div>

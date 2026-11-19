@@ -1,0 +1,218 @@
+<Workbench.split
+  id="session"
+  class={["session-shell", if(@drawer_open?, do: "drawer-open")]}
+  sidebar_label="Session navigation"
+  main_label="Conversation"
+>
+  <:sidebar>
+    <div class="sidebar-top">
+      <.link navigate={~p"/"} class="btn btn-sm btn-ghost">← Workspaces</.link>
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost mobile-only"
+        phx-click="toggle_drawer"
+      >
+        Close
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-title">Session</div>
+      <div class="mono session-id-label">{@session_id}</div>
+      <div :if={@session} class="muted mono session-cwd">
+        {@session.env_id}: {@session.cwd}
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-title">Conversations</div>
+      <ul id="branches-list" class="branch-list">
+        <li :for={conv <- @conversations}>
+          <.link
+            patch={~p"/sessions/#{@session_id}/conversations/#{conv.id}"}
+            class={[
+              "branch-link mono",
+              if(to_string(conv.id) == @conversation_id, do: "is-active")
+            ]}
+          >
+            <span>#{conv.id}</span>
+            <span :if={conv.parent} class="muted">
+              from #{conv.parent.conversation_id}@#{conv.parent.at}
+            </span>
+          </.link>
+        </li>
+      </ul>
+    </div>
+  </:sidebar>
+
+  <:main>
+    <header class="session-header">
+      <div class="header-left">
+        <button
+          type="button"
+          class="btn btn-sm mobile-only"
+          phx-click="toggle_drawer"
+        >
+          Menu
+        </button>
+        <span class="mono header-sid">{@session_id}</span>
+        <span class="badge mono">conv #{@conversation_id}</span>
+        <span :if={!is_nil(@cursor_seq)} id="hdr-seq" class="badge mono">
+          seq {@cursor_seq}
+        </span>
+        <span :if={usage_summary(@usage)} id="hdr-usage" class="badge mono">
+          {usage_summary(@usage)}
+        </span>
+      </div>
+
+      <div class="header-right">
+        <button
+          :if={@run_active?}
+          id="stop-btn"
+          type="button"
+          class="btn btn-sm btn-danger"
+          phx-click="abort"
+        >
+          Stop
+        </button>
+        <form action={~p"/logout"} method="post" class="inline-form">
+          <input type="hidden" name="_csrf_token" value={get_csrf_token()} />
+          <button type="submit" class="btn btn-sm btn-ghost">Sign out</button>
+        </form>
+      </div>
+    </header>
+
+    <div
+      :if={@error_banner}
+      id="session-error-banner"
+      role="alert"
+      class="flash-banner flash-error"
+    >
+      <span>{@error_banner}</span>
+      <button type="button" class="btn btn-sm btn-ghost" phx-click="dismiss_error">
+        Dismiss
+      </button>
+    </div>
+
+    <div id="transcript-scroll" class="transcript-scroll" phx-hook="FollowTranscript">
+      <div :if={@has_more} class="load-earlier-wrap">
+        <button
+          id="load-earlier-btn"
+          type="button"
+          class="btn btn-sm"
+          phx-click="load_earlier"
+        >
+          Load earlier
+        </button>
+      </div>
+
+      <div id="entries-stream" phx-update="stream" class="entries-list">
+        <article
+          :for={{dom_id, entry} <- @streams.entries}
+          id={dom_id}
+          class={["entry-card", "entry-#{entry["kind"]}"]}
+        >
+          <header class="entry-header">
+            <div class="entry-header-left">
+              <span class="role-label">{entry["kind"]}</span>
+              <span class="badge mono">#{entry["id"]}</span>
+              <span :if={entry["data"]["aborted"]} class="badge badge-warn">aborted</span>
+              <span :if={entry["kind"] == "tool_result"} class="badge mono">
+                {entry["data"]["tool_name"] || entry["data"]["name"] || "tool"}
+              </span>
+              <span
+                :if={
+                  entry["kind"] == "tool_result" and
+                    (entry["data"]["is_error"] || entry["data"]["error"])
+                }
+                class="badge badge-danger"
+              >
+                error
+              </span>
+            </div>
+
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              phx-click="fork_entry"
+              phx-value-entry_id={entry["id"]}
+            >
+              Fork here
+            </button>
+          </header>
+
+          <div class="entry-body">
+            <ConversationComponents.entry_body entry={entry} />
+          </div>
+        </article>
+      </div>
+
+      <ConversationComponents.live_region live={@ephemeral_live} inbox={@inbox} />
+    </div>
+
+    <button type="button" id="jump-latest" class="btn btn-sm jump-latest" hidden>Latest ↓</button>
+
+    <div class="composer-shell">
+      <form id="agent-config-form" phx-change="configure" class="composer-config">
+        <label class="composer-select-group">
+          <span class="field-label">Model</span>
+          <select id="model-select" name="model" class="input composer-select">
+            <option
+              :for={model <- @models}
+              value={model.id}
+              selected={model.id == @agent["model"]}
+            >
+              {model.name || model.id}
+            </option>
+          </select>
+        </label>
+
+        <label class="composer-select-group">
+          <span class="field-label">Thinking</span>
+          <select id="thinking-select" name="thinking" class="input composer-select">
+            <option
+              :for={level <- @thinking_levels}
+              value={level}
+              selected={level == (@agent["thinking"] || "medium")}
+            >
+              {level}
+            </option>
+          </select>
+        </label>
+      </form>
+
+      <form
+        id="composer-form"
+        phx-submit="submit"
+        phx-change="composer_change"
+        class="composer"
+      >
+        <textarea
+          id="prompt-input"
+          name="content"
+          rows="2"
+          placeholder="Message the agent…"
+          phx-hook="ComposerDraft"
+          phx-mounted={JS.ignore_attributes("style")}
+          data-session-id={@session_id}
+          data-conversation-id={@conversation_id}
+          class="composer-input"
+        >{@composer_text}</textarea>
+
+        <div class="composer-actions">
+          <span class="composer-hint muted">Shift+Enter to send · Enter for newline</span>
+          <button
+            :if={@run_active?}
+            id="steer-btn"
+            type="button"
+            class="btn btn-warn"
+            phx-click="steer"
+          >
+            Steer
+          </button>
+          <button id="send-btn" type="submit" class="btn btn-primary">Send</button>
+        </div>
+      </form>
+    </div>
+  </:main>
+</Workbench.split>

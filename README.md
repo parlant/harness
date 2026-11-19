@@ -17,6 +17,8 @@ mix run --no-halt -e 'H.serve()'
 
 Run only one server per data directory. For Phoenix, open `http://127.0.0.1:4000` and sign in with the owner token in `${H_DATA_DIR:-$HOME/.local/share/h}/auth.token`.
 
+For live reloading, pane composition and the visual feedback inspector, see [Working on the web UI](clients/web/README.md).
+
 Build the terminal client from the repository, then run it from your project directory. It attaches to either server; it does not start one:
 
 ```sh

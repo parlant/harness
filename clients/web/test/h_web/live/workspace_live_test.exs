@@ -20,6 +20,9 @@ defmodule HWeb.WorkspaceLiveTest do
     conn = log_in_owner(conn, owner_token)
     {:ok, view, html} = live(conn, "/")
 
+    assert has_element?(view, "#workspace-sidebar #all-sessions-list")
+    assert has_element?(view, "#workspace-main #directories-list")
+    refute has_element?(view, "#ui-inspector")
     assert html =~ "Workspace Browser"
     assert html =~ "alpha-app/"
     assert html =~ ".git"

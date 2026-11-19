@@ -354,6 +354,7 @@ defmodule H.Context do
       "image" ->
         %{type: "image"}
         |> maybe_put_field(:data, fetch(block, :data))
+        |> maybe_put_field(:encoding, fetch(block, :encoding))
         |> maybe_put_field(:url, fetch(block, :url))
         |> maybe_put_field(:media_type, fetch(block, :media_type))
         |> maybe_put_field(:metadata, fetch(block, :metadata))
@@ -571,6 +572,15 @@ defmodule H.Context do
       |> maybe_put_atom_key(:signature, fetch(block, :signature))
 
     ContentPart.thinking(fetch(block, :text, ""), meta)
+  end
+
+  # JSON-safe transcript attachments become binary only at the provider boundary.
+  defp to_req_llm_part(%{type: "image", encoding: "base64", data: encoded} = block)
+       when is_binary(encoded) do
+    case Base.decode64(encoded) do
+      {:ok, bytes} -> to_req_llm_part(%{block | data: bytes, encoding: nil})
+      :error -> nil
+    end
   end
 
   defp to_req_llm_part(%{type: "image"} = block) do

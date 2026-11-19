@@ -352,6 +352,26 @@ defmodule H.ContextTest do
   end
 
   describe "to_req_llm/1" do
+    test "decodes explicitly base64-encoded transcript images only at the provider boundary" do
+      bytes = <<255, 216, 255, 224, 255, 217>>
+
+      block = %{
+        "type" => "image",
+        "media_type" => "image/jpeg",
+        "encoding" => "base64",
+        "data" => Base.encode64(bytes)
+      }
+
+      request = Context.build_request([%{kind: "user", data: %{"content" => [block]}}], %{})
+      assert [_] = JSON.decode!(JSON.encode!(request))["messages"]
+
+      assert {%{
+                messages: [
+                  %{content: [%ContentPart{type: :image, media_type: "image/jpeg", data: ^bytes}]}
+                ]
+              }, []} = Context.to_req_llm(request)
+    end
+
     test "converts request map to ReqLLM.Context and non-executing ReqLLM.Tool structs" do
       agent = %{
         model: "anthropic:claude-sonnet-4-5",

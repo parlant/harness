@@ -1,3 +1,6 @@
+import {PaneSplitter, FollowTranscript} from "./workbench.js";
+import {Inspector} from "./inspector.js";
+
 (() => {
   const csrfMeta = document.querySelector("meta[name='csrf-token']");
   const csrfToken = csrfMeta ? csrfMeta.getAttribute("content") : "";
@@ -9,6 +12,7 @@
   }
 
   const Hooks = {
+    PaneSplitter, FollowTranscript, Inspector,
     ComposerDraft: {
       mounted() {
         const key = draftKey(this.el);
@@ -24,7 +28,38 @@
           }
         }
 
+        // Older browsers need a measurement pass instead of CSS field-sizing.
+        if (!CSS.supports("field-sizing", "content")) {
+          const { el } = this;
+          this.growFrame = null;
+          this.scheduleAutogrow = () => {
+            if (this.growFrame !== null) return;
+            this.growFrame = window.requestAnimationFrame(() => {
+              this.growFrame = null;
+              const scrollTop = el.scrollTop;
+              el.style.overflowY = "hidden";
+              el.style.height = "0px";
+              // Leave room for fractional line heights when the content exceeds the minimum.
+              const height = el.scrollHeight;
+              el.style.height = `${height > el.clientHeight ? height + 1 : height}px`;
+              el.style.overflowY = "";
+              el.scrollTop = scrollTop;
+            });
+          };
+
+          let width = el.clientWidth;
+          this.resizeObserver = new ResizeObserver(([entry]) => {
+            const nextWidth = entry.contentRect.width;
+            if (nextWidth !== width) {
+              width = nextWidth;
+              this.scheduleAutogrow();
+            }
+          });
+          this.resizeObserver.observe(el.form);
+        }
+
         this.onInput = () => {
+          this.scheduleAutogrow?.();
           const k = draftKey(this.el);
           if (!k) return;
           try {
@@ -35,7 +70,7 @@
         };
 
         this.onKeydown = (event) => {
-          if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+          if (event.key === "Enter" && event.shiftKey && !event.isComposing) {
             event.preventDefault();
             if (this.el.form) {
               this.el.form.dispatchEvent(
@@ -50,6 +85,7 @@
 
         this.el.addEventListener("input", this.onInput);
         this.el.addEventListener("keydown", this.onKeydown);
+        this.scheduleAutogrow?.();
 
         this.handleEvent("clear_draft", ({ session_id, conversation_id }) => {
           if (session_id && conversation_id) {
@@ -62,10 +98,17 @@
             }
           }
           this.el.value = "";
+          this.scheduleAutogrow?.();
         });
       },
 
+      updated() {
+        this.scheduleAutogrow?.();
+      },
+
       destroyed() {
+        this.resizeObserver?.disconnect();
+        if (this.growFrame != null) window.cancelAnimationFrame(this.growFrame);
         if (this.onInput) this.el.removeEventListener("input", this.onInput);
         if (this.onKeydown) this.el.removeEventListener("keydown", this.onKeydown);
       }

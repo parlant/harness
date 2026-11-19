@@ -1,6 +1,6 @@
 import Config
 
-if System.get_env("PHX_SERVER") do
+if config_env() != :test and System.get_env("PHX_SERVER") do
   config :harness_web, HWeb.Endpoint, server: true
 end
 
@@ -16,6 +16,11 @@ if config_env() != :test do
 
   config :harness_web,
     daemon_opts: [data_dir: data_dir]
+end
+
+if config_env() == :dev do
+  config :harness_web, HWeb.Endpoint,
+    http: [ip: {127, 0, 0, 1}, port: String.to_integer(System.get_env("PORT", "4000"))]
 end
 
 if config_env() == :prod do

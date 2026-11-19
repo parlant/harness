@@ -83,6 +83,7 @@ defmodule HWeb.ConnCase do
     Application.put_env(:harness_web, :backend, HWeb.Backend.InVM)
     Application.put_env(:harness_web, :daemon_opts, daemon_opts)
 
+    start_supervised!({Phoenix.PubSub, name: HWeb.PubSub})
     start_supervised!(HWeb.Endpoint)
 
     on_exit(fn ->

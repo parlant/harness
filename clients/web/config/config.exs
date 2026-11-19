@@ -11,7 +11,7 @@ config :harness_web, HWeb.Endpoint,
     formats: [html: HWeb.ErrorHTML, json: HWeb.ErrorJSON],
     layout: false
   ],
-  pubsub_server: nil,
+  pubsub_server: HWeb.PubSub,
   check_origin: ["//127.0.0.1", "//localhost", "//[::1]"],
   live_view: [signing_salt: "hweb_lv_salt_9f2a4c"]
 
