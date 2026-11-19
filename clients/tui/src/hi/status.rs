@@ -146,6 +146,7 @@ impl StatusLines {
         let mut env = Environment::new();
         env.set_fuel(Some(10_000));
         env.set_undefined_behavior(UndefinedBehavior::Strict);
+        env.add_filter("compact", compact_number);
         env.set_formatter(|out, state, value| {
             // An unavailable field prints nothing, but is still `none` in conditions.
             if value.is_none() {
@@ -221,6 +222,20 @@ impl StatusLines {
     }
 }
 
+/// Abbreviate integer counts without rounding across a unit boundary.
+fn compact_number(number: Option<i128>) -> String {
+    let Some(number) = number else {
+        return String::new();
+    };
+    let (divisor, suffix) = match number.unsigned_abs() {
+        0..=999 => (1, ""),
+        1_000..=999_999 => (1_000, "k"),
+        1_000_000..=999_999_999 => (1_000_000, "m"),
+        _ => (1_000_000_000, "b"),
+    };
+    format!("{}{suffix}", number / divisor)
+}
+
 // Bound generated output per line, independently of the number of configured rows.
 #[derive(Default)]
 struct LineOutput(Vec<u8>);
@@ -259,6 +274,42 @@ mod tests {
                 harness_id: Some("coding".into()),
             },
         }
+    }
+
+    #[test]
+    fn compact_number_uses_whole_units_at_each_boundary() {
+        for (number, expected) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1k"),
+            (999_999, "999k"),
+            (1_000_000, "1m"),
+            (999_999_999, "999m"),
+            (1_000_000_000, "1b"),
+            (1_000_000_000_000, "1000b"),
+            (-12_345, "-12k"),
+            (i128::from(u64::MAX), "18446744073b"),
+        ] {
+            assert_eq!(compact_number(Some(number)), expected);
+        }
+    }
+
+    #[test]
+    fn status_templates_can_compact_optional_and_unsigned_counts() {
+        let status = StatusLines::compile(
+            Some(vec![
+                "seq={{ seq | compact }} · tokens={{ total_tokens | compact }}".into(),
+            ]),
+            vec![],
+        )
+        .unwrap();
+        let mut fields = StatusFields {
+            total_tokens: u64::MAX,
+            ..StatusFields::default()
+        };
+        assert_eq!(status.render(&fields), ["seq= · tokens=18446744073b"]);
+        fields.seq = Some(999_999);
+        assert_eq!(status.render(&fields), ["seq=999k · tokens=18446744073b"]);
     }
 
     #[test]

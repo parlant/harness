@@ -383,13 +383,13 @@ class HiTerminalBothModesTests(unittest.TestCase):
                         pty.send_text("/reload")
                         pty.send_enter()
                         pty.wait_for_output("reload failed (config unchanged)")
-                        pty.send_bytes(b"\x1b")
+                        pty.send_ctrl("c")  # cancel picker without an ambiguous ESC prefix
                         pty.wait_for_output("Reload failed:")
                         pty.send_ctrl("b")
                         screen = pty.wait_for_output("models · Search:")
                         self.assertIn("Provider branch: ok", screen)
                         self.assertNotIn("must not apply", screen)
-                        pty.send_bytes(b"\x1b")
+                        pty.send_ctrl("c")  # cancel picker without an ambiguous ESC prefix
 
                         # An invalid template must also leave the existing key binding in force.
                         user_file.write_text(json.dumps({"status_lines": ["{{ not_a_field }}"]}))
@@ -397,11 +397,11 @@ class HiTerminalBothModesTests(unittest.TestCase):
                         pty.send_text("/reload")
                         pty.send_enter()
                         pty.wait_for_output("reload failed (config unchanged)")
-                        pty.send_bytes(b"\x1b")
+                        pty.send_ctrl("c")  # cancel picker without an ambiguous ESC prefix
                         pty.send_ctrl("b")
                         screen = pty.wait_for_output("models · Search:")
                         self.assertIn("Provider branch: ok", screen)
-                        pty.send_bytes(b"\x1b")
+                        pty.send_ctrl("c")  # cancel picker without an ambiguous ESC prefix
 
                         # Check that an empty footer is allowed and can be restored immediately.
                         user_file.write_text('{"status_lines": []}')
