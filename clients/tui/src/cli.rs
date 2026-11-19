@@ -152,6 +152,7 @@ fn run(cli: Cli, hi: bool) -> Result<(), AppError> {
                 cid: target.conversation_id,
                 cwd: target.cwd,
                 env_id: target.env_id,
+                labels: target.labels,
             },
             &cfg.data_dir,
             cli.resume,
@@ -232,6 +233,7 @@ struct AttachedTarget {
     conversation_id: String,
     cwd: String,
     env_id: String,
+    labels: crate::hi::actions::SessionLabels,
 }
 
 fn list_cwd_sessions_sorted(
@@ -285,6 +287,7 @@ fn attach_named_session(client: &DaemonClient, sid: &str) -> Result<AttachedTarg
         .or_else(|| detail.conversations.first().map(|c| c.id.clone()))
         .unwrap_or_else(|| "1".to_string());
     Ok(AttachedTarget {
+        labels: (&detail.session).into(),
         session_id: detail.session.session_id,
         conversation_id: cid,
         cwd: detail.session.cwd,
@@ -304,6 +307,7 @@ fn continue_or_create_session(
             .clone()
             .unwrap_or_else(|| "1".to_string());
         return Ok(AttachedTarget {
+            labels: latest.into(),
             session_id: latest.session_id.clone(),
             conversation_id: cid,
             cwd: latest.cwd.clone(),
@@ -328,11 +332,13 @@ fn create_auto_session(
         agent: None,
     };
     let created = client.create_session(&req)?;
+    let labels = (&created.session).into();
     let cid = created
         .session
         .root_conversation_id
         .unwrap_or_else(|| "1".to_string());
     Ok(AttachedTarget {
+        labels,
         session_id: created.session.session_id,
         conversation_id: cid,
         cwd: created.session.cwd,

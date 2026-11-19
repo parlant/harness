@@ -1,5 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    ops::Range,
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -14,6 +17,7 @@ enum LastAction {
     Kill,
     Yank,
     TypeWord,
+    Complete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +189,48 @@ impl Editor {
         self.paste_counter = 0;
         self.buf = normalized;
         self.set_cursor(self.buf.len());
+    }
+
+    pub(super) fn replace_completion(&mut self, range: Range<usize>, value: &str) -> bool {
+        // Large pastes are represented by atomic markers; never replace a slice of one.
+        if !self.pastes.is_empty()
+            && (find_marker_spans(&self.buf).iter().any(|span| {
+                self.pastes.contains_key(&span.id)
+                    && range.start < span.end
+                    && span.start < range.end
+            }) || !find_marker_spans(value).is_empty())
+        {
+            return false;
+        }
+        self.exit_history_browsing();
+        self.jump_mode = None;
+        self.yank_start = None;
+        let cursor = range.start + value.len();
+        if self.buf[range.clone()] != *value || self.cursor != cursor {
+            if self.last_action != Some(LastAction::Complete) {
+                self.push_undo_snapshot();
+            }
+            self.last_action = Some(LastAction::Complete);
+            self.buf.replace_range(range, value);
+            self.set_cursor(cursor);
+        }
+        true
+    }
+
+    pub(super) fn cancel_completion(&mut self) {
+        if self.last_action == Some(LastAction::Complete) {
+            if let Some(original) = self.undo_stack.pop() {
+                self.restore_snapshot(original);
+                self.set_cursor(self.cursor);
+            }
+            self.finish_completion();
+        }
+    }
+
+    pub(super) fn finish_completion(&mut self) {
+        if self.last_action == Some(LastAction::Complete) {
+            self.last_action = None;
+        }
     }
 
     pub fn set_width(&mut self, width: usize) {

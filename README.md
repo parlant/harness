@@ -41,6 +41,7 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 - [Local HTTP/JSON and SSE protocol](docs/protocol.md)
 - [Roadmap](docs/roadmap.md) — implemented milestones and remaining work
 - [hi build and cutover status](docs/hi-build.md) — shipped workflows, verification and ordered remaining batches
+- [hi status lines](docs/hi-status.md) — user templates, available fields and `/reload`
 - [hi design and parity target](docs/hi.md) — interaction parity, Rust choices and durable differences
 - [Bringing a harness or tool to hi](docs/hi-extensions.md) — proposed contributor boundaries
 - [Design references](docs/references.md)

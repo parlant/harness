@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod app;
 pub mod cards;
+mod completion;
 pub mod editor;
 pub mod export;
 pub mod external;
@@ -8,4 +9,5 @@ pub mod files;
 pub mod picker;
 pub mod preferences;
 pub mod screen;
+mod status;
 pub mod stream;

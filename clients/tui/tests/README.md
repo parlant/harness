@@ -13,6 +13,7 @@ Python stdlib-only PTY test suite and disposable fake H daemon for verifying `hi
   4. `Alt-Enter` (`\x1b\r`) during active stream submits `when_busy: "follow_up"`.
   5. Detaching (`/quit`, `Ctrl-D`, or PTY hangup) during an active stream never sends `abort`; daemon turn completes and persists for re-attach.
   6. Window resize (`SIGWINCH`) during stream and loopback HTTP (`H_DAEMON_URL`) parity.
+- `test_hi_terminal_pty.py` — Covers command cycling, inline workspace paths, local attachments, live/reloadable status templates, and terminal encoding and resize behavior in both fullscreen and regular modes.
 - `test_fake_daemon_and_pty.py` — Self-tests for `FakeDaemon`, `PtySession`, and baseline `h` binary wire compatibility.
 
 ## How the coordinator runs it

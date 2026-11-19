@@ -305,7 +305,7 @@ impl TranscriptState {
         let total = usage
             .get("total_tokens")
             .and_then(Value::as_u64)
-            .unwrap_or(input + output);
+            .unwrap_or_else(|| input.saturating_add(output));
         let cost = usage.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
         if total == 0 && input == 0 && output == 0 && cost == 0.0 {
             None

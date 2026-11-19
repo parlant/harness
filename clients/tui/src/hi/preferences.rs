@@ -1,4 +1,6 @@
+use super::status::StatusLines;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -341,7 +343,7 @@ impl Preferences {
     }
 
     /// Return the action name bound to `key`, if any.
-    pub fn action(&self, key: KeyEvent) -> Option<&str> {
+    pub fn action(&self, key: KeyEvent) -> Option<&'static str> {
         let combo = KeyCombo::from_event(key)?;
         self.lookup.get(&combo).copied()
     }
@@ -456,6 +458,42 @@ fn parse_binding_value(action: &str, value: &Value) -> Result<Vec<KeyCombo>, Str
         _ => Err(format!(
             "invalid binding for {action:?}: expected key string, array of key strings, or null"
         )),
+    }
+}
+
+#[derive(Default)]
+pub(super) struct UserConfig {
+    pub keys: Preferences,
+    pub status: StatusLines,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UserSettings {
+    status_lines: Option<Vec<String>>,
+    status_lines_append: Vec<String>,
+}
+
+impl UserConfig {
+    pub(super) fn load(data_dir: &Path) -> Result<Self, String> {
+        let path = data_dir.join("hi.json");
+        let user = match fs::read_to_string(&path) {
+            Ok(raw) => {
+                let syntax = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+                if !syntax.trim_start().starts_with('{') {
+                    return Err(format!("{}: expected a JSON object", path.display()));
+                }
+                serde_json::from_str(syntax).map_err(|e| format!("{}: {e}", path.display()))?
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => UserSettings::default(),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let status = StatusLines::compile(user.status_lines, user.status_lines_append)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            keys: Preferences::load(&data_dir.join("hi-keybindings.json"))?,
+            status,
+        })
     }
 }
 

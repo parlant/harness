@@ -2,18 +2,20 @@
 use super::{
     actions::{self, Effect, Reply, Target},
     cards,
+    completion::{self, Completion, Token},
     editor::Editor,
     external,
     picker::{Choice, Picker},
-    preferences::Preferences,
-    screen::Screen,
+    preferences::UserConfig,
+    screen::{EditorOverlay, Screen},
+    status::StatusFields,
     stream::{Subscription, Update},
 };
 use crate::{
     cli::generate_request_id,
-    client::DaemonClient,
+    client::{ClientError, DaemonClient},
     protocol::{CommandEnvelope, ServerFrame, WhenBusy, WhenIdle},
-    render::{extract_entry_text, format_status_line, sanitize_single_line},
+    render::{extract_entry_text, sanitize_single_line},
     transcript::{CommitOutcome, TranscriptState},
 };
 use crossterm::event::{
@@ -54,14 +56,23 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/envs", "List environments"),
     ("/search", "Search loaded messages"),
     ("/status", "Show connection and run status"),
+    ("/help", "Open command palette"),
     ("/hotkeys", "Active shortcuts"),
-    ("/reload", "Reload local keybindings"),
+    ("/reload", "Reload local status templates and keybindings"),
     ("/copy", "Copy last assistant message (OSC 52)"),
     (
         "/export",
         "Export history to a new local .html or .jsonl file",
     ),
     ("/quit", "Detach (does not abort)"),
+    ("/retry", "Retry a pending submission"),
+    ("/discard-retry", "Forget a pending submission retry"),
+    ("/conv", "Switch to a conversation by ID"),
+    ("/files", "Browse session workspace files"),
+    ("/branches", "Alias for /tree"),
+    ("/sessions", "Alias for /resume"),
+    ("/session", "Alias for /status"),
+    ("/exit", "Alias for /quit"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +125,10 @@ struct Job {
     submitted: Option<(String, CommandEnvelope)>,
     source_target: (String, String),
 }
+struct PathLookup {
+    token: Option<Token>,
+    result: Receiver<Result<Vec<(String, String)>, ClientError>>,
+}
 struct Ui {
     client: DaemonClient,
     target: Target,
@@ -124,9 +139,11 @@ struct Ui {
     draft: Draft,
     saved: HashMap<(String, String), Draft>,
     picker: Option<PickerState>,
+    completion: Option<Completion>,
+    path_lookup: Option<PathLookup>,
     pending_root_fork: Option<PendingRootFork>,
-    prefs: Preferences,
-    pref_path: PathBuf,
+    config: UserConfig,
+    data_dir: PathBuf,
     job: Option<Job>,
     note: String,
     tools: bool,
@@ -154,8 +171,7 @@ pub fn run(
     } else {
         Screen::open
     };
-    let pref_path = data_dir.join("hi-keybindings.json");
-    let prefs = Preferences::load(&pref_path)?;
+    let config = UserConfig::load(data_dir)?;
     let sub = Subscription::start(client.clone(), target.sid.clone(), target.cid.clone(), None);
     let state = TranscriptState::new(Some(target.sid.clone()), Some(target.cid.clone()));
     let mut ui = Ui {
@@ -168,9 +184,11 @@ pub fn run(
         draft: Draft::default(),
         saved: HashMap::new(),
         picker: None,
+        completion: None,
+        path_lookup: None,
         pending_root_fork: None,
-        prefs,
-        pref_path,
+        config,
+        data_dir: data_dir.to_owned(),
         job: None,
         note: "Connecting · /help".into(),
         tools: false,
@@ -180,6 +198,7 @@ pub fn run(
         quit: false,
         last_clear: None,
     };
+    ui.config.status.validate(&ui.status_fields())?;
     let exiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         local(signal_hook::flag::register(signal, exiting.clone()))?;
@@ -196,11 +215,11 @@ pub fn run(
             ui.update(update);
             repaint = true;
         }
-        if ui.complete(&mut screen) {
-            repaint = true;
-        }
+        repaint |= ui.complete(&mut screen);
+        repaint |= ui.complete_path_lookup();
         if ui.online && ui.state.seq.is_some() && ui.job.is_none() {
             if let Some(text) = initial.take() {
+                ui.dismiss_completion();
                 ui.draft.editor.set(text);
                 ui.send(false);
                 repaint = true;
@@ -217,11 +236,12 @@ pub fn run(
                         ui.draft.editor.key(k);
                     } else if ui.picker.is_some() {
                         ui.pick_key(k, &mut screen);
-                    } else if ui.prefs.action(k) == Some("external")
+                    } else if ui.config.keys.action(k) == Some("external")
                         || (k.code == KeyCode::Enter
                             && k.modifiers.is_empty()
                             && ui.draft.editor.text() == "/edit")
                     {
+                        ui.dismiss_completion();
                         if ui.draft.editor.text() == "/edit" {
                             ui.draft.editor.set("");
                         }
@@ -231,7 +251,8 @@ pub fn run(
                             Err(e) => ui.note = e.to_string(),
                         };
                         screen = local(open_screen())?;
-                    } else if ui.prefs.action(k) == Some("suspend") {
+                    } else if ui.config.keys.action(k) == Some("suspend") {
+                        ui.dismiss_completion();
                         drop(screen);
                         local(signal_hook::low_level::raise(signal_hook::consts::SIGSTOP))?;
                         screen = local(open_screen())?;
@@ -240,6 +261,7 @@ pub fn run(
                     }
                 }
                 Event::Paste(s) if ui.picker.is_none() => {
+                    ui.dismiss_completion();
                     if s.len() > super::files::MAX_TEXT_BYTES {
                         ui.note = "Paste exceeds 1 MiB; use a smaller excerpt".into();
                     } else {
@@ -272,66 +294,41 @@ impl Ui {
             );
             self.rows_dirty = false;
         }
-        let fork_tag = self
-            .draft
-            .fork_edit
-            .as_ref()
-            .map(|fe| {
-                format!(
-                    " · fork-edit #{}@{}",
-                    sanitize_single_line(&fe.selected_entry_id),
-                    fe.predecessor_id
-                )
-            })
-            .unwrap_or_default();
-        let shell_tag = self
-            .state
-            .active_user_shell()
-            .map(|(cmd, status, include)| {
-                let prefix = if include { "!" } else { "!!" };
-                format!(
-                    " · shell {prefix}{} ({})",
-                    sanitize_single_line(cmd)
-                        .chars()
-                        .take(24)
-                        .collect::<String>(),
-                    sanitize_single_line(status)
-                )
-            })
-            .unwrap_or_default();
-        let status = format!(
-            "{}{} · {} · {}{}{}{} · {}:{} · {}",
-            self.note,
-            shell_tag,
-            if self.online { "online" } else { "offline" },
-            format_status_line(&self.state),
-            if self.job.is_some() {
-                " · pending"
-            } else {
-                ""
-            },
-            if !self.draft.attachments.is_empty() {
-                " · attachment"
-            } else {
-                ""
-            },
-            fork_tag,
-            self.target.sid,
-            self.target.cid,
-            self.target.cwd
-        );
-        let overlay = self
-            .picker
-            .as_ref()
-            .map(|p| p.picker.lines())
-            .unwrap_or_default();
-        local(screen.draw(
+        let status = self.config.status.render(&self.status_fields());
+        let lines;
+        let overlay = if let Some(picker) = &self.picker {
+            lines = picker.picker.lines();
+            EditorOverlay::Picker(&lines)
+        } else if let Some(completion) = &self.completion {
+            lines = completion.lines();
+            EditorOverlay::Completion(&lines)
+        } else {
+            EditorOverlay::None
+        };
+        local(screen.draw_with_overlay(
             &self.cached_rows,
             self.draft.editor.text(),
             self.draft.editor.cursor(),
-            &sanitize_single_line(&status),
-            &overlay,
+            &status,
+            overlay,
         ))
+    }
+    fn status_fields(&self) -> StatusFields<'_> {
+        let mut fields = StatusFields::from_session(&self.target, &self.state);
+        fields.note = &self.note;
+        fields.connection = if self.online { "online" } else { "offline" };
+        fields.online = self.online;
+        fields.pending = self.job.is_some();
+        fields.attachments = self.draft.attachments.len();
+        if let Some(fe) = &self.draft.fork_edit {
+            fields.fork_entry_id = Some(&fe.selected_entry_id);
+            fields.fork_predecessor_id = Some(fe.predecessor_id);
+        }
+        fields.retry_pending = self.draft.retry.is_some();
+        fields.historical = self.historical.is_some();
+        fields.show_tools = self.tools;
+        fields.show_thinking = self.thinking;
+        fields
     }
     fn update(&mut self, u: Update) {
         match u {
@@ -379,6 +376,7 @@ impl Ui {
         }
     }
     fn menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
+        self.dismiss_completion();
         self.picker = Some(PickerState {
             kind,
             picker: Picker::new(title, choices),
@@ -386,6 +384,7 @@ impl Ui {
         });
     }
     fn scoped_menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
+        self.dismiss_completion();
         self.picker = Some(PickerState {
             kind,
             picker: Picker::new(title, choices),
@@ -473,6 +472,12 @@ impl Ui {
                 }
             }
             Ok(Reply::Message(m)) => self.note = m,
+            Ok(Reply::SessionName { title, note }) => {
+                if source_target.0 == self.target.sid {
+                    self.target.labels.title = title;
+                    self.note = note;
+                }
+            }
             Ok(Reply::Attachment(path, block)) => {
                 if self
                     .draft
@@ -583,6 +588,7 @@ impl Ui {
                                     } else {
                                         "\n"
                                     };
+                                    self.dismiss_completion();
                                     self.draft.editor.set(&format!(
                                         "{}{sep}{t}",
                                         self.draft.editor.expanded_text()
@@ -612,6 +618,7 @@ impl Ui {
         true
     }
     fn switch(&mut self, t: Target, screen: &mut Screen) {
+        self.dismiss_completion();
         let key = (self.target.sid.clone(), self.target.cid.clone());
         self.saved.insert(key, std::mem::take(&mut self.draft));
         self.draft = self
@@ -893,10 +900,38 @@ impl Ui {
         }
     }
     fn key(&mut self, k: KeyEvent, screen: &mut Screen) {
-        if self.prefs.action(k) != Some("clear") {
+        let action = self.config.keys.action(k);
+        if action != Some("clear") {
             self.last_clear = None;
         }
-        match self.prefs.action(k) {
+        if k.code == KeyCode::Esc && k.modifiers.is_empty() {
+            if self.completion.is_some() {
+                self.draft.editor.cancel_completion();
+                self.dismiss_completion();
+                return;
+            }
+            if self
+                .path_lookup
+                .as_mut()
+                .is_some_and(|lookup| lookup.token.take().is_some())
+            {
+                return;
+            }
+        }
+        if k.code == KeyCode::Tab && k.modifiers.is_empty() && action.is_none() {
+            self.tab();
+            return;
+        }
+        if k.code == KeyCode::Right
+            && k.modifiers.is_empty()
+            && action.is_none()
+            && self.completion.is_some()
+        {
+            self.dismiss_completion();
+            return;
+        }
+        self.dismiss_completion();
+        match action {
             Some("interrupt") => {
                 if self.draft.fork_edit.is_some() && self.job.is_none() {
                     self.cancel_fork_edit();
@@ -953,21 +988,102 @@ impl Ui {
                 KeyCode::PageUp => screen.scroll(10),
                 KeyCode::PageDown => screen.scroll(-10),
                 KeyCode::End if k.modifiers == Mod::CONTROL => screen.bottom(),
-                KeyCode::Tab if self.draft.editor.text().starts_with("/attach ") => {
-                    let prefix = self.draft.editor.text()["/attach ".len()..]
-                        .trim()
-                        .to_owned();
-                    self.file_menu(&prefix);
-                }
-                KeyCode::Tab if self.draft.editor.text().starts_with('/') => self.palette(),
-                KeyCode::Tab if self.draft.editor.text().starts_with('@') => {
-                    let prefix = self.draft.editor.text()[1..].to_owned();
-                    self.workspace_file_menu(&prefix);
-                }
                 _ => {
                     self.draft.editor.key(k);
                 }
             },
+        }
+    }
+    fn dismiss_completion(&mut self) {
+        self.completion = None;
+        self.draft.editor.finish_completion();
+        if let Some(lookup) = &mut self.path_lookup {
+            lookup.token = None;
+        }
+    }
+    fn tab(&mut self) {
+        if let Some(completion) = &mut self.completion {
+            if let Some(directory) = completion.sole_directory() {
+                self.dismiss_completion();
+                self.start_path_lookup(directory);
+            } else {
+                completion.cycle(&mut self.draft.editor);
+            }
+            return;
+        }
+        let editor = &self.draft.editor;
+        let text = editor.text();
+        if let Some(prefix) = text[..editor.cursor()].strip_prefix("/attach ") {
+            let prefix = prefix.trim().to_owned();
+            self.file_menu(&prefix);
+        } else if let Some(prefix) = text[..editor.cursor()].strip_prefix('@') {
+            let prefix = prefix.to_owned();
+            self.workspace_file_menu(&prefix);
+        } else if let Some(token) = Token::at_cursor(editor) {
+            if token.is_command(editor) {
+                let prefix = token.prefix(editor);
+                let choices = COMMANDS
+                    .iter()
+                    .filter(|(name, _)| name.starts_with(prefix))
+                    .map(|(name, desc)| (name.to_string(), format!("{name}  {desc}")))
+                    .collect();
+                self.completion =
+                    Completion::start(&mut self.draft.editor, token, "Commands", choices);
+            } else {
+                self.start_path_lookup(token);
+            }
+        }
+    }
+    fn start_path_lookup(&mut self, token: Token) {
+        // Keep only one bounded read in flight. Dismissing it invalidates the
+        // token, so a late response cannot edit a newer draft or another target.
+        if self.path_lookup.is_some() {
+            return;
+        }
+        let editor = &self.draft.editor;
+        let prefix = token.prefix(editor).to_owned();
+        let text = editor.text();
+        let shell = parse_user_shell_input(text).is_some()
+            || ["/steer ", "/follow-up "].iter().any(|cmd| {
+                text.strip_prefix(cmd)
+                    .and_then(parse_user_shell_input)
+                    .is_some()
+            });
+        let (tx, result) = mpsc::sync_channel(1);
+        let client = self.client.clone();
+        let target = self.target.clone();
+        thread::spawn(move || {
+            let _ = tx.send(completion::paths(&client, &target, &prefix, shell));
+        });
+        self.path_lookup = Some(PathLookup {
+            token: Some(token),
+            result,
+        });
+    }
+    fn complete_path_lookup(&mut self) -> bool {
+        let Some(lookup) = &mut self.path_lookup else {
+            return false;
+        };
+        let result = match lookup.result.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => Err(ClientError::Io(
+                "Path completion worker disconnected".into(),
+            )),
+        };
+        let token = lookup.token.take();
+        self.path_lookup = None;
+        let Some(token) = token else { return false };
+        match result {
+            Ok(choices) => {
+                self.completion =
+                    Completion::start(&mut self.draft.editor, token, "Paths", choices);
+                self.completion.is_some()
+            }
+            Err(err) => {
+                self.note = format!("Path completion: {err}");
+                true
+            }
         }
     }
     fn palette(&mut self) {
@@ -991,19 +1107,34 @@ impl Ui {
             "/hotkeys" => self.menu(
                 PickerKind::Info,
                 "shortcuts",
-                self.prefs
+                self.config
+                    .keys
                     .help()
                     .into_iter()
                     .map(|s| (String::new(), s))
                     .collect(),
             ),
-            "/reload" => match Preferences::load(&self.pref_path) {
-                Ok(p) => {
-                    self.prefs = p;
-                    self.note = "Keybindings reloaded".into();
+            "/reload" => {
+                let candidate = UserConfig::load(&self.data_dir).and_then(|config| {
+                    config.status.validate(&self.status_fields())?;
+                    Ok(config)
+                });
+                match candidate {
+                    Ok(config) => {
+                        self.config = config;
+                        self.note = "Hi configuration reloaded".into();
+                    }
+                    Err(err) => {
+                        self.note = format!("Reload failed: {err}");
+                        // Keep failures visible even if a custom footer omits `note`.
+                        self.menu(
+                            PickerKind::Info,
+                            "reload failed (config unchanged)",
+                            vec![(String::new(), err)],
+                        );
+                    }
                 }
-                Err(e) => self.note = e,
-            },
+            }
             "/session" | "/status" => {
                 self.note = format!(
                     "{}:{} · {} · env={}",
@@ -1550,6 +1681,7 @@ mod tests {
             cid: cid.to_string(),
             cwd: "/tmp/proj".to_string(),
             env_id: "host".to_string(),
+            labels: Default::default(),
         };
         let sub = Subscription::start(client.clone(), target.sid.clone(), target.cid.clone(), None);
         let state = TranscriptState::new(Some(target.sid.clone()), Some(target.cid.clone()));
@@ -1563,9 +1695,11 @@ mod tests {
             draft: Draft::default(),
             saved: HashMap::new(),
             picker: None,
+            completion: None,
+            path_lookup: None,
             pending_root_fork: None,
-            prefs: Preferences::default(),
-            pref_path: PathBuf::from("/private/tmp/hi-app-nonexistent-keybindings.json"),
+            config: UserConfig::default(),
+            data_dir: PathBuf::from("/private/tmp/hi-app-nonexistent-config"),
             job: None,
             note: "Ready".into(),
             tools: false,
@@ -2110,6 +2244,7 @@ mod tests {
                 cid: "2".into(),
                 cwd: "/tmp/proj".into(),
                 env_id: "host".into(),
+                labels: Default::default(),
             },
             &mut screen,
         );
@@ -2226,6 +2361,7 @@ mod tests {
                 cid: "3".into(),
                 cwd: "/tmp/proj".into(),
                 env_id: "host".into(),
+                labels: Default::default(),
             },
             receipt: crate::protocol::CommandReceipt {
                 version: Some(1),
@@ -2387,6 +2523,203 @@ mod tests {
         assert_eq!(cmds[0]["args"]["title"], "Updated Title");
         assert_eq!(cmds[0]["args"]["expected_seq"], 15);
         assert_eq!(cmds[1]["args"]["expected_seq"], 15);
+    }
+
+    #[test]
+    fn slash_tab_filters_cycles_wraps_and_cancels_in_the_editor() {
+        let (_srv, client) = TestServer::bind("command-completion");
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        let tab = KeyEvent::new(KeyCode::Tab, Mod::NONE);
+        ui.draft.editor.set("/");
+        ui.key(tab, &mut screen);
+        assert_eq!(ui.draft.editor.text(), COMMANDS[0].0);
+        assert_eq!(
+            ui.completion.as_ref().unwrap().lines().len(),
+            COMMANDS.len() + 1
+        );
+        assert!(ui.picker.is_none());
+        assert!(ui.job.is_none());
+        press_esc(&mut ui, &mut screen);
+        assert_eq!(ui.draft.editor.text(), "/");
+
+        // Cursor inside the first token: complete from its prefix, preserve arguments.
+        ui.draft.editor.set("/hx argument");
+        for _ in 0.."x argument".len() {
+            ui.draft.editor.key(KeyEvent::new(KeyCode::Left, Mod::NONE));
+        }
+        for cmd in ["/help", "/hotkeys", "/help"] {
+            ui.key(tab, &mut screen);
+            assert_eq!(ui.draft.editor.text(), format!("{cmd} argument"));
+            assert_eq!(ui.draft.editor.cursor(), cmd.len());
+            assert_eq!(ui.completion.as_ref().unwrap().lines().len(), 3);
+        }
+        ui.key(KeyEvent::new(KeyCode::Char(' '), Mod::NONE), &mut screen);
+        assert!(ui.completion.is_none());
+        assert_eq!(ui.draft.editor.text(), "/help  argument");
+        assert!(ui.draft.editor.undo());
+        assert!(ui.draft.editor.undo());
+        assert_eq!(ui.draft.editor.text(), "/hx argument");
+        assert_eq!(ui.draft.editor.cursor(), 2);
+
+        ui.draft.editor.set("/nonexistent");
+        ui.key(tab, &mut screen);
+        assert_eq!(ui.draft.editor.text(), "/nonexistent");
+        assert!(ui.completion.is_none());
+        assert!(ui.path_lookup.is_none());
+    }
+
+    fn wait_path_lookup(ui: &mut Ui) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while ui.path_lookup.is_some() {
+            ui.complete_path_lookup();
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for path completion"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn path_tab_queries_the_target_directory_and_replaces_only_the_current_token() {
+        let (srv, client) = TestServer::bind("inline-paths");
+        let listener = srv.listener.try_clone().unwrap();
+        let server = thread::spawn(move || {
+            for (dir, prefix, entries) in [
+                (
+                    "%2Fremote",
+                    "s",
+                    json!([
+                        {"path": "src", "type": "dir"}, {"path": "scripts", "type": "dir"},
+                        {"path": "some.txt", "type": "file"}, {"path": "assets", "type": "dir"},
+                        {"path": "sym", "type": "symlink"}
+                    ]),
+                ),
+                (
+                    "%2Fremote",
+                    "some",
+                    json!([{"path": "some.txt", "type": "file"}]),
+                ),
+                ("%2Fremote%2F", "s", json!([{"path": "src", "type": "dir"}])),
+                (
+                    "%2Fremote%2Fsrc%2F",
+                    "",
+                    json!([{"path": "main.rs", "type": "file"}]),
+                ),
+                (
+                    "%2Fremote%2F.%2Fsrc%2F",
+                    "m",
+                    json!([{"path": "main.rs", "type": "file"}]),
+                ),
+                (
+                    "%2Fremote%2F..%2F",
+                    "s",
+                    json!([{"path": "sibling", "type": "dir"}]),
+                ),
+                (
+                    "%2Ftmp%2F",
+                    "uni",
+                    json!([{"path": "unicode 📁", "type": "dir"}]),
+                ),
+            ] {
+                loop {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let (head, _) = read_http_request(&mut stream);
+                    if !head.starts_with("GET /api/v1/fs/files?") {
+                        write_json_response(&mut stream, "404 Not Found", "{}");
+                        continue;
+                    }
+                    let query = if prefix.is_empty() {
+                        String::new()
+                    } else {
+                        format!("&query={prefix}")
+                    };
+                    assert!(head.starts_with(&format!(
+                        "GET /api/v1/fs/files?env_id=vm-1&cwd={dir}&max_depth=1&limit=500&include_hidden=false{query} "
+                    )), "{head}");
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        &json!({
+                            "env_id": "vm-1", "cwd": "/remote", "entries": entries
+                        })
+                        .to_string(),
+                    );
+                    break;
+                }
+            }
+        });
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        ui.target.cwd = "/remote".into();
+        ui.target.env_id = "vm-1".into();
+        let tab = KeyEvent::new(KeyCode::Tab, Mod::NONE);
+        ui.draft.editor.set("s");
+        ui.key(tab, &mut screen);
+        wait_path_lookup(&mut ui);
+        assert_eq!(ui.draft.editor.text(), "scripts/");
+        ui.key(tab, &mut screen);
+        assert_eq!(ui.draft.editor.text(), "src/");
+        press_esc(&mut ui, &mut screen);
+        assert_eq!(ui.draft.editor.text(), "s");
+
+        ui.draft.editor.set("inspect some");
+        ui.key(tab, &mut screen);
+        wait_path_lookup(&mut ui);
+        assert!(ui.completion.is_none());
+        assert_eq!(ui.draft.editor.text(), "inspect some");
+
+        ui.draft.editor.set("inspect /remote/s");
+        ui.key(tab, &mut screen);
+        wait_path_lookup(&mut ui);
+        assert_eq!(ui.draft.editor.text(), "inspect /remote/src/");
+        ui.key(tab, &mut screen);
+        wait_path_lookup(&mut ui);
+        assert_eq!(ui.draft.editor.text(), "inspect /remote/src/main.rs");
+
+        for (draft, expected) in [
+            ("./src/m", "./src/main.rs"),
+            ("/file ../s", "/file ../sibling/"),
+            ("👋\n/tmp/uni", "👋\n/tmp/unicode 📁/"),
+        ] {
+            ui.key(KeyEvent::new(KeyCode::Right, Mod::NONE), &mut screen);
+            ui.draft.editor.set(draft);
+            ui.key(tab, &mut screen);
+            wait_path_lookup(&mut ui);
+            assert_eq!(ui.draft.editor.text(), expected);
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn late_path_results_never_overwrite_an_edit_or_a_switched_draft() {
+        let (_srv, client) = TestServer::bind("stale-completion");
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        for switch in [false, true] {
+            ui.draft.editor.set("check sr");
+            let (tx, result) = mpsc::sync_channel(1);
+            ui.path_lookup = Some(PathLookup {
+                token: Token::at_cursor(&ui.draft.editor),
+                result,
+            });
+            if switch {
+                ui.switch(
+                    Target {
+                        cid: "2".into(),
+                        ..ui.target.clone()
+                    },
+                    &mut screen,
+                );
+            } else {
+                ui.key(KeyEvent::new(KeyCode::Char('z'), Mod::NONE), &mut screen);
+            }
+            tx.send(Ok(vec![("src/".into(), "src/".into())])).unwrap();
+            assert!(!ui.complete_path_lookup());
+            assert!(ui.completion.is_none());
+            assert_eq!(
+                ui.draft.editor.text(),
+                if switch { "" } else { "check srz" }
+            );
+        }
     }
 
     #[test]

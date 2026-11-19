@@ -305,6 +305,34 @@ impl DaemonClient {
         self.get_json(&path)
     }
 
+    pub(crate) fn list_directory_files(
+        &self,
+        env_id: &str,
+        cwd: &str,
+        prefix: &str,
+    ) -> Result<WorkspaceFilesResponse, ClientError> {
+        if env_id.is_empty()
+            || !cwd.starts_with('/')
+            || [env_id, cwd, prefix].iter().any(|s| s.contains('\0'))
+        {
+            return Err(ClientError::InvalidInput(
+                "invalid completion directory or prefix".into(),
+            ));
+        }
+        let path = format!(
+            "/api/v1/fs/files?env_id={}&cwd={}&max_depth=1&limit=500&include_hidden={}{}",
+            percent_encode(env_id),
+            percent_encode(cwd),
+            prefix.starts_with('.'),
+            if prefix.is_empty() {
+                String::new()
+            } else {
+                format!("&query={}", percent_encode(prefix))
+            },
+        );
+        self.request_json("GET", &path, None, Duration::from_secs(3))
+    }
+
     pub fn list_session_files(
         &self,
         session_id: &str,
@@ -523,7 +551,7 @@ impl DaemonClient {
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
-        self.request_json::<T>("GET", path, None)
+        self.request_json("GET", path, None, DEFAULT_IO_TIMEOUT)
     }
 
     fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
@@ -533,7 +561,7 @@ impl DaemonClient {
     ) -> Result<T, ClientError> {
         let json_bytes = serde_json::to_vec(body)
             .map_err(|e| ClientError::InvalidInput(format!("JSON encode failed: {e}")))?;
-        self.request_json::<T>("POST", path, Some(&json_bytes))
+        self.request_json("POST", path, Some(&json_bytes), DEFAULT_IO_TIMEOUT)
     }
 
     fn request_json<T: serde::de::DeserializeOwned>(
@@ -541,8 +569,9 @@ impl DaemonClient {
         method: &str,
         path: &str,
         body: Option<&[u8]>,
+        timeout: Duration,
     ) -> Result<T, ClientError> {
-        let mut stream = self.connect(Some(DEFAULT_IO_TIMEOUT))?;
+        let mut stream = self.connect(Some(timeout))?;
         write_request(
             &mut stream,
             method,

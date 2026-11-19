@@ -8,6 +8,7 @@ No user terminal settings are modified and no remote hosts are contacted.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import shutil
@@ -17,7 +18,9 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(TESTS_DIR, "..", "..", ".."))
@@ -102,7 +105,26 @@ class TerminalFakeDaemon(FakeDaemon):
 
         class TerminalHandler(base_cls):
             def do_GET(self) -> None:
-                if self.path.split("?", 1)[0] == "/api/v1/models":
+                parsed = urlsplit(self.path)
+                if parsed.path == "/api/v1/fs/files":
+                    if not self._check_auth_and_host():
+                        return
+                    params = parse_qs(parsed.query)
+                    cwd = os.path.realpath(params["cwd"][0])
+                    # This fake only browses the disposable fixture tree.
+                    root = os.path.realpath(daemon.cwd)
+                    if os.path.commonpath((cwd, root)) != root or not os.path.isdir(cwd):
+                        self._send_json(404, {"error": "missing fixture directory"})
+                        return
+                    query = params.get("query", [""])[0].lower()
+                    with os.scandir(cwd) as listing:
+                        entries = [
+                            {"path": e.name, "type": "dir" if e.is_dir() else "file"}
+                            for e in listing if query in e.name.lower()
+                        ]
+                    self._send_json(200, {"env_id": params["env_id"][0], "cwd": cwd, "entries": entries})
+                    return
+                if parsed.path == "/api/v1/models":
                     if not self._check_auth_and_host():
                         return
                     self._send_json(200, {"models": daemon.models})
@@ -165,17 +187,26 @@ class HiTerminalBothModesTests(unittest.TestCase):
                         pty.wait_for_raw_mode()
                         pty.wait_for_output("Ready")
 
-                        # 1. Slash palette completion via `/` + Tab, filter, Esc cancel (no abort)
+                        # 1. Complete in the draft; Esc restores the prefix without aborting.
                         pty.send_text("/")
                         pty.send_bytes(b"\t")
-                        pty.wait_for_output("commands · Search:")
-                        pty.send_text("model")
-                        pty.wait_for_output("/model")
+                        screen = pty.wait_for_output("Commands · Tab to cycle (1/")
+                        self.assertIn("/resume", screen.splitlines())
                         pty.send_bytes(b"\x1b")
-                        time.sleep(0.05)
+                        pty.wait_for_output("\n/\n")
+                        pty.send_text("h")
+                        pty.send_bytes(b"\t")
+                        screen = pty.wait_for_output("Commands · Tab to cycle (1/2)")
+                        self.assertIn("/help", screen.splitlines())
+                        self.assertIn("/hotkeys", screen)
+                        pty.send_bytes(b"\t")
+                        screen = pty.wait_for_output("Commands · Tab to cycle (2/2)")
+                        self.assertIn("/hotkeys", screen.splitlines())
+                        pty.send_bytes(b"\x1b")
+                        pty.wait_for_output("\n/h\n")
                         self.assertEqual(daemon.abort_commands(), [])
 
-                        # Clear `/` and open `@` client-local file completion + drill into `sub/`
+                        # Clear the prefix and open the separate client-local attachment picker.
                         pty.send_ctrl("u")
                         pty.send_text("/attach su")
                         pty.send_bytes(b"\t")
@@ -213,6 +244,30 @@ class HiTerminalBothModesTests(unittest.TestCase):
                         self.assertEqual(pty.wait(), 0)
                         self.assertTrue(pty.is_cooked_mode())
                         _assert_mode_sequences(self, pty.raw_text(), mode)
+
+    def test_path_completion_in_both_modes(self) -> None:
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                with TerminalFakeDaemon(cwd=self.workdir, session_id="demo") as daemon:
+                    cmd = [self.hi_bin, "-s", "demo", "--tui-mode", mode]
+                    # The client CWD intentionally differs from the session CWD.
+                    with tempfile.TemporaryDirectory(dir="/tmp") as client_cwd:
+                        with PtySession(cmd, env=daemon.env(), cwd=client_cwd, rows=24, cols=80) as pty:
+                            daemon.wait_for_sse_connect()
+                            pty.wait_for_raw_mode()
+                            pty.wait_for_output("Ready")
+                            pty.send_text("check su")
+                            pty.send_bytes(b"\t")
+                            pty.wait_for_output("\ncheck sub/\n")
+                            pty.send_bytes(b"\t")
+                            pty.wait_for_output("\ncheck sub/nested.rs\n")
+                            self.assertEqual(daemon.recorded_commands, [])
+                            pty.send_enter()
+                            submitted = daemon.wait_for_command(lambda c: c["command"] == "submit")
+                            self.assertEqual(extract_content_text(submitted["args"]["content"]), "check sub/nested.rs")
+                            pty.send_text("/quit")
+                            pty.send_enter()
+                            self.assertEqual(pty.wait(), 0)
 
     def test_inline_model_help_hotkeys_and_conflict_in_both_modes(self) -> None:
         for mode in self.MODES:
@@ -286,6 +341,87 @@ class HiTerminalBothModesTests(unittest.TestCase):
                         pty.send_enter()
                         self.assertEqual(pty.wait(), 0)
                         self.assertTrue(pty.is_cooked_mode())
+
+    def test_status_templates_reload_atomically_and_follow_live_model_in_both_modes(self) -> None:
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                with TerminalFakeDaemon(cwd=self.workdir) as daemon:
+                    daemon.seed_entry("user", "status fixture transcript")
+                    user_file = Path(daemon.data_dir) / "hi.json"
+                    keys_file = Path(daemon.data_dir) / "hi-keybindings.json"
+                    user_file.write_text(json.dumps({"status_lines_append": ["Extra: {{ session_title }}"]}))
+                    cmd = [self.hi_bin, "-s", "demo", "--tui-mode", mode]
+                    with PtySession(cmd, env=daemon.env(), cwd=self.workdir, rows=16, cols=110) as pty:
+                        daemon.wait_for_sse_connect()
+                        pty.wait_for_output("Extra: Demo Session")
+                        pty.wait_for_output("Ready · /help")
+                        user_file.write_text(json.dumps({"status_lines": [
+                            "{{ provider }} / {{ model_name }} ({{ thinking }}) · {{ activity }}",
+                            "{% if provider == 'openai' %}Provider branch: {{ session_status }}{% endif %}",
+                            "{{ note }}",
+                        ]}))
+                        keys_file.write_text(json.dumps({"model": "ctrl+b"}))
+                        pty.send_text("/reload")
+                        pty.send_enter()
+                        pty.wait_for_output("Hi configuration reloaded")
+                        screen = pty.wait_for_output("fake / test-model (medium) · idle")
+                        self.assertNotIn("Extra:", screen)
+                        self.assertNotIn("Provider branch:", screen)
+                        self.assertIn("status fixture transcript", screen)
+
+                        pty.send_ctrl("b")
+                        pty.wait_for_output("models · Search:")
+                        pty.send_text("codex")
+                        pty.wait_for_output("openai/gpt-5.2-codex")
+                        pty.send_enter()
+                        screen = pty.wait_for_output("Provider branch: ok")
+                        self.assertIn("openai / gpt-5.2-codex (medium) · idle", screen)
+
+                        # A bad keymap must roll back the footer too.
+                        user_file.write_text(json.dumps({"status_lines": ["must not apply"]}))
+                        keys_file.write_text(json.dumps({"model": "ctrl+c"}))
+                        pty.send_text("/reload")
+                        pty.send_enter()
+                        pty.wait_for_output("reload failed (config unchanged)")
+                        pty.send_bytes(b"\x1b")
+                        pty.wait_for_output("Reload failed:")
+                        pty.send_ctrl("b")
+                        screen = pty.wait_for_output("models · Search:")
+                        self.assertIn("Provider branch: ok", screen)
+                        self.assertNotIn("must not apply", screen)
+                        pty.send_bytes(b"\x1b")
+
+                        # An invalid template must also leave the existing key binding in force.
+                        user_file.write_text(json.dumps({"status_lines": ["{{ not_a_field }}"]}))
+                        keys_file.unlink()
+                        pty.send_text("/reload")
+                        pty.send_enter()
+                        pty.wait_for_output("reload failed (config unchanged)")
+                        pty.send_bytes(b"\x1b")
+                        pty.send_ctrl("b")
+                        screen = pty.wait_for_output("models · Search:")
+                        self.assertIn("Provider branch: ok", screen)
+                        pty.send_bytes(b"\x1b")
+
+                        # Check that an empty footer is allowed and can be restored immediately.
+                        user_file.write_text('{"status_lines": []}')
+                        pty.send_text("/reload")
+                        pty.send_enter()
+                        pty.send_text("draft with no footer")
+                        screen = pty.wait_for_output("draft with no footer")
+                        self.assertNotIn("Provider branch:", screen)
+                        self.assertIn("status fixture transcript", screen)
+                        pty.send_ctrl("u")
+                        user_file.write_text('{"status_lines": ["restored · {{ note }}"]}')
+                        pty.send_text("/reload")
+                        pty.send_enter()
+                        screen = pty.wait_for_output("restored · Hi configuration reloaded")
+                        self.assertNotIn("Provider branch:", screen)
+                        self.assertIn("status fixture transcript", screen)
+                        pty.send_text("/quit")
+                        pty.send_enter()
+                        self.assertEqual(pty.wait(), 0)
+                        self.assertEqual(len(daemon.recorded_commands), 1)  # configure only
 
     def test_composed_unicode_cursor_editing_paste_and_resize_in_both_modes(self) -> None:
         for mode in self.MODES:

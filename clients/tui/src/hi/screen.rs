@@ -419,6 +419,13 @@ enum ModeState {
     Regular(RegularState),
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum EditorOverlay<'a> {
+    None,
+    Picker(&'a [String]),
+    Completion(&'a [String]),
+}
+
 pub struct Screen {
     mode: ModeState,
     _guard: TerminalModeGuard,
@@ -569,7 +576,23 @@ impl Screen {
         editor: &str,
         cursor: usize,
         status: &str,
-        overlay: &[String],
+        picker: &[String],
+    ) -> io::Result<()> {
+        let overlay = if picker.is_empty() {
+            EditorOverlay::None
+        } else {
+            EditorOverlay::Picker(picker)
+        };
+        self.draw_with_overlay(rows, editor, cursor, &[status], overlay)
+    }
+
+    pub(super) fn draw_with_overlay(
+        &mut self,
+        rows: &[String],
+        editor: &str,
+        cursor: usize,
+        status: &[impl AsRef<str>],
+        overlay: EditorOverlay<'_>,
     ) -> io::Result<()> {
         match &mut self.mode {
             ModeState::Fullscreen(fs) => draw_fullscreen(fs, rows, editor, cursor, status, overlay),
@@ -583,8 +606,8 @@ fn draw_fullscreen(
     rows: &[String],
     editor: &str,
     cursor: usize,
-    status: &str,
-    overlay: &[String],
+    status: &[impl AsRef<str>],
+    overlay: EditorOverlay<'_>,
 ) -> io::Result<()> {
     let mut next_scroll_state = fs.scroll_state.clone();
     let mut next_editor_scroll = fs.editor_scroll;
@@ -597,7 +620,12 @@ fn draw_fullscreen(
 
         let width = area.width as usize;
         let editor_layout = layout_editor(editor, cursor, width);
-        let layout = compute_layout(area.height, editor_layout.lines.len(), overlay.len());
+        let layout = compute_layout(
+            area.height,
+            editor_layout.lines.len(),
+            overlay,
+            status.len(),
+        );
 
         // 1. Transcript rows
         if layout.transcript_height > 0 {
@@ -643,18 +671,17 @@ fn draw_fullscreen(
             &editor_layout,
             &mut next_editor_scroll,
             overlay,
+            layout.completion_height,
         );
 
         // 4. Status bar
-        if let Some(status_y) = layout.status_y {
-            render_status_bar(
-                frame.buffer_mut(),
-                area.x,
-                area.y + status_y,
-                area.width,
-                status,
-            );
-        }
+        render_status_lines(
+            frame.buffer_mut(),
+            area.x,
+            area.y + area.height - layout.status_height,
+            area.width,
+            &status[..layout.status_height as usize],
+        );
 
         if let Some(pos) = cursor_pos {
             frame.set_cursor_position(pos);
@@ -675,30 +702,24 @@ fn render_editor_area(
     editor_height: u16,
     editor_layout: &EditorLayout,
     editor_scroll: &mut usize,
-    picker: &[String],
+    overlay: EditorOverlay<'_>,
+    completion_height: u16,
 ) -> Option<Position> {
-    let visible_editor_h = editor_height as usize;
-    if !picker.is_empty() {
-        // Header stays put; keep the selected result visible even after a short resize.
-        let selected = picker.iter().position(|s| s.starts_with("> ")).unwrap_or(1);
-        let skip = selected.saturating_sub(visible_editor_h.saturating_sub(1));
-        for (row, line) in picker[..1]
-            .iter()
-            .chain(picker[1..].iter().skip(skip))
-            .take(visible_editor_h)
-            .enumerate()
-        {
-            write_plain_str_to_row(
-                buf,
-                area_x,
-                editor_y + row as u16,
-                total_width as usize,
-                line,
-                Style::default(),
-            );
-        }
+    if let EditorOverlay::Picker(lines) = overlay {
+        render_option_lines(buf, area_x, editor_y, total_width, editor_height, lines);
         return None;
     }
+    if let EditorOverlay::Completion(lines) = overlay {
+        render_option_lines(
+            buf,
+            area_x,
+            editor_y + editor_height - completion_height,
+            total_width,
+            completion_height,
+            lines,
+        );
+    }
+    let visible_editor_h = (editor_height - completion_height) as usize;
     let cursor_visual_row = editor_layout.cursor_row;
     if cursor_visual_row < *editor_scroll {
         *editor_scroll = cursor_visual_row;
@@ -733,13 +754,49 @@ fn render_editor_area(
     cursor_pos
 }
 
-fn render_status_bar(buf: &mut Buffer, x: u16, y: u16, width: u16, status: &str) {
-    let safe_status = sanitize_single_line(status);
-    let style = Style::default().add_modifier(Modifier::REVERSED);
-    for dx in 0..width {
-        buf[(x + dx, y)].set_symbol(" ").set_style(style);
+fn render_option_lines(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    lines: &[String],
+) {
+    let Some((header, choices)) = lines.split_first() else {
+        return;
+    };
+    // Header stays put; keep the selected result visible even after a short resize.
+    let selected = choices
+        .iter()
+        .position(|s| s.starts_with("> "))
+        .unwrap_or(0);
+    let skip = (selected + 1).saturating_sub((height as usize).saturating_sub(1));
+    for (row, line) in std::iter::once(header)
+        .chain(choices.iter().skip(skip))
+        .take(height as usize)
+        .enumerate()
+    {
+        write_plain_str_to_row(
+            buf,
+            x,
+            y + row as u16,
+            width as usize,
+            line,
+            Style::default(),
+        );
     }
-    write_plain_str_to_row(buf, x, y, width as usize, &safe_status, style);
+}
+
+fn render_status_lines(buf: &mut Buffer, x: u16, y: u16, width: u16, lines: &[impl AsRef<str>]) {
+    let style = Style::default().add_modifier(Modifier::REVERSED);
+    for (i, line) in lines.iter().enumerate() {
+        let row = y + i as u16;
+        let safe = sanitize_single_line(line.as_ref());
+        for dx in 0..width {
+            buf[(x + dx, row)].set_symbol(" ").set_style(style);
+        }
+        write_plain_str_to_row(buf, x, row, width as usize, &safe, style);
+    }
 }
 
 fn draw_regular(
@@ -747,8 +804,8 @@ fn draw_regular(
     rows: &[String],
     editor: &str,
     cursor: usize,
-    status: &str,
-    overlay: &[String],
+    status: &[impl AsRef<str>],
+    overlay: EditorOverlay<'_>,
 ) -> io::Result<()> {
     let (term_w, term_h) = reg.target.size()?;
     if term_w == 0 || term_h == 0 {
@@ -763,10 +820,10 @@ fn draw_regular(
     let mut need_full_clear = width_changed || height_shrunk;
 
     let editor_layout = layout_editor(editor, cursor, width);
-    let layout = compute_layout(term_h, editor_layout.lines.len(), overlay.len());
+    let layout = compute_layout(term_h, editor_layout.lines.len(), overlay, status.len());
 
     let sep_h = usize::from(layout.separator_y.is_some());
-    let status_h = usize::from(layout.status_y.is_some());
+    let status_h = layout.status_height as usize;
     let editor_h = layout.editor_height as usize;
     let bottom_h = sep_h + editor_h + status_h;
     let max_tail_lines = height.saturating_sub(bottom_h);
@@ -842,12 +899,11 @@ fn draw_regular(
         &editor_layout,
         &mut reg.editor_scroll,
         overlay,
+        layout.completion_height,
     );
     cur_y += layout.editor_height;
 
-    if layout.status_y.is_some() && (cur_y as usize) < work_h {
-        render_status_bar(&mut buf, 0, cur_y, term_w, status);
-    }
+    render_status_lines(&mut buf, 0, cur_y, term_w, &status[..status_h]);
 
     let new_working_lines: Vec<String> = (0..work_h)
         .map(|y| buffer_row_to_ansi(&buf, y as u16, term_w))
@@ -1082,75 +1138,53 @@ struct ScreenLayout {
     separator_y: Option<u16>,
     editor_y: u16,
     editor_height: u16,
-    status_y: Option<u16>,
+    status_height: u16,
+    completion_height: u16,
 }
 
 fn compute_layout(
     total_height: u16,
     editor_visual_lines: usize,
-    picker_lines: usize,
+    overlay: EditorOverlay<'_>,
+    status_lines: usize,
 ) -> ScreenLayout {
-    if total_height == 0 {
-        return ScreenLayout {
-            transcript_height: 0,
-            separator_y: None,
-            editor_y: 0,
-            editor_height: 0,
-            status_y: None,
-        };
-    }
-    if total_height == 1 {
-        return ScreenLayout {
-            transcript_height: 0,
-            separator_y: None,
-            editor_y: 0,
-            editor_height: 1,
-            status_y: None,
-        };
-    }
-    if total_height == 2 {
-        return ScreenLayout {
-            transcript_height: 0,
-            separator_y: None,
-            editor_y: 0,
-            editor_height: 1,
-            status_y: Some(1),
-        };
-    }
-    if total_height <= 4 {
-        let editor_h = (picker_lines as u16).clamp(1, total_height - 1);
-        let status_y = total_height - 1;
-        let editor_y = status_y - editor_h;
-        return ScreenLayout {
-            transcript_height: editor_y,
-            separator_y: None,
-            editor_y,
-            editor_height: editor_h,
-            status_y: Some(status_y),
-        };
-    }
-
-    // total_height >= 5: transcript + 1 separator + editor + 1 status
-    let status_h = 1u16;
-    let sep_h = 1u16;
-    let max_editor = ((total_height as usize * 3) / 10)
-        .max(3)
-        .min((total_height - status_h - sep_h - 1) as usize);
-    let editor_h = if picker_lines == 0 {
-        editor_visual_lines.clamp(1, max_editor) as u16
+    let first_status_row = u16::from(total_height >= 2 && status_lines > 0);
+    // Keep a transcript row and separator on terminals tall enough for both.
+    let sep_h = u16::from(total_height >= 5);
+    let available = total_height - first_status_row - 2 * sep_h;
+    let max_editor = if sep_h == 0 {
+        1
     } else {
-        (picker_lines.min(7) as u16).min(total_height - status_h - sep_h - 1)
+        ((usize::from(total_height) * 3 / 10) as u16).max(3)
     };
-    let status_y = total_height - 1;
-    let editor_y = status_y - editor_h;
-    let separator_y = editor_y - 1;
-
+    let mut editor_height = editor_visual_lines
+        .clamp(1, max_editor as usize)
+        .min(available as usize) as u16;
+    let mut completion_height = 0;
+    match overlay {
+        EditorOverlay::None => {}
+        EditorOverlay::Picker(lines) => {
+            editor_height = (lines.len().clamp(1, 7) as u16).min(available);
+        }
+        EditorOverlay::Completion(lines) => {
+            completion_height =
+                (lines.len().min(7) as u16).min(available.saturating_sub(editor_height));
+            editor_height += completion_height;
+        }
+    }
+    // Additional status rows never crowd out the editor or its focused overlay.
+    // Keep the first configured rows when the terminal is too short.
+    let status_height =
+        status_lines.min(usize::from(total_height - 2 * sep_h - editor_height)) as u16;
+    let editor_y = total_height - status_height - editor_height;
+    let transcript_height = editor_y - sep_h;
     ScreenLayout {
-        transcript_height: separator_y,
-        separator_y: Some(separator_y),
+        transcript_height,
+        separator_y: (sep_h != 0).then_some(transcript_height),
         editor_y,
-        editor_height: editor_h,
-        status_y: Some(status_y),
+        editor_height,
+        status_height,
+        completion_height,
     }
 }
 
@@ -2386,6 +2420,102 @@ mod tests {
         }
         let lines = buffer_all_text(buf);
         assert_eq!(&lines[7..], &["Pick model", "1. claude", "ok"]);
+    }
+
+    #[test]
+    fn completion_keeps_draft_and_cursor_visible_with_selected_match() {
+        let mut screen = Screen::with_test_backend(40, 5).unwrap();
+        let options = ["Commands".into(), "  /help".into(), "> /hotkeys".into()];
+        screen
+            .draw_with_overlay(
+                &["transcript".into()],
+                "/hotkeys",
+                8,
+                &["ok"],
+                EditorOverlay::Completion(&options),
+            )
+            .unwrap();
+        let lines = buffer_all_text(screen.test_backend().buffer());
+        assert_eq!(lines[0], "transcript");
+        assert_eq!(lines[2], "/hotkeys");
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(8, 2));
+
+        screen.resize_test_backend(40, 6);
+        screen
+            .draw_with_overlay(
+                &[],
+                "/hotkeys",
+                8,
+                &["ok"],
+                EditorOverlay::Completion(&options),
+            )
+            .unwrap();
+        let lines = buffer_all_text(screen.test_backend().buffer());
+        assert_eq!(&lines[2..], &["/hotkeys", "Commands", "> /hotkeys", "ok"]);
+    }
+
+    #[test]
+    fn multiline_footer_keeps_first_rows_and_editor_on_small_screens() {
+        let mut screen = Screen::with_test_backend(28, 7).unwrap();
+        let status = ["路径 🌱", "idle", "third", "fourth", "fifth", "sixth"];
+        let rows = ["transcript".into()];
+        screen
+            .draw_with_overlay(&rows, "draft", 3, &status, EditorOverlay::None)
+            .unwrap();
+        let lines = buffer_all_text(screen.test_backend().buffer());
+        assert_eq!(lines[0], "transcript");
+        assert_eq!(lines[2], "draft");
+        assert_eq!(&lines[4..], &["idle", "third", "fourth"]);
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(3, 2));
+
+        screen.resize_test_backend(28, 2);
+        screen
+            .draw_with_overlay(&rows, "draft", 3, &status, EditorOverlay::None)
+            .unwrap();
+        assert_eq!(buffer_row_text(screen.test_backend().buffer(), 0), "draft");
+        assert_eq!(screen.test_cursor_position().unwrap(), Position::new(3, 0));
+
+        screen
+            .draw_with_overlay(&rows, "draft", 3, &[] as &[&str], EditorOverlay::None)
+            .unwrap();
+        assert_eq!(
+            buffer_all_text(screen.test_backend().buffer()),
+            ["transcript", "draft"]
+        );
+    }
+
+    #[test]
+    fn regular_mode_footer_resize_does_not_reprint_flushed_history() {
+        let log = Rc::new(RefCell::new(MockRegularLog {
+            width: 40,
+            height: 7,
+            ..Default::default()
+        }));
+        let mut screen =
+            Screen::with_regular_test_target(Box::new(MockRegularTarget { log: log.clone() }));
+        let rows: Vec<_> = (0..9).map(|i| format!("history {i}")).collect();
+        screen.draw(&rows, "draft", 3, "original", &[]).unwrap();
+        screen
+            .draw_with_overlay(
+                &rows,
+                "draft",
+                3,
+                &["first", "second", "third"],
+                EditorOverlay::None,
+            )
+            .unwrap();
+        screen
+            .draw_with_overlay(&rows, "draft", 3, &[] as &[&str], EditorOverlay::None)
+            .unwrap();
+        let log = log.borrow();
+        assert_eq!(log.writes.concat().matches("history 0").count(), 1);
+        assert!(!log.writes[1].contains("\x1b[2J"));
+        assert!(!log.writes[2].contains("\x1b[2J"));
+        let ModeState::Regular(reg) = &screen.mode else {
+            unreachable!()
+        };
+        assert!(reg.working_lines.last().unwrap().contains("draft"));
+        assert_eq!(reg.cursor_row, reg.working_lines.len() - 1);
     }
 
     #[test]

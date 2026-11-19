@@ -19,6 +19,24 @@ pub struct Target {
     pub cid: String,
     pub cwd: String,
     pub env_id: String,
+    pub labels: SessionLabels,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionLabels {
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub harness_id: Option<String>,
+}
+
+impl From<&SessionSummary> for SessionLabels {
+    fn from(session: &SessionSummary) -> Self {
+        Self {
+            title: session.title.clone(),
+            status: session.status.clone(),
+            harness_id: session.harness_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +83,10 @@ pub enum Reply {
     Page(EntriesPageResponse),
     Target(Target),
     Message(String),
+    SessionName {
+        title: Option<String>,
+        note: String,
+    },
     Attachment(String, Value),
     WorkspaceAttachment {
         path: String,
@@ -128,6 +150,7 @@ pub fn execute(
                     cid: new_cid,
                     cwd: target.cwd.clone(),
                     env_id: target.env_id.clone(),
+                    labels: target.labels.clone(),
                 },
                 receipt,
             })
@@ -284,8 +307,13 @@ pub fn execute(
                 .clone()
                 .or_else(|| detail.conversations.first().map(|c| c.id.clone()))
                 .unwrap_or_else(|| "1".to_string());
-            let env_id = detail.session.env_id.unwrap_or_else(|| "host".to_string());
+            let env_id = detail
+                .session
+                .env_id
+                .clone()
+                .unwrap_or_else(|| "host".to_string());
             Ok(Reply::Target(Target {
+                labels: SessionLabels::from(&detail.session),
                 sid: detail.session.session_id,
                 cid,
                 cwd: detail.session.cwd,
@@ -311,6 +339,7 @@ pub fn execute(
                 cid: new_cid,
                 cwd: target.cwd.clone(),
                 env_id: target.env_id.clone(),
+                labels: target.labels.clone(),
             }))
         }
 
@@ -416,8 +445,10 @@ pub fn execute(
             let env_id = detail
                 .session
                 .env_id
+                .clone()
                 .unwrap_or_else(|| target.env_id.clone());
             Ok(Reply::Target(Target {
+                labels: SessionLabels::from(&detail.session),
                 sid: detail.session.session_id,
                 cid: found.id,
                 cwd: detail.session.cwd,
@@ -531,7 +562,10 @@ pub fn execute(
                 Some(title) => format!("Session name: {}", sanitize_single_line(title)),
                 None => "Session name: (untitled)".to_string(),
             };
-            Ok(Reply::Message(msg))
+            Ok(Reply::SessionName {
+                title: detail.session.title,
+                note: msg,
+            })
         }
 
         Effect::Rename(title) => {
@@ -549,7 +583,7 @@ pub fn execute(
                 Some(name) => format!("Renamed session to {}{seq_str}", sanitize_single_line(name)),
                 None => format!("Cleared session name{seq_str}"),
             };
-            Ok(Reply::Message(msg))
+            Ok(Reply::SessionName { title, note: msg })
         }
 
         Effect::UserShell {
@@ -639,6 +673,7 @@ fn verify_created_target(
             sanitize_single_line(&created.session.session_id)
         ));
     }
+    let labels = SessionLabels::from(&created.session);
     let actual_env_id = created.session.env_id.unwrap_or_else(|| "host".to_string());
     if actual_env_id != expected_env_id {
         return Err(format!(
@@ -664,6 +699,7 @@ fn verify_created_target(
         cid,
         cwd: created.session.cwd,
         env_id: actual_env_id,
+        labels,
     }))
 }
 
@@ -947,6 +983,7 @@ mod tests {
             cid: "1".to_string(),
             cwd: "/tmp/proj".to_string(),
             env_id: "host".to_string(),
+            labels: SessionLabels::default(),
         }
     }
 
@@ -1300,6 +1337,10 @@ mod tests {
                 cid: "1".to_string(),
                 cwd: "/tmp/proj".to_string(),
                 env_id: "host".to_string(),
+                labels: SessionLabels {
+                    status: Some("ok".into()),
+                    ..SessionLabels::default()
+                },
             })
         );
         drop(reqs);
@@ -1450,6 +1491,7 @@ mod tests {
                 cid: "2".to_string(),
                 cwd: "/tmp/proj".to_string(),
                 env_id: "host".to_string(),
+                labels: SessionLabels::default(),
             })
         );
 
@@ -1471,6 +1513,10 @@ mod tests {
                 cid: "3".to_string(),
                 cwd: "/work".to_string(),
                 env_id: "vm-1".to_string(),
+                labels: SessionLabels {
+                    status: Some("ok".into()),
+                    ..SessionLabels::default()
+                },
             })
         );
 
@@ -1488,6 +1534,7 @@ mod tests {
                 cid: "2".to_string(),
                 cwd: "/tmp/proj".to_string(),
                 env_id: "host".to_string(),
+                labels: SessionLabels::default(),
             })
         );
 
@@ -1646,6 +1693,7 @@ mod tests {
                     cid: "2".to_string(),
                     cwd: "/tmp/proj".to_string(),
                     env_id: "host".to_string(),
+                    labels: SessionLabels::default(),
                 },
                 receipt: CommandReceipt {
                     version: Some(1),
@@ -1728,7 +1776,10 @@ mod tests {
         let read_reply = execute(&client, &target, Some(12), Effect::ReadName).unwrap();
         assert_eq!(
             read_reply,
-            Reply::Message("Session name: Initial Title".to_string())
+            Reply::SessionName {
+                title: Some("Initial Title".into()),
+                note: "Session name: Initial Title".into()
+            }
         );
 
         let rename_reply = execute(
@@ -1740,7 +1791,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             rename_reply,
-            Reply::Message("Renamed session to New Name · seq 13".to_string())
+            Reply::SessionName {
+                title: Some("New Name".into()),
+                note: "Renamed session to New Name · seq 13".into()
+            }
         );
 
         let conflict = execute(
