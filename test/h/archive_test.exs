@@ -46,8 +46,60 @@ defmodule H.ArchiveTest do
     assert %{"status" => "stale"} = upload(ctx, 1, rows)
     assert request(ctx, 3, rows, ctx.token, false).status == 422
 
-    assert [%{session_id: ^sid, title: "Example", attention: "archived"}] =
-             H.Daemon.list_sessions(ctx.opts)
+    assert [
+             %{
+               session_id: ^sid,
+               title: "Example",
+               attention: "archived",
+               archived: true,
+               needs_attention: false,
+               loaded: false
+             }
+           ] = H.Daemon.list_sessions(ctx.opts)
+
+    assert {:error, {:conflict, "session is archived"}} =
+             H.Daemon.triage_session(sid, %{"needs_attention" => true}, ctx.opts)
+
+    assert {:error, {:conflict, "session is archived"}} =
+             H.Daemon.archive_session(sid, %{"archived" => false}, ctx.opts)
+
+    assert {:error, {:conflict, "session is archived"}} =
+             H.Daemon.stop_session(sid, %{}, ctx.opts)
+
+    # Forking an imported archive into an existing cwd creates a live native session
+    fork_cwd = Path.join(ctx.opts[:data_dir], "forked-work")
+    File.mkdir_p!(fork_cwd)
+
+    fork_opts =
+      Keyword.merge(ctx.opts,
+        registry: :"archive_reg_#{System.unique_integer([:positive])}",
+        workspace_lease: :"archive_lease_#{System.unique_integer([:positive])}",
+        runtime_sup: :"archive_sup_#{System.unique_integer([:positive])}",
+        provider: H.Provider.Fake,
+        provider_config: %{server: start_supervised!(H.Provider.Fake)},
+        storage_mod: H.Storage.Memory
+      )
+
+    start_supervised!({Registry, keys: :unique, name: fork_opts[:registry]})
+    start_supervised!({H.WorkspaceLease, name: fork_opts[:workspace_lease]})
+    start_supervised!({DynamicSupervisor, strategy: :one_for_one, name: fork_opts[:runtime_sup]})
+
+    assert {:ok, %{session: forked}} =
+             H.Daemon.fork_session(
+               sid,
+               %{"cwd" => fork_cwd, "conversation_id" => fork.id},
+               fork_opts
+             )
+
+    assert forked.status == "ok"
+    assert forked.archived == false
+    assert forked.loaded == true
+    assert forked.needs_attention == true
+
+    assert {:ok, %{items: forked_items}} =
+             H.Daemon.scan_entries(forked.session_id, "1", %{"order" => "asc"}, fork_opts)
+
+    assert Enum.map(forked_items, & &1.data["text"]) == ["root", "fork"]
 
     assert {:ok, %{items: [%{"id" => "8"}], next_cursor: "8"}} =
              H.Daemon.scan_entries(sid, "1", %{"limit" => "1"}, ctx.opts)

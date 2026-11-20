@@ -90,6 +90,25 @@ defmodule H.Session.Server.State do
 
   # Workspace leases
 
+  def cwd_available?(state) when is_map(state) do
+    env = Map.get(state, :execution_env)
+    cwd = workspace_cwd(env, state)
+
+    cond do
+      not is_binary(cwd) or cwd == "" ->
+        false
+
+      is_nil(env) ->
+        File.dir?(cwd)
+
+      ExecutionEnv.kind(env) == "host" ->
+        File.dir?(cwd)
+
+      true ->
+        match?({:ok, _}, ExecutionEnv.bind_cwd(env, cwd))
+    end
+  end
+
   def workspace_cwd(env, state) do
     Map.get(state, :cwd) || if(env, do: ExecutionEnv.cwd(env), else: nil)
   end

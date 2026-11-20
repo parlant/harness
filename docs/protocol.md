@@ -26,10 +26,14 @@
 | `GET /fs/file` | Bounded read-only UTF-8 file reader. Required `env_id`, absolute `cwd`, and `path`; optional `offset` (default 1), `limit` 1–2000 (default 200), `max_bytes` 1–65536 (default 51200). Confined within workspace (`403` on traversal, `~`, or symlinks; `422` on dirs, non-regular files, or binary/non-UTF-8). |
 | `GET /archives` | Source identity, revision (file modification time in nanoseconds), size, generation, and H session ID of each imported archive. |
 | `POST /archives` | Owner bearer only. Stream `application/x-ndjson`: one header `{source,source_id,cwd,created_at,revision,size}`, then ordered entries `{parent,kind,data,created_at,title?}`, then `{end: <entry count>}`. Parent is `null` or the earlier entry's even ID (`2 × ordinal`, 1-based). Returns `{session_id,status}` with `created`, `updated`, `unchanged`, or `stale`. Archives are read-only and do not create a session worker. |
-| `GET /sessions` | Catalog `sessions` (`SessionSummary` entries); optional filters `env_id`, `cwd`, `subtree`. Reads `H.Catalog` without waking unloaded sessions. |
+| `GET /sessions` | Catalog `sessions` (`SessionSummary` entries); optional filters `env_id`, `cwd`, `subtree`, `archived`. Reads `H.Catalog` without waking unloaded sessions. |
 | `GET /sessions/events` | Catalog-level SSE stream (`text/event-stream`) across all sessions without waking unloaded sessions. Emits an initial `snapshot` event (`{"version":1,"seq":N,"sessions":[...]}`) followed by live `catalog` events (`{"version":1,"seq":N,"type":"upsert","session":...}` or `{"version":1,"seq":N,"type":"removed","session_id":"..."}`). |
 | `POST /sessions` | Required absolute `cwd`; optional `env_id` and `harness_id` (default `host` and `coding` for new sessions only), `title`, `agent`, `session_id`. Returns `session` and `seq`. Supply a stable `session_id` for create-or-attach; an explicit different profile or workspace conflicts, and an omitted profile or environment uses the recorded one when attaching. An unavailable recorded profile or environment returns `503`. Omitting the ID can create a second session on retry. |
 | `GET /sessions/:sid` | `session`, `conversations` with ancestry, and `tasks`. No open-waits API. |
+| `POST /sessions/:sid/triage` | Body `{needs_attention}` (boolean). Updates catalog triage state without waking unloaded sessions → `200` `{"session":...}`. |
+| `POST /sessions/:sid/stop` | Optional `{reason}`. Aborts active generation, tool, compaction, and user-shell work across all conversations in the session → `200` `{"session":...}`. |
+| `POST /sessions/:sid/archive` | Optional `{archived, stop}` (defaults `archived: true`, `stop: false`). When archiving, returns `409` `{"error":"session_busy"}` if busy unless `stop: true` (or `force: true`), cleanly unloads the session supervisor from RAM, and sets `archived: true`, `needs_attention: false`, `loaded: false`. Reopening or sending a command automatically unarchives. |
+| `POST /sessions/:sid/fork` | Required existing target `cwd`; optional `env_id`, `conversation_id`, `at_entry_id`, `title`, `session_id`. Copies visible branch entries into a new session bound to `cwd` → `200` `{"session":...,"seq":N}`. |
 | `GET /sessions/:sid/files` | Same bounded file discovery as `GET /fs/files`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |
 | `GET /sessions/:sid/file` | Same bounded UTF-8 file read as `GET /fs/file`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |
 | `GET /sessions/:sid/conversations/:cid/entries` | `items` and `next_cursor` through the visible lineage. `order=desc` (default) or `asc`; `cursor` optional, `limit` 1–200 (default 50). |
@@ -56,6 +60,8 @@ A `200` receipt acknowledges the command, not a completed model reply. It includ
 | `abort` | Abort active generation or user-shell work in the conversation, optionally with `reason`. Although validation accepts `task_id`, the handler does **not** narrow cancellation to that task. |
 | `withdraw` | `submission_ids`: non-empty array of queued submission IDs to withdraw atomically from the conversation's `inbox`. All-or-conflict (`409` `"submission_not_queued"` if any ID is missing, already consumed, already withdrawn, or belongs to another conversation). Receipt returns `status: "done"` and `withdrawn`: array of withdrawn inbox items (`submission_id`, `request_id`, `when_busy`, `content`) in original `inbox` order; idempotent retries return the stored `withdrawn` array. |
 
+If a session's bound working directory no longer exists (`cwd_exists: false`), read endpoints (`GET /sessions/:sid`, `GET /sessions/:sid/conversations/:cid/entries`, `GET /sessions/:sid/conversations/:cid/events`) and management commands (`abort`, `withdraw`, `rename`, `configure`, `fork`, `submit/write`) remain available, while work-starting commands (`submit/input`, `submit/continue`, `fork_and_submit`, `user_shell`, `compact`) return `409` `{"error":"cwd_missing"}`. Use `POST /sessions/:sid/fork` to continue the conversation in an existing working directory.
+
 ## Automatic compaction and continuation
 
 Before each generation (including after a completed tool batch), the daemon estimates the size of the **projected** messages and tool schemas: roughly one token per four serialized bytes. This is not cumulative session usage or an exact provider token count. For a known ReqLLM model the default trigger is its context window minus 16,384 tokens (reserve at most half of a small window). Unknown models and other adapters default to 96,000 estimated tokens.
@@ -75,15 +81,19 @@ Exact cwd + qualified model wins, then cwd, model, provider, `:default`, and fin
 
 There is no built-in tool-round cap. An optional future extension could enforce a round, cost, or elapsed-time budget to bound unattended work or catch a looping model. That is separate from context management. Without that policy a model that keeps calling tools may keep spending until you abort it.
 
-## SessionSummary attention fields
+## SessionSummary attention and lifecycle fields
 
-Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST /sessions`, `GET /sessions/:sid`, and `GET /fs` (`sessions` and `directories[*].latest_session`) includes live attention metadata persisted in `H.Catalog`:
+Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST /sessions`, `GET /sessions/:sid`, `POST /sessions/:sid/{triage,stop,archive,fork}`, and `GET /fs` (`sessions` and `directories[*].latest_session`) includes attention and lifecycle metadata:
 
 - `attention`: `"idle"` | `"running"` | `"sleeping"` | `"error"` | `"quarantined"` (always `"quarantined"` when `status == "quarantined"`).
 - Imported sessions have `status` and `attention` set to `"archived"`, with `active: false`.
 - `activity_kind`: `null` | `"generation"` | `"tool"` | `"user_shell"` | `"compaction"` | `"retry"`.
 - `activity_label`: `null` or a sanitized short string (max 120 chars, no control characters), e.g. active tool name (`"bash"`), `"shell"`, `"compact"`, `"retrying"`, or failure reason/code when `attention == "error"`.
 - `queued_count`: non-negative integer count of queued inbox items across conversations in the session.
+- `needs_attention`: boolean triage flag persisted in `H.Catalog` (`true` on creation and when a run settles to `"idle"`, `"error"`, or `"quarantined"`; `false` while `"running"`/`"sleeping"`, when `archived == true`, or when manually dismissed via `POST /sessions/:sid/triage`).
+- `archived`: boolean persisted in `H.Catalog` (`false` by default).
+- `loaded`: live boolean indicating whether the session's `H.Session.Server` coordinator is currently running in OTP RAM (never persisted to disk).
+- `cwd_exists`: live boolean indicating whether the session's working directory currently exists (`false` when a host `cwd` was deleted).
 
 ## SSE cursor rules
 

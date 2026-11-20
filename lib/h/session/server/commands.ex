@@ -52,9 +52,22 @@ defmodule H.Session.Server.Commands do
     now = System.system_time(:millisecond)
 
     case args.type do
-      "write" -> stage_submit_write(from, cid, req_id, fp, args, state, now)
-      "continue" -> stage_submit_continue(from, cid, req_id, fp, state, now)
-      "input" -> stage_submit_input(from, cid, req_id, fp, args, state, now)
+      "write" ->
+        stage_submit_write(from, cid, req_id, fp, args, state, now)
+
+      "continue" ->
+        if State.cwd_available?(state) do
+          stage_submit_continue(from, cid, req_id, fp, state, now)
+        else
+          {:immediate, from, {:error, {:conflict, "cwd_missing"}}, [], state}
+        end
+
+      "input" ->
+        if State.cwd_available?(state) do
+          stage_submit_input(from, cid, req_id, fp, args, state, now)
+        else
+          {:immediate, from, {:error, {:conflict, "cwd_missing"}}, [], state}
+        end
     end
   end
 
@@ -63,7 +76,11 @@ defmodule H.Session.Server.Commands do
   end
 
   defp dispatch(from, "fork_and_submit", cid, req_id, fp, args, state, _staged_rev) do
-    stage_fork(from, cid, req_id, fp, args, state, true)
+    if State.cwd_available?(state) do
+      stage_fork(from, cid, req_id, fp, args, state, true)
+    else
+      {:immediate, from, {:error, {:conflict, "cwd_missing"}}, [], state}
+    end
   end
 
   defp dispatch(from, "configure", cid, req_id, fp, args, state, _staged_rev) do
@@ -83,11 +100,19 @@ defmodule H.Session.Server.Commands do
   end
 
   defp dispatch(from, "user_shell", cid, req_id, fp, args, state, _staged_rev) do
-    UserShell.stage(from, cid, req_id, fp, args, state)
+    if State.cwd_available?(state) do
+      UserShell.stage(from, cid, req_id, fp, args, state)
+    else
+      {:immediate, from, {:error, {:conflict, "cwd_missing"}}, [], state}
+    end
   end
 
   defp dispatch(from, "compact", cid, req_id, fp, args, state, _staged_rev) do
-    stage_compact(from, cid, req_id, fp, args, state)
+    if State.cwd_available?(state) do
+      stage_compact(from, cid, req_id, fp, args, state)
+    else
+      {:immediate, from, {:error, {:conflict, "cwd_missing"}}, [], state}
+    end
   end
 
   # Individual command stagers
@@ -565,12 +590,77 @@ defmodule H.Session.Server.Commands do
     end
   end
 
-  defp stage_abort(from, cid, req_id, fp, args, state) do
+  def stage_abort_all(from, reason, state) do
     now = System.system_time(:millisecond)
-    reason = Map.get(args, :reason) || "aborted"
-    {:ok, sub_id, store} = Storage.mint_id(state.store)
-    state = %{state | store: store}
+    reason = if is_binary(reason) and reason != "", do: reason, else: "stopped"
 
+    cids = state.conversations |> Map.keys() |> Enum.sort()
+
+    {writes, conv_events, effects, aborted_count, state} =
+      Enum.reduce(cids, {[], %{}, [], 0, state}, fn cid,
+                                                    {acc_w, acc_ev, acc_eff, acc_cnt, acc_st} ->
+        {w, ev, eff, aborted?, next_st} = abort_conversation_tasks(cid, reason, acc_st, now)
+
+        if aborted? do
+          {acc_w ++ w, Map.put(acc_ev, cid, ev), acc_eff ++ eff, acc_cnt + 1, next_st}
+        else
+          {acc_w, acc_ev, acc_eff, acc_cnt, next_st}
+        end
+      end)
+
+    if writes == [] do
+      {:immediate, from, {:ok, %{aborted_conversations: 0, seq: state.seq}}, [], state}
+    else
+      staged = %{
+        raw_item: {:abort_all, from, reason},
+        writes: writes,
+        conv_events: conv_events,
+        submissions: [],
+        effects: effects,
+        reply_from: from,
+        receipt: %{aborted_conversations: aborted_count}
+      }
+
+      {:batch, staged, state}
+    end
+  end
+
+  def stage_seed_entries(from, cid, raw_entries, state) do
+    if raw_entries == [] do
+      {:immediate, from, {:ok, %{seeded: 0, seq: state.seq}}, [], state}
+    else
+      now = System.system_time(:millisecond)
+
+      {entries, state} =
+        Enum.reduce(raw_entries, {[], state}, fn raw, {acc_e, acc_st} ->
+          {:ok, entry_id, store} = Storage.mint_id(acc_st.store)
+          acc_st = %{acc_st | store: store}
+          kind = Map.get(raw, :kind) || Map.get(raw, "kind")
+          data = Map.get(raw, :data) || Map.get(raw, "data") || %{}
+          created_at = Map.get(raw, :created_at) || Map.get(raw, "created_at") || now
+
+          entry = State.build_entry(entry_id, cid, kind, data, created_at)
+          acc_st = State.record_entry(acc_st, cid, entry_id)
+          {acc_e ++ [entry], acc_st}
+        end)
+
+      writes = Enum.map(entries, &{:append_entry, &1})
+
+      staged = %{
+        raw_item: {:seed_entries, from, cid, raw_entries},
+        writes: writes,
+        conv_events: %{cid => %{entries: entries, doc_ops: %{}}},
+        submissions: [],
+        effects: [],
+        reply_from: from,
+        receipt: %{seeded: length(entries)}
+      }
+
+      {:batch, staged, state}
+    end
+  end
+
+  defp abort_conversation_tasks(cid, reason, state, now) do
     active_for = fn kind ->
       state.tasks
       |> Map.values()
@@ -583,26 +673,50 @@ defmodule H.Session.Server.Commands do
     active_shells = active_for.("user_shell")
     active_compactions = active_for.("compaction")
 
-    {abort_writes, state, kill_effects} =
-      Enum.reduce(active_gens, {[], state, []}, fn gen_task, {acc_w, acc_s, acc_eff} ->
-        {w, st, eff} = Generation.abort_generation_run(gen_task, cid, reason, acc_s, now)
-        {acc_w ++ w, st, acc_eff ++ eff}
-      end)
+    if active_gens == [] and active_shells == [] and active_compactions == [] do
+      {[], %{entries: [], doc_ops: %{}}, [], false, state}
+    else
+      {abort_writes, state, kill_effects} =
+        Enum.reduce(active_gens, {[], state, []}, fn gen_task, {acc_w, acc_s, acc_eff} ->
+          {w, st, eff} = Generation.abort_generation_run(gen_task, cid, reason, acc_s, now)
+          {acc_w ++ w, st, acc_eff ++ eff}
+        end)
 
-    {shell_writes, state, shell_kills} =
-      Enum.reduce(active_shells, {[], state, []}, fn shell_task, {acc_w, acc_s, acc_eff} ->
-        {w, st, eff} = UserShell.stage_abort(shell_task, cid, reason, acc_s, now)
-        {acc_w ++ w, st, acc_eff ++ eff}
-      end)
+      {shell_writes, state, shell_kills} =
+        Enum.reduce(active_shells, {[], state, []}, fn shell_task, {acc_w, acc_s, acc_eff} ->
+          {w, st, eff} = UserShell.stage_abort(shell_task, cid, reason, acc_s, now)
+          {acc_w ++ w, st, acc_eff ++ eff}
+        end)
 
-    {comp_writes, state, comp_kills} =
-      Enum.reduce(active_compactions, {[], state, []}, fn comp_task, {acc_w, acc_s, acc_eff} ->
-        {w, st, eff} = Generation.abort_compaction_run(comp_task, cid, reason, acc_s, now)
-        {acc_w ++ w, st, acc_eff ++ eff}
-      end)
+      {comp_writes, state, comp_kills} =
+        Enum.reduce(active_compactions, {[], state, []}, fn comp_task, {acc_w, acc_s, acc_eff} ->
+          {w, st, eff} = Generation.abort_compaction_run(comp_task, cid, reason, acc_s, now)
+          {acc_w ++ w, st, acc_eff ++ eff}
+        end)
 
-    all_abort_writes = abort_writes ++ shell_writes ++ comp_writes
-    all_kill_effects = kill_effects ++ shell_kills ++ comp_kills
+      all_abort_writes = abort_writes ++ shell_writes ++ comp_writes
+      all_kill_effects = kill_effects ++ shell_kills ++ comp_kills
+      next_live = state.docs[cid]["live"]
+
+      appended =
+        Enum.flat_map(all_abort_writes, fn
+          {:append_entry, e} -> [e]
+          _ -> []
+        end)
+
+      ev = %{entries: appended, doc_ops: %{"live" => [["replace", next_live]]}}
+      {all_abort_writes, ev, all_kill_effects, true, state}
+    end
+  end
+
+  defp stage_abort(from, cid, req_id, fp, args, state) do
+    now = System.system_time(:millisecond)
+    reason = Map.get(args, :reason) || "aborted"
+    {:ok, sub_id, store} = Storage.mint_id(state.store)
+    state = %{state | store: store}
+
+    {all_abort_writes, ev, all_kill_effects, _aborted?, state} =
+      abort_conversation_tasks(cid, reason, state, now)
 
     sub =
       Submission.new(%{
@@ -619,25 +733,12 @@ defmodule H.Session.Server.Commands do
     writes =
       [{:check, {:unique_request_id, req_id, fp}}, {:put_submission, sub}] ++ all_abort_writes
 
-    next_live = state.docs[cid]["live"]
-
-    doc_ops =
-      if active_gens == [] and active_shells == [] and active_compactions == [],
-        do: %{},
-        else: %{"live" => [["replace", next_live]]}
-
-    appended =
-      Enum.flat_map(all_abort_writes, fn
-        {:append_entry, e} -> [e]
-        _ -> []
-      end)
-
     staged = %{
       raw_item:
         {:command, from,
          %{command: "abort", conversation_id: cid, request_id: req_id, args: args}},
       writes: writes,
-      conv_events: %{cid => %{entries: appended, doc_ops: doc_ops}},
+      conv_events: %{cid => ev},
       submissions: [sub],
       effects: all_kill_effects,
       reply_from: from,

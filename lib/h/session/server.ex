@@ -56,6 +56,24 @@ defmodule H.Session.Server do
     GenServer.call(server, {:command, cmd}, 30_000)
   end
 
+  @spec abort_all(GenServer.server(), String.t()) :: {:ok, map()} | {:error, term()}
+  def abort_all(server, reason \\ "stopped") when is_binary(reason) do
+    GenServer.call(server, {:abort_all, reason}, 30_000)
+  end
+
+  @spec export_branch(GenServer.server(), pos_integer(), nil | pos_integer()) ::
+          {:ok, %{entries: [map()], agent: map()}} | {:error, term()}
+  def export_branch(server, cid, at_entry_id \\ nil)
+      when is_integer(cid) and (is_nil(at_entry_id) or is_integer(at_entry_id)) do
+    GenServer.call(server, {:export_branch, cid, at_entry_id}, 30_000)
+  end
+
+  @spec seed_entries(GenServer.server(), [map()], pos_integer()) ::
+          {:ok, %{seeded: non_neg_integer(), seq: non_neg_integer()}} | {:error, term()}
+  def seed_entries(server, entries, cid \\ 1) when is_list(entries) and is_integer(cid) do
+    GenServer.call(server, {:seed_entries, cid, entries}, 30_000)
+  end
+
   @spec close(GenServer.server(), term()) :: :ok
   def close(server, reason \\ :shutdown) do
     GenServer.stop(server, reason)
@@ -94,6 +112,7 @@ defmodule H.Session.Server do
     detail = %{
       session_meta: state.session_meta,
       seq: state.seq,
+      cwd_exists: State.cwd_available?(state),
       conversations: state.conversations |> Map.values() |> Enum.sort_by(& &1.id),
       tasks: state.tasks |> Map.values() |> Enum.sort_by(& &1.id)
     }
@@ -136,6 +155,25 @@ defmodule H.Session.Server do
 
   def handle_call({:command, cmd}, from, state) do
     process_with_drain({:command, from, cmd}, state)
+  end
+
+  def handle_call({:abort_all, reason}, from, state) do
+    process_with_drain({:abort_all, from, reason}, state)
+  end
+
+  def handle_call({:seed_entries, cid, entries}, from, state) do
+    process_with_drain({:seed_entries, from, cid, entries}, state)
+  end
+
+  def handle_call({:export_branch, cid, at_entry_id}, _from, state) do
+    if Map.has_key?(state.conversations, cid) do
+      case do_export_branch(state, cid, at_entry_id) do
+        {:ok, payload, next_state} -> {:reply, {:ok, payload}, next_state}
+        {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
+      end
+    else
+      {:reply, {:error, :not_found}, state}
+    end
   end
 
   @impl true
@@ -368,6 +406,24 @@ defmodule H.Session.Server do
     end
   end
 
+  defp stage_single_item({:abort_all, from, reason}, state, _staged_rev) do
+    if state.maintenance_table &&
+         not :ets.lookup_element(state.maintenance_table, :open, 2, false) do
+      {:immediate, from, {:error, :daemon_draining}, [], state}
+    else
+      Commands.stage_abort_all(from, reason, state)
+    end
+  end
+
+  defp stage_single_item({:seed_entries, from, cid, entries}, state, _staged_rev) do
+    if state.maintenance_table &&
+         not :ets.lookup_element(state.maintenance_table, :open, 2, false) do
+      {:immediate, from, {:error, :daemon_draining}, [], state}
+    else
+      Commands.stage_seed_entries(from, cid, entries, state)
+    end
+  end
+
   defp stage_single_item(
          {:worker_done, tid, attempt_id, {:generation_result, _} = result},
          state,
@@ -450,5 +506,32 @@ defmodule H.Session.Server do
 
   defp apply_effect({:release_lease, cid}, state) do
     State.release_lease(cid, state)
+  end
+
+  defp do_export_branch(state, cid, nil) do
+    {:ok, entries, state} = State.load_visible_entries(state, cid)
+    agent = get_in(state.docs, [cid, "agent"]) || %{}
+    {:ok, %{entries: entries, agent: agent}, state}
+  end
+
+  defp do_export_branch(state, cid, at_entry_id) do
+    case State.verify_visible_entry(state, cid, at_entry_id) do
+      {:ok, at_entry, state} ->
+        {:ok, all_entries, state} = State.load_visible_entries(state, cid)
+        prefix = Enum.filter(all_entries, &(&1.id <= at_entry_id))
+
+        case H.Document.fork_docs(state.store, cid, at_entry.seq,
+               default_model: state.default_model
+             ) do
+          {:ok, fork_docs, next_store} ->
+            {:ok, %{entries: prefix, agent: fork_docs["agent"]}, %{state | store: next_store}}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      {:error, :entry_not_visible, state} ->
+        {:error, {:bad_request, "entry_not_visible"}, state}
+    end
   end
 end

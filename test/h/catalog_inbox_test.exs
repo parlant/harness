@@ -80,7 +80,8 @@ defmodule H.CatalogInboxTest do
     start_supervised!({Auth, data_dir: data_dir, name: auth, table: auth_table})
 
     start_supervised!(
-      {Catalog, data_dir: data_dir, name: catalog, table: catalog_table, pubsub: pubsub}
+      {Catalog,
+       data_dir: data_dir, name: catalog, table: catalog_table, pubsub: pubsub, registry: registry}
     )
 
     start_supervised!({WorkspaceLease, name: lease})

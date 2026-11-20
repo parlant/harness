@@ -12,6 +12,7 @@ defmodule H.Catalog do
   alias H.Schema
 
   @default_table :h_catalog
+  @default_registry H.Registry
 
   @worker_fields [
     :title,
@@ -32,6 +33,8 @@ defmodule H.Catalog do
     :activity_kind,
     :activity_label,
     :queued_count,
+    :needs_attention,
+    :archived,
     :next_wake_at,
     :applied_edit_rev
   ]
@@ -48,6 +51,7 @@ defmodule H.Catalog do
     * `:name` - GenServer registration name (default `H.Catalog`, pass `nil` for unnamed)
     * `:table` - ETS table name (default `:h_catalog`)
     * `:pubsub` - `Registry` name for `:catalog` topic broadcasts (default `H.PubSub`, pass `nil` to disable)
+    * `:registry` - `Registry` name for live session lookup (default `H.Registry`, pass `nil` to disable)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -60,9 +64,12 @@ defmodule H.Catalog do
   Formats a catalog entry into the wire-level `SessionSummary` map shared by
   `H.Daemon` and catalog SSE broadcasts.
   """
-  @spec wire_session(map()) :: map()
-  def wire_session(entry) when is_map(entry) do
+  @spec wire_session(map(), keyword()) :: map()
+  def wire_session(entry, opts \\ []) when is_map(entry) and is_list(opts) do
     status = Map.get(entry, :status) || "ok"
+    env_id = Map.get(entry, :env_id) || "host"
+    archived = status == "archived" or Map.get(entry, :archived) == true
+    registry = Keyword.get(opts, :registry, @default_registry)
 
     attention =
       if status == "quarantined" do
@@ -71,10 +78,20 @@ defmodule H.Catalog do
         normalize_attention(Map.get(entry, :attention), status)
       end
 
+    needs_attention =
+      if archived do
+        false
+      else
+        case Map.fetch(entry, :needs_attention) do
+          {:ok, val} when is_boolean(val) -> val
+          _ -> attention not in ["running", "sleeping"]
+        end
+      end
+
     %{
       session_id: entry.session_id,
       title: Map.get(entry, :title),
-      env_id: Map.get(entry, :env_id) || "host",
+      env_id: env_id,
       harness_id: Map.get(entry, :harness_id) || "coding",
       cwd: entry.cwd,
       root_conversation_id: to_string(Map.get(entry, :root_conversation_id) || 1),
@@ -85,6 +102,10 @@ defmodule H.Catalog do
       activity_kind: normalize_activity_kind(Map.get(entry, :activity_kind)),
       activity_label: sanitize_activity_label(Map.get(entry, :activity_label)),
       queued_count: normalize_queued_count(Map.get(entry, :queued_count)),
+      needs_attention: needs_attention,
+      archived: archived,
+      loaded: session_loaded?(registry, entry.session_id),
+      cwd_exists: cwd_exists?(env_id, entry.cwd),
       next_wake_at: Map.get(entry, :next_wake_at),
       status: status
     }
@@ -181,6 +202,7 @@ defmodule H.Catalog do
     else
       table = Keyword.get(opts, :table, @default_table)
       parent_path = Keyword.get(opts, :parent_path)
+      registry = Keyword.get(opts, :registry, @default_registry)
       target_env = normalize_env_id(env_id)
 
       resolved_dirs = Enum.map(dir_entries, &resolve_dir_path(&1, target_env, parent_path))
@@ -194,7 +216,7 @@ defmodule H.Catalog do
 
       Enum.zip_with(dir_entries, resolved_dirs, fn dir, dir_path ->
         stats = Map.get(stats_by_path, dir_path, empty_dir_stats())
-        merge_dir_annotations(dir, stats)
+        merge_dir_annotations(dir, stats, registry)
       end)
     end
   end
@@ -251,6 +273,36 @@ defmodule H.Catalog do
   end
 
   @doc """
+  Sets triage metadata (`needs_attention`) for a session without waking it.
+  Setting `needs_attention: true` also clears `archived: false`.
+  """
+  @spec set_triage(GenServer.server(), String.t(), map()) ::
+          {:ok, map()} | {:error, :not_found | String.t()}
+  def set_triage(server \\ __MODULE__, session_id, attrs)
+      when is_binary(session_id) and is_map(attrs) do
+    GenServer.call(server, {:set_triage, session_id, attrs})
+  end
+
+  @doc """
+  Archives or unarchives a session in the catalog without waking it.
+  """
+  @spec set_archived(GenServer.server(), String.t(), boolean(), keyword()) ::
+          {:ok, map()} | {:error, :not_found}
+  def set_archived(server \\ __MODULE__, session_id, archived?, opts \\ [])
+      when is_binary(session_id) and is_boolean(archived?) and is_list(opts) do
+    GenServer.call(server, {:set_archived, session_id, archived?, opts})
+  end
+
+  @doc """
+  Broadcasts a fresh `:catalog` upsert for `session_id` reflecting live computed
+  fields (`loaded`, `cwd_exists`) without rewriting `sessions.json`.
+  """
+  @spec broadcast_live_state(GenServer.server(), String.t()) :: :ok
+  def broadcast_live_state(server \\ __MODULE__, session_id) when is_binary(session_id) do
+    GenServer.call(server, {:broadcast_live_state, session_id})
+  end
+
+  @doc """
   Deletes a session entry from ETS and disk atomically.
   """
   @spec delete_session(GenServer.server(), String.t()) :: :ok
@@ -263,6 +315,7 @@ defmodule H.Catalog do
     data_dir = Keyword.fetch!(opts, :data_dir) |> Path.expand()
     table_name = Keyword.get(opts, :table, @default_table)
     pubsub = Keyword.get(opts, :pubsub, H.PubSub)
+    registry = Keyword.get(opts, :registry, @default_registry)
 
     catalog_dir = Path.join(data_dir, "catalog")
     File.mkdir_p!(data_dir)
@@ -279,7 +332,15 @@ defmodule H.Catalog do
       :ets.insert(table, {session_id, entry})
     end)
 
-    {:ok, %{table: table, file_path: file_path, entries: entries, pubsub: pubsub, seq: 1}}
+    {:ok,
+     %{
+       table: table,
+       file_path: file_path,
+       entries: entries,
+       pubsub: pubsub,
+       registry: registry,
+       seq: 1
+     }}
   end
 
   @impl true
@@ -325,7 +386,12 @@ defmodule H.Catalog do
 
       with {:ok, validated} <-
              validate_put_attrs(
-               Map.merge(attrs, %{status: "archived", harness_id: source.source})
+               Map.merge(attrs, %{
+                 status: "archived",
+                 archived: true,
+                 needs_attention: false,
+                 harness_id: source.source
+               })
              ),
            :ok <- File.rename(staged, dest) do
         entry = build_entry(nil, validated, attrs.updated_at)
@@ -335,7 +401,7 @@ defmodule H.Catalog do
         :ets.insert(state.table, {sid, entry})
         if old, do: File.rm(H.Archive.path(dir, sid, old.generation))
         seq = state.seq + 1
-        broadcast_upsert(state.pubsub, seq, entry)
+        broadcast_upsert(state.pubsub, state.registry, seq, entry)
 
         {:reply, {:ok, if(old, do: "updated", else: "created")},
          %{state | entries: entries, seq: seq}}
@@ -364,7 +430,7 @@ defmodule H.Catalog do
         persist_entries!(state.file_path, entries)
         :ets.insert(state.table, {session_id, entry})
         next_seq = state.seq + 1
-        broadcast_upsert(state.pubsub, next_seq, entry)
+        broadcast_upsert(state.pubsub, state.registry, next_seq, entry)
 
         {:reply, {:ok, entry}, %{state | entries: entries, seq: next_seq}}
       end
@@ -386,6 +452,7 @@ defmodule H.Catalog do
           existing
           |> Map.merge(updates)
           |> enforce_status_attention()
+          |> apply_runtime_triage_transitions(existing)
 
         changed? = runtime_changed?(existing, candidate)
 
@@ -401,7 +468,7 @@ defmodule H.Catalog do
           persist_entries!(state.file_path, entries)
           :ets.insert(state.table, {session_id, updated})
           next_seq = state.seq + 1
-          broadcast_upsert(state.pubsub, next_seq, updated)
+          broadcast_upsert(state.pubsub, state.registry, next_seq, updated)
 
           {:reply, {:ok, updated}, %{state | entries: entries, seq: next_seq}}
         else
@@ -426,6 +493,8 @@ defmodule H.Catalog do
             attention: "quarantined",
             activity_kind: nil,
             activity_label: sanitize_activity_label(normalized_reason),
+            needs_attention: true,
+            archived: false,
             quarantine_reason: normalized_reason,
             updated_at: now
         }
@@ -434,9 +503,116 @@ defmodule H.Catalog do
         persist_entries!(state.file_path, entries)
         :ets.insert(state.table, {session_id, updated})
         next_seq = state.seq + 1
-        broadcast_upsert(state.pubsub, next_seq, updated)
+        broadcast_upsert(state.pubsub, state.registry, next_seq, updated)
 
         {:reply, {:ok, updated}, %{state | entries: entries, seq: next_seq}}
+    end
+  end
+
+  def handle_call({:set_triage, session_id, attrs}, _from, state) do
+    case Map.fetch(state.entries, session_id) do
+      :error ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok, %{status: "archived"}} ->
+        {:reply, {:error, {:conflict, "session is archived"}}, state}
+
+      {:ok, existing} ->
+        case extract_triage_bool(attrs) do
+          {:ok, needs_attention} ->
+            now = System.system_time(:millisecond)
+            next_archived = if needs_attention, do: false, else: existing.archived
+
+            updated = %{
+              existing
+              | needs_attention: needs_attention,
+                archived: next_archived,
+                updated_at: now
+            }
+
+            entries = Map.put(state.entries, session_id, updated)
+            persist_entries!(state.file_path, entries)
+            :ets.insert(state.table, {session_id, updated})
+            next_seq = state.seq + 1
+            broadcast_upsert(state.pubsub, state.registry, next_seq, updated)
+
+            {:reply, {:ok, updated}, %{state | entries: entries, seq: next_seq}}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
+  def handle_call({:set_archived, session_id, archived?, opts}, _from, state) do
+    case Map.fetch(state.entries, session_id) do
+      :error ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok, %{status: "archived"} = existing} ->
+        if archived? do
+          {:reply, {:ok, existing}, state}
+        else
+          {:reply, {:error, {:conflict, "session is archived"}}, state}
+        end
+
+      {:ok, existing} ->
+        now = System.system_time(:millisecond)
+
+        updated =
+          if archived? do
+            {next_attention, next_kind, next_label} =
+              if existing.attention in ["running", "sleeping"] do
+                {"idle", nil, nil}
+              else
+                {existing.attention, existing.activity_kind, existing.activity_label}
+              end
+
+            %{
+              existing
+              | archived: true,
+                needs_attention: false,
+                active: false,
+                attention: next_attention,
+                activity_kind: next_kind,
+                activity_label: next_label,
+                updated_at: now
+            }
+            |> enforce_status_attention()
+          else
+            next_needs_attention =
+              case Keyword.fetch(opts, :needs_attention) do
+                {:ok, val} when is_boolean(val) -> val
+                _ -> existing.needs_attention
+              end
+
+            %{
+              existing
+              | archived: false,
+                needs_attention: next_needs_attention,
+                updated_at: now
+            }
+          end
+
+        entries = Map.put(state.entries, session_id, updated)
+        persist_entries!(state.file_path, entries)
+        :ets.insert(state.table, {session_id, updated})
+        next_seq = state.seq + 1
+        broadcast_upsert(state.pubsub, state.registry, next_seq, updated)
+
+        {:reply, {:ok, updated}, %{state | entries: entries, seq: next_seq}}
+    end
+  end
+
+  def handle_call({:broadcast_live_state, session_id}, _from, state) do
+    case Map.fetch(state.entries, session_id) do
+      {:ok, entry} ->
+        next_seq = state.seq + 1
+        broadcast_upsert(state.pubsub, state.registry, next_seq, entry)
+        {:reply, :ok, %{state | seq: next_seq}}
+
+      :error ->
+        {:reply, :ok, state}
     end
   end
 
@@ -470,6 +646,8 @@ defmodule H.Catalog do
              {:activity_kind, {:enum, @valid_activity_kinds}, required: false, nullable: true},
              {:activity_label, :string, required: false, nullable: true},
              {:queued_count, {:int, min: 0}, required: false},
+             {:needs_attention, :boolean, required: false},
+             {:archived, :boolean, required: false},
              {:next_wake_at, :int, required: false, nullable: true},
              {:status, {:enum, ["ok", "quarantined", "archived"]}, required: false},
              {:quarantine_reason, :string, required: false, nullable: true},
@@ -503,6 +681,14 @@ defmodule H.Catalog do
 
   defp build_entry(nil, validated, now) do
     status = Map.get(validated, :status, "ok")
+    archived = status == "archived" or Map.get(validated, :archived, false) == true
+
+    needs_attention =
+      if archived do
+        false
+      else
+        Map.get(validated, :needs_attention, true) == true
+      end
 
     %{
       session_id: validated.session_id,
@@ -518,6 +704,8 @@ defmodule H.Catalog do
       activity_kind: Map.get(validated, :activity_kind, nil),
       activity_label: Map.get(validated, :activity_label, nil),
       queued_count: Map.get(validated, :queued_count, 0),
+      needs_attention: needs_attention,
+      archived: archived,
       next_wake_at: Map.get(validated, :next_wake_at, nil),
       status: status,
       archive: nil,
@@ -526,12 +714,14 @@ defmodule H.Catalog do
       applied_edit_rev: Map.get(validated, :applied_edit_rev, 0)
     }
     |> enforce_status_attention()
+    |> enforce_archived_triage()
   end
 
   defp build_entry(existing, validated, now) do
     existing
     |> Map.merge(validated)
     |> enforce_status_attention()
+    |> enforce_archived_triage()
     |> then(fn entry ->
       if Map.has_key?(validated, :updated_at), do: entry, else: %{entry | updated_at: now}
     end)
@@ -616,11 +806,66 @@ defmodule H.Catalog do
     end)
   end
 
+  defp enforce_archived_triage(%{archived: true} = entry), do: %{entry | needs_attention: false}
+  defp enforce_archived_triage(entry), do: entry
+
+  defp apply_runtime_triage_transitions(candidate, existing) do
+    cond do
+      candidate.attention in ["running", "sleeping"] ->
+        %{candidate | needs_attention: false, archived: false}
+
+      existing.attention in ["running", "sleeping"] and
+          candidate.attention in ["idle", "error", "quarantined"] ->
+        %{candidate | needs_attention: true, archived: false}
+
+      existing.attention != "error" and candidate.attention == "error" ->
+        %{candidate | needs_attention: true, archived: false}
+
+      true ->
+        enforce_archived_triage(candidate)
+    end
+  end
+
+  defp extract_triage_bool(attrs) do
+    val =
+      case Map.fetch(attrs, "needs_attention") do
+        {:ok, v} -> v
+        :error -> Map.get(attrs, :needs_attention, :missing)
+      end
+
+    if is_boolean(val) do
+      {:ok, val}
+    else
+      {:error, "needs_attention must be a boolean"}
+    end
+  end
+
+  defp session_loaded?(registry, session_id)
+       when is_atom(registry) and not is_nil(registry) and is_binary(session_id) do
+    if Process.whereis(registry) != nil do
+      try do
+        case Registry.lookup(registry, {:session, session_id}) do
+          [{pid, _}] -> is_pid(pid) and Process.alive?(pid)
+          _ -> false
+        end
+      catch
+        _, _ -> false
+      end
+    else
+      false
+    end
+  end
+
+  defp session_loaded?(_registry, _session_id), do: false
+
+  defp cwd_exists?("host", cwd) when is_binary(cwd), do: File.dir?(cwd)
+  defp cwd_exists?(_env_id, _cwd), do: true
+
   defp enforce_status_attention(%{status: "quarantined"} = entry),
     do: %{entry | attention: "quarantined"}
 
   defp enforce_status_attention(%{status: "archived"} = entry),
-    do: %{entry | attention: "archived", active: false}
+    do: %{entry | attention: "archived", active: false, archived: true, needs_attention: false}
 
   defp enforce_status_attention(entry) do
     %{entry | attention: normalize_attention(Map.get(entry, :attention), entry.status)}
@@ -637,14 +882,14 @@ defmodule H.Catalog do
   defp normalize_queued_count(val) when is_integer(val) and val >= 0, do: val
   defp normalize_queued_count(_), do: 0
 
-  defp broadcast_upsert(pubsub, seq, entry) do
+  defp broadcast_upsert(pubsub, registry, seq, entry) do
     if not is_nil(pubsub) and Process.whereis(pubsub) != nil do
       payload =
         %{
           "version" => 1,
           "seq" => seq,
           "type" => "upsert",
-          "session" => wire_session(entry)
+          "session" => wire_session(entry, registry: registry)
         }
         |> JSON.encode_to_iodata!()
         |> IO.iodata_to_binary()
@@ -699,6 +944,18 @@ defmodule H.Catalog do
 
   defp decode_entry(raw) when is_map(raw) do
     status = Map.get(raw, "status", "ok")
+    attention = normalize_attention(Map.get(raw, "attention"), status)
+    archived = status == "archived" or Map.get(raw, "archived", false) == true
+
+    needs_attention =
+      if archived do
+        false
+      else
+        case Map.fetch(raw, "needs_attention") do
+          {:ok, val} when is_boolean(val) -> val
+          _ -> attention not in ["running", "sleeping"]
+        end
+      end
 
     %{
       session_id: Map.fetch!(raw, "session_id"),
@@ -710,10 +967,12 @@ defmodule H.Catalog do
       created_at: Map.fetch!(raw, "created_at"),
       updated_at: Map.fetch!(raw, "updated_at"),
       active: Map.get(raw, "active", false),
-      attention: normalize_attention(Map.get(raw, "attention"), status),
+      attention: attention,
       activity_kind: normalize_activity_kind(Map.get(raw, "activity_kind")),
       activity_label: sanitize_activity_label(Map.get(raw, "activity_label")),
       queued_count: normalize_queued_count(Map.get(raw, "queued_count")),
+      needs_attention: needs_attention,
+      archived: archived,
       next_wake_at: Map.get(raw, "next_wake_at"),
       status: status,
       archive: decode_archive(raw["archive"]),
@@ -901,7 +1160,7 @@ defmodule H.Catalog do
     }
   end
 
-  defp merge_dir_annotations(dir, stats) do
+  defp merge_dir_annotations(dir, stats, registry) do
     if string_keyed_map?(dir) do
       latest =
         case stats.latest_session do
@@ -909,19 +1168,23 @@ defmodule H.Catalog do
             nil
 
           s ->
-            status = s.status || "ok"
+            wired = wire_session(s, registry: registry)
 
             %{
-              "session_id" => s.session_id,
-              "title" => s.title,
-              "cwd" => s.cwd,
-              "updated_at" => s.updated_at,
-              "active" => s.active == true,
-              "attention" => normalize_attention(Map.get(s, :attention), status),
-              "activity_kind" => normalize_activity_kind(Map.get(s, :activity_kind)),
-              "activity_label" => sanitize_activity_label(Map.get(s, :activity_label)),
-              "queued_count" => normalize_queued_count(Map.get(s, :queued_count)),
-              "status" => status
+              "session_id" => wired.session_id,
+              "title" => wired.title,
+              "cwd" => wired.cwd,
+              "updated_at" => wired.updated_at,
+              "active" => wired.active,
+              "attention" => wired.attention,
+              "activity_kind" => wired.activity_kind,
+              "activity_label" => wired.activity_label,
+              "queued_count" => wired.queued_count,
+              "needs_attention" => wired.needs_attention,
+              "archived" => wired.archived,
+              "loaded" => wired.loaded,
+              "cwd_exists" => wired.cwd_exists,
+              "status" => wired.status
             }
         end
 
@@ -938,19 +1201,23 @@ defmodule H.Catalog do
             nil
 
           s ->
-            status = s.status || "ok"
+            wired = wire_session(s, registry: registry)
 
             %{
-              session_id: s.session_id,
-              title: s.title,
-              cwd: s.cwd,
-              updated_at: s.updated_at,
-              active: s.active == true,
-              attention: normalize_attention(Map.get(s, :attention), status),
-              activity_kind: normalize_activity_kind(Map.get(s, :activity_kind)),
-              activity_label: sanitize_activity_label(Map.get(s, :activity_label)),
-              queued_count: normalize_queued_count(Map.get(s, :queued_count)),
-              status: status
+              session_id: wired.session_id,
+              title: wired.title,
+              cwd: wired.cwd,
+              updated_at: wired.updated_at,
+              active: wired.active,
+              attention: wired.attention,
+              activity_kind: wired.activity_kind,
+              activity_label: wired.activity_label,
+              queued_count: wired.queued_count,
+              needs_attention: wired.needs_attention,
+              archived: wired.archived,
+              loaded: wired.loaded,
+              cwd_exists: wired.cwd_exists,
+              status: wired.status
             }
         end
 

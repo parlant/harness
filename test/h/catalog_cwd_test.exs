@@ -287,6 +287,10 @@ defmodule H.CatalogCwdTest do
                activity_kind: nil,
                activity_label: nil,
                queued_count: 0,
+               needs_attention: true,
+               archived: false,
+               loaded: false,
+               cwd_exists: false,
                status: "ok"
              }
 
@@ -338,6 +342,10 @@ defmodule H.CatalogCwdTest do
                "activity_kind" => nil,
                "activity_label" => nil,
                "queued_count" => 0,
+               "needs_attention" => true,
+               "archived" => false,
+               "loaded" => false,
+               "cwd_exists" => true,
                "status" => "ok"
              }
 

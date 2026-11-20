@@ -131,8 +131,49 @@ defmodule H.Archive do
           %{id: to_string(id), parent: parent, owner: "ownerless"}
         end)
 
-      {:ok, %{session: Catalog.wire_session(current), conversations: branches, tasks: []}}
+      {:ok, %{session: Catalog.wire_session(current, opts), conversations: branches, tasks: []}}
     end)
+  end
+
+  def export_branch(entry, cid, at_entry_id, opts) do
+    read(entry, opts, fn fd, entries, conversations, _current ->
+      case Map.fetch(conversations, cid) do
+        {:ok, %{head: head}} ->
+          ids = lineage(head, entries, [])
+
+          with {:ok, selected_ids} <- filter_export_cutoff(ids, at_entry_id) do
+            locations =
+              Enum.map(selected_ids, fn id ->
+                {_, _, offset, size} = entries[id]
+                {offset, size}
+              end)
+
+            case locations do
+              [] ->
+                {:ok, %{entries: [], agent: %{}}}
+
+              _ ->
+                with {:ok, bins} <- :file.pread(fd, locations) do
+                  exported = Enum.map(bins, &JSON.decode!/1)
+                  {:ok, %{entries: exported, agent: %{}}}
+                end
+            end
+          end
+
+        :error ->
+          {:error, :not_found}
+      end
+    end)
+  end
+
+  defp filter_export_cutoff(ids, nil), do: {:ok, ids}
+
+  defp filter_export_cutoff(ids, at_entry_id) when is_integer(at_entry_id) do
+    if at_entry_id in ids do
+      {:ok, Enum.take_while(ids, &(&1 <= at_entry_id))}
+    else
+      {:error, {:bad_request, "entry_not_visible"}}
+    end
   end
 
   def scan(entry, cid, query, opts) do

@@ -42,7 +42,8 @@ defmodule H.Daemon.Workspace do
         annotated =
           Catalog.annotate_directories(desc.id, raw_dirs,
             table: table,
-            parent_path: canonical_path
+            parent_path: canonical_path,
+            registry: Keyword.get(opts, :registry, H.Registry)
           )
 
         directories =

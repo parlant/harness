@@ -293,6 +293,90 @@ defmodule H.HTTP.Router do
     H.HTTP.SSE.stream(conn, sid, cid, router_opts(conn))
   end
 
+  post "/api/v1/sessions/:sid/triage" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :triage_session, [sid, conn.body_params, daemon_opts]) do
+      {:ok, %{session: session}} ->
+        send_json(conn, 200, %{"session" => session})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "session not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
+  post "/api/v1/sessions/:sid/stop" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :stop_session, [sid, conn.body_params, daemon_opts]) do
+      {:ok, %{session: session}} ->
+        send_json(conn, 200, %{"session" => session})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "session not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
+  post "/api/v1/sessions/:sid/archive" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :archive_session, [sid, conn.body_params, daemon_opts]) do
+      {:ok, %{session: session}} ->
+        send_json(conn, 200, %{"session" => session})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "session not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
+  post "/api/v1/sessions/:sid/fork" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :fork_session, [sid, conn.body_params, daemon_opts]) do
+      {:ok, %{session: session, seq: seq}} ->
+        send_json(conn, 200, %{"session" => session, "seq" => seq})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
   post "/api/v1/sessions/:sid/commands" do
     {daemon, daemon_opts} = daemon_config(conn)
 
