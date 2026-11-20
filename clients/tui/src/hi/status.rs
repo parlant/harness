@@ -116,6 +116,8 @@ impl<'a> StatusFields<'a> {
             seq: state.seq,
             activity: if target.labels.status.as_deref() == Some("archived") {
                 "archived"
+            } else if state.workspace_wait().is_some() {
+                "waiting"
             } else if state.is_run_active() {
                 "busy"
             } else if failure.is_some() {

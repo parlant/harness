@@ -143,6 +143,95 @@ defmodule H.WorkspaceLeaseTest do
     end
   end
 
+  describe "acquire_or_wait/5" do
+    test "hands off FIFO by signal and reserves the lease before notifying", %{server: server} do
+      cwd = "/tmp/work/repo"
+      assert :ok = WorkspaceLease.acquire(server, cwd, {"owner", 1}, self())
+      first = make_ref()
+      second = make_ref()
+
+      assert {:waiting, {"owner", 1}, _} =
+               WorkspaceLease.acquire_or_wait(server, cwd, {"first", 1}, self(), first)
+
+      assert {:waiting, {"owner", 1}, _} =
+               WorkspaceLease.acquire_or_wait(server, cwd, {"second", 1}, self(), second)
+
+      assert :ok = WorkspaceLease.release(server, cwd, {"owner", 1})
+      assert_receive {:workspace_lease_granted, ^first}
+      refute_receive {:workspace_lease_granted, ^second}, 0
+
+      assert {:error, {:workspace_busy, {"first", 1}}} =
+               WorkspaceLease.acquire(server, cwd, {"outsider", 1}, self())
+
+      assert_receive {:workspace_lease_blocked, ^second, {"first", 1}, _}
+      assert :ok = WorkspaceLease.release(server, cwd, {"first", 1})
+      assert_receive {:workspace_lease_granted, ^second}
+    end
+
+    test "cancel removes a waiter, including a grant not yet consumed", %{server: server} do
+      cwd = "/tmp/work/repo"
+      :ok = WorkspaceLease.acquire(server, cwd, {"owner", 1}, self())
+      cancelled = make_ref()
+      next = make_ref()
+
+      {:waiting, _, _} =
+        WorkspaceLease.acquire_or_wait(server, cwd, {"cancel", 1}, self(), cancelled)
+
+      {:waiting, _, _} = WorkspaceLease.acquire_or_wait(server, cwd, {"next", 1}, self(), next)
+      :ok = WorkspaceLease.release(server, cwd, {"cancel", 1})
+      :ok = WorkspaceLease.release(server, cwd, {"owner", 1})
+      assert_receive {:workspace_lease_granted, ^next}
+      refute_receive {:workspace_lease_granted, ^cancelled}, 0
+      :ok = WorkspaceLease.release(server, cwd, {"next", 1})
+      assert :ok = WorkspaceLease.acquire(server, cwd, {"other", 1}, self())
+    end
+
+    test "owner death signals the waiter; dead waiters never acquire", %{server: server} do
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      waiter = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Enum.each([owner, waiter], &Process.exit(&1, :kill)) end)
+      cwd = {"remote", "/repo"}
+      :ok = WorkspaceLease.acquire(server, cwd, {"owner", 1}, owner)
+
+      {:waiting, _, _} =
+        WorkspaceLease.acquire_or_wait(server, cwd, {"dead", 1}, waiter, make_ref())
+
+      next = make_ref()
+      {:waiting, _, _} = WorkspaceLease.acquire_or_wait(server, cwd, {"next", 1}, self(), next)
+      Process.exit(waiter, :kill)
+      Process.exit(owner, :kill)
+      assert_receive {:workspace_lease_granted, ^next}
+    end
+
+    test "stop request targets the current lease, never releases it, and prioritizes its waiter",
+         %{server: server} do
+      cwd = "/tmp/work/repo"
+      :ok = WorkspaceLease.acquire(server, cwd, {"owner", 1}, self())
+      first = make_ref()
+      chosen = make_ref()
+
+      {:waiting, _, lease_id} =
+        WorkspaceLease.acquire_or_wait(server, cwd, {"first", 1}, self(), first)
+
+      {:waiting, _, ^lease_id} =
+        WorkspaceLease.acquire_or_wait(server, cwd, {"chosen", 1}, self(), chosen)
+
+      assert :ok = WorkspaceLease.stop_holder(server, cwd, {"chosen", 1}, chosen, lease_id)
+      assert_receive {:stop_workspace_holder, {"host", ^cwd}, {"owner", 1}, ^lease_id}
+
+      assert {:error, {:workspace_busy, {"owner", 1}}} =
+               WorkspaceLease.acquire(server, cwd, {"other", 1}, self())
+
+      :ok = WorkspaceLease.release(server, cwd, {"owner", 1})
+      assert_receive {:workspace_lease_granted, ^chosen}
+
+      assert {:error, :stale_wait} =
+               WorkspaceLease.stop_holder(server, cwd, {"first", 1}, first, lease_id)
+
+      refute_receive {:stop_workspace_holder, _, _, _}, 0
+    end
+  end
+
   describe "release/3" do
     test "frees the lease only when called by the current holder_key", %{server: server} do
       assert :ok = WorkspaceLease.acquire(server, "/tmp/work/repo", {:conv, 1}, self())

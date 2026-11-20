@@ -221,6 +221,51 @@ defmodule HWeb.SessionLiveTest do
     assert render(view) =~ "conv ##{forked_cid}"
   end
 
+  test "workspace wait offers cancel and stop-holder actions and resumes on release", %{
+    conn: conn,
+    projects_dir: cwd,
+    owner_token: token,
+    daemon_opts: opts,
+    fake: fake
+  } do
+    :ok = H.WorkspaceLease.acquire(opts[:workspace_lease], {"host", cwd}, {"holder", 1}, self())
+
+    for call <- ["first", "second"] do
+      Fake.push_step(
+        fake,
+        {:reply, [],
+         %{
+           content: [],
+           tool_calls: [
+             %{id: call, name: "write", arguments: %{"path" => "marker", "content" => "ran"}}
+           ],
+           finish_reason: "tool_calls"
+         }}
+      )
+    end
+
+    Fake.push_step(fake, {:reply, [], %{content: [%{type: "text", text: "Finished waiting"}]}})
+    {:ok, %{session: session}} = Daemon.create_session(%{"cwd" => cwd}, opts)
+    {:ok, view, _} = live(log_in_owner(conn, token), "/sessions/#{session.session_id}")
+    view |> form("#composer-form", %{content: "First attempt"}) |> render_submit()
+    wait_until(fn -> has_element?(view, "#workspace-wait") end)
+    assert render(view) =~ "holder"
+    assert has_element?(view, "#stop-holder-btn", "Stop holder and acquire")
+    view |> element("#cancel-wait-btn") |> render_click()
+    wait_until(fn -> not has_element?(view, "#workspace-wait") end)
+    refute File.exists?(Path.join(cwd, "marker"))
+    refute_receive {:stop_workspace_holder, _, _, _}, 0
+
+    view |> form("#composer-form", %{content: "Second attempt"}) |> render_submit()
+    wait_until(fn -> has_element?(view, "#workspace-wait") end)
+    view |> element("#stop-holder-btn") |> render_click()
+    assert_receive {:stop_workspace_holder, {"host", ^cwd}, {"holder", 1}, _}
+    :ok = H.WorkspaceLease.release(opts[:workspace_lease], {"host", cwd}, {"holder", 1})
+    wait_until(fn -> render(view) =~ "Finished waiting" end)
+    refute has_element?(view, "#workspace-wait")
+    assert File.read!(Path.join(cwd, "marker")) == "ran"
+  end
+
   defp wait_until(fun, attempts \\ 50)
   defp wait_until(fun, 0), do: assert(fun.())
 

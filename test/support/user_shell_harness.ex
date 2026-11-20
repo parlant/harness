@@ -105,6 +105,7 @@ defmodule H.Test.UserShellHarness do
       workers: %{},
       ephemeral: %{},
       held_leases: MapSet.new(),
+      workspace_waits: %{},
       replay_rings: %{},
       ring_base_seq: %{},
       conv_last_seq: Map.new(Map.keys(conversations), fn cid -> {cid, bootstrap.seq || 0} end),
@@ -303,6 +304,15 @@ defmodule H.Test.UserShellHarness do
     end
   end
 
+  def handle_info({:workspace_lease_granted, token}, state) do
+    {effects, state} = H.Session.Server.WorkspaceWait.granted(token, state)
+    {:noreply, apply_effects(effects, state)}
+  end
+
+  def handle_info({:workspace_lease_blocked, token, holder, lease_id}, state) do
+    {:noreply, H.Session.Server.WorkspaceWait.blocked(token, holder, lease_id, state)}
+  end
+
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case Enum.find(state.workers, fn {_aid, w} -> w.monitor_ref == ref end) do
       nil ->
@@ -324,6 +334,7 @@ defmodule H.Test.UserShellHarness do
   def terminate(_reason, state) do
     Enum.each(state.workers, fn {_aid, w} ->
       Process.demonitor(w.monitor_ref, [:flush])
+      if w[:abort_ref], do: send(w.pid, {:abort_exec, w.abort_ref})
 
       if is_pid(w.pid) and Process.alive?(w.pid) do
         Elixir.Task.Supervisor.terminate_child(state.task_sup, w.pid)
@@ -333,7 +344,9 @@ defmodule H.Test.UserShellHarness do
     if state.workspace_lease && GenServer.whereis(state.workspace_lease) do
       ws_key = {state.env_id || "host", state.cwd}
 
-      Enum.each(state.held_leases, fn cid ->
+      cids = MapSet.union(state.held_leases, MapSet.new(Map.keys(state.workspace_waits)))
+
+      Enum.each(cids, fn cid ->
         try do
           WorkspaceLease.release(state.workspace_lease, ws_key, {state.session_id, cid})
         catch
@@ -391,6 +404,8 @@ defmodule H.Test.UserShellHarness do
 
   defp apply_effects([{:kill_worker, attempt_id, pid, ref} | rest], state) do
     Process.demonitor(ref, [:flush])
+    worker = state.workers[attempt_id]
+    if worker && worker[:abort_ref], do: send(pid, {:abort_exec, worker.abort_ref})
 
     if is_pid(pid) and Process.alive?(pid) do
       Elixir.Task.Supervisor.terminate_child(state.task_sup, pid)
@@ -400,15 +415,7 @@ defmodule H.Test.UserShellHarness do
   end
 
   defp apply_effects([{:release_lease, cid} | rest], state) do
-    next_state =
-      if MapSet.member?(state.held_leases, cid) and not is_nil(state.workspace_lease) and
-           GenServer.whereis(state.workspace_lease) != nil do
-        ws_key = {state.env_id || "host", state.cwd}
-        WorkspaceLease.release(state.workspace_lease, ws_key, {state.session_id, cid})
-        %{state | held_leases: MapSet.delete(state.held_leases, cid)}
-      else
-        state
-      end
+    next_state = H.Session.Server.State.release_lease(cid, state)
 
     apply_effects(rest, next_state)
   end

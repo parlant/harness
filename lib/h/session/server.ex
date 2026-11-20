@@ -14,7 +14,17 @@ defmodule H.Session.Server do
 
   alias H.Storage
   alias H.Session.UserShell
-  alias H.Session.Server.{Commands, Generation, Recovery, State, Stream, Submissions, Tools}
+
+  alias H.Session.Server.{
+    Commands,
+    Generation,
+    Recovery,
+    State,
+    Stream,
+    Submissions,
+    Tools,
+    WorkspaceWait
+  }
 
   @max_drain 31
 
@@ -221,6 +231,19 @@ defmodule H.Session.Server do
     process_with_drain({:wake_task, tid}, state)
   end
 
+  def handle_info({:workspace_lease_granted, token}, state) do
+    {effects, state} = WorkspaceWait.granted(token, state)
+    {:noreply, apply_effects_list(effects, state)}
+  end
+
+  def handle_info({:workspace_lease_blocked, token, holder, lease_id}, state) do
+    {:noreply, WorkspaceWait.blocked(token, holder, lease_id, state)}
+  end
+
+  def handle_info({:stop_workspace_holder, cwd, holder, lease_id}, state) do
+    process_with_drain({:stop_workspace_holder, cwd, holder, lease_id}, state)
+  end
+
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case State.find_worker_by_monitor(state.workers, ref) do
       nil ->
@@ -406,6 +429,10 @@ defmodule H.Session.Server do
     end
   end
 
+  defp stage_single_item({:stop_workspace_holder, cwd, holder, lease_id}, state, _staged_rev) do
+    Commands.stage_stop_workspace_holder(cwd, holder, lease_id, state)
+  end
+
   defp stage_single_item({:abort_all, from, reason}, state, _staged_rev) do
     if state.maintenance_table &&
          not :ets.lookup_element(state.maintenance_table, :open, 2, false) do
@@ -500,8 +527,14 @@ defmodule H.Session.Server do
 
   defp apply_effect({:kill_worker, attempt_id, pid, ref}, state) do
     Process.demonitor(ref, [:flush])
+    worker = state.workers[attempt_id]
+    if worker && worker[:abort_ref], do: send(pid, {:abort_exec, worker.abort_ref})
     State.terminate_worker_pid(state.task_sup, pid)
     %{state | workers: Map.delete(state.workers, attempt_id)}
+  end
+
+  defp apply_effect({:stop_workspace_holder, cid, task_id, lease_id}, state) do
+    WorkspaceWait.stop_holder(cid, task_id, lease_id, state)
   end
 
   defp apply_effect({:release_lease, cid}, state) do

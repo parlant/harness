@@ -91,6 +91,58 @@ defmodule H.Session.Server.Commands do
     stage_abort(from, cid, req_id, fp, args, state)
   end
 
+  defp dispatch(from, "workspace_wait", cid, req_id, fp, args, state, _staged_rev) do
+    wait = get_in(state.docs, [cid, "live", "workspace_wait"])
+
+    if wait && wait["task_id"] == to_string(args.task_id) &&
+         (args.action == "cancel" or wait["lease_id"] == args.lease_id) do
+      case args.action do
+        "cancel" ->
+          stage_abort(
+            from,
+            cid,
+            req_id,
+            fp,
+            Map.put(args, :reason, "wait_cancelled"),
+            state,
+            "workspace_wait"
+          )
+
+        "stop_holder" ->
+          now = System.system_time(:millisecond)
+          {:ok, id, store} = Storage.mint_id(state.store)
+          state = %{state | store: store}
+
+          sub =
+            Submission.new(%{
+              id: id,
+              request_id: req_id,
+              fingerprint: fp,
+              kind: "workspace_wait",
+              status: "done",
+              conversation_id: cid,
+              created_at: now
+            })
+
+          staged = %{
+            raw_item:
+              {:command, from,
+               %{command: "workspace_wait", conversation_id: cid, request_id: req_id, args: args}},
+            writes: [{:check, {:unique_request_id, req_id, fp}}, {:put_submission, sub}],
+            conv_events: %{},
+            submissions: [sub],
+            effects: [{:stop_workspace_holder, cid, args.task_id, args.lease_id}],
+            reply_from: from,
+            receipt: Submission.to_receipt(sub, state.seq)
+          }
+
+          {:batch, staged, state}
+      end
+    else
+      {:immediate, from, {:error, {:conflict, "stale_workspace_wait"}}, [], state}
+    end
+  end
+
   defp dispatch(from, "withdraw", cid, req_id, fp, args, state, staged_rev) do
     stage_withdraw(from, cid, req_id, fp, args, state, staged_rev)
   end
@@ -696,7 +748,12 @@ defmodule H.Session.Server.Commands do
 
       all_abort_writes = abort_writes ++ shell_writes ++ comp_writes
       all_kill_effects = kill_effects ++ shell_kills ++ comp_kills
-      next_live = state.docs[cid]["live"]
+      next_live = Map.delete(state.docs[cid]["live"], "workspace_wait")
+      state = State.put_doc(state, cid, "live", next_live)
+
+      all_abort_writes =
+        all_abort_writes ++
+          [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
 
       appended =
         Enum.flat_map(all_abort_writes, fn
@@ -709,7 +766,34 @@ defmodule H.Session.Server.Commands do
     end
   end
 
-  defp stage_abort(from, cid, req_id, fp, args, state) do
+  def stage_stop_workspace_holder(cwd, {sid, cid} = holder, lease_id, state) do
+    if sid == state.session_id and MapSet.member?(state.held_leases, cid) and
+         H.WorkspaceLease.current?(state.workspace_lease, cwd, holder, lease_id) do
+      {writes, ev, effects, _aborted?, state} =
+        abort_conversation_tasks(
+          cid,
+          "workspace_handoff",
+          state,
+          System.system_time(:millisecond)
+        )
+
+      staged = %{
+        raw_item: {:stop_workspace_holder, cwd, holder, lease_id},
+        writes: writes,
+        conv_events: %{cid => ev},
+        submissions: [],
+        effects: effects,
+        reply_from: nil,
+        receipt: nil
+      }
+
+      {:batch, staged, state}
+    else
+      {:skip, state}
+    end
+  end
+
+  defp stage_abort(from, cid, req_id, fp, args, state, command \\ "abort") do
     now = System.system_time(:millisecond)
     reason = Map.get(args, :reason) || "aborted"
     {:ok, sub_id, store} = Storage.mint_id(state.store)
@@ -723,7 +807,7 @@ defmodule H.Session.Server.Commands do
         id: sub_id,
         request_id: req_id,
         fingerprint: fp,
-        kind: "abort",
+        kind: command,
         status: "done",
         conversation_id: cid,
         reason: reason,
@@ -736,7 +820,7 @@ defmodule H.Session.Server.Commands do
     staged = %{
       raw_item:
         {:command, from,
-         %{command: "abort", conversation_id: cid, request_id: req_id, args: args}},
+         %{command: command, conversation_id: cid, request_id: req_id, args: args}},
       writes: writes,
       conv_events: %{cid => ev},
       submissions: [sub],

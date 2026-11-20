@@ -39,6 +39,14 @@ impl RunFailureInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct WorkspaceWaitInfo {
+    pub task_id: String,
+    pub lease_id: String,
+    pub holder_session_id: String,
+    pub holder_conversation_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct TranscriptState {
     pub session_id: Option<String>,
@@ -185,6 +193,10 @@ impl TranscriptState {
 
     pub fn live_doc(&self) -> Option<&Map<String, Value>> {
         self.docs.get("live").and_then(Value::as_object)
+    }
+
+    pub fn workspace_wait(&self) -> Option<WorkspaceWaitInfo> {
+        serde_json::from_value(self.live_doc()?.get("workspace_wait")?.clone()).ok()
     }
 
     pub fn active_user_shell(&self) -> Option<(&str, &str, bool)> {

@@ -7,7 +7,7 @@ defmodule H.Session.Server.Tools do
 
   alias H.{Document, Storage, Task, Tool}
   alias H.Session.LiveOutput
-  alias H.Session.Server.{State, Stream, Submissions}
+  alias H.Session.Server.{State, Stream, Submissions, WorkspaceWait}
 
   def spawn_worker(cid, tool_task_id, state, apply_effects_fn) do
     case Map.get(state.tasks, tool_task_id) do
@@ -50,19 +50,9 @@ defmodule H.Session.Server.Tools do
                 )
 
               {:ok, validated_args} ->
-                case maybe_acquire_tool_lease(tool_mod, cid, state) do
-                  {:error, {:workspace_busy, holder_key}} ->
-                    commit_immediate_error(
-                      cid,
-                      tool_task,
-                      call_id,
-                      name,
-                      "Workspace #{state.cwd} is currently busy with mutating work by #{inspect(holder_key)}.",
-                      "workspace_busy",
-                      state,
-                      now,
-                      apply_effects_fn
-                    )
+                case maybe_acquire_tool_lease(tool_mod, cid, tool_task, state) do
+                  {:waiting, state} ->
+                    state
 
                   {:ok, state} ->
                     {:ok, attempt_id, store} = Storage.mint_id(state.store)
@@ -87,15 +77,17 @@ defmodule H.Session.Server.Tools do
                              {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}
                            ]
                          ]) do
-                      {:error, _io_err} ->
-                        State.release_lease(cid, state)
+                      {:error, io_err} ->
+                        send(self(), {:stop_storage_failed, io_err})
+                        state = State.release_lease(cid, state)
+                        %{state | storage_failed: true}
 
                       {:ok, %{seqs: [batch_seq]}, committed_store} ->
                         state = %{state | store: committed_store, seq: batch_seq}
 
                         state =
                           Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
-                            "live" => [["set", ["tools", call_id, "status"], "running"]]
+                            "live" => [["replace", live]]
                           })
 
                         server_pid = self()
@@ -111,7 +103,10 @@ defmodule H.Session.Server.Tools do
                             )
                           end)
 
+                        abort_ref = if name == "bash", do: make_ref()
+
                         tool_ctx = %{
+                          abort_ref: abort_ref,
                           env: env,
                           session_id: sid,
                           conversation_id: cid,
@@ -124,6 +119,7 @@ defmodule H.Session.Server.Tools do
 
                         {:ok, worker_pid} =
                           Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
+                            if abort_ref, do: Process.flag(:trap_exit, true)
                             t0 = System.monotonic_time(:millisecond)
                             res = tool_mod.execute(validated_args, tool_ctx)
                             dur = max(0, System.monotonic_time(:millisecond) - t0)
@@ -138,6 +134,7 @@ defmodule H.Session.Server.Tools do
                         ref = Process.monitor(worker_pid)
 
                         worker_info = %{
+                          abort_ref: abort_ref,
                           task_id: tool_task_id,
                           conv_id: cid,
                           kind: :tool_call,
@@ -442,9 +439,9 @@ defmodule H.Session.Server.Tools do
 
   # Internal helpers
 
-  defp maybe_acquire_tool_lease(tool_mod, cid, state) do
+  defp maybe_acquire_tool_lease(tool_mod, cid, task, state) do
     if tool_mod.mutating?() do
-      State.acquire_lease(cid, state)
+      WorkspaceWait.acquire(cid, task, state)
     else
       {:ok, state}
     end
@@ -483,11 +480,15 @@ defmodule H.Session.Server.Tools do
         now
       )
 
-    live = State.put_tool_status(state.docs[cid]["live"], call_id, "done")
+    live =
+      state.docs[cid]["live"]
+      |> Map.delete("workspace_wait")
+      |> State.put_tool_status(call_id, "done")
+
     state = state |> State.put_task(done_task) |> State.put_doc(cid, "live", live)
 
     {:batch, staged, state} =
-      stage_after_tool_settled(cid, done_task, entry, live, state, now, [])
+      stage_after_tool_settled(cid, done_task, entry, live, state, now, [{:release_lease, cid}])
 
     case Storage.commit(state.store, [staged.writes]) do
       {:ok, %{seqs: [batch_seq]}, committed_store} ->
@@ -496,8 +497,9 @@ defmodule H.Session.Server.Tools do
 
         apply_effects_fn.(staged.effects, state)
 
-      {:error, _} ->
-        state
+      {:error, reason} ->
+        send(self(), {:stop_storage_failed, reason})
+        %{state | storage_failed: true}
     end
   end
 

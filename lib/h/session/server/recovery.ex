@@ -125,6 +125,7 @@ defmodule H.Session.Server.Recovery do
         workers: %{},
         ephemeral: %{},
         held_leases: MapSet.new(),
+        workspace_waits: %{},
         replay_rings: %{},
         ring_base_seq: %{},
         conv_last_seq: Map.new(Map.keys(conversations), fn cid -> {cid, bootstrap.seq || 0} end),
@@ -192,7 +193,9 @@ defmodule H.Session.Server.Recovery do
       state.tasks
       |> Map.values()
       |> Enum.filter(fn t ->
-        t.status == "running" or (UserShell.unsafe_task?(t) and t.status == "pending")
+        t.status == "running" or
+          (UserShell.unsafe_task?(t) and t.status == "pending" and
+             t.checkpoint["phase"] != "workspace_wait")
       end)
       |> Enum.sort_by(& &1.id)
 
@@ -335,7 +338,15 @@ defmodule H.Session.Server.Recovery do
         if next_pending, do: [{:spawn_tool, cid, next_pending.id}], else: []
       end)
 
-    inference_effects ++ tool_effects
+    shell_effects =
+      tasks
+      |> Enum.filter(
+        &(&1.kind == "user_shell" and &1.status == "pending" and
+            &1.checkpoint["phase"] == "workspace_wait")
+      )
+      |> Enum.map(&{:spawn_user_shell, &1.checkpoint["conversation_id"], &1.id})
+
+    inference_effects ++ tool_effects ++ shell_effects
   end
 
   def stage_worker_crashed(tid, attempt_id, reason, state) do

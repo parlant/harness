@@ -969,6 +969,16 @@ fn render_live(
     let Some(live) = state.live_doc() else {
         return;
     };
+    if let Some(wait) = state.workspace_wait() {
+        separate(out);
+        out.push(StyledRow::plain(
+            sanitize_single_line(&format!(
+                "[waiting for workspace · held by {}:{} · /workspace for actions]",
+                wait.holder_session_id, wait.holder_conversation_id
+            )),
+            theme.tool_running,
+        ));
+    }
     let turn_tag = live
         .get("run")
         .and_then(|r| u64_at(r, "turns"))

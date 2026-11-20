@@ -93,6 +93,19 @@ def service_file(home, data, launcher):
     return path
 
 
+def wait_until_stopped(service, env):
+    target = f"gui/{os.getuid()}/{service.stem}"
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        status = run(["/bin/launchctl", "print", target], env, timeout=5)
+        if status.returncode:
+            raise RuntimeError(f"Cannot establish LaunchAgent shutdown: {status.stderr.strip()}")
+        if re.search(r"^\s*state = not running\s*$", status.stdout, re.MULTILINE):
+            return
+        time.sleep(0.2)
+    raise RuntimeError("LaunchAgent shutdown did not finish; current bundle was not changed")
+
+
 def wait_until_serving(hi, env):
     deadline = time.monotonic() + 12
     last_error = "No readiness response"
@@ -178,6 +191,9 @@ def install(args):
             # the old release while the link is being switched.
             checked([release / "bin/hi", "daemon", "check-service"], env)
             checked([hi, "daemon", "stop"], env, timeout=50)
+            # The API and store lock disappear before the VM exits. A kickstart
+            # while launchd still tracks that process succeeds without restarting it.
+            wait_until_stopped(existing_service, env)
 
         switch(current, release)
         if not os.path.lexists(hi_link):

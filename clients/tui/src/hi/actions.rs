@@ -78,6 +78,11 @@ pub enum Effect {
     Fork(u64),
     Configure(String, String),
     Abort,
+    WorkspaceWait {
+        action: String,
+        task_id: String,
+        lease_id: String,
+    },
     Continue,
     Environments,
     Branch(String),
@@ -529,6 +534,22 @@ pub fn execute(
             let cid_num = parse_cid(&target.cid)?;
             let envelope =
                 CommandEnvelope::abort(generate_request_id(), cid_num, Some("user_abort"));
+            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+            Ok(Reply::Receipt(receipt))
+        }
+
+        Effect::WorkspaceWait {
+            action,
+            task_id,
+            lease_id,
+        } => {
+            let envelope = CommandEnvelope {
+                version: 1,
+                request_id: generate_request_id(),
+                conversation_id: parse_cid(&target.cid)?,
+                command: "workspace_wait".to_string(),
+                args: json!({"action": action, "task_id": task_id, "lease_id": lease_id}),
+            };
             let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
             Ok(Reply::Receipt(receipt))
         }

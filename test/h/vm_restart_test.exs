@@ -100,6 +100,14 @@ defmodule H.VmRestartTest do
     end
 
     wait_flushed.(wait_flushed)
+
+    {:ok, %{seq: wait_seq}} = H.Daemon.create_session(%{"session_id" => "vm-wait", "cwd" => cwd}, opts)
+    {:ok, _} = H.Daemon.execute_command("vm-wait", %{
+      "version" => 1, "request_id" => "queued-shell", "command" => "user_shell", "conversation_id" => "1",
+      "args" => %{"command" => "printf tick >> wait-count", "include_in_context" => true, "expected_seq" => wait_seq}
+    }, opts)
+    {:ok, {:snapshot, _, wait_bin}} = H.Daemon.subscribe_conversation("vm-wait", "1", self(), nil, opts)
+    true = is_map(JSON.decode!(wait_bin)["docs"]["live"]["workspace_wait"])
     IO.puts("READY:" <> System.pid())
 
     receive do
@@ -206,6 +214,15 @@ defmodule H.VmRestartTest do
     assert tool_res.data["is_error"] == true
     assert tool_res.data["diagnostic"] == "interrupted"
     assert tool_res.data["details"]["partial_output"] =~ "vm-partial"
+
+    [queued_result] =
+      wait_until(fn ->
+        {:ok, %{items: queued}} = Daemon.scan_entries("vm-wait", "1", %{"order" => "asc"}, opts2)
+        if length(queued) == 1, do: queued, else: nil
+      end)
+
+    assert queued_result.data["is_error"] == false
+    assert File.read!(Path.join(cwd, "wait-count")) == "tick"
 
     final_assistant = Enum.at(items, 3)
 

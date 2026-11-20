@@ -249,6 +249,40 @@
         </article>
       </div>
 
+      <div
+        :if={wait = @ephemeral_live["workspace_wait"]}
+        id="workspace-wait"
+        class="entry-card entry-live"
+        role="status"
+      >
+        <p>
+          Waiting for workspace held by session <span class="mono">{wait["holder_session_id"]}</span>,
+          conversation #{wait["holder_conversation_id"]}.
+        </p>
+        <button
+          id="cancel-wait-btn"
+          type="button"
+          class="btn btn-sm"
+          phx-click="workspace_wait"
+          phx-value-action="cancel"
+          phx-value-task_id={wait["task_id"]}
+          phx-value-lease_id={wait["lease_id"]}
+        >
+          Cancel wait
+        </button>
+        <button
+          id="stop-holder-btn"
+          type="button"
+          class="btn btn-sm btn-danger"
+          phx-click="workspace_wait"
+          phx-value-action="stop_holder"
+          phx-value-task_id={wait["task_id"]}
+          phx-value-lease_id={wait["lease_id"]}
+          data-confirm="Stop the holding conversation's active work and acquire its workspace after cleanup?"
+        >
+          Stop holder and acquire
+        </button>
+      </div>
       <ConversationComponents.live_region live={@ephemeral_live} inbox={@inbox} />
     </div>
 

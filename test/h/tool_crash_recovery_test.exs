@@ -455,7 +455,7 @@ defmodule H.ToolCrashRecoveryTest do
   end
 
   describe "tool validation and workspace lease" do
-    test "rejects invalid arguments, enforces workspace lease, and continues to a final answer" do
+    test "waits for the workspace lease, rejects invalid arguments, and continues to a final answer" do
       sid1 = "s-lease-1-#{System.unique_integer([:positive])}"
       sid2 = "s-lease-2-#{System.unique_integer([:positive])}"
       counter1 = start_supervised!({Agent, fn -> 0 end}, id: :c1)
@@ -476,7 +476,7 @@ defmodule H.ToolCrashRecoveryTest do
              tool_calls: [%{id: "t1", name: "gated_unsafe", arguments: %{"action" => "hold"}}],
              finish_reason: "tool_calls"
            }},
-          # sid2 turn 1: tries to run mutating write while sid1 holds lease -> workspace_busy
+          # sid2 turn 1: waits for sid1 before executing the mutating write
           {:reply, [],
            %{
              content: [],
@@ -492,9 +492,7 @@ defmodule H.ToolCrashRecoveryTest do
              tool_calls: [%{id: "t3", name: "read", arguments: %{"offset" => "not_an_int"}}],
              finish_reason: "tool_calls"
            }},
-          {:reply, [], %{content: [%{type: "text", text: "sid2 done"}]}},
-          # sid1 turn 2: finishes after release
-          {:reply, [], %{content: [%{type: "text", text: "sid1 done"}]}}
+          {:reply, [], %{content: [%{type: "text", text: "sid2 done"}]}}
         ])
 
       {:ok, _} = Daemon.create_session(%{"session_id" => sid1, "cwd" => cwd}, opts)
@@ -515,13 +513,23 @@ defmodule H.ToolCrashRecoveryTest do
 
       assert_receive {:unsafe_tool_entered, tool_pid1, 1}, 1_000
 
-      # Both failures go back to the model.
+      # Contention does not produce a tool error or another provider request.
       {:ok, _} =
         Daemon.execute_command(
           sid2,
           cmd("2", "submit", "1", %{"type" => "input", "content" => "Contend"}),
           opts
         )
+
+      wait_until(fn ->
+        {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation(sid2, "1", self(), nil, opts)
+        JSON.decode!(bin)["docs"]["live"]["workspace_wait"]
+      end)
+
+      refute File.exists?(Path.join(cwd, "x.txt"))
+      assert length(Fake.requests(Keyword.fetch!(opts, :provider_config).server)) == 2
+      {:ok, _} = Daemon.stop_session(sid1, %{}, opts)
+      refute Process.alive?(tool_pid1)
 
       snap2 =
         wait_until(fn ->
@@ -530,18 +538,13 @@ defmodule H.ToolCrashRecoveryTest do
           if length(decoded["entries"]) == 6, do: decoded, else: nil
         end)
 
+      assert File.read!(Path.join(cwd, "x.txt")) == "hi"
       refute snap2["docs"]["live"]["run_failure"]
       tool_results2 = Enum.filter(snap2["entries"], &(&1["kind"] == "tool_result"))
-      assert Enum.at(tool_results2, 0)["data"]["diagnostic"] == "workspace_busy"
+      assert Enum.at(tool_results2, 0)["data"]["is_error"] == false
       assert Enum.at(tool_results2, 1)["data"]["diagnostic"] == "invalid_arguments"
 
-      # Release sid1
-      send(tool_pid1, :proceed)
-
-      wait_until(fn ->
-        {:ok, %{items: items}} = Daemon.scan_entries(sid1, "1", %{"order" => "asc"}, opts)
-        if length(items) == 4, do: items, else: nil
-      end)
+      assert Agent.get(counter1, & &1) == 1
     end
   end
 end
