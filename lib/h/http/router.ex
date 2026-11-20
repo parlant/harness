@@ -197,6 +197,10 @@ defmodule H.HTTP.Router do
     end
   end
 
+  get "/api/v1/sessions/events" do
+    H.HTTP.SSE.stream_sessions(conn, router_opts(conn))
+  end
+
   get "/api/v1/sessions/:sid" do
     {daemon, daemon_opts} = daemon_config(conn)
 

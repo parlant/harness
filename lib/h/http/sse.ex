@@ -17,6 +17,46 @@ defmodule H.HTTP.SSE do
   @default_max_queue_bytes 2_097_152
 
   @doc """
+  Subscribes the current request process to catalog session events via `daemon`
+  and streams initial `snapshot` + live `catalog` SSE frames until the client
+  disconnects or `{:close_sse, reason}` is received.
+  """
+  @spec stream_sessions(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
+  def stream_sessions(conn, opts \\ []) do
+    daemon = Keyword.get(opts, :daemon, H.Daemon)
+    daemon_opts = Keyword.get(opts, :daemon_opts, [])
+
+    case apply(daemon, :subscribe_sessions, [self(), daemon_opts]) do
+      {:ok, {:snapshot, seq, bin}} ->
+        conn =
+          conn
+          |> put_resp_content_type("text/event-stream")
+          |> put_resp_header("cache-control", "no-cache")
+          |> put_resp_header("x-accel-buffering", "no")
+          |> send_chunked(200)
+
+        state = %{
+          daemon: daemon,
+          daemon_opts: daemon_opts,
+          keepalive_ms: Keyword.get(opts, :sse_keepalive_ms, @default_keepalive_ms),
+          max_queue_len: Keyword.get(opts, :sse_max_queue_len, @default_max_queue_len),
+          max_queue_bytes: Keyword.get(opts, :sse_max_queue_bytes, @default_max_queue_bytes),
+          last_sent_seq: seq
+        }
+
+        drain_catalog_frames(seq)
+
+        case chunk(conn, snapshot_frame(seq, bin)) do
+          {:ok, conn} -> sessions_loop(conn, state)
+          {:error, _reason} -> conn
+        end
+
+      {:error, _} ->
+        send_json(conn, 503, %{"error" => "catalog unavailable"})
+    end
+  end
+
+  @doc """
   Subscribes the current request process to `(sid, cid)` via `daemon` and streams
   SSE frames until the client disconnects or `{:close_sse, reason}` is received.
   """
@@ -198,6 +238,67 @@ defmodule H.HTTP.SSE do
     end
   end
 
+  defp sessions_loop(conn, state) do
+    if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
+      resnapshot_sessions(conn, state)
+    else
+      receive do
+        {:catalog_frame, seq, bin} ->
+          if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
+            resnapshot_sessions(conn, state)
+          else
+            send_catalog(conn, seq, bin, state)
+          end
+
+        {:close_sse, _reason} ->
+          conn
+      after
+        state.keepalive_ms ->
+          case chunk(conn, ": keepalive\n\n") do
+            {:ok, conn} -> sessions_loop(conn, state)
+            {:error, _reason} -> conn
+          end
+      end
+    end
+  end
+
+  defp send_catalog(conn, seq, bin, state) do
+    if is_integer(state.last_sent_seq) and seq <= state.last_sent_seq do
+      sessions_loop(conn, state)
+    else
+      case chunk(conn, catalog_frame(seq, bin)) do
+        {:ok, conn} -> sessions_loop(conn, %{state | last_sent_seq: seq})
+        {:error, _reason} -> conn
+      end
+    end
+  end
+
+  defp resnapshot_sessions(conn, state) do
+    drain_catalog_frames(nil)
+
+    case apply(state.daemon, :subscribe_sessions, [self(), state.daemon_opts]) do
+      {:ok, {:snapshot, seq, bin}} ->
+        drain_catalog_frames(seq)
+
+        case chunk(conn, snapshot_frame(seq, bin)) do
+          {:ok, conn} -> sessions_loop(conn, %{state | last_sent_seq: seq})
+          {:error, _reason} -> conn
+        end
+
+      {:error, _reason} ->
+        conn
+    end
+  end
+
+  defp drain_catalog_frames(max_seq) do
+    receive do
+      {:catalog_frame, seq, _} when is_nil(max_seq) or seq <= max_seq ->
+        drain_catalog_frames(max_seq)
+    after
+      0 -> :ok
+    end
+  end
+
   defp queue_overflow?(max_len, max_bytes) do
     case Process.info(self(), [:message_queue_len, :memory]) do
       [message_queue_len: qlen, memory: mem] -> qlen > max_len or mem > max_bytes
@@ -211,6 +312,10 @@ defmodule H.HTTP.SSE do
 
   defp commit_frame(seq, bin) do
     ["id: ", Integer.to_string(seq), "\nevent: commit\ndata: ", bin, "\n\n"]
+  end
+
+  defp catalog_frame(seq, bin) do
+    ["id: ", Integer.to_string(seq), "\nevent: catalog\ndata: ", bin, "\n\n"]
   end
 
   defp send_json(conn, status, payload) do

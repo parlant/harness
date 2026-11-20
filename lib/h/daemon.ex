@@ -367,11 +367,17 @@ defmodule H.Daemon do
          {:ok, server} <- ensure_session_started(entry, opts, nil),
          {:ok, detail} <- Server.get_detail(server) do
       session_entry =
-        if is_map(detail.session_meta) and Map.has_key?(detail.session_meta, :title) do
-          %{entry | title: detail.session_meta.title}
-        else
-          entry
+        case Catalog.get_session(session_id, table) do
+          {:ok, latest} -> latest
+          _ -> entry
         end
+        |> then(fn current ->
+          if is_map(detail.session_meta) and Map.has_key?(detail.session_meta, :title) do
+            %{current | title: detail.session_meta.title}
+          else
+            current
+          end
+        end)
 
       {:ok,
        %{
@@ -403,6 +409,52 @@ defmodule H.Daemon do
          items: Enum.map(items, &wire_entry/1),
          next_cursor: if(next_cursor, do: to_string(next_cursor), else: nil)
        }}
+    end
+  end
+
+  @doc """
+  Subscribes `subscriber_pid` (must equal `self()`) to `H.PubSub` for `:catalog`
+  events and returns an atomic `{:snapshot, seq, snapshot_json_bin}` directly
+  from `H.Catalog` without waking any unloaded sessions.
+  """
+  @spec subscribe_sessions(pid(), keyword()) ::
+          {:ok, {:snapshot, non_neg_integer(), binary()}} | {:error, term()}
+  def subscribe_sessions(subscriber_pid, opts \\ [])
+      when is_pid(subscriber_pid) and is_list(opts) do
+    catalog = Keyword.get(opts, :catalog, @default_catalog)
+    pubsub = Keyword.get(opts, :pubsub, @default_pubsub)
+
+    already_registered? =
+      subscriber_pid == self() and not is_nil(pubsub) and
+        Process.whereis(pubsub) != nil and
+        :catalog in Registry.keys(pubsub, self())
+
+    if subscriber_pid == self() and not is_nil(pubsub) and
+         Process.whereis(pubsub) != nil and not already_registered? do
+      Registry.register(pubsub, :catalog, nil)
+    end
+
+    try do
+      %{seq: seq, sessions: entries} = Catalog.snapshot(catalog)
+
+      snapshot_json =
+        %{
+          "version" => 1,
+          "seq" => seq,
+          "sessions" => Enum.map(entries, &wire_session/1)
+        }
+        |> JSON.encode_to_iodata!()
+        |> IO.iodata_to_binary()
+
+      {:ok, {:snapshot, seq, snapshot_json}}
+    catch
+      :exit, _ ->
+        if subscriber_pid == self() and not is_nil(pubsub) and
+             Process.whereis(pubsub) != nil and not already_registered? do
+          Registry.unregister(pubsub, :catalog)
+        end
+
+        {:error, :catalog_unavailable}
     end
   end
 
@@ -675,21 +727,7 @@ defmodule H.Daemon do
 
   # Wire formatting & misc helpers
 
-  defp wire_session(entry) do
-    %{
-      session_id: entry.session_id,
-      title: entry.title,
-      env_id: Map.get(entry, :env_id) || "host",
-      harness_id: Map.get(entry, :harness_id) || "coding",
-      cwd: entry.cwd,
-      root_conversation_id: to_string(entry.root_conversation_id || 1),
-      created_at: entry.created_at,
-      updated_at: entry.updated_at,
-      active: entry.active == true,
-      next_wake_at: entry.next_wake_at,
-      status: entry.status || "ok"
-    }
-  end
+  defp wire_session(entry), do: Catalog.wire_session(entry)
 
   defp wire_conversation(conv) do
     parent =

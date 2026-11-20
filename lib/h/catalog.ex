@@ -13,7 +13,32 @@ defmodule H.Catalog do
 
   @default_table :h_catalog
 
-  @worker_fields [:title, :active, :next_wake_at, :updated_at, :applied_edit_rev]
+  @worker_fields [
+    :title,
+    :active,
+    :attention,
+    :activity_kind,
+    :activity_label,
+    :queued_count,
+    :next_wake_at,
+    :updated_at,
+    :applied_edit_rev
+  ]
+
+  @runtime_change_fields [
+    :title,
+    :active,
+    :attention,
+    :activity_kind,
+    :activity_label,
+    :queued_count,
+    :next_wake_at,
+    :applied_edit_rev
+  ]
+
+  @valid_attentions ["idle", "running", "sleeping", "error", "quarantined"]
+  @valid_activity_kinds ["generation", "tool", "user_shell", "compaction", "retry"]
+  @max_activity_label_length 120
 
   @doc """
   Starts the catalog process.
@@ -22,6 +47,7 @@ defmodule H.Catalog do
     * `:data_dir` (required) - root storage directory
     * `:name` - GenServer registration name (default `H.Catalog`, pass `nil` for unnamed)
     * `:table` - ETS table name (default `:h_catalog`)
+    * `:pubsub` - `Registry` name for `:catalog` topic broadcasts (default `H.PubSub`, pass `nil` to disable)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -29,6 +55,71 @@ defmodule H.Catalog do
     gen_opts = if name = Keyword.get(opts, :name, __MODULE__), do: [name: name], else: []
     GenServer.start_link(__MODULE__, opts, gen_opts)
   end
+
+  @doc """
+  Formats a catalog entry into the wire-level `SessionSummary` map shared by
+  `H.Daemon` and catalog SSE broadcasts.
+  """
+  @spec wire_session(map()) :: map()
+  def wire_session(entry) when is_map(entry) do
+    status = Map.get(entry, :status) || "ok"
+
+    attention =
+      if status == "quarantined" do
+        "quarantined"
+      else
+        normalize_attention(Map.get(entry, :attention), status)
+      end
+
+    %{
+      session_id: entry.session_id,
+      title: Map.get(entry, :title),
+      env_id: Map.get(entry, :env_id) || "host",
+      harness_id: Map.get(entry, :harness_id) || "coding",
+      cwd: entry.cwd,
+      root_conversation_id: to_string(Map.get(entry, :root_conversation_id) || 1),
+      created_at: entry.created_at,
+      updated_at: entry.updated_at,
+      active: Map.get(entry, :active) == true,
+      attention: attention,
+      activity_kind: normalize_activity_kind(Map.get(entry, :activity_kind)),
+      activity_label: sanitize_activity_label(Map.get(entry, :activity_label)),
+      queued_count: normalize_queued_count(Map.get(entry, :queued_count)),
+      next_wake_at: Map.get(entry, :next_wake_at),
+      status: status
+    }
+  end
+
+  @doc """
+  Returns an atomic catalog snapshot (`%{seq: pos_integer(), sessions: [map()]}`)
+  from the catalog GenServer without waking any sessions.
+  """
+  @spec snapshot(GenServer.server()) :: %{seq: pos_integer(), sessions: [map()]}
+  def snapshot(server \\ __MODULE__) do
+    GenServer.call(server, :snapshot)
+  end
+
+  @doc """
+  Sanitizes an optional activity label to at most #{@max_activity_label_length}
+  printable characters without control characters.
+  """
+  @spec sanitize_activity_label(term()) :: nil | String.t()
+  def sanitize_activity_label(nil), do: nil
+
+  def sanitize_activity_label(val) when is_binary(val) do
+    cleaned =
+      val
+      |> String.replace(~r/[\x00-\x1F\x7F]+/u, " ")
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    case cleaned do
+      "" -> nil
+      str -> String.slice(str, 0, @max_activity_label_length)
+    end
+  end
+
+  def sanitize_activity_label(_), do: nil
 
   @doc """
   Lists all catalog entries directly from ETS, sorted by `updated_at` descending.
@@ -166,6 +257,7 @@ defmodule H.Catalog do
   def init(opts) do
     data_dir = Keyword.fetch!(opts, :data_dir) |> Path.expand()
     table_name = Keyword.get(opts, :table, @default_table)
+    pubsub = Keyword.get(opts, :pubsub, H.PubSub)
 
     catalog_dir = Path.join(data_dir, "catalog")
     File.mkdir_p!(data_dir)
@@ -182,10 +274,19 @@ defmodule H.Catalog do
       :ets.insert(table, {session_id, entry})
     end)
 
-    {:ok, %{table: table, file_path: file_path, entries: entries}}
+    {:ok, %{table: table, file_path: file_path, entries: entries, pubsub: pubsub, seq: 1}}
   end
 
   @impl true
+  def handle_call(:snapshot, _from, state) do
+    sessions =
+      state.entries
+      |> Map.values()
+      |> Enum.sort_by(&{&1.updated_at || 0, &1.session_id}, :desc)
+
+    {:reply, %{seq: state.seq, sessions: sessions}, state}
+  end
+
   def handle_call({operation, attrs}, _from, state)
       when operation in [:put_session, :insert_session] do
     with {:ok, validated} <- validate_put_attrs(attrs) do
@@ -200,8 +301,10 @@ defmodule H.Catalog do
         entries = Map.put(state.entries, session_id, entry)
         persist_entries!(state.file_path, entries)
         :ets.insert(state.table, {session_id, entry})
+        next_seq = state.seq + 1
+        broadcast_upsert(state.pubsub, next_seq, entry)
 
-        {:reply, {:ok, entry}, %{state | entries: entries}}
+        {:reply, {:ok, entry}, %{state | entries: entries, seq: next_seq}}
       end
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -215,21 +318,33 @@ defmodule H.Catalog do
 
       {:ok, existing} ->
         now = System.system_time(:millisecond)
-        updates = extract_fields(runtime_fields, @worker_fields)
+        updates = extract_runtime_fields(runtime_fields, existing.status)
 
-        updated =
+        candidate =
           existing
           |> Map.merge(updates)
-          |> Map.put_new(:updated_at, now)
-          |> then(fn entry ->
-            if Map.has_key?(updates, :updated_at), do: entry, else: %{entry | updated_at: now}
-          end)
+          |> enforce_status_attention()
 
-        entries = Map.put(state.entries, session_id, updated)
-        persist_entries!(state.file_path, entries)
-        :ets.insert(state.table, {session_id, updated})
+        changed? = runtime_changed?(existing, candidate)
 
-        {:reply, {:ok, updated}, %{state | entries: entries}}
+        if changed? do
+          updated =
+            if Map.has_key?(updates, :updated_at) do
+              candidate
+            else
+              %{candidate | updated_at: now}
+            end
+
+          entries = Map.put(state.entries, session_id, updated)
+          persist_entries!(state.file_path, entries)
+          :ets.insert(state.table, {session_id, updated})
+          next_seq = state.seq + 1
+          broadcast_upsert(state.pubsub, next_seq, updated)
+
+          {:reply, {:ok, updated}, %{state | entries: entries, seq: next_seq}}
+        else
+          {:reply, {:ok, existing}, state}
+        end
     end
   end
 
@@ -240,20 +355,26 @@ defmodule H.Catalog do
 
       {:ok, existing} ->
         now = System.system_time(:millisecond)
+        normalized_reason = normalize_reason(reason)
 
         updated = %{
           existing
           | status: "quarantined",
             active: false,
-            quarantine_reason: normalize_reason(reason),
+            attention: "quarantined",
+            activity_kind: nil,
+            activity_label: sanitize_activity_label(normalized_reason),
+            quarantine_reason: normalized_reason,
             updated_at: now
         }
 
         entries = Map.put(state.entries, session_id, updated)
         persist_entries!(state.file_path, entries)
         :ets.insert(state.table, {session_id, updated})
+        next_seq = state.seq + 1
+        broadcast_upsert(state.pubsub, next_seq, updated)
 
-        {:reply, {:ok, updated}, %{state | entries: entries}}
+        {:reply, {:ok, updated}, %{state | entries: entries, seq: next_seq}}
     end
   end
 
@@ -263,9 +384,12 @@ defmodule H.Catalog do
     if map_size(entries) != map_size(state.entries) do
       persist_entries!(state.file_path, entries)
       :ets.delete(state.table, session_id)
+      next_seq = state.seq + 1
+      broadcast_removed(state.pubsub, next_seq, session_id)
+      {:reply, :ok, %{state | entries: entries, seq: next_seq}}
+    else
+      {:reply, :ok, state}
     end
-
-    {:reply, :ok, %{state | entries: entries}}
   end
 
   defp validate_put_attrs(attrs) do
@@ -280,6 +404,10 @@ defmodule H.Catalog do
              {:created_at, :int, required: false},
              {:updated_at, :int, required: false},
              {:active, :boolean, required: false},
+             {:attention, {:enum, @valid_attentions}, required: false},
+             {:activity_kind, {:enum, @valid_activity_kinds}, required: false, nullable: true},
+             {:activity_label, :string, required: false, nullable: true},
+             {:queued_count, {:int, min: 0}, required: false},
              {:next_wake_at, :int, required: false, nullable: true},
              {:status, {:enum, ["ok", "quarantined"]}, required: false},
              {:quarantine_reason, :string, required: false, nullable: true},
@@ -288,6 +416,16 @@ defmodule H.Catalog do
            ]),
          {:ok, normalized_cwd} <- validate_and_normalize_cwd(base.env_id, base.cwd),
          {:ok, normalized_base} <- normalize_optional_title(base) do
+      normalized_base =
+        if Map.has_key?(normalized_base, :activity_label) do
+          %{
+            normalized_base
+            | activity_label: sanitize_activity_label(normalized_base.activity_label)
+          }
+        else
+          normalized_base
+        end
+
       {:ok, %{normalized_base | cwd: normalized_cwd}}
     end
   end
@@ -302,6 +440,8 @@ defmodule H.Catalog do
   defp normalize_optional_title(map), do: {:ok, map}
 
   defp build_entry(nil, validated, now) do
+    status = Map.get(validated, :status, "ok")
+
     %{
       session_id: validated.session_id,
       title: Map.get(validated, :title, nil),
@@ -312,23 +452,40 @@ defmodule H.Catalog do
       created_at: Map.get(validated, :created_at, now),
       updated_at: Map.get(validated, :updated_at, now),
       active: Map.get(validated, :active, false),
+      attention: Map.get(validated, :attention, "idle"),
+      activity_kind: Map.get(validated, :activity_kind, nil),
+      activity_label: Map.get(validated, :activity_label, nil),
+      queued_count: Map.get(validated, :queued_count, 0),
       next_wake_at: Map.get(validated, :next_wake_at, nil),
-      status: Map.get(validated, :status, "ok"),
+      status: status,
       quarantine_reason: Map.get(validated, :quarantine_reason, nil),
       pending_edits: Map.get(validated, :pending_edits, []),
       applied_edit_rev: Map.get(validated, :applied_edit_rev, 0)
     }
+    |> enforce_status_attention()
   end
 
   defp build_entry(existing, validated, now) do
     existing
     |> Map.merge(validated)
+    |> enforce_status_attention()
     |> then(fn entry ->
       if Map.has_key?(validated, :updated_at), do: entry, else: %{entry | updated_at: now}
     end)
   end
 
-  defp extract_fields(input, allowed_keys) do
+  defp extract_runtime_fields(input, existing_status) do
+    @worker_fields
+    |> extract_fields(input)
+    |> Enum.reduce(%{}, fn {key, val}, acc ->
+      case validate_runtime_field(key, val, existing_status) do
+        {:ok, normalized} -> Map.put(acc, key, normalized)
+        :ignore -> acc
+      end
+    end)
+  end
+
+  defp extract_fields(allowed_keys, input) do
     Enum.reduce(allowed_keys, %{}, fn key, acc ->
       key_str = Atom.to_string(key)
 
@@ -343,6 +500,114 @@ defmodule H.Catalog do
           end
       end
     end)
+  end
+
+  defp validate_runtime_field(:title, nil, _status), do: {:ok, nil}
+
+  defp validate_runtime_field(:title, val, _status) when is_binary(val) do
+    case Schema.normalize_title(val) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, _} -> :ignore
+    end
+  end
+
+  defp validate_runtime_field(:active, val, _status) when is_boolean(val), do: {:ok, val}
+
+  defp validate_runtime_field(:attention, _val, "quarantined"), do: {:ok, "quarantined"}
+
+  defp validate_runtime_field(:attention, val, _status)
+       when val in ["idle", "running", "sleeping", "error"],
+       do: {:ok, val}
+
+  defp validate_runtime_field(:activity_kind, nil, _status), do: {:ok, nil}
+
+  defp validate_runtime_field(:activity_kind, val, _status)
+       when val in @valid_activity_kinds,
+       do: {:ok, val}
+
+  defp validate_runtime_field(:activity_label, nil, _status), do: {:ok, nil}
+
+  defp validate_runtime_field(:activity_label, val, _status) when is_binary(val),
+    do: {:ok, sanitize_activity_label(val)}
+
+  defp validate_runtime_field(:queued_count, val, _status)
+       when is_integer(val) and val >= 0,
+       do: {:ok, val}
+
+  defp validate_runtime_field(:next_wake_at, nil, _status), do: {:ok, nil}
+
+  defp validate_runtime_field(:next_wake_at, val, _status) when is_integer(val),
+    do: {:ok, val}
+
+  defp validate_runtime_field(:updated_at, val, _status) when is_integer(val),
+    do: {:ok, val}
+
+  defp validate_runtime_field(:applied_edit_rev, val, _status) when is_integer(val),
+    do: {:ok, val}
+
+  defp validate_runtime_field(_key, _val, _status), do: :ignore
+
+  defp runtime_changed?(existing, candidate) do
+    Enum.any?(@runtime_change_fields, fn key ->
+      Map.get(existing, key) != Map.get(candidate, key)
+    end)
+  end
+
+  defp enforce_status_attention(%{status: "quarantined"} = entry),
+    do: %{entry | attention: "quarantined"}
+
+  defp enforce_status_attention(entry) do
+    %{entry | attention: normalize_attention(Map.get(entry, :attention), entry.status)}
+  end
+
+  defp normalize_attention(_val, "quarantined"), do: "quarantined"
+  defp normalize_attention(val, _status) when val in @valid_attentions, do: val
+  defp normalize_attention(_val, _status), do: "idle"
+
+  defp normalize_activity_kind(val) when val in @valid_activity_kinds, do: val
+  defp normalize_activity_kind(_), do: nil
+
+  defp normalize_queued_count(val) when is_integer(val) and val >= 0, do: val
+  defp normalize_queued_count(_), do: 0
+
+  defp broadcast_upsert(pubsub, seq, entry) do
+    if not is_nil(pubsub) and Process.whereis(pubsub) != nil do
+      payload =
+        %{
+          "version" => 1,
+          "seq" => seq,
+          "type" => "upsert",
+          "session" => wire_session(entry)
+        }
+        |> JSON.encode_to_iodata!()
+        |> IO.iodata_to_binary()
+
+      Registry.dispatch(pubsub, :catalog, fn entries ->
+        for {pid, _} <- entries do
+          send(pid, {:catalog_frame, seq, payload})
+        end
+      end)
+    end
+  end
+
+  defp broadcast_removed(pubsub, seq, session_id) do
+    if not is_nil(pubsub) and Process.whereis(pubsub) != nil do
+      payload =
+        %{
+          "version" => 1,
+          "seq" => seq,
+          "type" => "removed",
+          "session_id" => session_id
+        }
+        |> JSON.encode_to_iodata!()
+        |> IO.iodata_to_binary()
+
+      Registry.dispatch(pubsub, :catalog, fn entries ->
+        for {pid, _} <- entries do
+          send(pid, {:catalog_frame, seq, payload})
+        end
+      end)
+    end
   end
 
   defp normalize_reason(reason) when is_binary(reason), do: reason
@@ -366,6 +631,8 @@ defmodule H.Catalog do
   end
 
   defp decode_entry(raw) when is_map(raw) do
+    status = Map.get(raw, "status", "ok")
+
     %{
       session_id: Map.fetch!(raw, "session_id"),
       title: Map.get(raw, "title"),
@@ -376,8 +643,12 @@ defmodule H.Catalog do
       created_at: Map.fetch!(raw, "created_at"),
       updated_at: Map.fetch!(raw, "updated_at"),
       active: Map.get(raw, "active", false),
+      attention: normalize_attention(Map.get(raw, "attention"), status),
+      activity_kind: normalize_activity_kind(Map.get(raw, "activity_kind")),
+      activity_label: sanitize_activity_label(Map.get(raw, "activity_label")),
+      queued_count: normalize_queued_count(Map.get(raw, "queued_count")),
       next_wake_at: Map.get(raw, "next_wake_at"),
-      status: Map.get(raw, "status", "ok"),
+      status: status,
       quarantine_reason: Map.get(raw, "quarantine_reason"),
       pending_edits: Map.get(raw, "pending_edits", []),
       applied_edit_rev: Map.get(raw, "applied_edit_rev", 0)
@@ -558,13 +829,19 @@ defmodule H.Catalog do
             nil
 
           s ->
+            status = s.status || "ok"
+
             %{
               "session_id" => s.session_id,
               "title" => s.title,
               "cwd" => s.cwd,
               "updated_at" => s.updated_at,
               "active" => s.active == true,
-              "status" => s.status || "ok"
+              "attention" => normalize_attention(Map.get(s, :attention), status),
+              "activity_kind" => normalize_activity_kind(Map.get(s, :activity_kind)),
+              "activity_label" => sanitize_activity_label(Map.get(s, :activity_label)),
+              "queued_count" => normalize_queued_count(Map.get(s, :queued_count)),
+              "status" => status
             }
         end
 
@@ -581,13 +858,19 @@ defmodule H.Catalog do
             nil
 
           s ->
+            status = s.status || "ok"
+
             %{
               session_id: s.session_id,
               title: s.title,
               cwd: s.cwd,
               updated_at: s.updated_at,
               active: s.active == true,
-              status: s.status || "ok"
+              attention: normalize_attention(Map.get(s, :attention), status),
+              activity_kind: normalize_activity_kind(Map.get(s, :activity_kind)),
+              activity_label: sanitize_activity_label(Map.get(s, :activity_label)),
+              queued_count: normalize_queued_count(Map.get(s, :queued_count)),
+              status: status
             }
         end
 
@@ -614,7 +897,7 @@ defmodule H.Catalog do
       |> JSON.encode_to_iodata!()
       |> IO.iodata_to_binary()
 
-    tmp_path = file_path <> ".tmp"
+    tmp_path = "#{file_path}.tmp.#{System.unique_integer([:positive])}"
     {:ok, fd} = :file.open(tmp_path, [:write, :raw, :binary])
 
     try do

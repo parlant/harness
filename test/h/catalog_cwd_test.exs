@@ -283,6 +283,10 @@ defmodule H.CatalogCwdTest do
                cwd: "/path/app/packages/ui",
                updated_at: 350,
                active: true,
+               attention: "idle",
+               activity_kind: nil,
+               activity_label: nil,
+               queued_count: 0,
                status: "ok"
              }
 
@@ -330,6 +334,10 @@ defmodule H.CatalogCwdTest do
                "cwd" => "/path/app",
                "updated_at" => 999,
                "active" => true,
+               "attention" => "idle",
+               "activity_kind" => nil,
+               "activity_label" => nil,
+               "queued_count" => 0,
                "status" => "ok"
              }
 

@@ -154,9 +154,53 @@ defmodule H.Session.Server.State do
 
   # Catalog runtime reporting
 
+  @doc """
+  Computes the catalog runtime summary (`title`, `active`, `attention`,
+  `activity_kind`, `activity_label`, `queued_count`) from coordinator state.
+  """
+  @spec derive_catalog_runtime(map()) :: map()
+  def derive_catalog_runtime(state) when is_map(state) do
+    tasks = Map.get(state, :tasks, %{}) |> Map.values()
+    docs = Map.get(state, :docs, %{})
+
+    active_tasks = Enum.filter(tasks, &(&1.status in ["pending", "running", "waiting"]))
+    sleeping_tasks = Enum.filter(tasks, &(&1.status == "sleeping"))
+
+    {attention, activity_kind, activity_label} =
+      cond do
+        active_tasks != [] ->
+          derive_active_activity(active_tasks)
+
+        sleeping_tasks != [] ->
+          {"sleeping", "retry", "retrying"}
+
+        true ->
+          case find_conversation_failure(docs) do
+            {:ok, label} -> {"error", nil, label}
+            :none -> {"idle", nil, nil}
+          end
+      end
+
+    queued_count =
+      Enum.reduce(docs, 0, fn {_cid, conv_docs}, acc ->
+        case Map.get(conv_docs, "inbox") do
+          inbox when is_list(inbox) -> acc + length(inbox)
+          _ -> acc
+        end
+      end)
+
+    %{
+      title: Map.get(state, :session_meta, %{})[:title],
+      active: active_tasks != [] or sleeping_tasks != [],
+      attention: attention,
+      activity_kind: activity_kind,
+      activity_label: Catalog.sanitize_activity_label(activity_label),
+      queued_count: queued_count
+    }
+  end
+
   def maybe_report_catalog_runtime(prev_state, next_state) do
-    if session_active?(prev_state) != session_active?(next_state) or
-         prev_state.session_meta[:title] != next_state.session_meta[:title] do
+    if derive_catalog_runtime(prev_state) != derive_catalog_runtime(next_state) do
       report_catalog_active(next_state)
     end
   end
@@ -164,17 +208,78 @@ defmodule H.Session.Server.State do
   def report_catalog_active(state) do
     if not is_nil(state.catalog) and GenServer.whereis(state.catalog) != nil do
       try do
-        fields = %{
-          title: state.session_meta[:title],
-          active: session_active?(state),
-          updated_at: System.system_time(:millisecond)
-        }
+        fields =
+          state
+          |> derive_catalog_runtime()
+          |> Map.put(:updated_at, System.system_time(:millisecond))
 
         Catalog.report_runtime(state.catalog, state.session_id, fields)
       catch
         :exit, _ -> :ok
       end
     end
+  end
+
+  defp derive_active_activity(active_tasks) do
+    sorted = Enum.sort_by(active_tasks, &{status_priority(&1.status), &1.id})
+
+    tool_task =
+      Enum.find(sorted, fn t ->
+        t.kind == "tool_call" and t.status in ["running", "pending"]
+      end)
+
+    user_shell_task = Enum.find(sorted, &(&1.kind == "user_shell"))
+
+    compaction_task =
+      Enum.find(sorted, fn t ->
+        t.kind == "compaction" and t.status in ["running", "pending"]
+      end)
+
+    cond do
+      tool_task != nil ->
+        label =
+          case get_in(tool_task, [:checkpoint, "name"]) do
+            name when is_binary(name) and name != "" -> name
+            _ -> "tool"
+          end
+
+        {"running", "tool", label}
+
+      user_shell_task != nil ->
+        {"running", "user_shell", "shell"}
+
+      compaction_task != nil ->
+        {"running", "compaction", "compact"}
+
+      true ->
+        {"running", "generation", nil}
+    end
+  end
+
+  defp status_priority("running"), do: 0
+  defp status_priority("pending"), do: 1
+  defp status_priority("waiting"), do: 2
+  defp status_priority(_), do: 3
+
+  defp find_conversation_failure(docs) do
+    docs
+    |> Enum.sort_by(fn {cid, _} -> cid end)
+    |> Enum.find_value(:none, fn {_cid, conv_docs} ->
+      live = Map.get(conv_docs, "live") || %{}
+
+      case Map.get(live, "run_failure") || Map.get(live, "compaction_failure") do
+        failure when is_map(failure) ->
+          raw =
+            Map.get(failure, "reason") ||
+              Map.get(failure, "code") ||
+              "error"
+
+          {:ok, Catalog.sanitize_activity_label(to_string(raw)) || "error"}
+
+        _ ->
+          nil
+      end
+    end)
   end
 
   # Worker management & JSON/tool helpers

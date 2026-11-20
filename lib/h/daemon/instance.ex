@@ -32,7 +32,11 @@ defmodule H.Daemon.Instance do
       [
         {H.StoreLock, data_dir: opts[:data_dir], name: opts[:store_lock]},
         {H.Auth, data_dir: opts[:data_dir], name: opts[:auth_server], table: opts[:auth_table]},
-        {H.Catalog, data_dir: opts[:data_dir], name: opts[:catalog], table: opts[:catalog_table]},
+        {H.Catalog,
+         data_dir: opts[:data_dir],
+         name: opts[:catalog],
+         table: opts[:catalog_table],
+         pubsub: opts[:pubsub]},
         {H.Daemon.Runtime, opts}
       ],
       # Losing the instance/lock is a failed boot, not permission to reread

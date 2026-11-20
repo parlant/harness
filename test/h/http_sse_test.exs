@@ -16,6 +16,19 @@ defmodule H.HTTP.SSETest do
       GenServer.call(server, {:subscribe, sid, cid, pid, last_event_id})
     end
 
+    def subscribe_sessions(pid, opts) do
+      server = Keyword.fetch!(opts, :server)
+      GenServer.call(server, {:subscribe_sessions, pid})
+    end
+
+    def emit_catalog_burst(server, count) do
+      GenServer.call(server, {:emit_catalog_burst, count})
+    end
+
+    def emit_catalog_upsert(server, sid, attrs) do
+      GenServer.call(server, {:emit_catalog_upsert, sid, attrs})
+    end
+
     def emit_commit(server, sid, cid, data_map) do
       GenServer.call(server, {:emit_commit, sid, cid, data_map})
     end
@@ -99,6 +112,77 @@ defmodule H.HTTP.SSETest do
         end
 
       {:reply, reply, state}
+    end
+
+    def handle_call({:subscribe_sessions, pid}, _from, state) do
+      key = :catalog
+      subs = Map.get(state.subscribers, key, MapSet.new())
+
+      {subs, monitors} =
+        if MapSet.member?(subs, pid) do
+          {subs, state.monitors}
+        else
+          ref = Process.monitor(pid)
+          {MapSet.put(subs, pid), Map.put(state.monitors, ref, {key, pid})}
+        end
+
+      state = %{
+        state
+        | subscribers: Map.put(state.subscribers, key, subs),
+          monitors: monitors
+      }
+
+      snap =
+        JSON.encode!(%{
+          "version" => 1,
+          "seq" => state.seq,
+          "sessions" => []
+        })
+
+      {:reply, {:ok, {:snapshot, state.seq, snap}}, state}
+    end
+
+    def handle_call({:emit_catalog_burst, count}, _from, state) do
+      subs = Map.get(state.subscribers, :catalog, MapSet.new())
+
+      seq =
+        Enum.reduce(1..count, state.seq, fn i, acc_seq ->
+          next_seq = acc_seq + 1
+
+          bin =
+            JSON.encode!(%{
+              "version" => 1,
+              "seq" => next_seq,
+              "type" => "upsert",
+              "session" => %{"session_id" => "s-#{i}", "attention" => "running"}
+            })
+
+          for pid <- subs do
+            send(pid, {:catalog_frame, next_seq, bin})
+          end
+
+          next_seq
+        end)
+
+      {:reply, {:ok, seq}, %{state | seq: seq}}
+    end
+
+    def handle_call({:emit_catalog_upsert, sid, attrs}, _from, state) do
+      seq = state.seq + 1
+
+      bin =
+        JSON.encode!(%{
+          "version" => 1,
+          "seq" => seq,
+          "type" => "upsert",
+          "session" => Map.put(attrs, "session_id", sid)
+        })
+
+      for pid <- Map.get(state.subscribers, :catalog, MapSet.new()) do
+        send(pid, {:catalog_frame, seq, bin})
+      end
+
+      {:reply, {:ok, seq}, %{state | seq: seq}}
     end
 
     def handle_call({:emit_commit, sid, cid, data_map}, _from, state) do
@@ -554,6 +638,38 @@ defmodule H.HTTP.SSETest do
       {:ok, c42, _buf} = next_sse_event(resp, buf)
       assert c42.event == "commit"
       assert c42.id == "42"
+
+      Req.cancel_async_response(resp)
+    end
+
+    test "recovers from slow-client queue overflow on /api/v1/sessions/events with a fresh snapshot frame" do
+      ctx = start_bandit_daemon(sse_max_queue_len: 5)
+      url = "#{ctx.base_url}/api/v1/sessions/events"
+
+      resp =
+        Req.get!(url,
+          headers: [{"authorization", "Bearer #{ctx.token}"}],
+          into: :self,
+          retry: false
+        )
+
+      {:ok, snap1, buf} = next_sse_event(resp)
+      assert snap1.event == "snapshot"
+      assert snap1.id == "1"
+
+      {:ok, 41} = FakeDaemon.emit_catalog_burst(ctx.daemon, 40)
+
+      {events, buf} = drain_until_snapshot(resp, buf, 41, [])
+      snapshot_events = Enum.filter(events, &(&1.event == "snapshot"))
+      assert [%{id: "41", data: %{"seq" => 41}}] = snapshot_events
+      assert length(events) < 40
+
+      {:ok, 42} = FakeDaemon.emit_catalog_upsert(ctx.daemon, "after", %{"attention" => "idle"})
+      {:ok, c42, _buf} = next_sse_event(resp, buf)
+      assert c42.event == "catalog"
+      assert c42.id == "42"
+      assert c42.data["type"] == "upsert"
+      assert c42.data["session"]["session_id"] == "after"
 
       Req.cancel_async_response(resp)
     end

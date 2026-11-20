@@ -24,7 +24,8 @@
 | `GET /fs` | Browse `env_id` and `path`; returns the resolved path, parent, annotated directories and sessions rooted there. |
 | `GET /fs/files` | Bounded read-only workspace file discovery. Required `env_id` and absolute `cwd` (never falls back to daemon cwd); optional `query`, `include_hidden` (default `false`), `include_dirs` (default `true`), `exclude`, `limit` 1–500 (default 200), `max_depth` 1–32 (default 32). Skips `.git` and does not traverse symlinks. |
 | `GET /fs/file` | Bounded read-only UTF-8 file reader. Required `env_id`, absolute `cwd`, and `path`; optional `offset` (default 1), `limit` 1–2000 (default 200), `max_bytes` 1–65536 (default 51200). Confined within workspace (`403` on traversal, `~`, or symlinks; `422` on dirs, non-regular files, or binary/non-UTF-8). |
-| `GET /sessions` | Catalog `sessions`; optional filters `env_id`, `cwd`, `subtree`. |
+| `GET /sessions` | Catalog `sessions` (`SessionSummary` entries); optional filters `env_id`, `cwd`, `subtree`. Reads `H.Catalog` without waking unloaded sessions. |
+| `GET /sessions/events` | Catalog-level SSE stream (`text/event-stream`) across all sessions without waking unloaded sessions. Emits an initial `snapshot` event (`{"version":1,"seq":N,"sessions":[...]}`) followed by live `catalog` events (`{"version":1,"seq":N,"type":"upsert","session":...}` or `{"version":1,"seq":N,"type":"removed","session_id":"..."}`). |
 | `POST /sessions` | Required absolute `cwd`; optional `env_id` and `harness_id` (default `host` and `coding` for new sessions only), `title`, `agent`, `session_id`. Returns `session` and `seq`. Supply a stable `session_id` for create-or-attach; an explicit different profile or workspace conflicts, and an omitted profile or environment uses the recorded one when attaching. An unavailable recorded profile or environment returns `503`. Omitting the ID can create a second session on retry. |
 | `GET /sessions/:sid` | `session`, `conversations` with ancestry, and `tasks`. No open-waits API. |
 | `GET /sessions/:sid/files` | Same bounded file discovery as `GET /fs/files`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |
@@ -71,6 +72,15 @@ H.serve(auto_compaction: %{
 Exact cwd + qualified model wins, then cwd, model, provider, `:default`, and finally the built-in threshold. Use positive integer token counts, or `:off` at any scope. Changing the threshold does not change the provider's actual context window. A successful automatic summary commits a boundary and resumes the original input; queued follow-ups still wait. No `/continue` or second prompt needed. If there is no safe prefix to summarize, the daemon attempts the original request instead of looping. Failed or aborted summarization does not discard history or start another turn. Automatic failures carry `automatic: true` in `live.compaction_failure`, so clients can distinguish a paused prompt from a failed `/compact`. Manual `/compact` remains available.
 
 There is no built-in tool-round cap. An optional future extension could enforce a round, cost, or elapsed-time budget to bound unattended work or catch a looping model. That is separate from context management. Without that policy a model that keeps calling tools may keep spending until you abort it.
+
+## SessionSummary attention fields
+
+Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST /sessions`, `GET /sessions/:sid`, and `GET /fs` (`sessions` and `directories[*].latest_session`) includes live attention metadata persisted in `H.Catalog`:
+
+- `attention`: `"idle"` | `"running"` | `"sleeping"` | `"error"` | `"quarantined"` (always `"quarantined"` when `status == "quarantined"`).
+- `activity_kind`: `null` | `"generation"` | `"tool"` | `"user_shell"` | `"compaction"` | `"retry"`.
+- `activity_label`: `null` or a sanitized short string (max 120 chars, no control characters), e.g. active tool name (`"bash"`), `"shell"`, `"compact"`, `"retrying"`, or failure reason/code when `attention == "error"`.
+- `queued_count`: non-negative integer count of queued inbox items across conversations in the session.
 
 ## SSE cursor rules
 
