@@ -498,11 +498,12 @@ defmodule H.HTTP.SSETest do
         )
 
       {:ok, _snap, _buf} = next_sse_event(resp)
+      assert_receive {:subscribed, "demo", "1", connection, nil}
+      ref = Process.monitor(connection)
       assert FakeDaemon.subscriber_count(ctx.daemon, "demo", "1") == 1
 
       Req.cancel_async_response(resp)
-      Process.sleep(80)
-      assert FakeDaemon.subscriber_count(ctx.daemon, "demo", "1") == 0
+      assert_receive {:DOWN, ^ref, :process, ^connection, _}, 1_000
     end
 
     test "emits periodic : keepalive comments" do

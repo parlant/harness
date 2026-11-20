@@ -282,6 +282,9 @@ defmodule H.GenerationRecoveryTest do
           {:reply, [], %{content: [%{type: "text", text: "Resumed cleanly!"}]}}
         ])
 
+      # Hold unclean recovery in backoff so this test distinguishes it from a clean reset.
+      opts = Keyword.put(opts, :retry_backoff_ms, 60_000)
+
       {:ok, _} = Daemon.create_session(%{"session_id" => "s-clean", "cwd" => cwd}, opts)
 
       {:ok, _} =
@@ -303,6 +306,7 @@ defmodule H.GenerationRecoveryTest do
       # Reopen session via get_session_detail -> auto-resumes pending task without aborted entry!
       {:ok, detail} = Daemon.get_session_detail("s-clean", opts)
       assert detail.session.status == "ok"
+      assert [%{kind: "generation", restarts: 0}] = detail.tasks
 
       items =
         wait_until(fn ->

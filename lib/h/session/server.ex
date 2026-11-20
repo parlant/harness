@@ -80,6 +80,8 @@ defmodule H.Session.Server do
 
   @impl true
   def init(opts) do
+    # OTP shutdown must pass through terminate/2 to persist the clean-close policy.
+    Process.flag(:trap_exit, true)
     session_id = Keyword.fetch!(opts, :session_id)
     storage_mod = Keyword.get(opts, :storage_mod, H.Storage.File)
     storage_opts = build_storage_opts(opts, session_id)
