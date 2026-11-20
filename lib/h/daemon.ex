@@ -162,7 +162,7 @@ defmodule H.Daemon do
   def read_session_file(_session_id, _query_params, _opts),
     do: {:error, {:bad_request, "expected a map"}}
 
-  @doc "Lists one directory page and git changes in the session's execution environment."
+  @doc "Browses workspace directories, Git history, or a commit in the session's execution environment."
   def review_workspace(session_id, params, opts \\ []) do
     with {:ok, workspace} <- review_workspace_binding(session_id, opts),
          {:ok, browser} <- H.Daemon.Review.browse(workspace, params) do
@@ -170,7 +170,7 @@ defmodule H.Daemon do
     end
   end
 
-  @doc "Reads a bounded review file or its HEAD version in the session's workspace."
+  @doc "Reads a bounded review file from the worktree, HEAD, or a pinned commit."
   def read_review_file(session_id, path, source, opts \\ []) do
     with {:ok, workspace} <- review_workspace_binding(session_id, opts),
          {:ok, file} <- H.Daemon.Review.read(workspace, path, source) do

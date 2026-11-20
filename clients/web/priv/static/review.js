@@ -54,8 +54,9 @@ export const ReviewEditor = {
     window.addEventListener("beforeunload", this.beforeUnload);
     // A working-tree write must not be retried automatically on reconnect.
     this.onNavigate = (event) => {
-      if (this.dirty && (event.target.closest("[data-phx-link]")) &&
-          !window.confirm("Leave this review and discard unsaved edits?")) {
+      const link = event.target.closest("[data-phx-link], [data-review-context]");
+      if (link && (this.dirty || this.fields.comment.elements.note.value.trim()) &&
+          !window.confirm("Leave this file and discard the unsaved draft?")) {
         event.preventDefault();
         event.stopImmediatePropagation();
       }
@@ -65,7 +66,9 @@ export const ReviewEditor = {
     this.generation = 0;
     this.path = this.el.dataset.path;
     this.url = this.el.dataset.url;
-    this.switchView(this.el.dataset.deleted === "true" ? "head" : "working", true);
+    this.commit = this.el.dataset.commit;
+    this.sources = {working: this.commit || "working", head: this.commit ? this.el.dataset.base : "head"};
+    this.switchView(this.initialView(), true);
     loadMonaco().then((api) => {
       if (this.dead) return;
       this.api = api;
@@ -80,7 +83,7 @@ export const ReviewEditor = {
         // LiveView tracks which file is authoritative for mutations. If the
         // browser retains the old draft, it must first re-select that file.
         if (!window.confirm("Discard the unsaved file or comment draft and open the selected file?")) {
-          this.pushEvent("review_open", {path: this.path, deleted: String(this.view === "head" && !this.files.working)});
+          this.pushEvent("review_open", {path: this.path, deleted: String(this.deleted), changed: String(this.fromChanges)});
           this.updateControls();
           return;
         }
@@ -90,7 +93,7 @@ export const ReviewEditor = {
       this.url = this.el.dataset.url;
       this.files = {};
       this.fields.comment.reset();
-      this.switchView(this.el.dataset.deleted === "true" ? "head" : "working", true);
+      this.switchView(this.initialView(), true);
     }
     this.updateControls();
   },
@@ -113,11 +116,19 @@ export const ReviewEditor = {
 
   message(text) { this.fields.status.textContent = text; },
 
+  initialView() {
+    this.deleted = this.el.dataset.deleted === "true";
+    this.fromChanges = this.el.dataset.changed === "true";
+    if (this.deleted && this.sources.head) return "head";
+    return this.commit && this.sources.head && this.fromChanges ? "diff" : "working";
+  },
+
   async switchView(view, discard = false) {
     if (this.pending || (this.dirty && !discard)) {
       this.message("Save or discard your edits before switching views.");
       return;
     }
+    if (view === "preview" && this.view !== "preview") this.previewSide = this.view === "head" ? "head" : "working";
     this.fetchController?.abort();
     this.view = view;
     this.generation++;
@@ -134,10 +145,12 @@ export const ReviewEditor = {
     await this.poll(this.generation);
   },
 
-  async fetchFile(source, signal) {
+  async fetchFile(side, signal) {
+    const source = this.sources[side];
+    if (source === "empty") return {code: "missing", error: "The initial commit has no parent file."};
     const url = new URL(this.url, location.href);
     url.searchParams.set("source", source);
-    const previous = this.files[source];
+    const previous = this.files[side];
     const headers = previous ? {"If-None-Match": `"${previous.revision}"`} : {};
     const response = await fetch(url, {headers, signal, credentials: "same-origin", cache: "no-store"});
     if (response.status === 304) return previous;
@@ -152,8 +165,7 @@ export const ReviewEditor = {
     this.fetchController = controller;
     try {
       if (this.pending || document.hidden && this.current) return;
-      const mode = this.view;
-      const sources = mode === "diff" ? ["head", "working"] : [mode === "head" ? "head" : "working"];
+      const sources = this.view === "diff" ? ["head", "working"] : [this.fileSide()];
       const files = await Promise.all(sources.map((source) => this.fetchFile(source, controller.signal)));
       if (generation !== this.generation || this.dead || this.pending) return;
       const [first, second] = files;
@@ -180,7 +192,7 @@ export const ReviewEditor = {
         this.message(error.message || "Could not load file. Retrying…");
       }
     } finally {
-      if (generation === this.generation && !this.dead) {
+      if (generation === this.generation && !this.dead && (!this.commit || !this.current)) {
         this.timer = setTimeout(() => this.poll(generation), POLL_MS);
       }
     }
@@ -261,7 +273,8 @@ export const ReviewEditor = {
     const original = head?.text || "";
     const modified = file.text || "";
     if (!this.api) {
-      this.message("The diff viewer needs Monaco. Working file and HEAD can still be viewed separately.");
+      this.message(this.commit ? "The diff viewer needs Monaco. Open Commit file or Parent file instead." :
+        "The diff viewer needs Monaco. Working file and HEAD can still be viewed separately.");
       return;
     }
     this.fields.monaco.hidden = false;
@@ -269,12 +282,19 @@ export const ReviewEditor = {
       readOnly: true, originalEditable: false, automaticLayout: true,
       minimap: {enabled: false}, theme: this.theme(), links: false
     });
-    this.editor.setModel({original: this.model(original, `HEAD/${this.path}`), modified: this.model(modified)});
-    this.message("Compare HEAD → working file. To comment, select text in Working file or HEAD.");
+    this.editor.setModel({original: this.model(original, `base/${this.path}`), modified: this.model(modified)});
+    const comparison = this.sources.head === "empty" ? "Compare empty tree → initial commit." :
+      this.commit ? "Compare first parent → selected commit." : "Compare HEAD → working file.";
+    this.message(`${comparison} To comment, select text in ${this.commit ? "a file view" : "Working file or HEAD"}.`);
+  },
+
+  fileSide() {
+    return this.view === "head" || this.view === "preview" && this.previewSide === "head" ? "head" : "working";
   },
 
   preview(file) {
     const url = new URL(this.url, location.href);
+    url.searchParams.set("source", this.sources[this.fileSide()]);
     url.searchParams.set("preview", "1");
     url.searchParams.set("rev", file.revision);
     const tag = {html: "iframe", image: "img", audio: "audio", video: "video"}[file.preview];
@@ -290,7 +310,7 @@ export const ReviewEditor = {
     this.fields.media.hidden = false;
   },
 
-  editable() { return this.view === "working" && this.el.dataset.readonly !== "true"; },
+  editable() { return this.view === "working" && !this.commit && this.el.dataset.readonly !== "true"; },
 
   text() {
     if (this.editor) return this.editor.getModel().getValue(undefined, true);
@@ -318,9 +338,11 @@ export const ReviewEditor = {
       else this.fields.text.readOnly = !this.editable();
     }
     this.buttons.save.disabled = !matched || !this.editable() || !this.dirty || this.conflict || this.pending;
+    this.buttons.save.hidden = Boolean(this.commit);
     this.buttons.reload.hidden = !this.dirty;
-    this.buttons.head.hidden = this.buttons.diff.hidden = this.el.dataset.git === "false";
-    this.buttons.preview.hidden = !(this.files.working?.preview || this.current?.preview);
+    this.buttons.head.hidden = this.el.dataset.git === "false" || !this.sources.head || this.sources.head === "empty";
+    this.buttons.diff.hidden = this.el.dataset.git === "false" || !this.sources.head;
+    this.buttons.preview.hidden = this.view === "diff" || !this.current?.preview;
     this.fields.comment.hidden = !this.base || this.el.dataset.readonly === "true";
     this.buttons.select.disabled = this.dirty || this.pending;
     this.fields.range.textContent = this.anchor ? `Lines ${this.anchor.range[0]}–${this.anchor.range[2]}` : "Select a passage in the saved file.";
@@ -346,7 +368,7 @@ export const ReviewEditor = {
       this.message("Select text in the editor first.");
       return;
     }
-    this.anchor = {range, revision: this.base.revision, source: this.view, request_id: crypto.randomUUID()};
+    this.anchor = {range, revision: this.base.revision, source: this.sources[this.view], request_id: crypto.randomUUID()};
     if (this.editor) {
       this.highlight.set([{
         range: new this.api.Range(...range), options: {className: "review-highlight"}

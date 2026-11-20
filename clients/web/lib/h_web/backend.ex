@@ -12,7 +12,7 @@ defmodule HWeb.Backend do
   @callback open_workspace_review(map(), keyword()) ::
               {:ok, %{session: map(), seq: non_neg_integer()}} | {:error, term()}
   @callback review_workspace(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
-  @callback read_review_file(String.t(), String.t(), :working | :head, keyword()) ::
+  @callback read_review_file(String.t(), String.t(), :working | :head | String.t(), keyword()) ::
               {:ok, map()} | {:error, term()}
   @callback save_review_file(String.t(), String.t(), String.t(), String.t(), keyword()) ::
               {:ok, String.t()} | {:error, term()}

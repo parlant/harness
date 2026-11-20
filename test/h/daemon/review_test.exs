@@ -95,6 +95,120 @@ defmodule H.Daemon.ReviewTest do
       assert {:error, :not_in_head} == Review.read(workspace, "new file.txt", :head)
     end
 
+    test "pages history and opens old, root and detached commits by object ID", %{dir: dir} do
+      git(dir, ~w(init --quiet))
+
+      assert {:ok, %{commits: [], next?: false}} ==
+               Review.browse(%{env: Host.new(dir)}, %{history: 0})
+
+      File.write!(Path.join(dir, "notes.txt"), "initial\n")
+      git(dir, ~w(add notes.txt))
+      git(dir, ~w(commit -qm initial))
+      first = git(dir, ~w(rev-parse HEAD)) |> String.trim()
+
+      for _ <- 1..30, do: git(dir, ~w(commit --allow-empty -qm later))
+      ws = %{env: Host.new(dir)}
+      assert {:ok, %{commits: commits, next?: true}} = Review.browse(ws, %{history: 0})
+      assert length(commits) == 30
+      refute Enum.any?(commits, &(&1.id == first))
+
+      assert {:ok, %{commits: [%{id: ^first, subject: "initial", parent: nil}], next?: false}} =
+               Review.browse(ws, %{history: 1})
+
+      assert {:ok,
+              %{
+                commit: %{id: ^first, base: "empty"},
+                git: %{entries: [%{status: "A", path: "notes.txt"}]}
+              }} =
+               Review.browse(ws, %{commit: String.slice(first, 0, 10)})
+
+      git(dir, ["checkout", "--quiet", "--detach", first])
+      git(dir, ~w(commit --allow-empty -qm detached))
+      detached = git(dir, ~w(rev-parse HEAD)) |> String.trim()
+      git(dir, ~w(checkout --quiet -))
+
+      assert {:ok, %{commit: %{id: ^detached, base: ^first}, git: %{entries: []}}} =
+               Review.browse(ws, %{commit: detached})
+
+      for ref <- ["HEAD", "--all", "../abc", first <> "^", first <> ":notes.txt"] do
+        assert {:error, :invalid_commit} == Review.browse(ws, %{commit: ref})
+
+        if ref != "HEAD",
+          do: assert({:error, :invalid_commit} == Review.read(ws, "notes.txt", ref))
+      end
+
+      git(dir, ~w(branch deadbeef))
+      assert {:error, :commit_unavailable} == Review.browse(ws, %{commit: "deadbeef"})
+
+      assert {:error, :commit_unavailable} ==
+               Review.browse(ws, %{commit: String.duplicate("a", 40)})
+    end
+
+    test "uses the first parent for merge commits and limits snapshots to the session directory",
+         %{dir: dir} do
+      git(dir, ~w(init --quiet -b trunk))
+      File.mkdir_p!(Path.join(dir, "src/sub"))
+      File.write!(Path.join(dir, "src/sub/old.txt"), "old\n")
+      File.write!(Path.join(dir, "outside.txt"), "outside\n")
+      File.ln_s!("../outside.txt", Path.join(dir, "src/link"))
+      git(dir, ~w(add .))
+      git(dir, ~w(commit -qm initial))
+      git(dir, ~w(checkout -qb topic))
+      File.rm!(Path.join(dir, "src/sub/old.txt"))
+      File.write!(Path.join(dir, "src/new.txt"), "added\n")
+      File.write!(Path.join(dir, "outside.txt"), "updated\n")
+      git(dir, ~w(add -A))
+      git(dir, ~w(commit -qm topic))
+      git(dir, ~w(checkout -q trunk))
+      git(dir, ~w(commit --allow-empty -qm trunk))
+      parent = git(dir, ~w(rev-parse HEAD)) |> String.trim()
+      git(dir, ~w(merge --no-ff -qm merged topic))
+      merge = git(dir, ~w(rev-parse HEAD)) |> String.trim()
+      cwd = Path.join(dir, "src")
+      agent = start_supervised!({RemoteAgent, id: "review-history-remote", env: Host.new(dir)})
+      ws = %{env: Remote.new(agent, cwd)}
+
+      assert {:ok,
+              %{commit: %{id: ^merge, base: ^parent}, git: %{entries: entries, truncated?: false}}} =
+               Review.browse(ws, %{commit: merge})
+
+      assert entries == [%{status: "A", path: "new.txt"}, %{status: "D", path: "sub/old.txt"}]
+
+      # Neither browsing nor reading should resolve against the current checkout.
+      File.write!(Path.join(cwd, "new.txt"), "changed in the worktree\n")
+
+      assert {:ok, %{entries: [%{path: "new.txt", type: "file"}], next?: false}} =
+               Review.browse(ws, %{commit: merge, dir: "", page: 0})
+
+      assert {:ok, %{entries: [%{path: "sub/old.txt", type: "file"}], next?: false}} =
+               Review.browse(ws, %{commit: parent, dir: "sub", page: 0})
+
+      assert {:ok, %{text: "added\n"}} = Review.read(ws, "new.txt", merge)
+      assert {:ok, %{text: "old\n"}} = Review.read(ws, "sub/old.txt", parent)
+      assert {:error, :not_in_commit} == Review.read(ws, "sub/old.txt", merge)
+      assert {:error, :symlink_not_followed} == Review.read(ws, "link", merge)
+      assert {:error, :not_in_commit} == Review.read(ws, "outside.txt", merge)
+      assert {:error, :invalid_path} == Review.read(ws, "../outside.txt", merge)
+      assert {:error, :invalid_path} == Review.browse(ws, %{commit: merge, dir: "..", page: 0})
+    end
+
+    test "keeps shallow commits browseable without inventing a root diff", %{dir: dir} do
+      git(dir, ~w(init --quiet))
+      File.write!(Path.join(dir, "notes.txt"), "first\n")
+      git(dir, ~w(add .))
+      git(dir, ~w(commit -qm initial))
+      git(dir, ~w(commit --allow-empty -qm later))
+      head = git(dir, ~w(rev-parse HEAD)) |> String.trim()
+      shallow = Path.join(dir, "shallow")
+      git(dir, ["clone", "--quiet", "--depth=1", "file://#{dir}", shallow])
+      ws = %{env: Host.new(shallow)}
+
+      assert {:ok, %{commit: %{base: nil}, git: :parent_unavailable}} =
+               Review.browse(ws, %{commit: head})
+
+      assert {:ok, %{text: "first\n"}} = Review.read(ws, "notes.txt", head)
+    end
+
     test "does not execute repository clean filters or fsmonitor commands", %{dir: dir} do
       git(dir, ~w(init --quiet))
       File.write!(Path.join(dir, ".gitattributes"), "test.txt filter=review\n")
@@ -119,7 +233,7 @@ defmodule H.Daemon.ReviewTest do
   end
 
   defp git(dir, args) do
-    assert {_, 0} =
+    assert {output, 0} =
              System.cmd(
                "git",
                [
@@ -138,5 +252,7 @@ defmodule H.Daemon.ReviewTest do
                stderr_to_stdout: true,
                env: [{"GIT_CONFIG_NOSYSTEM", "1"}, {"GIT_CONFIG_GLOBAL", "/dev/null"}]
              )
+
+    output
   end
 end

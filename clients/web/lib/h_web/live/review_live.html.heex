@@ -35,7 +35,27 @@
     main_label="File editor"
   >
     <:sidebar>
-      <div class="review-toolbar">
+      <div :if={@git_available?} class="review-toolbar" aria-label="Review source">
+        <button
+          :if={@commit || @tab == "history"}
+          type="button"
+          class="btn btn-sm"
+          phx-click="review_working"
+          data-review-context
+        >← Working tree</button>
+        <button
+          :if={@tab != "history"}
+          type="button"
+          class="btn btn-sm"
+          phx-click="review_history"
+          data-review-context
+        >{if @commit, do: "← History", else: "History"}</button>
+      </div>
+      <div :if={@commit} id="review-selected-commit" class="review-commit-summary">
+        <strong>{@commit.subject}</strong>
+        <small class="mono muted" title={@commit.id}>{String.slice(@commit.id, 0, 12)} · {@commit.date} · Read-only files</small>
+      </div>
+      <div :if={@tab != "history"} class="review-toolbar" aria-label="File listing">
         <button
           :if={@git_available?}
           type="button"
@@ -52,14 +72,56 @@
           aria-pressed={to_string(@tab == "files")}
         >All files</button>
       </div>
-      <p :if={@browser_error} class="review-hint muted">{@browser_error}</p>
+      <p :if={@browser_error} class="review-hint muted" role="status">{@browser_error}</p>
+      <div :if={@tab == "history"} id="review-history">
+        <form
+          id="review-commit-form"
+          phx-submit="review_commit"
+          class="review-toolbar review-commit-form"
+        >
+          <label for="review-commit-ref" class="muted">Jump to a commit</label>
+          <div>
+            <input
+              id="review-commit-ref"
+              class="input mono"
+              name="ref"
+              placeholder="Commit hash"
+              maxlength="64"
+              required
+            />
+            <button type="submit" class="btn btn-sm">Open</button>
+          </div>
+        </form>
+        <p :if={@history && @history.commits == []} class="review-hint muted">No commits.</p>
+        <ul :if={@history} class="review-list">
+          <li :for={commit <- @history.commits}>
+            <button
+              type="button"
+              class="review-file review-commit-summary"
+              phx-click="review_commit"
+              phx-value-ref={commit.id}
+            >
+              <span>{commit.subject}</span>
+              <small class="mono muted">{String.slice(commit.id, 0, 12)} · {commit.date}</small>
+            </button>
+          </li>
+        </ul>
+        <.pager page={@history_page} listing={@history} event="review_history_page" />
+      </div>
       <div :if={@tab == "changes" && @browser} id="review-changes">
+        <p :if={@commit} class="review-hint muted">
+          {case @commit.base do
+            "empty" -> "Changes in the initial commit"
+            nil -> "The parent isn't available locally. Use All files to browse this commit."
+            base -> "Changes from first parent #{String.slice(base, 0, 12)}"
+          end}
+        </p>
         <%= if is_map(@browser.git) do %>
           <p
             :if={@browser.git.entries == [] && !@browser.git.truncated?}
             class="review-hint muted"
           >
-            No git changes.
+            {if @commit, do: "No changes in this directory.", else: "No git changes."}
           </p>
           <p :if={@browser.git.truncated?} class="review-hint muted">
             Change list capped. Use All files for the full tree.
@@ -71,76 +133,39 @@
                 class="review-file mono"
                 phx-click="review_open"
                 phx-value-path={entry.path}
-                phx-value-deleted={
-                  to_string(
-                    entry[:working] == "D" || (entry[:staged] == "D" && !entry[:untracked])
-                  )
-                }
+                phx-value-deleted={to_string(deleted?(entry))}
+                phx-value-changed="true"
                 aria-current={if @file && @file.path == entry.path, do: "true"}
               >
-                <span class="badge" title="Staged / working tree">{entry[:staged] || "·"}{entry[
-                  :working
-                ] || entry[:untracked] || "·"}</span>
+                <span :if={@commit} class="badge" title="Change in this commit">{entry.status}</span>
+                <span :if={!@commit} class="badge" title="Staged / working tree">{entry[:staged] ||
+                  "·"}{entry[:working] || entry[:untracked] || "·"}</span>
                 {entry.path}
               </button>
             </li>
           </ul>
         <% else %>
-          <p class="review-hint muted">Git changes unavailable. Browse All files instead.</p>
+          <p :if={@browser.git != :parent_unavailable} class="review-hint muted">
+            Git changes unavailable. Browse All files instead.
+          </p>
         <% end %>
       </div>
       <div :if={@tab == "files"} id="review-files">
-        <div class="review-toolbar">
-          <button
-            :if={@dir != ""}
-            type="button"
-            class="btn btn-sm"
-            phx-click="review_dir"
-            phx-value-dir={if Path.dirname(@dir) == ".", do: "", else: Path.dirname(@dir)}
-          >↑ Up</button>
-          <span class="mono muted">/{@dir}</span>
-        </div>
-        <ul :if={@browser} class="review-list">
-          <li :for={entry <- @browser.entries}>
-            <button
-              :if={entry.type == "dir"}
-              type="button"
-              class="review-file mono"
-              phx-click="review_dir"
-              phx-value-dir={entry.path}
-            >{entry.name}/</button>
-            <button
-              :if={entry.type == "file"}
-              type="button"
-              class="review-file mono"
-              phx-click="review_open"
-              phx-value-path={entry.path}
-              aria-current={if @file && @file.path == entry.path, do: "true"}
-            >{entry.name}</button>
-          </li>
-        </ul>
-        <div :if={@page > 0 || (@browser && @browser.next?)} class="review-toolbar">
-          <button
-            type="button"
-            class="btn btn-sm"
-            phx-click="review_page"
-            phx-value-direction="prev"
-            disabled={@page == 0}
-          >Previous</button>
-          <span>Page {@page + 1}</span>
-          <button
-            type="button"
-            class="btn btn-sm"
-            phx-click="review_page"
-            phx-value-direction="next"
-            disabled={!@browser || !@browser.next?}
-          >Next</button>
-        </div>
+        <.file_tree dir="" dirs={@dirs} file={@file} />
       </div>
     </:sidebar>
     <:main>
       <p :if={!@file} class="review-hint muted">
-        Open a file to view it, compare it with HEAD, or select text and leave a comment in this session.
+        {cond do
+          @tab == "history" ->
+            "Choose a commit to inspect its changes or browse its files."
+
+          @commit ->
+            "Open a file to view this commit, compare with its first parent, or leave a session comment."
+
+          true ->
+            "Open a file to view it, compare it with HEAD, or select text and leave a comment in this session."
+        end}
       </p>
       <div
         :if={@file}
@@ -151,13 +176,20 @@
         data-path={@file.path}
         data-url={~p"/sessions/#{@session_id}/review/file?#{%{path: @file.path}}"}
         data-deleted={to_string(@file.deleted?)}
+        data-changed={to_string(@file.changed?)}
         data-readonly={to_string(@session.archived)}
         data-git={to_string(@git_available?)}
+        data-commit={@commit && @commit.id}
+        data-base={@commit && @commit.base}
       >
         <div class="review-toolbar">
           <strong class="mono" data-review-path></strong>
-          <button type="button" class="btn btn-sm" data-review="working">Working file</button>
-          <button type="button" class="btn btn-sm" data-review="head">HEAD</button>
+          <button type="button" class="btn btn-sm" data-review="working">{if @commit,
+            do: "Commit file",
+            else: "Working file"}</button>
+          <button type="button" class="btn btn-sm" data-review="head">{if @commit,
+            do: "Parent file",
+            else: "HEAD"}</button>
           <button type="button" class="btn btn-sm" data-review="diff">Diff</button>
           <button type="button" class="btn btn-sm" data-review="preview" hidden>Preview</button>
           <button type="button" class="btn btn-sm" data-review="reload" hidden>Discard draft &amp; reload</button>

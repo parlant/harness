@@ -4,7 +4,7 @@ defmodule HWeb.ReviewFileController do
   alias HWeb.{Backend, ReviewLive}
 
   def show(conn, %{"session_id" => sid, "path" => path} = params) do
-    source = if params["source"] == "head", do: :head, else: :working
+    source = Map.get(params, "source", "working")
     conn = put_resp_header(conn, "cache-control", "no-store")
 
     case Backend.read_review_file(sid, path, source) do
@@ -12,7 +12,8 @@ defmodule HWeb.ReviewFileController do
         respond(conn, file, params["preview"] == "1")
 
       {:error, reason} ->
-        code = if reason in [:enoent, :not_in_head], do: "missing", else: "unavailable"
+        code =
+          if reason in [:enoent, :not_in_head, :not_in_commit], do: "missing", else: "unavailable"
 
         conn
         |> put_status(:not_found)

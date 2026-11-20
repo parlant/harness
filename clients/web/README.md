@@ -102,7 +102,7 @@ a HEEx label: the first should update without navigation and the second
 should refresh the page and restore the inspector mode. None of these steps
 requires a provider call.
 
-## Review working files
+## Review working files and commits
 
 - **Workspaces → Review files** opens a dedicated **File review** session for
   that environment and directory. Reopening the workspace reuses its latest
@@ -115,15 +115,26 @@ requires a provider call.
 - In a git worktree, **Changes** shows staged, unstaged and untracked files
   under the session directory. **HEAD** and **Diff** compare with the last
   commit, not the index. Deleted text files can be read from HEAD. **All files**
-  browses the directory tree and is the default outside git. Git discovery is
-  read-only and skips configured filters and hooks; a touched-but-unchanged
-  tracked file can appear as modified until git refreshes its index.
-- Select text in **Working file** or **HEAD**, choose **Use selected text**, and
-  enter a comment. **Save comment** writes the verified path, revision, range,
-  and excerpt to the active conversation without a provider call. **Ask agent**
-  sends it as normal input and can start or queue a run. Highlights mark the
-  draft selection; they are not persistent inline threads.
-- The open file and directory/change list refresh every few seconds. Unsaved
+  browses the directory tree and is the default outside git. Expand or collapse
+  folders in place; each open folder has its own page, and closing a branch
+  doesn't close the file you're reading. Git discovery is read-only and skips
+  configured filters and hooks; a touched-but-unchanged tracked file can appear
+  as modified until git refreshes its index.
+- **History** lists commits from local Git history. Page through them or jump
+  to a full or abbreviated commit hash. **Changes** compares the selected
+  commit with its first parent (an empty tree for the initial commit);
+  **All files** browses the selected snapshot under the session directory.
+  Use **Commit file** or **Parent file** to read and comment on either side,
+  including deleted text. History never checks out or writes a commit, and
+  doesn't fetch missing history in a shallow clone. **Working tree** returns
+  to the editable view.
+- Select text in a file view, choose **Use selected text**, and enter a comment.
+  **Save comment** writes the verified path, revision, range, and excerpt to the
+  active conversation without a provider call. Historical comments include the
+  full commit hash of the selected text. **Ask agent**
+  sends the comment as normal input and can start or queue a run. Highlights mark
+  the draft selection; they are not persistent inline threads.
+- The open working file and visible working-tree listings refresh periodically. Unsaved
   text is kept when a file changes on disk; discard the draft to reload. Saving
   checks the source revision and uses the workspace's writer lease to avoid
   overwriting agent edits. It does not stage changes. Save before leaving the

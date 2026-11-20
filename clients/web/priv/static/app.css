@@ -1784,6 +1784,15 @@ html.inspect-picking * { cursor: crosshair !important; }
   color: var(--text); background: transparent; overflow-wrap: anywhere; cursor: pointer;
 }
 .review-file:hover, .review-file[aria-current="true"] { background: var(--surface-2); }
+.review-folder, .review-tree-file { display: flex; align-items: baseline; gap: 6px; }
+.review-folder > span { color: var(--muted); width: 12px; flex-shrink: 0; }
+.review-tree-file { padding-left: 24px; }
+.review-subtree { border-left: 1px solid var(--border); margin-left: 12px; padding-left: 4px; }
+.review-commit-summary { display: grid; gap: 3px; padding: 8px; overflow-wrap: anywhere; }
+.review-commit-form { display: grid; }
+.review-commit-form > div { display: flex; gap: 6px; }
+.review-commit-form input { min-width: 0; flex: 1; }
+.review-pager { padding-left: 24px; }
 .review-file .badge { display: inline-block; min-width: 2.7em; text-align: center; }
 .review-document { border: 1px solid var(--border); min-width: 0; background: var(--surface); }
 .review-document > textarea, .review-document > [data-review-monaco] {

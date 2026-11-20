@@ -37,6 +37,19 @@ defmodule HWeb.ReviewFileControllerTest do
       assert ["sandbox;" <> _] = get_resp_header(svg, "content-security-policy")
     end
 
+    test "rejects invalid sources rather than falling back to the working file", ctx do
+      %{conn: conn, owner_token: token, projects_dir: cwd, daemon_opts: opts} = ctx
+      File.write!(Path.join(cwd, "notes.txt"), "working file\n")
+      {:ok, %{session: session}} = Daemon.create_session(%{cwd: cwd}, opts)
+      url = "/sessions/#{session.session_id}/review/file"
+      conn = log_in_owner(conn, token)
+
+      for source <- ["--all", "HEAD^", "working:notes.txt", %{"unexpected" => "working"}] do
+        assert %{"code" => "unavailable", "error" => "Enter a full or abbreviated commit hash."} =
+                 json_response(get(conn, url, %{"path" => "notes.txt", "source" => source}), 404)
+      end
+    end
+
     test "offers single byte ranges to media players", ctx do
       %{conn: conn, owner_token: token, projects_dir: cwd, daemon_opts: opts} = ctx
       File.write!(Path.join(cwd, "sample.wav"), <<0, 1, 2, 3, 4, 5, 6, 7>>)
