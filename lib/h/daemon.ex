@@ -349,6 +349,7 @@ defmodule H.Daemon do
           cwd: ws.cwd
         }
         |> maybe_put(:title, Map.get(params, :title))
+        |> maybe_put(:tags, Map.get(params, :tags))
 
       case Catalog.insert_session(catalog, attrs) do
         {:ok, entry} -> session_result(entry, opts, bootstrapped)
@@ -386,7 +387,7 @@ defmodule H.Daemon do
     end
   end
 
-  @doc "Updates `needs_attention` triage flag on a session without waking unloaded sessions."
+  @doc "Updates a session’s `needs_attention` flag or `tags` without waking it."
   @spec triage_session(String.t(), map(), keyword()) ::
           {:ok, %{session: map()}}
           | {:error, :not_found | {:bad_request, String.t()} | term()}
@@ -403,18 +404,8 @@ defmodule H.Daemon do
   defp do_triage_session(session_id, params, opts) do
     catalog = Keyword.get(opts, :catalog, @default_catalog)
 
-    needs_attention =
-      case Map.fetch(params, "needs_attention") do
-        {:ok, v} -> v
-        :error -> Map.get(params, :needs_attention, :missing)
-      end
-
     with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
-         true <-
-           is_boolean(needs_attention) ||
-             {:error, {:bad_request, "needs_attention must be a boolean"}},
-         {:ok, updated} <-
-           Catalog.set_triage(catalog, session_id, %{needs_attention: needs_attention}) do
+         {:ok, updated} <- Catalog.set_triage(catalog, session_id, params) do
       {:ok, %{session: wire_session(updated, opts)}}
     else
       {:error, msg} when is_binary(msg) -> {:error, {:bad_request, msg}}
@@ -636,7 +627,8 @@ defmodule H.Daemon do
           session_id: new_sid,
           env_id: ws.env_id,
           harness_id: harness.id(),
-          cwd: ws.cwd
+          cwd: ws.cwd,
+          tags: source_entry.tags
         }
         |> maybe_put(:title, new_title)
 

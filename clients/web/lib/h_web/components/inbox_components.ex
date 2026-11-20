@@ -6,17 +6,13 @@ defmodule HWeb.InboxComponents do
   """
 
   use Phoenix.Component
-  use HWeb, :verified_routes
 
-  alias HWeb.CatalogState
+  alias HWeb.{CatalogState, InboxFilter}
 
   attr :id, :string, default: "inbox-filter-bar"
   attr :counts, :map, required: true
   attr :filter_mode, :string, default: "inbox"
-  attr :search, :string, default: ""
   attr :filter_event, :string, default: "set_filter"
-  attr :search_event, :string, default: "search"
-  attr :show_search, :boolean, default: true
   attr :compact, :boolean, default: false
 
   def filter_bar(assigns) do
@@ -86,25 +82,75 @@ defmodule HWeb.InboxComponents do
           <span>Running {@counts.processing}</span>
         </span>
       </div>
-
-      <form
-        :if={@show_search}
-        id={"#{@id}-search-form"}
-        phx-change={@search_event}
-        class="inbox-search-form"
-      >
-        <input
-          id={"#{@id}-search-input"}
-          type="search"
-          name="q"
-          value={@search}
-          placeholder="Filter sessions or folders…"
-          aria-label="Filter sessions or folders"
-          class="input inbox-search-input"
-          autocomplete="off"
-        />
-      </form>
     </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :filter, InboxFilter, required: true
+  attr :options, :map, required: true
+  attr :clear_path, :string, required: true
+  attr :show_mode, :boolean, default: false
+
+  def scope_controls(assigns) do
+    ~H"""
+    <form
+      id={"#{@id}-search-form"}
+      phx-change="filter_inbox"
+      phx-submit="filter_inbox"
+      class="inbox-scope-controls"
+      aria-label="Inbox filters"
+    >
+      <select :if={@show_mode} name="filter" class="input" aria-label="Session status">
+        <option
+          :for={
+            {mode, label} <- [
+              {"inbox", "Inbox"},
+              {"attention", "Needs Attention"},
+              {"archived", "Archived"},
+              {"all", "All Sessions"}
+            ]
+          }
+          value={mode}
+          selected={@filter.mode == mode}
+        >
+          {label}
+        </option>
+      </select>
+      <select name="workspace" class="input mono" aria-label="Working directory">
+        <option value="" selected={is_nil(@filter.workspace)}>All directories</option>
+        <option
+          :for={{label, value} <- @options.workspaces}
+          value={value}
+          selected={InboxFilter.workspace_value(@filter.workspace) == value}
+        >
+          {label}
+        </option>
+      </select>
+      <select name="tag" class="input" aria-label="Session tag">
+        <option value="" selected={is_nil(@filter.tag)}>All tags</option>
+        <option :for={tag <- @options.tags} value={tag} selected={@filter.tag == tag}>{tag}</option>
+      </select>
+      <input
+        id={"#{@id}-search-input"}
+        type="search"
+        name="q"
+        value={@filter.query}
+        placeholder="Filter sessions or folders…"
+        aria-label="Filter sessions or folders"
+        class="input"
+        autocomplete="off"
+        phx-debounce="250"
+      />
+      <.link
+        :if={InboxFilter.params(@filter) != %{}}
+        patch={@clear_path}
+        replace={true}
+        class="btn btn-sm btn-ghost"
+      >
+        Clear filters
+      </.link>
+    </form>
     """
   end
 
@@ -112,6 +158,7 @@ defmodule HWeb.InboxComponents do
   attr :groups, :list, required: true
   attr :current_session_id, :string, default: nil
   attr :from_inbox, :boolean, default: true
+  attr :inbox_filter, InboxFilter, default: %InboxFilter{}
   attr :compact, :boolean, default: false
   attr :new_session_event, :string, default: nil
   attr :empty_message, :string, default: "No sessions match the current filter."
@@ -168,6 +215,7 @@ defmodule HWeb.InboxComponents do
               session={s}
               current?={@current_session_id == s.session_id}
               from_inbox={@from_inbox}
+              inbox_filter={@inbox_filter}
               compact={@compact}
             />
           </li>
@@ -180,6 +228,7 @@ defmodule HWeb.InboxComponents do
   attr :session, :map, required: true
   attr :current?, :boolean, default: false
   attr :from_inbox, :boolean, default: true
+  attr :inbox_filter, InboxFilter, default: %InboxFilter{}
   attr :compact, :boolean, default: false
 
   def session_row(assigns) do
@@ -192,12 +241,7 @@ defmodule HWeb.InboxComponents do
     imported_archive? = session.status == "archived"
     missing_cwd? = not imported_archive? and session.cwd_exists == false
 
-    href =
-      if assigns.from_inbox do
-        ~p"/sessions/#{session.session_id}?from=inbox"
-      else
-        ~p"/sessions/#{session.session_id}"
-      end
+    href = InboxFilter.session_path(session.session_id, assigns.inbox_filter, assigns.from_inbox)
 
     assigns =
       assigns
@@ -255,6 +299,9 @@ defmodule HWeb.InboxComponents do
             </span>
             <span :if={@session.title} class="inbox-row-sid mono muted">
               {@session.session_id}
+            </span>
+            <span :for={tag <- @session.tags} class="badge mono inbox-session-tag" title={tag}>
+              {tag}
             </span>
           </div>
         </div>

@@ -6,28 +6,22 @@ defmodule HWeb.InboxLive do
   """
   use HWeb, :live_view
 
-  alias HWeb.{Backend, CatalogState, InboxComponents}
-
-  @valid_filters ~w(inbox attention archived all)
+  alias HWeb.{Backend, CatalogState, InboxComponents, InboxFilter}
 
   @impl true
-  def mount(params, _session, socket) do
-    initial_filter = normalize_filter(params["filter"])
-    initial_search = if is_binary(params["q"]), do: params["q"], else: ""
-
+  def mount(_params, _session, socket) do
     socket =
       socket
-      |> assign(
-        catalog: CatalogState.new(),
-        catalog_subscribed?: false,
-        filter_mode: initial_filter,
-        search: initial_search,
-        error_banner: nil
-      )
+      |> assign(catalog: CatalogState.new(), catalog_subscribed?: false, error_banner: nil)
       |> load_catalog()
-      |> recompute_view()
 
     {:ok, socket}
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    {:noreply,
+     socket |> assign(:inbox_filter, InboxFilter.from_params(params)) |> recompute_view()}
   end
 
   @impl true
@@ -61,20 +55,14 @@ defmodule HWeb.InboxLive do
 
   @impl true
   def handle_event("set_filter", %{"mode" => mode}, socket) do
-    {:noreply,
-     socket
-     |> assign(:filter_mode, normalize_filter(mode))
-     |> recompute_view()}
+    filter = %{socket.assigns.inbox_filter | mode: mode}
+    {:noreply, push_patch(socket, to: InboxFilter.inbox_path(filter), replace: true)}
   end
 
-  def handle_event("search", %{"q" => q}, socket) when is_binary(q) do
-    {:noreply,
-     socket
-     |> assign(:search, q)
-     |> recompute_view()}
+  def handle_event("filter_inbox", params, socket) do
+    filter = InboxFilter.from_form(socket.assigns.inbox_filter, params)
+    {:noreply, push_patch(socket, to: InboxFilter.inbox_path(filter), replace: true)}
   end
-
-  def handle_event("search", _params, socket), do: {:noreply, socket}
 
   def handle_event("refresh", _params, socket) do
     {:noreply,
@@ -152,10 +140,12 @@ defmodule HWeb.InboxLive do
         _ -> "host"
       end
 
+    filter = socket.assigns.inbox_filter
+
     case Backend.create_session(%{"env_id" => env_id, "cwd" => cwd}) do
       {:ok, %{session: session}} ->
         sid = session[:session_id] || session["session_id"]
-        {:noreply, push_navigate(socket, to: ~p"/sessions/#{sid}?from=inbox")}
+        {:noreply, push_navigate(socket, to: InboxFilter.session_path(sid, filter))}
 
       {:error, reason} ->
         {:noreply, assign(socket, :error_banner, format_error(reason))}
@@ -195,23 +185,16 @@ defmodule HWeb.InboxLive do
 
   defp recompute_view(socket) do
     all_sessions = socket.assigns.catalog.sessions
-    counts = CatalogState.counts(all_sessions)
-
-    filtered =
-      CatalogState.filter_sessions(
-        all_sessions,
-        socket.assigns.filter_mode,
-        socket.assigns.search
-      )
-
-    groups = CatalogState.group_by_workspace(filtered)
-    next_attention = CatalogState.next_attention_session(all_sessions)
+    filter = socket.assigns.inbox_filter
+    scoped = InboxFilter.scope(filter, all_sessions)
+    filtered = CatalogState.filter_sessions(scoped, filter.mode)
 
     assign(socket,
-      counts: counts,
-      groups: groups,
-      filtered_count: length(filtered),
-      next_attention: next_attention
+      counts: CatalogState.counts(scoped),
+      groups: CatalogState.group_by_workspace(filtered),
+      filter_options: InboxFilter.options(filter, all_sessions),
+      catalog_empty?: all_sessions == [],
+      next_attention: CatalogState.next_attention_session(filtered)
     )
   end
 
@@ -230,9 +213,6 @@ defmodule HWeb.InboxLive do
     |> assign(catalog: next_catalog, error_banner: nil)
     |> recompute_view()
   end
-
-  defp normalize_filter(mode) when mode in @valid_filters, do: mode
-  defp normalize_filter(_), do: "inbox"
 
   defp format_error({:bad_request, msg}), do: msg
   defp format_error({:conflict, msg}), do: msg

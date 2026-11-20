@@ -996,13 +996,33 @@ html.inspect-picking * { cursor: crosshair !important; }
   border: 1px solid var(--border);
 }
 
-.inbox-search-form {
-  flex: 1 1 200px;
-  max-width: 280px;
+.inbox-shell .topbar {
+  flex-wrap: wrap;
 }
 
-.inbox-search-input {
-  padding: 6px 10px;
+.inbox-scope-controls {
+  flex: 1 1 100%;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.inbox-scope-controls .input {
+  width: auto;
+  max-width: min(22rem, 100%);
+  min-width: 0;
+  padding: 5px 8px;
+  text-overflow: ellipsis;
+}
+
+.inbox-scope-controls input {
+  flex: 1 1 12rem;
+}
+
+.inbox-session-tag {
+  font-weight: normal;
 }
 
 .inbox-tree {
@@ -1506,11 +1526,6 @@ html.inspect-picking * { cursor: crosshair !important; }
 
   .inbox-shortcuts {
     display: none;
-  }
-
-  .inbox-search-form {
-    max-width: none;
-    flex: 1 1 100%;
   }
 
   .inbox-pill,

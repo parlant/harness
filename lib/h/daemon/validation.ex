@@ -94,6 +94,7 @@ defmodule H.Daemon.Validation do
              {:harness_id, :non_empty_string, required: false},
              {:cwd, :abs_path, required: true},
              {:title, :string, required: false, nullable: true},
+             {:tags, :session_tags},
              {:agent, :map, required: false},
              {:request_id, :non_empty_string, required: false}
            ]),

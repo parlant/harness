@@ -13,6 +13,7 @@ defmodule HWeb.SessionLive do
     CatalogState,
     ConversationComponents,
     InboxComponents,
+    InboxFilter,
     Transcript,
     Workbench
   }
@@ -30,6 +31,8 @@ defmodule HWeb.SessionLive do
         session_id: session_id,
         conversation_id: cid,
         from_inbox?: from_inbox?,
+        inbox_filter: InboxFilter.from_params(params),
+        filter_options: %{workspaces: [], tags: []},
         subscribed_cid: nil,
         catalog: CatalogState.new(),
         catalog_subscribed?: false,
@@ -76,14 +79,11 @@ defmodule HWeb.SessionLive do
   def handle_params(%{"session_id" => sid} = params, _uri, socket) do
     cid = normalize_cid(params["conversation_id"])
 
-    from_inbox? =
-      if Map.has_key?(params, "from") do
-        params["from"] == "inbox"
-      else
-        socket.assigns.from_inbox?
-      end
-
-    socket = assign(socket, :from_inbox?, from_inbox?)
+    socket =
+      assign(socket,
+        from_inbox?: params["from"] == "inbox",
+        inbox_filter: InboxFilter.from_params(params)
+      )
 
     cond do
       sid != socket.assigns.session_id ->
@@ -107,10 +107,11 @@ defmodule HWeb.SessionLive do
          socket
          |> unsubscribe_current()
          |> assign(conversation_id: cid, provider_filter: nil)
+         |> recompute_catalog_assigns()
          |> load_conversation(sid, cid)}
 
       true ->
-        {:noreply, socket}
+        {:noreply, recompute_catalog_assigns(socket)}
     end
   end
 
@@ -189,6 +190,39 @@ defmodule HWeb.SessionLive do
     {:noreply, assign(socket, :drawer_open?, not socket.assigns.drawer_open?)}
   end
 
+  def handle_event("filter_inbox", params, socket) do
+    filter = InboxFilter.from_form(socket.assigns.inbox_filter, params)
+
+    {:noreply,
+     push_patch(socket,
+       to:
+         session_filter_path(
+           socket.assigns.session_id,
+           socket.assigns.conversation_id,
+           socket.assigns.from_inbox?,
+           filter
+         ),
+       replace: true
+     )}
+  end
+
+  def handle_event("save_session_tags", %{"tags" => raw_tags}, socket) when is_binary(raw_tags) do
+    tags = raw_tags |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+    case Backend.triage_session(socket.assigns.session_id, %{"tags" => tags}) do
+      {:ok, %{session: updated}} ->
+        {:noreply,
+         socket
+         |> assign(error_banner: nil)
+         |> apply_session_to_catalog(updated)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("save_session_tags", _params, socket), do: {:noreply, socket}
+
   def handle_event("dismiss_error", _params, socket) do
     {:noreply, assign(socket, :error_banner, nil)}
   end
@@ -225,7 +259,7 @@ defmodule HWeb.SessionLive do
         {:noreply,
          socket
          |> unsubscribe_current()
-         |> push_navigate(to: ~p"/inbox")}
+         |> push_navigate(to: InboxFilter.inbox_path(socket.assigns.inbox_filter))}
 
       {:error, reason} ->
         {:noreply, assign(socket, :error_banner, format_error(reason))}
@@ -295,7 +329,7 @@ defmodule HWeb.SessionLive do
           {:noreply,
            socket
            |> unsubscribe_current()
-           |> push_navigate(to: ~p"/sessions/#{new_sid}?from=inbox")}
+           |> push_navigate(to: InboxFilter.session_path(new_sid, socket.assigns.inbox_filter))}
 
         {:error, reason} ->
           {:noreply, assign(socket, :picker_error, format_error(reason))}
@@ -440,10 +474,11 @@ defmodule HWeb.SessionLive do
               {:noreply,
                push_patch(socket,
                  to:
-                   conversation_path(
+                   InboxFilter.session_path(
                      socket.assigns.session_id,
-                     new_cid,
-                     socket.assigns.from_inbox?
+                     socket.assigns.inbox_filter,
+                     socket.assigns.from_inbox?,
+                     new_cid
                    )
                )}
             else
@@ -519,14 +554,20 @@ defmodule HWeb.SessionLive do
   end
 
   defp recompute_catalog_assigns(socket) do
-    sessions = socket.assigns.catalog.sessions
+    all_sessions = socket.assigns.catalog.sessions
+    filter = socket.assigns.inbox_filter
+
+    scoped = InboxFilter.scope(filter, all_sessions)
+    sessions = CatalogState.filter_sessions(scoped, filter.mode)
     current_sid = socket.assigns.session_id
     counts = CatalogState.counts(sessions)
 
     sidebar_sessions =
-      Enum.filter(sessions, fn s ->
-        s.session_id == current_sid or CatalogState.active_inbox?(s)
-      end)
+      if filter.mode == "inbox" do
+        Enum.filter(scoped, &(&1.session_id == current_sid or CatalogState.active_inbox?(&1)))
+      else
+        sessions
+      end
 
     groups = CatalogState.group_by_workspace(sidebar_sessions)
     next_attention = CatalogState.next_attention_session(sessions, current_sid)
@@ -539,6 +580,7 @@ defmodule HWeb.SessionLive do
     assign(socket,
       catalog_counts: counts,
       catalog_groups: groups,
+      filter_options: InboxFilter.options(filter, all_sessions),
       next_attention_session: next_attention,
       other_attention_count: other_attention_count
     )
@@ -583,11 +625,9 @@ defmodule HWeb.SessionLive do
       end
   end
 
-  defp conversation_path(session_id, conversation_id, true),
-    do: ~p"/sessions/#{session_id}/conversations/#{conversation_id}?from=inbox"
-
-  defp conversation_path(session_id, conversation_id, _false),
-    do: ~p"/sessions/#{session_id}/conversations/#{conversation_id}"
+  defp session_filter_path(sid, cid, from_inbox?, filter) do
+    InboxFilter.session_path(sid, filter, from_inbox?, if(cid != "1", do: cid))
+  end
 
   defp load_initial(socket, session_id, cid) do
     case Backend.get_session_detail(session_id) do
@@ -632,7 +672,10 @@ defmodule HWeb.SessionLive do
   end
 
   defp redirect_with_error(socket, message) do
-    dest = if socket.assigns.from_inbox?, do: ~p"/inbox", else: ~p"/"
+    dest =
+      if socket.assigns.from_inbox?,
+        do: InboxFilter.inbox_path(socket.assigns.inbox_filter),
+        else: ~p"/"
 
     socket
     |> put_flash(:error, message)

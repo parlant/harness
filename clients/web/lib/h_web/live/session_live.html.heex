@@ -7,7 +7,11 @@
   <:sidebar>
     <div class="sidebar-top">
       <div class="sidebar-nav-links">
-        <.link id="sidebar-inbox-link" navigate={~p"/inbox"} class="btn btn-sm btn-ghost">
+        <.link
+          id="sidebar-inbox-link"
+          navigate={InboxFilter.inbox_path(@inbox_filter)}
+          class="btn btn-sm btn-ghost"
+        >
           ← Inbox
         </.link>
         <.link navigate={~p"/"} class="btn btn-sm btn-ghost">Workspaces</.link>
@@ -27,6 +31,21 @@
       <div :if={@session} class="muted mono session-cwd">
         {@session.env_id}: {@session.cwd}
       </div>
+      <form
+        :if={@session}
+        id="session-tags-form"
+        phx-submit="save_session_tags"
+        class="inbox-scope-controls"
+      >
+        <label class="field-label" for="session-tags-input">Session tags (comma-separated)</label>
+        <input
+          id="session-tags-input"
+          name="tags"
+          class="input"
+          value={Enum.join(Map.get(@catalog.by_id[@session_id] || @session, :tags, []), ", ")}
+        />
+        <button type="submit" class="btn btn-sm">Save tags</button>
+      </form>
     </div>
 
     <div class="sidebar-section">
@@ -34,7 +53,7 @@
       <ul id="branches-list" class="branch-list">
         <li :for={conv <- @conversations}>
           <.link
-            patch={conversation_path(@session_id, conv.id, @from_inbox?)}
+            patch={InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, conv.id)}
             class={[
               "branch-link mono",
               if(to_string(conv.id) == @conversation_id, do: "is-active")
@@ -51,7 +70,7 @@
 
     <div id="session-inbox-switcher" class="sidebar-section sidebar-inbox-section">
       <div class="sidebar-section-head">
-        <span class="section-title">All Sessions (Inbox)</span>
+        <span class="section-title">Inbox sessions</span>
         <span
           :if={@catalog_counts.attention > 0}
           class={[
@@ -67,9 +86,9 @@
         id="session-sidebar-inbox-tree"
         groups={@catalog_groups}
         current_session_id={@session_id}
-        from_inbox={true}
+        inbox_filter={@inbox_filter}
         compact={true}
-        empty_message="No other sessions."
+        empty_message="No sessions match the current filters."
       />
     </div>
   </:sidebar>
@@ -96,7 +115,7 @@
         </button>
         <.link
           id="header-inbox-link"
-          navigate={~p"/inbox"}
+          navigate={InboxFilter.inbox_path(@inbox_filter)}
           class={["btn btn-sm", if(@from_inbox?, do: "btn-inbox-return", else: "btn-ghost")]}
         >
           ← Inbox
@@ -122,7 +141,7 @@
         <.link
           :if={@next_attention_session}
           id="next-attention-btn"
-          navigate={~p"/sessions/#{@next_attention_session.session_id}?from=inbox"}
+          navigate={InboxFilter.session_path(@next_attention_session.session_id, @inbox_filter)}
           class={[
             "btn btn-sm session-attention-pill",
             if(@next_attention_session.attention in ["error", "quarantined"],
@@ -201,6 +220,15 @@
           <button type="submit" class="btn btn-sm btn-ghost">Sign out</button>
         </form>
       </div>
+      <InboxComponents.scope_controls
+        id="carousel-filter"
+        filter={@inbox_filter}
+        options={@filter_options}
+        clear_path={
+          session_filter_path(@session_id, @conversation_id, @from_inbox?, %InboxFilter{})
+        }
+        show_mode={true}
+      />
     </header>
 
     <div
@@ -273,10 +301,11 @@
           Waiting for workspace held by <.link
             id="workspace-holder-link"
             navigate={
-              conversation_path(
+              InboxFilter.session_path(
                 wait["holder_session_id"],
-                wait["holder_conversation_id"],
-                @from_inbox?
+                @inbox_filter,
+                @from_inbox?,
+                wait["holder_conversation_id"]
               )
             }
           >

@@ -11,6 +11,7 @@ defmodule HWeb.CatalogState do
   @type session :: %{
           session_id: String.t(),
           title: String.t() | nil,
+          tags: [String.t()],
           env_id: String.t(),
           harness_id: String.t(),
           cwd: String.t(),
@@ -140,6 +141,7 @@ defmodule HWeb.CatalogState do
     %{
       session_id: to_string(field(raw, :session_id, "session_id") || ""),
       title: field(raw, :title, "title"),
+      tags: normalize_tags(field(raw, :tags, "tags")),
       env_id: field(raw, :env_id, "env_id") || "host",
       harness_id: field(raw, :harness_id, "harness_id") || "coding",
       cwd: field(raw, :cwd, "cwd") || "/",
@@ -397,6 +399,12 @@ defmodule HWeb.CatalogState do
       true -> 3
     end
   end
+
+  defp normalize_tags(tags) when is_list(tags) do
+    tags |> Enum.filter(&(is_binary(&1) and &1 != "" and String.valid?(&1))) |> Enum.uniq()
+  end
+
+  defp normalize_tags(_), do: []
 
   defp field(map, atom_key, string_key) do
     case Map.fetch(map, atom_key) do

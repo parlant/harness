@@ -321,6 +321,163 @@ defmodule HWeb.InboxLiveTest do
       assert has_element?(returned_inbox, "#inbox-workspace-tree")
     end
 
+    test "carries exact directory, tag, and search filters through Next, branch links, and return to Inbox",
+         %{conn: conn, projects_dir: cwd, owner_token: owner_token, daemon_opts: opts} do
+      catalog = Keyword.fetch!(opts, :catalog)
+      other_cwd = Path.join(cwd, "child")
+      File.mkdir_p!(other_cwd)
+
+      for {sid, title, tags} <- [
+            {"current", "Review first", ["topic & notes"]},
+            {"peer", "Review second", ["topic & notes"]},
+            {"wrong-tag", "Review another", ["topic"]},
+            {"wrong-title", "Unrelated", ["topic & notes"]}
+          ] do
+        assert {:ok, _} =
+                 Daemon.create_session(
+                   %{session_id: sid, cwd: cwd, title: title, tags: tags},
+                   opts
+                 )
+      end
+
+      for {sid, env_id, path} <- [{"wrong-dir", "host", other_cwd}, {"wrong-env", "vm", cwd}] do
+        assert {:ok, _} =
+                 Catalog.put_session(catalog, %{
+                   session_id: sid,
+                   title: "Review error",
+                   env_id: env_id,
+                   cwd: path,
+                   tags: ["topic & notes"],
+                   attention: "error"
+                 })
+      end
+
+      conn = log_in_owner(conn, owner_token)
+      {:ok, inbox, _} = live(conn, "/inbox")
+
+      inbox
+      |> form("#inbox-filter-search-form", %{
+        workspace: JSON.encode!(["host", cwd]),
+        tag: "topic & notes",
+        q: "review"
+      })
+      |> render_change()
+
+      filters = %{cwd: cwd, tag: "topic & notes", q: "review"}
+      assert_patch(inbox, ~p"/inbox?#{filters}")
+
+      assert has_element?(
+               inbox,
+               ~s(a[data-session-id="current"] .inbox-session-tag),
+               "topic & notes"
+             )
+
+      assert has_element?(inbox, ~s(a[data-session-id="peer"]))
+      refute has_element?(inbox, ~s(a[data-session-id^="wrong-"]))
+
+      assert has_element?(inbox, "#inbox-topbar-attention", "2 attention")
+      assert has_element?(inbox, "#inbox-jump-next-btn")
+
+      session_filters = Map.put(filters, :from, "inbox")
+
+      {:ok, view, _} =
+        inbox
+        |> element(~s(a[data-session-id="current"]))
+        |> render_click()
+        |> follow_redirect(conn, ~p"/sessions/current?#{session_filters}")
+
+      assert has_element?(
+               view,
+               "#carousel-filter-search-form select[name=workspace] option[selected]",
+               cwd
+             )
+
+      assert has_element?(
+               view,
+               "#carousel-filter-search-form select[name=tag] option[selected]",
+               "topic & notes"
+             )
+
+      refute has_element?(view, ~s(a[data-session-id^="wrong-"]))
+      assert has_element?(view, "#next-attention-btn", "1 need attention")
+      assert has_element?(view, "#next-attention-btn", "Next →")
+
+      view |> element("#branches-list a") |> render_click()
+      assert_patch(view, ~p"/sessions/current/conversations/1?#{session_filters}")
+
+      {:ok, peer, _} =
+        view
+        |> element("#next-attention-btn")
+        |> render_click()
+        |> follow_redirect(conn, ~p"/sessions/peer?#{session_filters}")
+
+      {:ok, returned, _} =
+        peer
+        |> element("#header-inbox-link")
+        |> render_click()
+        |> follow_redirect(conn, ~p"/inbox?#{filters}")
+
+      refute has_element?(returned, ~s(a[data-session-id^="wrong-"]))
+    end
+
+    test "updates carousel candidates on tag edits and lets the top bar change and clear filters",
+         %{conn: conn, projects_dir: cwd, owner_token: owner_token, daemon_opts: opts} do
+      for {sid, tags} <- [{"current", ["work"]}, {"peer", ["work"]}, {"other", ["personal"]}] do
+        assert {:ok, _} = Daemon.create_session(%{session_id: sid, cwd: cwd, tags: tags}, opts)
+      end
+
+      conn = log_in_owner(conn, owner_token)
+      {:ok, view, _} = live(conn, "/sessions/current?from=inbox&tag=work")
+      {:ok, peer, _} = live(conn, "/sessions/peer")
+
+      assert has_element?(
+               view,
+               "#next-attention-btn[title=\"Jump to peer\"]",
+               "1 need attention"
+             )
+
+      peer |> form("#session-tags-form", %{tags: "personal, urgent"}) |> render_submit()
+      assert has_element?(peer, ~s(#session-tags-input[value="personal, urgent"]))
+      wait_until(fn -> not has_element?(view, "#next-attention-btn") end)
+
+      assert has_element?(
+               view,
+               "#carousel-filter-search-form select[name=tag] option[selected]",
+               "work"
+             )
+
+      view |> form("#carousel-filter-search-form", %{tag: "urgent"}) |> render_change()
+      assert_patch(view, ~p"/sessions/current?#{%{tag: "urgent", from: "inbox"}}")
+
+      assert has_element?(
+               view,
+               "#next-attention-btn[title=\"Jump to peer\"]",
+               "1 need attention"
+             )
+
+      refute has_element?(view, ~s(a[data-session-id="other"]))
+
+      view |> element("#carousel-filter-search-form a", "Clear filters") |> render_click()
+      assert_patch(view, "/sessions/current?from=inbox")
+
+      assert has_element?(
+               view,
+               "#carousel-filter-search-form select[name=tag] option[selected]",
+               "All tags"
+             )
+
+      assert has_element?(view, "#next-attention-btn", "2 need attention")
+      assert has_element?(view, ~s(a[data-session-id="other"]))
+
+      assert {:ok, _} = Daemon.archive_session("other", %{archived: true}, opts)
+
+      view |> form("#carousel-filter-search-form", %{filter: "archived"}) |> render_change()
+      assert_patch(view, ~p"/sessions/current?#{%{filter: "archived", from: "inbox"}}")
+      refute has_element?(view, "#next-attention-btn")
+      assert has_element?(view, ~s(a[data-session-id="other"][data-archived="true"]))
+      refute has_element?(view, ~s(a[data-session-id="peer"]))
+    end
+
     test "creates a new session from a workspace group header + New button and opens with ?from=inbox",
          %{
            conn: conn,

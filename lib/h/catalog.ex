@@ -91,6 +91,7 @@ defmodule H.Catalog do
     %{
       session_id: entry.session_id,
       title: Map.get(entry, :title),
+      tags: Map.get(entry, :tags, []),
       env_id: env_id,
       harness_id: Map.get(entry, :harness_id) || "coding",
       cwd: entry.cwd,
@@ -273,8 +274,8 @@ defmodule H.Catalog do
   end
 
   @doc """
-  Sets triage metadata (`needs_attention`) for a session without waking it.
-  Setting `needs_attention: true` also clears `archived: false`.
+  Updates catalog triage metadata (`needs_attention` and/or `tags`) without
+  waking the session. Setting `needs_attention: true` clears the archive flag.
   """
   @spec set_triage(GenServer.server(), String.t(), map()) ::
           {:ok, map()} | {:error, :not_found | String.t()}
@@ -395,7 +396,8 @@ defmodule H.Catalog do
              ),
            :ok <- File.rename(staged, dest) do
         entry = build_entry(nil, validated, attrs.updated_at)
-        entry = %{entry | archive: Map.put(source, :generation, gen)}
+        tags = if existing, do: existing.tags, else: entry.tags
+        entry = %{entry | archive: Map.put(source, :generation, gen), tags: tags}
         entries = Map.put(state.entries, sid, entry)
         persist_entries!(state.file_path, entries)
         :ets.insert(state.table, {sid, entry})
@@ -510,37 +512,30 @@ defmodule H.Catalog do
   end
 
   def handle_call({:set_triage, session_id, attrs}, _from, state) do
-    case Map.fetch(state.entries, session_id) do
-      :error ->
-        {:reply, {:error, :not_found}, state}
+    with {:ok, updates} <-
+           Schema.validate_map(attrs, [{:needs_attention, :boolean}, {:tags, :session_tags}]),
+         true <- map_size(updates) > 0 || {:error, "expected needs_attention or tags"},
+         {:ok, existing} <- Map.fetch(state.entries, session_id),
+         false <- existing.status == "archived" and Map.has_key?(updates, :needs_attention) do
+      updated =
+        existing
+        |> Map.merge(updates)
+        |> then(fn entry ->
+          if updates[:needs_attention] == true, do: %{entry | archived: false}, else: entry
+        end)
+        |> Map.put(:updated_at, System.system_time(:millisecond))
 
-      {:ok, %{status: "archived"}} ->
-        {:reply, {:error, {:conflict, "session is archived"}}, state}
+      entries = Map.put(state.entries, session_id, updated)
+      persist_entries!(state.file_path, entries)
+      :ets.insert(state.table, {session_id, updated})
+      next_seq = state.seq + 1
+      broadcast_upsert(state.pubsub, state.registry, next_seq, updated)
 
-      {:ok, existing} ->
-        case extract_triage_bool(attrs) do
-          {:ok, needs_attention} ->
-            now = System.system_time(:millisecond)
-            next_archived = if needs_attention, do: false, else: existing.archived
-
-            updated = %{
-              existing
-              | needs_attention: needs_attention,
-                archived: next_archived,
-                updated_at: now
-            }
-
-            entries = Map.put(state.entries, session_id, updated)
-            persist_entries!(state.file_path, entries)
-            :ets.insert(state.table, {session_id, updated})
-            next_seq = state.seq + 1
-            broadcast_upsert(state.pubsub, state.registry, next_seq, updated)
-
-            {:reply, {:ok, updated}, %{state | entries: entries, seq: next_seq}}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
+      {:reply, {:ok, updated}, %{state | entries: entries, seq: next_seq}}
+    else
+      :error -> {:reply, {:error, :not_found}, state}
+      true -> {:reply, {:error, {:conflict, "session is archived"}}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -638,6 +633,7 @@ defmodule H.Catalog do
              {:harness_id, :non_empty_string, required: false, default: "coding"},
              {:cwd, :string, required: true},
              {:title, :string, required: false, nullable: true},
+             {:tags, :session_tags},
              {:root_conversation_id, :pos_int, required: false},
              {:created_at, :int, required: false},
              {:updated_at, :int, required: false},
@@ -693,6 +689,7 @@ defmodule H.Catalog do
     %{
       session_id: validated.session_id,
       title: Map.get(validated, :title, nil),
+      tags: Map.get(validated, :tags, []),
       env_id: Map.get(validated, :env_id, "host"),
       cwd: validated.cwd,
       harness_id: Map.get(validated, :harness_id, "coding"),
@@ -826,20 +823,6 @@ defmodule H.Catalog do
     end
   end
 
-  defp extract_triage_bool(attrs) do
-    val =
-      case Map.fetch(attrs, "needs_attention") do
-        {:ok, v} -> v
-        :error -> Map.get(attrs, :needs_attention, :missing)
-      end
-
-    if is_boolean(val) do
-      {:ok, val}
-    else
-      {:error, "needs_attention must be a boolean"}
-    end
-  end
-
   defp session_loaded?(registry, session_id)
        when is_atom(registry) and not is_nil(registry) and is_binary(session_id) do
     if Process.whereis(registry) != nil do
@@ -960,6 +943,7 @@ defmodule H.Catalog do
     %{
       session_id: Map.fetch!(raw, "session_id"),
       title: Map.get(raw, "title"),
+      tags: Map.get(raw, "tags", []),
       env_id: non_empty_or_default(Map.get(raw, "env_id"), "host"),
       cwd: Map.fetch!(raw, "cwd"),
       harness_id: non_empty_or_default(Map.get(raw, "harness_id"), "coding"),
@@ -1173,6 +1157,7 @@ defmodule H.Catalog do
             %{
               "session_id" => wired.session_id,
               "title" => wired.title,
+              "tags" => wired.tags,
               "cwd" => wired.cwd,
               "updated_at" => wired.updated_at,
               "active" => wired.active,
@@ -1206,6 +1191,7 @@ defmodule H.Catalog do
             %{
               session_id: wired.session_id,
               title: wired.title,
+              tags: wired.tags,
               cwd: wired.cwd,
               updated_at: wired.updated_at,
               active: wired.active,

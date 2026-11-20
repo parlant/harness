@@ -280,6 +280,7 @@ defmodule H.CatalogCwdTest do
       assert app.latest_session == %{
                session_id: "app-nested",
                title: "Latest Nested",
+               tags: [],
                cwd: "/path/app/packages/ui",
                updated_at: 350,
                active: true,
@@ -335,6 +336,7 @@ defmodule H.CatalogCwdTest do
       assert str_app["latest_session"] == %{
                "session_id" => "vm-only-session",
                "title" => "VM Session",
+               "tags" => [],
                "cwd" => "/path/app",
                "updated_at" => 999,
                "active" => true,

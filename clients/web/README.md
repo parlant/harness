@@ -50,6 +50,14 @@ workspace stacks and the session sidebar becomes a drawer. The chat keeps its
 composer in place and follows output only while you're at the bottom; **Latest**
 returns there.
 
+The Inbox and session top bars share working-directory, tag, and text filters.
+The filters travel in the URL: opening a row, jumping to the next session
+needing attention, switching branches, and returning to the Inbox preserve
+them. A directory filter matches the exact environment and directory; a tag
+filter matches the full tag. Use **Clear filters** to reset the view. Edit a
+session's tags in the Session section of its sidebar. In the Inbox browser,
+`n`/`p` cycle through attention rows; Tab moves between controls.
+
 - Put presentation in function components (`ConversationComponents`), and
   page markup in colocated `*.html.heex`. Keep URL params, subscriptions,
   command dispatch and the entry stream in the routed LiveView.
