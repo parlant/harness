@@ -99,6 +99,10 @@ def smoke(source):
                     spec = codex_models[f"openai_codex:{model}"]
                     assert spec["context_window"] == context
                     assert spec["unavailable_reason"] == "Codex sign-in required (/login)"
+                api("provider-keys/set", {"provider": "google", "source": "default", "api_key": fixture_key})
+                models_by_id = {model["id"]: model for model in api("models")["models"]}
+                assert models_by_id["google:gemini-4-neon"]["context_window"] == 1_048_576
+                assert models_by_id["google:gemini-4-neon"]["max_output_tokens"] == 65_536
                 for alias in ("personal", "work"):
                     run(hi, "account", "add", alias)
 

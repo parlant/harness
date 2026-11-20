@@ -11,7 +11,7 @@ defmodule H.Provider.ReqLLM do
   @behaviour H.Provider
 
   alias H.{Context, Credentials}
-  alias H.Provider.{CodexModels, Settings, VertexExpress}
+  alias H.Provider.{CodexModels, GeminiModels, Settings, VertexExpress}
   alias ReqLLM.{StreamEvent, StreamResponse}
   alias ReqLLM.StreamResponse.MetadataHandle
 
@@ -54,12 +54,14 @@ defmodule H.Provider.ReqLLM do
       "claude-opus-4-8"
     ],
     google_vertex: [
+      "gemini-4-neon",
       "gemini-4-hydrogen",
       "gemini-4-carbon",
       "gemini-4-argon",
       "gemini-3.8-flash"
     ],
     google: [
+      "gemini-4-neon",
       "gemini-4-hydrogen",
       "gemini-4-carbon",
       "gemini-4-argon",
@@ -380,6 +382,13 @@ defmodule H.Provider.ReqLLM do
 
   defp resolve_model(nil), do: {:error, {:invalid_model, "model is required"}}
 
+  defp resolve_model("google:" <> id) do
+    case google_model(id) do
+      %LLMDB.Model{} = model -> ReqLLM.model(model)
+      nil -> ReqLLM.model(%{provider: :google, id: id})
+    end
+  end
+
   defp resolve_model("google_vertex:" <> id) do
     case vertex_model(id) do
       %LLMDB.Model{} = model -> ReqLLM.model(model)
@@ -399,23 +408,31 @@ defmodule H.Provider.ReqLLM do
 
   defp resolve_model(model_spec), do: ReqLLM.model(model_spec)
 
+  defp google_model(id) do
+    case lookup_llmdb_model(:google, id) || GeminiModels.get(id) do
+      %LLMDB.Model{} = model -> synchronous_gemini_limits(model)
+      nil -> nil
+    end
+  end
+
   defp vertex_model(id) do
     lookup_llmdb_model(:google_vertex, id) ||
-      case lookup_llmdb_model(:google, id) do
-        %LLMDB.Model{} = model ->
-          # The Developer API catalog can advertise long-decode limits; H uses
-          # ordinary synchronous Vertex streams, not long-decode continuation.
-          limits =
-            case get_nested(model.extra, [:default_synchronous_output_limit]) do
-              n when is_integer(n) and n > 0 -> Map.put(model.limits || %{}, :output, n)
-              _ -> model.limits
-            end
-
-          %{model | provider: :google_vertex, limits: limits}
-
-        nil ->
-          nil
+      case google_model(id) do
+        %LLMDB.Model{} = model -> %{model | provider: :google_vertex}
+        nil -> nil
       end
+  end
+
+  # The Developer API catalog can advertise long-decode limits; H uses
+  # ordinary synchronous streams, not long-decode continuation.
+  defp synchronous_gemini_limits(%LLMDB.Model{} = model) do
+    limits =
+      case get_nested(model.extra, [:default_synchronous_output_limit]) do
+        n when is_integer(n) and n > 0 -> Map.put(model.limits || %{}, :output, n)
+        _ -> model.limits
+      end
+
+    %{model | limits: limits}
   end
 
   defp build_req_llm_inputs(request) do
@@ -450,6 +467,7 @@ defmodule H.Provider.ReqLLM do
         |> maybe_put_max_tokens(request)
         |> maybe_put_reasoning_effort(request, config)
         |> merge_user_provider_options(config)
+        |> gemini_thinking_level(model)
         |> codex_transport(settings, model)
 
       {:ok, opts}
@@ -562,6 +580,31 @@ defmodule H.Provider.ReqLLM do
       _ ->
         opts
     end
+  end
+
+  # ReqLLM 1.30 clamps Gemini reasoning_effort :xhigh/:max to :high, whereas
+  # Gemini 4 Neon and Hydrogen support thinkingLevel "xhigh" natively.
+  defp gemini_thinking_level(opts, %LLMDB.Model{provider: provider} = model)
+       when provider in [:google, :google_vertex] do
+    effort = Keyword.get(opts, :reasoning_effort)
+    provider_opts = Keyword.get(opts, :provider_options, [])
+
+    if effort in [:xhigh, :max] and not Keyword.has_key?(provider_opts, :google_thinking_level) and
+         not Keyword.has_key?(provider_opts, :google_thinking_budget) and
+         gemini_supports_effort?(model, "xhigh") do
+      opts
+      |> Keyword.delete(:reasoning_effort)
+      |> Keyword.put(:provider_options, [{:google_thinking_level, "xhigh"} | provider_opts])
+    else
+      opts
+    end
+  end
+
+  defp gemini_thinking_level(opts, _model), do: opts
+
+  defp gemini_supports_effort?(%LLMDB.Model{capabilities: caps}, level) do
+    values = get_nested(caps, [:reasoning, :effort, :values]) || []
+    Enum.any?(values, &(to_string(&1) == level))
   end
 
   defp codex_transport(opts, settings, %LLMDB.Model{provider: :openai_codex}) do
@@ -1035,9 +1078,11 @@ defmodule H.Provider.ReqLLM do
         ids
         |> Enum.flat_map(fn id ->
           model =
-            if provider == :google_vertex,
-              do: vertex_model(id),
-              else: lookup_llmdb_model(provider, id)
+            case provider do
+              :google -> google_model(id)
+              :google_vertex -> vertex_model(id)
+              _ -> lookup_llmdb_model(provider, id)
+            end
 
           case model do
             %LLMDB.Model{} = m -> [project_model(m)]

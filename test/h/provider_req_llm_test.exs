@@ -357,12 +357,85 @@ defmodule H.Provider.ReqLLMTest do
       end
     end
 
-    test "builds Gemini 4 requests against both Vertex endpoints, never AI Studio" do
-      for id <- ~w(gemini-4-hydrogen gemini-4-argon gemini-4-carbon), mode <- [:adc, :key] do
+    test "builds Gemini 4 Neon Developer API requests with xhigh thinking and synchronous output cap" do
+      for {thinking, expected_level} <- [{"high", "high"}, {"xhigh", "xhigh"}] do
+        owner = self()
+
         request =
           Context.build_request(
             [%{id: 1, kind: "user", data: %{text: "Hi"}}],
-            %{model: "google-vertex:" <> id, thinking: "high"},
+            %{model: "google:gemini-4-neon", thinking: thinking},
+            [
+              %{
+                name: "read",
+                description: "Read",
+                parameters_schema: %{
+                  "type" => "object",
+                  "properties" => %{"path" => %{"type" => "string"}}
+                }
+              }
+            ]
+          )
+
+        stream_fn = fn model, ctx, opts ->
+          send(owner, {:google_request, model, ctx, opts})
+
+          {:ok,
+           [
+             StreamEvent.new(:text_delta, "Done"),
+             StreamEvent.new(:finish, %{finish_reason: :stop})
+           ]}
+        end
+
+        assert {:ok, %{content: [%{text: "Done"}]}} =
+                 Adapter.stream_turn(
+                   %{stream_fn: stream_fn, credentials_opts: [api_key: "fixture-google-key"]},
+                   request,
+                   fn _ -> :ok end
+                 )
+
+        assert_receive {:google_request,
+                        %LLMDB.Model{
+                          provider: :google,
+                          id: "gemini-4-neon",
+                          limits: %{context: 1_048_576, output: 65_536}
+                        } = model, ctx, opts}
+
+        assert {:ok, wire} = ReqLLM.Providers.Google.attach_stream(model, ctx, opts, nil)
+        assert wire.host == "generativelanguage.googleapis.com"
+        assert wire.path == "/v1beta/models/gemini-4-neon:streamGenerateContent"
+        assert wire.query == "alt=sse"
+        headers = Map.new(wire.headers, fn {k, v} -> {String.downcase(k), v} end)
+        assert headers["x-goog-api-key"] == "fixture-google-key"
+
+        assert %{
+                 "contents" => [%{"role" => "user", "parts" => [%{"text" => "Hi"}]}],
+                 "tools" => [%{"functionDeclarations" => [%{"name" => "read"}]}],
+                 "generationConfig" => %{
+                   "maxOutputTokens" => 65_536,
+                   "thinkingConfig" => %{"thinkingLevel" => ^expected_level}
+                 }
+               } = JSON.decode!(IO.iodata_to_binary(wire.body))
+
+        assert {:ok, cost} =
+                 ReqLLM.Usage.Cost.breakdown(
+                   %{input_tokens: 1_000_000, output_tokens: 1_000_000},
+                   model
+                 )
+
+        assert cost.total_cost == 18.0
+      end
+    end
+
+    test "builds Gemini 4 requests against both Vertex endpoints, never AI Studio" do
+      for id <- ~w(gemini-4-neon gemini-4-hydrogen gemini-4-argon gemini-4-carbon),
+          mode <- [:adc, :key] do
+        thinking = if id in ~w(gemini-4-neon gemini-4-hydrogen), do: "xhigh", else: "high"
+
+        request =
+          Context.build_request(
+            [%{id: 1, kind: "user", data: %{text: "Hi"}}],
+            %{model: "google-vertex:" <> id, thinking: thinking},
             [
               %{
                 name: "read",
@@ -412,7 +485,7 @@ defmodule H.Provider.ReqLLMTest do
                    "tools" => [%{"functionDeclarations" => [%{"name" => "read"}]}],
                    "generationConfig" => %{
                      "maxOutputTokens" => 65536,
-                     "thinkingConfig" => %{"thinkingLevel" => "high"}
+                     "thinkingConfig" => %{"thinkingLevel" => ^thinking}
                    }
                  } = JSON.decode!(IO.iodata_to_binary(wire.body))
 
@@ -617,13 +690,24 @@ defmodule H.Provider.ReqLLMTest do
              ] = Adapter.list_models(%{provider: "openai-codex", credentials_opts: [env: %{}]})
     end
 
-    test "lists all three Gemini 4 Vertex models" do
-      models = Adapter.list_models(%{provider: "google-vertex"})
+    test "lists all four Gemini 4 models for Google and Vertex with synchronous output caps" do
+      for {provider, prefix} <- [{"google", "google"}, {"google-vertex", "google_vertex"}] do
+        models = Adapter.list_models(%{provider: provider})
 
-      assert Enum.map(Enum.take(models, 3), & &1.id) ==
-               ~w(google_vertex:gemini-4-hydrogen google_vertex:gemini-4-carbon google_vertex:gemini-4-argon)
+        assert Enum.map(Enum.take(models, 4), & &1.id) ==
+                 Enum.map(
+                   ~w(gemini-4-neon gemini-4-hydrogen gemini-4-carbon gemini-4-argon),
+                   &"#{prefix}:#{&1}"
+                 )
 
-      assert Enum.all?(Enum.take(models, 3), &(&1.supports_tools and &1.supports_reasoning))
+        assert Enum.all?(
+                 Enum.take(models, 4),
+                 &(&1.context_window == 1_048_576 and &1.max_output_tokens == 65_536 and
+                     &1.supports_tools and &1.supports_reasoning)
+               )
+      end
+
+      assert Adapter.context_window("google:gemini-4-neon") == 1_048_576
     end
 
     test "filters model list to configured providers and selects default_model/1" do

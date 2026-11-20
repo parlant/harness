@@ -163,9 +163,17 @@ files, run Pi, or refresh a copied token. Replace the H-owned copy when it
 expires. Alternatively set `OPENAI_CODEX_ACCESS_TOKEN` and, if the account ID
 cannot be derived from the token, `OPENAI_CODEX_ACCOUNT_ID`.
 
-## Google Vertex AI
+## Google Gemini Developer API & Vertex AI
 
-Model IDs are `google_vertex:gemini-4-hydrogen`, `google_vertex:gemini-4-argon`,
+For the Gemini Developer API (`google:`, configured via `/key set google <alias>`
+or `GOOGLE_API_KEY`), H lists `google:gemini-4-neon`, `google:gemini-4-hydrogen`,
+`google:gemini-4-carbon`, `google:gemini-4-argon`, and `google:gemini-3.8-flash`.
+`gemini-4-neon` is bundled locally until upstream `llm_db` includes it. Neon
+and Hydrogen support `xhigh` thinking natively; all Gemini 4 models use the
+65,536-token synchronous stream output cap in H (not multi-hop long decode).
+
+For Vertex AI, model IDs are `google_vertex:gemini-4-neon`,
+`google_vertex:gemini-4-hydrogen`, `google_vertex:gemini-4-argon`,
 and `google_vertex:gemini-4-carbon` (`google-vertex:` also works). These use
 Vertex AI, not the Gemini Developer API (`google:`).
 
