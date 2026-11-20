@@ -268,14 +268,46 @@ defmodule HWeb.SessionLiveTest do
     assert render(view) =~ "conv ##{forked_cid}"
   end
 
-  test "workspace wait offers cancel and stop-holder actions and resumes on release", %{
+  test "workspace wait links to the holder and offers cancel and stop-holder actions", %{
     conn: conn,
     projects_dir: cwd,
     owner_token: token,
     daemon_opts: opts,
     fake: fake
   } do
-    :ok = H.WorkspaceLease.acquire(opts[:workspace_lease], {"host", cwd}, {"holder", 1}, self())
+    {:ok, %{session: %{session_id: holder_sid}}} =
+      Daemon.create_session(%{"cwd" => cwd, "session_id" => "holder"}, opts)
+
+    {:ok, _} =
+      Daemon.execute_command(
+        holder_sid,
+        %{
+          "version" => 1,
+          "request_id" => "holder-note",
+          "conversation_id" => 1,
+          "command" => "submit",
+          "args" => %{"type" => "write", "content" => "Holder transcript"}
+        },
+        opts
+      )
+
+    {:ok, %{items: [note]}} = Daemon.scan_entries(holder_sid, 1, %{}, opts)
+
+    {:ok, %{conversation_id: holder_cid}} =
+      Daemon.execute_command(
+        holder_sid,
+        %{
+          "version" => 1,
+          "request_id" => "holder-fork",
+          "conversation_id" => 1,
+          "command" => "fork",
+          "args" => %{"at_entry_id" => note.id}
+        },
+        opts
+      )
+
+    holder = {holder_sid, String.to_integer(holder_cid)}
+    :ok = H.WorkspaceLease.acquire(opts[:workspace_lease], {"host", cwd}, holder, self())
 
     for call <- ["first", "second"] do
       Fake.push_step(
@@ -293,10 +325,25 @@ defmodule HWeb.SessionLiveTest do
 
     Fake.push_step(fake, {:reply, [], %{content: [%{type: "text", text: "Finished waiting"}]}})
     {:ok, %{session: session}} = Daemon.create_session(%{"cwd" => cwd}, opts)
-    {:ok, view, _} = live(log_in_owner(conn, token), "/sessions/#{session.session_id}")
+    conn = log_in_owner(conn, token)
+    waiter_path = ~p"/sessions/#{session.session_id}?from=inbox"
+    holder_path = ~p"/sessions/#{holder_sid}/conversations/#{holder_cid}?from=inbox"
+    {:ok, view, _} = live(conn, waiter_path)
     view |> form("#composer-form", %{content: "First attempt"}) |> render_submit()
     wait_until(fn -> has_element?(view, "#workspace-wait") end)
-    assert render(view) =~ "holder"
+
+    {:ok, holder_view, _html} =
+      view
+      |> element("#workspace-holder-link")
+      |> render_click()
+      |> follow_redirect(conn, holder_path)
+
+    assert has_element?(holder_view, ".header-sid", holder_sid)
+    assert has_element?(holder_view, ".session-header .badge", "conv ##{holder_cid}")
+    assert has_element?(holder_view, "#header-inbox-link.btn-inbox-return")
+
+    {:ok, view, _} = live(conn, waiter_path)
+    assert has_element?(view, "#workspace-wait")
     assert has_element?(view, "#live-activity[data-status=waiting]", "1 activity")
     refute has_element?(view, "#live-activity .activity-spinner")
     refute has_element?(view, "#entries-stream .entry-assistant")
@@ -310,8 +357,8 @@ defmodule HWeb.SessionLiveTest do
     view |> form("#composer-form", %{content: "Second attempt"}) |> render_submit()
     wait_until(fn -> has_element?(view, "#workspace-wait") end)
     view |> element("#stop-holder-btn") |> render_click()
-    assert_receive {:stop_workspace_holder, {"host", ^cwd}, {"holder", 1}, _}
-    :ok = H.WorkspaceLease.release(opts[:workspace_lease], {"host", cwd}, {"holder", 1})
+    assert_receive {:stop_workspace_holder, {"host", ^cwd}, ^holder, _}
+    :ok = H.WorkspaceLease.release(opts[:workspace_lease], {"host", cwd}, holder)
     wait_until(fn -> render(view) =~ "Finished waiting" end)
     refute has_element?(view, "#workspace-wait")
 

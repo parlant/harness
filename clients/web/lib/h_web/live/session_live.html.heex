@@ -250,8 +250,19 @@
         role="status"
       >
         <p>
-          Waiting for workspace held by session <span class="mono">{wait["holder_session_id"]}</span>,
-          conversation #{wait["holder_conversation_id"]}.
+          Waiting for workspace held by <.link
+            id="workspace-holder-link"
+            navigate={
+              conversation_path(
+                wait["holder_session_id"],
+                wait["holder_conversation_id"],
+                @from_inbox?
+              )
+            }
+          >
+            session <span class="mono">{wait["holder_session_id"]}</span>,
+            conversation #{wait["holder_conversation_id"]}
+          </.link>.
         </p>
         <button
           id="cancel-wait-btn"

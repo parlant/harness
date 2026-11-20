@@ -608,6 +608,10 @@ body {
   border-color: var(--accent);
 }
 
+#workspace-holder-link {
+  color: var(--accent);
+}
+
 .entry-header {
   display: flex;
   align-items: center;
