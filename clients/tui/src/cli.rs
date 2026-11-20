@@ -21,6 +21,30 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Parser)]
 #[command(
+    name = "hi inbox",
+    version,
+    about = "Browse all H sessions across workspaces in an interactive inbox"
+)]
+struct InboxCli {
+    /// Override H data directory (default: $H_DATA_DIR or ~/.local/share/h)
+    #[arg(long, value_name = "PATH")]
+    data_dir: Option<PathBuf>,
+
+    /// Override daemon URL (literal loopback http://127.0.0.1:<port> or http://[::1]:<port>)
+    #[arg(long, value_name = "URL")]
+    daemon_url: Option<String>,
+
+    /// hi terminal layout (interactive TTY only)
+    #[arg(long, value_parser = ["fullscreen", "regular"], default_value = "fullscreen")]
+    tui_mode: String,
+
+    /// Default execution environment ID for new sessions created from the inbox
+    #[arg(long = "env", value_name = "ID", default_value = "host")]
+    env_id: String,
+}
+
+#[derive(Debug, Parser)]
+#[command(
     name = "hi",
     version,
     about = "Interactive terminal for the durable H daemon"
@@ -103,8 +127,8 @@ impl From<ClientError> for AppError {
 
 pub fn hi_main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
-    // Reserve these first words for hi management. `--` and -p keep literal
-    // prompts possible.
+    // Reserve these first words for hi management and inbox browser. `--` and -p
+    // keep literal prompts possible.
     if args
         .get(1)
         .and_then(|arg| arg.to_str())
@@ -114,10 +138,45 @@ pub fn hi_main() -> ExitCode {
             crate::manage::run(crate::manage::Manage::parse_from(args)).map_err(AppError::Message),
         );
     }
+    if args.get(1).and_then(|arg| arg.to_str()) == Some("inbox") {
+        let mut inbox_args = Vec::with_capacity(args.len().saturating_sub(1));
+        if let Some(bin) = args.first() {
+            inbox_args.push(bin.clone());
+        }
+        inbox_args.extend(args.into_iter().skip(2));
+        let inbox_cli = InboxCli::parse_from(inbox_args);
+        return report(run_inbox_cli(inbox_cli));
+    }
     let cmd = Cli::command()
-        .after_help("Management: hi login, hi account, hi daemon (each accepts --help)");
+        .after_help("Subcommands: hi inbox, hi login, hi account, hi daemon (each accepts --help)");
     let cli = Cli::from_arg_matches(&cmd.get_matches_from(args)).unwrap_or_else(|err| err.exit());
     report(run(cli))
+}
+
+fn run_inbox_cli(cli: InboxCli) -> Result<(), AppError> {
+    let interactive = io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && std::env::var("TERM").as_deref() != Ok("dumb");
+    if !interactive {
+        return Err(AppError::Message(
+            "hi inbox requires an interactive TTY".into(),
+        ));
+    }
+    let cfg = resolve_config(cli.data_dir.as_deref(), cli.daemon_url.as_deref())?;
+    let client = DaemonClient::new(cfg.target, cfg.token);
+    let cwd = current_cwd_string()?;
+    let reexec = crate::hi::app::RestartOrigin {
+        daemon_url: cli.daemon_url.clone(),
+    };
+    crate::hi::app::run_inbox(
+        client,
+        cli.env_id,
+        cwd,
+        &cfg.data_dir,
+        cli.tui_mode == "regular",
+        reexec,
+    )
+    .map_err(AppError::Message)
 }
 
 fn report(result: Result<(), AppError>) -> ExitCode {
@@ -637,6 +696,29 @@ mod tests {
         assert!(cli.continue_latest);
         assert_eq!(cli.print_prompt.as_deref(), Some("hello"));
 
+        let inbox = InboxCli::try_parse_from([
+            "hi",
+            "--data-dir",
+            "/tmp/h-data",
+            "--daemon-url",
+            "http://127.0.0.1:4100",
+            "--tui-mode",
+            "regular",
+            "--env",
+            "vm-1",
+        ])
+        .unwrap();
+        assert_eq!(inbox.data_dir, Some(PathBuf::from("/tmp/h-data")));
+        assert_eq!(inbox.daemon_url.as_deref(), Some("http://127.0.0.1:4100"));
+        assert_eq!(inbox.tui_mode, "regular");
+        assert_eq!(inbox.env_id, "vm-1");
+
+        // Literal prompt starting with "inbox" still works via `-- inbox` or `-p "inbox ..."`
+        let literal = Cli::try_parse_from(["hi", "--", "inbox", "status"]).unwrap();
+        assert_eq!(literal.prompt, vec!["inbox", "status"]);
+        let printed = Cli::try_parse_from(["hi", "-p", "inbox check"]).unwrap();
+        assert_eq!(printed.print_prompt.as_deref(), Some("inbox check"));
+
         let cli_pos = Cli::try_parse_from(["hi", "summarize", "diff"]).unwrap();
         assert_eq!(resolve_prompt(&cli_pos).as_deref(), Some("summarize diff"));
 
@@ -666,6 +748,10 @@ mod tests {
                 created_at: Some(100),
                 updated_at: Some(100),
                 active: false,
+                attention: None,
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
             },
@@ -679,6 +765,10 @@ mod tests {
                 created_at: Some(200),
                 updated_at: Some(200),
                 active: false,
+                attention: None,
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
                 next_wake_at: None,
                 status: Some("quarantined".to_string()),
             },

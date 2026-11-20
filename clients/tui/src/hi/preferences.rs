@@ -82,6 +82,11 @@ const ACTION_SPECS: &[ActionSpec] = &[
         description: "Search transcript",
     },
     ActionSpec {
+        name: "inbox",
+        defaults: &["alt+i"],
+        description: "Open session inbox",
+    },
+    ActionSpec {
         name: "suspend",
         defaults: &["ctrl+z"],
         description: "Suspend to background",
@@ -591,6 +596,10 @@ mod tests {
         assert_eq!(
             prefs.action(key(KeyCode::Enter, KeyModifiers::NONE)),
             Some("submit")
+        );
+        assert_eq!(
+            prefs.action(key(KeyCode::Char('i'), KeyModifiers::ALT)),
+            Some("inbox")
         );
         assert_eq!(
             prefs.action(key(KeyCode::Char('/'), KeyModifiers::NONE)),

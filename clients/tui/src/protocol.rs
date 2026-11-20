@@ -100,9 +100,66 @@ pub struct SessionSummary {
     #[serde(default)]
     pub active: bool,
     #[serde(default)]
+    pub attention: Option<String>,
+    #[serde(default)]
+    pub activity_kind: Option<String>,
+    #[serde(default)]
+    pub activity_label: Option<String>,
+    #[serde(default)]
+    pub queued_count: u64,
+    #[serde(default)]
     pub next_wake_at: Option<i64>,
     #[serde(default)]
     pub status: Option<String>,
+}
+
+impl SessionSummary {
+    /// Returns the effective attention state for this session, falling back
+    /// cleanly for older/minimal payloads that omit `attention`.
+    pub fn effective_attention(&self) -> &str {
+        if self.status.as_deref() == Some("quarantined") {
+            return "quarantined";
+        }
+        match self.attention.as_deref() {
+            Some("idle" | "running" | "sleeping" | "error" | "quarantined") => {
+                self.attention.as_deref().unwrap()
+            }
+            _ if self.active => "running",
+            _ => "idle",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CatalogSnapshotFrame {
+    #[serde(default)]
+    pub version: Option<u32>,
+    pub seq: u64,
+    #[serde(default)]
+    pub sessions: Vec<SessionSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CatalogEventKind {
+    Upsert { session: Box<SessionSummary> },
+    Removed { session_id: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CatalogEventFrame {
+    #[serde(default)]
+    pub version: Option<u32>,
+    pub seq: u64,
+    #[serde(flatten)]
+    pub kind: CatalogEventKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogFrame {
+    Snapshot(CatalogSnapshotFrame),
+    Event(CatalogEventFrame),
+    Unknown { event: Option<String>, data: String },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -455,6 +512,25 @@ impl SseEvent {
                 Ok(ServerFrame::Ephemeral(frame))
             }
             _ => Ok(ServerFrame::Unknown {
+                event: self.event.clone(),
+                data: self.data.clone(),
+            }),
+        }
+    }
+
+    pub fn decode_catalog_frame(&self) -> Result<CatalogFrame, FrameDecodeError> {
+        match self.event.as_deref() {
+            Some("snapshot") => {
+                let frame: CatalogSnapshotFrame = serde_json::from_str(&self.data)
+                    .map_err(|e| FrameDecodeError::InvalidJson(e.to_string()))?;
+                Ok(CatalogFrame::Snapshot(frame))
+            }
+            Some("catalog") => {
+                let frame: CatalogEventFrame = serde_json::from_str(&self.data)
+                    .map_err(|e| FrameDecodeError::InvalidJson(e.to_string()))?;
+                Ok(CatalogFrame::Event(frame))
+            }
+            _ => Ok(CatalogFrame::Unknown {
                 event: self.event.clone(),
                 data: self.data.clone(),
             }),
@@ -819,5 +895,72 @@ mod tests {
         let ok2 = ev_parser.try_push_bytes(b"data: small\n\n").unwrap();
         assert_eq!(ok2.len(), 1);
         assert_eq!(ok2[0].data, "small");
+    }
+
+    #[test]
+    fn session_summary_attention_and_catalog_frames_decode() {
+        let minimal: SessionSummary =
+            serde_json::from_str(r#"{"session_id":"s1","cwd":"/tmp/a","active":false}"#).unwrap();
+        assert_eq!(minimal.attention, None);
+        assert_eq!(minimal.queued_count, 0);
+        assert_eq!(minimal.effective_attention(), "idle");
+
+        let minimal_active: SessionSummary =
+            serde_json::from_str(r#"{"session_id":"s2","cwd":"/tmp/a","active":true}"#).unwrap();
+        assert_eq!(minimal_active.effective_attention(), "running");
+
+        let quarantined: SessionSummary = serde_json::from_str(
+            r#"{"session_id":"s3","cwd":"/tmp/a","active":false,"status":"quarantined","attention":"idle"}"#,
+        )
+        .unwrap();
+        assert_eq!(quarantined.effective_attention(), "quarantined");
+
+        let snap_ev = SseEvent {
+            id: Some("4".into()),
+            event: Some("snapshot".into()),
+            data: r#"{"version":1,"seq":4,"sessions":[{"session_id":"s1","cwd":"/tmp/a","active":true,"attention":"running","activity_kind":"tool","activity_label":"bash","queued_count":2}]}"#.into(),
+        };
+        match snap_ev.decode_catalog_frame().unwrap() {
+            CatalogFrame::Snapshot(snap) => {
+                assert_eq!(snap.seq, 4);
+                assert_eq!(snap.sessions.len(), 1);
+                assert_eq!(snap.sessions[0].effective_attention(), "running");
+                assert_eq!(snap.sessions[0].activity_kind.as_deref(), Some("tool"));
+                assert_eq!(snap.sessions[0].activity_label.as_deref(), Some("bash"));
+                assert_eq!(snap.sessions[0].queued_count, 2);
+            }
+            other => panic!("expected catalog snapshot, got {other:?}"),
+        }
+
+        let upsert_ev = SseEvent {
+            id: Some("5".into()),
+            event: Some("catalog".into()),
+            data: r#"{"version":1,"seq":5,"type":"upsert","session":{"session_id":"s1","cwd":"/tmp/a","attention":"error","activity_label":"model_error"}}"#.into(),
+        };
+        match upsert_ev.decode_catalog_frame().unwrap() {
+            CatalogFrame::Event(CatalogEventFrame {
+                seq: 5,
+                kind: CatalogEventKind::Upsert { session },
+                ..
+            }) => {
+                assert_eq!(session.effective_attention(), "error");
+                assert_eq!(session.activity_label.as_deref(), Some("model_error"));
+            }
+            other => panic!("expected upsert, got {other:?}"),
+        }
+
+        let removed_ev = SseEvent {
+            id: Some("6".into()),
+            event: Some("catalog".into()),
+            data: r#"{"version":1,"seq":6,"type":"removed","session_id":"s1"}"#.into(),
+        };
+        match removed_ev.decode_catalog_frame().unwrap() {
+            CatalogFrame::Event(CatalogEventFrame {
+                seq: 6,
+                kind: CatalogEventKind::Removed { session_id },
+                ..
+            }) => assert_eq!(session_id, "s1"),
+            other => panic!("expected removed, got {other:?}"),
+        }
     }
 }

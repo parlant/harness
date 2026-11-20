@@ -6,6 +6,7 @@ use super::{
     completion::{self, Completion, Token},
     editor::Editor,
     external,
+    inbox::{CatalogSubscription, InboxState},
     login::{self, Login},
     markdown::StyledRow,
     picker::{Choice, Picker},
@@ -36,6 +37,7 @@ use std::{
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Workspace sessions"),
+    ("/inbox", "Browse all sessions across workspaces"),
     ("/new", "New session"),
     ("/name", "Show or rename session title"),
     ("/tree", "Conversations and branch history"),
@@ -141,12 +143,21 @@ struct PathLookup {
     token: Option<Token>,
     result: Receiver<Result<Vec<(String, String)>, ClientError>>,
 }
+struct InboxMode {
+    state: InboxState,
+    sub: CatalogSubscription,
+}
+
 struct Ui {
     client: DaemonClient,
     target: Target,
+    launch_env_id: String,
+    launch_cwd: String,
     state: TranscriptState,
     historical: Option<TranscriptState>,
-    sub: Subscription,
+    sub: Option<Subscription>,
+    inbox: Option<InboxMode>,
+    entered_from_inbox: bool,
     online: bool,
     draft: Draft,
     saved: HashMap<(String, String), Draft>,
@@ -187,20 +198,21 @@ pub fn run(
     regular: bool,
     origin: RestartOrigin,
 ) -> Result<(), String> {
-    let open_screen = if regular {
-        Screen::open_regular
-    } else {
-        Screen::open
-    };
     let config = UserConfig::load(data_dir)?;
     let sub = Subscription::start(client.clone(), target.sid.clone(), target.cid.clone(), None);
     let state = TranscriptState::new(Some(target.sid.clone()), Some(target.cid.clone()));
-    let mut ui = Ui {
+    let launch_env_id = target.env_id.clone();
+    let launch_cwd = target.cwd.clone();
+    let ui = Ui {
         client,
         target,
+        launch_env_id,
+        launch_cwd,
         state,
         historical: None,
-        sub,
+        sub: Some(sub),
+        inbox: None,
+        entered_from_inbox: false,
         online: false,
         draft: Draft::default(),
         saved: HashMap::new(),
@@ -223,37 +235,117 @@ pub fn run(
         restart_ui: None,
         last_clear: None,
     };
+    run_loop(ui, resume, initial, regular, origin)
+}
+
+pub fn run_inbox(
+    client: DaemonClient,
+    env_id: String,
+    cwd: String,
+    data_dir: &Path,
+    regular: bool,
+    origin: RestartOrigin,
+) -> Result<(), String> {
+    let config = UserConfig::load(data_dir)?;
+    let catalog_sub = CatalogSubscription::start(client.clone());
+    let inbox_state = InboxState::new(env_id.clone(), cwd.clone(), None);
+    let placeholder_target = Target {
+        sid: String::new(),
+        cid: "1".to_string(),
+        cwd: cwd.clone(),
+        env_id: env_id.clone(),
+        labels: Default::default(),
+    };
+    let ui = Ui {
+        client,
+        target: placeholder_target,
+        launch_env_id: env_id,
+        launch_cwd: cwd,
+        state: TranscriptState::default(),
+        historical: None,
+        sub: None,
+        inbox: Some(InboxMode {
+            state: inbox_state,
+            sub: catalog_sub,
+        }),
+        entered_from_inbox: true,
+        online: false,
+        draft: Draft::default(),
+        saved: HashMap::new(),
+        picker: None,
+        login: None,
+        secret: None,
+        completion: None,
+        path_lookup: None,
+        pending_root_fork: None,
+        config,
+        status_metadata: StatusMetadata::default(),
+        data_dir: data_dir.to_owned(),
+        job: None,
+        note: String::new(),
+        tools: false,
+        thinking: false,
+        cached_rows: Vec::new(),
+        rows_dirty: true,
+        quit: false,
+        restart_ui: None,
+        last_clear: None,
+    };
+    run_loop(ui, false, "", regular, origin)
+}
+
+fn run_loop(
+    mut ui: Ui,
+    resume: bool,
+    initial: &str,
+    regular: bool,
+    origin: RestartOrigin,
+) -> Result<(), String> {
+    let open_screen = if regular {
+        Screen::open_regular
+    } else {
+        Screen::open
+    };
     ui.config.status.validate(&ui.status_fields())?;
     let exiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         local(signal_hook::flag::register(signal, exiting.clone()))?;
     }
     let mut screen = local(open_screen())?;
-    if resume {
+    if resume && ui.inbox.is_none() {
         ui.start(Effect::Sessions, None);
     }
     let mut initial = Some(initial).filter(|s| !s.is_empty());
     let mut repaint = true;
     while !ui.quit && !exiting.load(std::sync::atomic::Ordering::Relaxed) {
-        for _ in 0..48 {
-            let Some(update) = ui.sub.next() else { break };
-            ui.update(update);
-            repaint = true;
-        }
-        repaint |= ui.complete(&mut screen);
-        repaint |= ui.complete_path_lookup();
-        repaint |= ui
-            .status_metadata
-            .tick(&ui.target, &ui.client, &ui.config.status, ui.online);
-        repaint |= ui.login.as_mut().is_some_and(|flow| flow.tick(&ui.client));
-        if ui.online && ui.state.seq.is_some() && ui.job.is_none() {
-            if let Some(text) = initial.take() {
-                ui.dismiss_completion();
-                ui.draft.editor.set(text);
-                ui.send(false);
+        if ui.inbox.is_some() {
+            repaint |= ui.drain_inbox_updates();
+            if let Some(inbox) = ui.inbox.as_mut() {
+                repaint |= inbox.state.tick_spinner(Instant::now());
+            }
+        } else {
+            for _ in 0..48 {
+                let Some(update) = ui.sub.as_ref().and_then(Subscription::next) else {
+                    break;
+                };
+                ui.update(update);
                 repaint = true;
             }
+            repaint |= ui.complete_path_lookup();
+            repaint |=
+                ui.status_metadata
+                    .tick(&ui.target, &ui.client, &ui.config.status, ui.online);
+            repaint |= ui.login.as_mut().is_some_and(|flow| flow.tick(&ui.client));
+            if ui.online && ui.state.seq.is_some() && ui.job.is_none() {
+                if let Some(text) = initial.take() {
+                    ui.dismiss_completion();
+                    ui.draft.editor.set(text);
+                    ui.send(false);
+                    repaint = true;
+                }
+            }
         }
+        repaint |= ui.complete(&mut screen);
         if repaint {
             ui.draw(&mut screen)?;
             repaint = false;
@@ -261,7 +353,9 @@ pub fn run(
         if local(event::poll(Duration::from_millis(16)))? {
             match local(event::read())? {
                 Event::Key(k) if k.kind != KeyEventKind::Release => {
-                    if ui.secret.is_some() {
+                    if ui.inbox.is_some() {
+                        ui.inbox_key(k);
+                    } else if ui.secret.is_some() {
                         ui.secret_key(k);
                     } else if let Some(flow) = &mut ui.login {
                         if (k.code == KeyCode::Esc || (k.code == KeyCode::Enter && flow.is_done()))
@@ -297,6 +391,7 @@ pub fn run(
                         ui.key(k, &mut screen);
                     }
                 }
+                Event::Paste(_) if ui.inbox.is_some() => {}
                 Event::Paste(s) if ui.secret.is_some() => {
                     if let Some(secret) = &mut ui.secret {
                         secret.paste(&s);
@@ -310,6 +405,19 @@ pub fn run(
                         ui.draft.editor.paste(&s);
                     }
                 }
+                Event::Mouse(m) if ui.inbox.is_some() => match m.kind {
+                    MouseEventKind::ScrollUp => {
+                        if let Some(inbox) = ui.inbox.as_mut() {
+                            inbox.state.move_selection(-1);
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        if let Some(inbox) = ui.inbox.as_mut() {
+                            inbox.state.move_selection(1);
+                        }
+                    }
+                    _ => {}
+                },
                 Event::Mouse(m) => match m.kind {
                     MouseEventKind::ScrollUp => screen.scroll(3),
                     MouseEventKind::ScrollDown => screen.scroll(-3),
@@ -344,7 +452,145 @@ pub fn run(
 }
 
 impl Ui {
+    fn drain_inbox_updates(&mut self) -> bool {
+        let mut changed = false;
+        for _ in 0..64 {
+            let update = {
+                let Some(inbox) = self.inbox.as_ref() else {
+                    break;
+                };
+                inbox.sub.next()
+            };
+            let Some(update) = update else {
+                break;
+            };
+            if let Some(inbox) = self.inbox.as_mut() {
+                if let Some(err) = inbox.state.apply(update) {
+                    self.note = err;
+                } else if inbox.state.online && self.note.contains("catalog") {
+                    self.note.clear();
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn enter_inbox(&mut self) {
+        self.dismiss_completion();
+        if !self.target.sid.is_empty() {
+            let key = (self.target.sid.clone(), self.target.cid.clone());
+            self.saved.insert(key, std::mem::take(&mut self.draft));
+        }
+        self.picker = None;
+        self.login = None;
+        self.secret = None;
+        self.pending_root_fork = None;
+        self.historical = None;
+        self.sub = None;
+        let preselect = (!self.target.sid.is_empty()).then(|| self.target.sid.clone());
+        let catalog_sub = CatalogSubscription::start(self.client.clone());
+        let inbox_state = InboxState::new(
+            self.launch_env_id.clone(),
+            self.launch_cwd.clone(),
+            preselect,
+        );
+        self.inbox = Some(InboxMode {
+            state: inbox_state,
+            sub: catalog_sub,
+        });
+        self.entered_from_inbox = true;
+        self.note.clear();
+    }
+
+    fn inbox_key(&mut self, k: KeyEvent) {
+        let is_ctrl_d = k.code == KeyCode::Char('d') && k.modifiers.contains(Mod::CONTROL);
+        let is_ctrl_c = k.code == KeyCode::Char('c') && k.modifiers.contains(Mod::CONTROL);
+        if is_ctrl_d
+            || is_ctrl_c
+            || k.code == KeyCode::Esc
+            || (matches!(k.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+                && !k.modifiers.contains(Mod::CONTROL)
+                && !k.modifiers.contains(Mod::ALT))
+        {
+            self.quit = true;
+            return;
+        }
+
+        let Some(inbox) = self.inbox.as_mut() else {
+            return;
+        };
+
+        match k.code {
+            KeyCode::Down => {
+                inbox.state.move_selection(1);
+                self.note.clear();
+            }
+            KeyCode::Up => {
+                inbox.state.move_selection(-1);
+                self.note.clear();
+            }
+            KeyCode::Char('j' | 'J') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                inbox.state.move_selection(1);
+                self.note.clear();
+            }
+            KeyCode::Char('k' | 'K') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                inbox.state.move_selection(-1);
+                self.note.clear();
+            }
+            KeyCode::Tab => {
+                let forward = !k.modifiers.contains(Mod::SHIFT);
+                if inbox.state.cycle_attention(forward) {
+                    self.note.clear();
+                } else {
+                    self.note = "No idle or error sessions".into();
+                }
+            }
+            KeyCode::BackTab => {
+                if inbox.state.cycle_attention(false) {
+                    self.note.clear();
+                } else {
+                    self.note = "No idle or error sessions".into();
+                }
+            }
+            KeyCode::Enter => {
+                let selected = inbox.state.selected_session().cloned();
+                let Some(session) = selected else {
+                    self.note = "No session selected (press n to create one)".into();
+                    return;
+                };
+                if session.effective_attention() == "quarantined" {
+                    self.note = format!(
+                        "Session {} is quarantined and cannot be attached",
+                        sanitize_single_line(&session.session_id)
+                    );
+                    return;
+                }
+                inbox.state.mark_visited(&session.session_id);
+                let sid = session.session_id;
+                self.note = format!("Opening {}…", sanitize_single_line(&sid));
+                self.start(Effect::Attach(sid), None);
+            }
+            KeyCode::Char('n' | 'N') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                let (env_id, cwd) = inbox.state.new_session_workspace();
+                self.note = "Creating new session…".into();
+                self.start(Effect::NewIn { env_id, cwd }, None);
+            }
+            _ => {}
+        }
+    }
+
     fn draw(&mut self, screen: &mut Screen) -> Result<(), String> {
+        if let Some(inbox) = &self.inbox {
+            let rendered = inbox.state.render(&self.config.theme);
+            let status = [inbox.state.status_line(&self.note)];
+            return local(screen.draw_inbox(
+                &rendered.rows,
+                rendered.selected_row,
+                &status,
+                &self.config.theme,
+            ));
+        }
         let width = crossterm::terminal::size().map_or(0, |(width, _)| width);
         if width > 0 {
             self.draft.editor.set_width(usize::from(width));
@@ -422,12 +668,12 @@ impl Ui {
                     }
                     ServerFrame::Commit(c) => {
                         if self.state.apply_commit(c) == CommitOutcome::Gap {
-                            self.sub = Subscription::start(
+                            self.sub = Some(Subscription::start(
                                 self.client.clone(),
                                 self.target.sid.clone(),
                                 self.target.cid.clone(),
                                 None,
-                            );
+                            ));
                             self.online = false;
                             self.note = "Resyncing".into();
                         }
@@ -695,8 +941,12 @@ impl Ui {
     }
     fn switch(&mut self, t: Target, screen: &mut Screen) {
         self.dismiss_completion();
-        let key = (self.target.sid.clone(), self.target.cid.clone());
-        self.saved.insert(key, std::mem::take(&mut self.draft));
+        if self.inbox.take().is_some() {
+            self.entered_from_inbox = true;
+        } else if !self.target.sid.is_empty() {
+            let key = (self.target.sid.clone(), self.target.cid.clone());
+            self.saved.insert(key, std::mem::take(&mut self.draft));
+        }
         self.draft = self
             .saved
             .remove(&(t.sid.clone(), t.cid.clone()))
@@ -707,7 +957,12 @@ impl Ui {
         self.pending_root_fork = None;
         self.historical = None;
         self.state = TranscriptState::new(Some(t.sid.clone()), Some(t.cid.clone()));
-        self.sub = Subscription::start(self.client.clone(), t.sid.clone(), t.cid.clone(), None);
+        self.sub = Some(Subscription::start(
+            self.client.clone(),
+            t.sid.clone(),
+            t.cid.clone(),
+            None,
+        ));
         self.target = t;
         self.online = false;
         self.rows_dirty = true;
@@ -1064,7 +1319,14 @@ impl Ui {
                     self.last_clear = Some(Instant::now());
                 }
             }
-            Some("exit") if self.draft.editor.text().is_empty() => self.quit = true,
+            Some("exit") if self.draft.editor.text().is_empty() => {
+                if self.entered_from_inbox {
+                    self.enter_inbox();
+                } else {
+                    self.quit = true;
+                }
+            }
+            Some("inbox") => self.enter_inbox(),
             Some("tools") => {
                 self.tools = !self.tools;
                 self.rows_dirty = true;
@@ -1328,6 +1590,7 @@ impl Ui {
                 self.thinking = !self.thinking;
                 self.rows_dirty = true;
             }
+            "/inbox" => self.enter_inbox(),
             "/resume" | "/sessions" => self.start(Effect::Sessions, None),
             "/new" => {
                 self.pending_root_fork = None;
@@ -1870,10 +2133,14 @@ mod tests {
         let state = TranscriptState::new(Some(target.sid.clone()), Some(target.cid.clone()));
         let ui = Ui {
             client,
+            launch_env_id: target.env_id.clone(),
+            launch_cwd: target.cwd.clone(),
             target,
             state,
             historical: None,
-            sub,
+            sub: Some(sub),
+            inbox: None,
+            entered_from_inbox: false,
             online: true,
             draft: Draft::default(),
             saved: HashMap::new(),
@@ -3267,5 +3534,216 @@ mod tests {
             cmds[1]["args"],
             json!({"expected_seq": 11, "instructions": "focus on API contract"})
         );
+    }
+
+    #[test]
+    fn inbox_navigation_ctrl_d_contract_and_draft_preservation() {
+        let (srv, client) = TestServer::bind("app-inbox");
+        let listener = srv.listener.try_clone().unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let (head, _body) = read_http_request(&mut stream);
+                        let (status, body) = if head.starts_with("GET /api/v1/sessions/sess-2 ") {
+                            (
+                                "200 OK",
+                                json!({
+                                    "session": {
+                                        "session_id": "sess-2",
+                                        "title": "Second",
+                                        "env_id": "host",
+                                        "harness_id": "coding",
+                                        "cwd": "/tmp/proj",
+                                        "root_conversation_id": "1",
+                                        "active": false,
+                                        "attention": "idle",
+                                        "status": "ok"
+                                    },
+                                    "conversations": [{"id": "1", "parent": null, "owner": "ownerless"}],
+                                    "tasks": []
+                                })
+                                .to_string(),
+                            )
+                        } else {
+                            ("404 Not Found", "{}".to_string())
+                        };
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.flush();
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // 1. Direct session launch (entered_from_inbox == false): Ctrl-D exits immediately
+        let (mut ui_direct, mut screen_direct) = make_ui(client.clone(), "sess-1", "1");
+        assert!(!ui_direct.entered_from_inbox);
+        ui_direct.key(
+            KeyEvent::new(KeyCode::Char('d'), Mod::CONTROL),
+            &mut screen_direct,
+        );
+        assert!(ui_direct.quit);
+        assert!(ui_direct.inbox.is_none());
+
+        // 2. Entering inbox via Alt+I saves draft, drops conversation sub, preselects sess-1
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        ui.draft.editor.set("wip draft");
+        ui.key(KeyEvent::new(KeyCode::Char('i'), Mod::ALT), &mut screen);
+        assert!(ui.inbox.is_some());
+        assert!(ui.sub.is_none());
+        assert!(ui.entered_from_inbox);
+        assert_eq!(
+            ui.saved
+                .get(&("sess-1".into(), "1".into()))
+                .unwrap()
+                .editor
+                .text(),
+            "wip draft"
+        );
+
+        // Inject catalog snapshot with running, idle, quarantined sessions
+        {
+            let inbox = ui.inbox.as_mut().unwrap();
+            inbox
+                .state
+                .apply(super::super::inbox::CatalogUpdate::Online);
+            inbox
+                .state
+                .apply(super::super::inbox::CatalogUpdate::Snapshot(vec![
+                    crate::protocol::SessionSummary {
+                        session_id: "sess-1".into(),
+                        title: Some("First".into()),
+                        env_id: Some("host".into()),
+                        harness_id: Some("coding".into()),
+                        cwd: "/tmp/proj".into(),
+                        root_conversation_id: Some("1".into()),
+                        created_at: Some(1),
+                        updated_at: Some(1),
+                        active: false,
+                        attention: Some("idle".into()),
+                        activity_kind: None,
+                        activity_label: None,
+                        queued_count: 0,
+                        next_wake_at: None,
+                        status: Some("ok".into()),
+                    },
+                    crate::protocol::SessionSummary {
+                        session_id: "sess-run".into(),
+                        title: Some("Busy".into()),
+                        env_id: Some("host".into()),
+                        harness_id: Some("coding".into()),
+                        cwd: "/tmp/proj".into(),
+                        root_conversation_id: Some("1".into()),
+                        created_at: Some(2),
+                        updated_at: Some(2),
+                        active: true,
+                        attention: Some("running".into()),
+                        activity_kind: Some("tool".into()),
+                        activity_label: Some("bash".into()),
+                        queued_count: 0,
+                        next_wake_at: None,
+                        status: Some("ok".into()),
+                    },
+                    crate::protocol::SessionSummary {
+                        session_id: "sess-2".into(),
+                        title: Some("Second".into()),
+                        env_id: Some("host".into()),
+                        harness_id: Some("coding".into()),
+                        cwd: "/tmp/proj".into(),
+                        root_conversation_id: Some("1".into()),
+                        created_at: Some(3),
+                        updated_at: Some(3),
+                        active: false,
+                        attention: Some("idle".into()),
+                        activity_kind: None,
+                        activity_label: None,
+                        queued_count: 0,
+                        next_wake_at: None,
+                        status: Some("ok".into()),
+                    },
+                    crate::protocol::SessionSummary {
+                        session_id: "sess-q".into(),
+                        title: Some("Broken".into()),
+                        env_id: Some("host".into()),
+                        harness_id: Some("coding".into()),
+                        cwd: "/tmp/proj".into(),
+                        root_conversation_id: Some("1".into()),
+                        created_at: Some(4),
+                        updated_at: Some(4),
+                        active: false,
+                        attention: Some("quarantined".into()),
+                        activity_kind: None,
+                        activity_label: Some("corrupt".into()),
+                        queued_count: 0,
+                        next_wake_at: None,
+                        status: Some("quarantined".into()),
+                    },
+                ]));
+            assert_eq!(inbox.state.selected_id(), Some("sess-1"));
+        }
+
+        // Tab skips sess-run and lands on sess-2
+        ui.inbox_key(KeyEvent::new(KeyCode::Tab, Mod::NONE));
+        assert_eq!(
+            ui.inbox.as_ref().unwrap().state.selected_id(),
+            Some("sess-2")
+        );
+
+        // Enter on quarantined session shows clear note and stays in inbox
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('j'), Mod::NONE));
+        assert_eq!(
+            ui.inbox.as_ref().unwrap().state.selected_id(),
+            Some("sess-q")
+        );
+        ui.inbox_key(KeyEvent::new(KeyCode::Enter, Mod::NONE));
+        assert!(ui.inbox.is_some());
+        assert!(ui.note.contains("quarantined"), "note={}", ui.note);
+
+        // Move back up to sess-2 and press Enter -> attaches to sess-2
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('k'), Mod::NONE));
+        ui.inbox_key(KeyEvent::new(KeyCode::Enter, Mod::NONE));
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.inbox.is_none());
+        assert!(ui.sub.is_some());
+        assert_eq!(ui.target.sid, "sess-2");
+        assert!(ui.entered_from_inbox);
+
+        // Ctrl-D in session mode returns to inbox (since entered_from_inbox == true)
+        ui.key(KeyEvent::new(KeyCode::Char('d'), Mod::CONTROL), &mut screen);
+        assert!(!ui.quit);
+        assert!(ui.inbox.is_some());
+        assert_eq!(
+            ui.inbox.as_ref().unwrap().state.selected_id(),
+            Some("sess-2")
+        );
+
+        // Ctrl-D in inbox mode exits cleanly
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('d'), Mod::CONTROL));
+        assert!(ui.quit);
+
+        // /quit in session mode always exits even when entered_from_inbox == true
+        ui.quit = false;
+        ui.inbox = None;
+        ui.entered_from_inbox = true;
+        ui.command("/quit");
+        assert!(ui.quit);
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(ui);
+        drop(ui_direct);
+        let _ = handle.join();
     }
 }

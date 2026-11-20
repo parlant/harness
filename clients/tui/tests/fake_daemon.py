@@ -103,8 +103,11 @@ class FakeDaemon:
         self.recorded_commands: list[dict[str, Any]] = []
         self.entries_requests: list[dict[str, Any]] = []
         self.sse_connect_count = 0
+        self.catalog_sse_connect_count = 0
+        self.created_sessions: list[dict[str, Any]] = []
 
         self._seq = 1
+        self._catalog_seq = 1
         self._next_entry_id = 1
         self._next_sub_id = 1
         self._snapshot_limit = 50
@@ -120,12 +123,22 @@ class FakeDaemon:
             "agent": {"model": self.model_id, "thinking": "medium"},
             "usage": {"input_tokens": 0, "output_tokens": 0, "cost": 0.0},
         }
+        self._extra_sessions: dict[str, dict[str, Any]] = {}
+        self._extra_entries: dict[str, list[dict[str, Any]]] = {}
+        self._extra_docs: dict[str, dict[str, Any]] = {}
+        self._extra_seq: dict[str, int] = {}
+        self._primary_created_at = int(time.time())
+        self._primary_title = "Demo Session"
+        self._primary_attention: str | None = None
+        self._primary_activity_kind: str | None = None
+        self._primary_activity_label: str | None = None
 
         self._next_chunks: list[str] = ["Fake response"]
         self._next_gate: threading.Event | None = None
         self._next_gate_timeout: float | None = 10.0
 
         self._subscribers: list[_SseSubscriber] = []
+        self._catalog_subscribers: list[_SseSubscriber] = []
         self._turn_threads: list[threading.Thread] = []
         self._server: _ThreadingUnixStreamServer | _ThreadingTCPServer | None = None
         self._server_thread: threading.Thread | None = None
@@ -166,6 +179,8 @@ class FakeDaemon:
             if self._active_gate is not None:
                 self._active_gate.set()
             for sub in list(self._subscribers):
+                sub.close()
+            for sub in list(self._catalog_subscribers):
                 sub.close()
             self._cond.notify_all()
 
@@ -273,6 +288,104 @@ class FakeDaemon:
                 },
             )
 
+    def wait_for_catalog_sse_connect(self, *, min_count: int = 1, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            while not self._stop_event.is_set():
+                if self.catalog_sse_connect_count >= min_count and self._catalog_subscribers:
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("timed out waiting for catalog SSE connect")
+                self._cond.wait(timeout=remaining)
+
+    def add_session(
+        self,
+        session_id: str,
+        *,
+        cwd: str,
+        env_id: str = "host",
+        title: str | None = None,
+        attention: str = "idle",
+        activity_kind: str | None = None,
+        activity_label: str | None = None,
+        queued_count: int = 0,
+        status: str = "ok",
+        created_at: int | None = None,
+        entries: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        now = int(time.time())
+        created = created_at if created_at is not None else now
+        wire = {
+            "session_id": session_id,
+            "title": title,
+            "env_id": env_id,
+            "harness_id": "coding",
+            "cwd": os.path.abspath(cwd) if env_id == "host" else cwd,
+            "root_conversation_id": "1",
+            "created_at": created,
+            "updated_at": now,
+            "active": attention in ("running", "sleeping"),
+            "attention": "quarantined" if status == "quarantined" else attention,
+            "activity_kind": activity_kind,
+            "activity_label": activity_label,
+            "queued_count": queued_count,
+            "next_wake_at": None,
+            "status": status,
+        }
+        with self._lock:
+            if session_id == self.session_id:
+                self._primary_title = title or self._primary_title
+                self._primary_attention = wire["attention"]
+                self._primary_activity_kind = activity_kind
+                self._primary_activity_label = activity_label
+                self._active = wire["active"]
+                self._primary_created_at = created
+                if entries is not None:
+                    self._entries = list(entries)
+                self._broadcast_catalog_upsert_locked(self._wire_session())
+                return self._wire_session()
+            self._extra_sessions[session_id] = wire
+            self._extra_entries[session_id] = list(entries or [])
+            self._extra_docs[session_id] = {
+                "live": {},
+                "inbox": [],
+                "agent": {"model": self.model_id, "thinking": "medium"},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "cost": 0.0},
+            }
+            self._extra_seq[session_id] = max(1, len(self._extra_entries[session_id]))
+            self._broadcast_catalog_upsert_locked(dict(wire))
+            return dict(wire)
+
+    def update_session_attention(
+        self,
+        session_id: str,
+        *,
+        attention: str,
+        activity_kind: str | None = None,
+        activity_label: str | None = None,
+        queued_count: int | None = None,
+    ) -> None:
+        with self._lock:
+            if session_id == self.session_id:
+                self._primary_attention = attention
+                self._primary_activity_kind = activity_kind
+                self._primary_activity_label = activity_label
+                self._active = attention in ("running", "sleeping")
+                self._broadcast_catalog_upsert_locked(self._wire_session())
+                return
+            sess = self._extra_sessions.get(session_id)
+            if sess is None:
+                raise KeyError(f"unknown session {session_id}")
+            sess["attention"] = attention
+            sess["active"] = attention in ("running", "sleeping")
+            sess["activity_kind"] = activity_kind
+            sess["activity_label"] = activity_label
+            if queued_count is not None:
+                sess["queued_count"] = queued_count
+            sess["updated_at"] = int(time.time())
+            self._broadcast_catalog_upsert_locked(dict(sess))
+
     def wait_for_sse_connect(self, *, min_count: int = 1, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
         with self._lock:
@@ -333,26 +446,55 @@ class FakeDaemon:
 
     def _wire_session(self) -> dict[str, Any]:
         now = int(time.time())
+        attention = self._primary_attention or ("running" if self._active else "idle")
+        activity_kind = self._primary_activity_kind
+        if activity_kind is None and attention == "running":
+            activity_kind = "generation"
         return {
             "session_id": self.session_id,
-            "title": "Demo Session",
+            "title": self._primary_title,
             "env_id": "host",
             "harness_id": "coding",
             "cwd": self.cwd,
             "root_conversation_id": "1",
-            "created_at": now,
+            "created_at": self._primary_created_at,
             "updated_at": now,
             "active": self._active,
+            "attention": attention,
+            "activity_kind": activity_kind,
+            "activity_label": self._primary_activity_label,
+            "queued_count": len(self._inbox),
             "next_wake_at": None,
             "status": "ok",
         }
+
+    def _all_wire_sessions_locked(self) -> list[dict[str, Any]]:
+        out = [self._wire_session()]
+        for sess in self._extra_sessions.values():
+            out.append(dict(sess))
+        return out
+
+    def _broadcast_catalog_upsert_locked(self, session_wire: dict[str, Any]) -> None:
+        self._catalog_seq += 1
+        self._catalog_subscribers = [s for s in self._catalog_subscribers if not s.closed.is_set()]
+        payload = {
+            "version": 1,
+            "seq": self._catalog_seq,
+            "type": "upsert",
+            "session": session_wire,
+        }
+        for sub in self._catalog_subscribers:
+            sub.push("catalog", str(self._catalog_seq), payload)
+        self._cond.notify_all()
 
     def _broadcast_locked(
         self, event_name: str, event_id: str | None, payload: dict[str, Any]
     ) -> None:
         self._subscribers = [s for s in self._subscribers if not s.closed.is_set()]
+        target_sid = payload.get("session_id")
         for sub in self._subscribers:
-            sub.push(event_name, event_id, payload)
+            if target_sid is None or sub.sid == target_sid:
+                sub.push(event_name, event_id, payload)
 
     def _commit_locked(
         self,
@@ -411,6 +553,10 @@ class FakeDaemon:
             appended_entries=[user_entry],
             doc_ops={"live": [["replace", live_doc]]},
         )
+        self._primary_attention = "running"
+        self._primary_activity_kind = "generation"
+        self._primary_activity_label = None
+        self._broadcast_catalog_upsert_locked(self._wire_session())
         t = threading.Thread(
             target=self._run_turn_worker,
             args=(prompt_text, chunks, gate, gate_timeout),
@@ -467,6 +613,10 @@ class FakeDaemon:
                 self._start_turn_locked(queued["text"])
             else:
                 self._active = False
+                self._primary_attention = "idle"
+                self._primary_activity_kind = None
+                self._primary_activity_label = None
+                self._broadcast_catalog_upsert_locked(self._wire_session())
                 self._cond.notify_all()
 
     def _run_user_shell_worker(self, shell_cmd: str, include_ctx: bool) -> None:
@@ -655,30 +805,47 @@ class FakeDaemon:
                         {"models": [{"id": daemon.model_id, "name": "Fake", "provider": "fake"}]},
                     )
                     return
+                if path == "/api/v1/sessions/events":
+                    self._handle_catalog_sse()
+                    return
                 if path == "/api/v1/sessions":
                     with daemon._lock:
-                        self._send_json(200, {"sessions": [daemon._wire_session()]})
+                        self._send_json(200, {"sessions": daemon._all_wire_sessions_locked()})
                     return
-                if path == f"/api/v1/sessions/{daemon.session_id}":
+                if path.startswith("/api/v1/sessions/"):
+                    rest = path[len("/api/v1/sessions/") :]
+                    parts = rest.split("/")
+                    sid = urllib.parse.unquote(parts[0])
                     with daemon._lock:
+                        if sid == daemon.session_id:
+                            session_wire = daemon._wire_session()
+                        elif sid in daemon._extra_sessions:
+                            session_wire = dict(daemon._extra_sessions[sid])
+                        else:
+                            session_wire = None
+                    if session_wire is None:
+                        self._send_json(404, {"error": "not found"})
+                        return
+                    if len(parts) == 1:
                         self._send_json(
                             200,
                             {
-                                "session": daemon._wire_session(),
+                                "session": session_wire,
                                 "conversations": [{"id": "1", "parent": None, "owner": "ownerless"}],
                                 "tasks": [],
                             },
                         )
-                    return
-                if path == f"/api/v1/sessions/{daemon.session_id}/conversations/1/entries":
-                    self._handle_entries(parsed.query)
-                    return
-                if path == f"/api/v1/sessions/{daemon.session_id}/conversations/1/events":
-                    self._handle_sse()
-                    return
+                        return
+                    if len(parts) == 4 and parts[1] == "conversations" and parts[2] == "1":
+                        if parts[3] == "entries":
+                            self._handle_entries(parsed.query, sid=sid)
+                            return
+                        if parts[3] == "events":
+                            self._handle_sse(sid=sid)
+                            return
                 self._send_json(404, {"error": "not found"})
 
-            def _handle_entries(self, query: str) -> None:
+            def _handle_entries(self, query: str, *, sid: str = "") -> None:
                 qs = urllib.parse.parse_qs(query, keep_blank_values=False)
                 order = qs.get("order", ["desc"])[0]
                 if order not in ("asc", "desc"):
@@ -700,7 +867,11 @@ class FakeDaemon:
                     return
 
                 with daemon._lock:
-                    entries = daemon._entries
+                    entries = (
+                        daemon._entries
+                        if not sid or sid == daemon.session_id
+                        else daemon._extra_entries.get(sid, [])
+                    )
                     n = len(entries)
                     if order == "desc":
                         end = (
@@ -736,11 +907,27 @@ class FakeDaemon:
                 if not self._check_auth_and_host():
                     return
                 path = urllib.parse.urlparse(self.path).path
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
+                if path == "/api/v1/sessions":
+                    cwd = body.get("cwd") or daemon.cwd
+                    env_id = body.get("env_id") or "host"
+                    sid = body.get("session_id") or f"sess-{secrets.token_hex(4)}"
+                    title = body.get("title")
+                    wire = daemon.add_session(
+                        sid,
+                        cwd=cwd,
+                        env_id=env_id,
+                        title=title,
+                        attention="idle",
+                    )
+                    with daemon._lock:
+                        daemon.created_sessions.append(wire)
+                    self._send_json(200, {"session": wire, "seq": 1})
+                    return
                 if path != f"/api/v1/sessions/{daemon.session_id}/commands":
                     self._send_json(404, {"error": "not found"})
                     return
-                length = int(self.headers.get("Content-Length", "0"))
-                body = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
                 with daemon._lock:
                     status, payload = daemon._execute_command_locked(body)
                 self._send_json(status, payload)
@@ -750,23 +937,81 @@ class FakeDaemon:
                 self.wfile.write(f"{len(data):x}\r\n".encode("ascii") + data + b"\r\n")
                 self.wfile.flush()
 
-            def _handle_sse(self) -> None:
-                sub = _SseSubscriber(daemon.session_id, "1")
+            def _handle_catalog_sse(self) -> None:
+                sub = _SseSubscriber("_catalog", "0")
+                with daemon._lock:
+                    daemon._catalog_subscribers.append(sub)
+                    daemon.catalog_sse_connect_count += 1
+                    snap = {
+                        "version": 1,
+                        "seq": daemon._catalog_seq,
+                        "sessions": daemon._all_wire_sessions_locked(),
+                    }
+                    daemon._cond.notify_all()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+
+                try:
+                    self._write_chunk(
+                        f"id: {snap['seq']}\nevent: snapshot\ndata: {json.dumps(snap, separators=(',', ':'))}\n\n"
+                    )
+                    while not daemon._stop_event.is_set() and not sub.closed.is_set():
+                        try:
+                            item = sub.queue.get(timeout=0.5)
+                        except queue.Empty:
+                            self._write_chunk(": keepalive\n\n")
+                            continue
+                        if item is None:
+                            break
+                        ev_name, ev_id, data_json = item
+                        prefix = f"id: {ev_id}\n" if ev_id is not None else ""
+                        self._write_chunk(f"{prefix}event: {ev_name}\ndata: {data_json}\n\n")
+                except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                    if getattr(exc, "errno", None) not in (errno.EPIPE, errno.ECONNRESET, errno.EBADF, None):
+                        pass
+                finally:
+                    sub.close()
+
+            def _handle_sse(self, *, sid: str = "") -> None:
+                target_sid = sid or daemon.session_id
+                sub = _SseSubscriber(target_sid, "1")
                 with daemon._lock:
                     daemon._subscribers.append(sub)
                     daemon.sse_connect_count += 1
-                    snap_entries = list(daemon._entries[-daemon._snapshot_limit :])
-                    has_more = len(daemon._entries) > len(snap_entries) and len(snap_entries) > 0
+                    if target_sid == daemon.session_id:
+                        all_entries = daemon._entries
+                        seq = daemon._seq
+                        docs = daemon._docs
+                    else:
+                        all_entries = daemon._extra_entries.get(target_sid, [])
+                        seq = daemon._extra_seq.get(target_sid, 1)
+                        docs = daemon._extra_docs.get(
+                            target_sid,
+                            {
+                                "live": {},
+                                "inbox": [],
+                                "agent": {"model": daemon.model_id, "thinking": "medium"},
+                                "usage": {"input_tokens": 0, "output_tokens": 0, "cost": 0.0},
+                            },
+                        )
+                    snap_entries = list(all_entries[-daemon._snapshot_limit :])
+                    has_more = len(all_entries) > len(snap_entries) and len(snap_entries) > 0
                     before_entry_id = snap_entries[0]["id"] if has_more else None
                     snap = {
                         "version": 1,
-                        "session_id": daemon.session_id,
+                        "session_id": target_sid,
                         "conversation_id": "1",
-                        "seq": daemon._seq,
+                        "seq": seq,
                         "before_entry_id": before_entry_id,
                         "has_more": has_more,
                         "entries": snap_entries,
-                        "docs": json.loads(json.dumps(daemon._docs)),
+                        "docs": json.loads(json.dumps(docs)),
                     }
                     daemon._cond.notify_all()
 

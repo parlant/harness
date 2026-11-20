@@ -26,6 +26,7 @@ Build the terminal client from the repository, then run it from your project dir
 cargo install --locked --path clients/tui
 cd /path/to/project
 hi                         # fullscreen editor; Enter steers, Alt-Enter follows up
+hi inbox                   # live multi-session inbox across workspaces (/inbox or Alt-I in session)
 hi --tui-mode regular      # terminal-owned scrollback
 hi -r                      # workspace session picker
 hi -s SESSION_ID           # attach by ID, including when using a symlink to the workspace

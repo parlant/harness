@@ -55,6 +55,10 @@ pub enum Effect {
     Earlier(String),
     Attach(String),
     New,
+    NewIn {
+        env_id: String,
+        cwd: String,
+    },
     Fork(u64),
     Configure(String, String),
     Abort,
@@ -429,6 +433,17 @@ pub fn execute(
         }
 
         Effect::New => create_new_session(client, target),
+
+        Effect::NewIn { env_id, cwd } => {
+            let ws_target = Target {
+                sid: String::new(),
+                cid: "1".to_string(),
+                cwd,
+                env_id,
+                labels: SessionLabels::default(),
+            };
+            create_new_session(client, &ws_target)
+        }
 
         Effect::Fork(at_entry_id) => {
             if target.sid.trim().is_empty() {
@@ -1684,6 +1699,10 @@ mod tests {
                 created_at: None,
                 updated_at: None,
                 active: false,
+                attention: None,
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
             },
@@ -1706,6 +1725,10 @@ mod tests {
                 created_at: None,
                 updated_at: None,
                 active: false,
+                attention: None,
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
             },

@@ -55,6 +55,13 @@ pub struct Theme {
     pub syn_type: Style,
     pub syn_fn: Style,
 
+    // Inbox browser
+    pub inbox_dir: Style,
+    pub inbox_idle_new: Style,
+    pub inbox_idle: Style,
+    pub inbox_processing: Style,
+    pub inbox_selected: Style,
+
     // UI chrome
     pub separator: Style,
     pub scroll_badge: Style,
@@ -200,6 +207,22 @@ impl Theme {
             syn_type: Style::default().fg(Color::Rgb(86, 182, 194)),
             syn_fn: Style::default().fg(Color::Rgb(97, 175, 239)),
 
+            inbox_dir: Style::default()
+                .fg(Color::Rgb(110, 200, 225))
+                .add_modifier(Modifier::BOLD),
+            inbox_idle_new: Style::default()
+                .fg(Color::Rgb(115, 225, 145))
+                .add_modifier(Modifier::BOLD),
+            inbox_idle: Style::default()
+                .fg(Color::Rgb(235, 240, 248))
+                .add_modifier(Modifier::BOLD),
+            inbox_processing: Style::default()
+                .fg(Color::Rgb(135, 145, 160))
+                .add_modifier(Modifier::DIM),
+            inbox_selected: Style::default()
+                .bg(Color::Rgb(42, 52, 70))
+                .add_modifier(Modifier::BOLD),
+
             separator: Style::default().add_modifier(Modifier::DIM),
             scroll_badge: Style::default().add_modifier(Modifier::BOLD),
             status_bar: Style::default().add_modifier(Modifier::REVERSED),
@@ -313,6 +336,22 @@ impl Theme {
             syn_type: Style::default().fg(Color::Rgb(0, 120, 145)),
             syn_fn: Style::default().fg(Color::Rgb(15, 90, 190)),
 
+            inbox_dir: Style::default()
+                .fg(Color::Rgb(0, 105, 150))
+                .add_modifier(Modifier::BOLD),
+            inbox_idle_new: Style::default()
+                .fg(Color::Rgb(20, 140, 60))
+                .add_modifier(Modifier::BOLD),
+            inbox_idle: Style::default()
+                .fg(Color::Rgb(25, 30, 40))
+                .add_modifier(Modifier::BOLD),
+            inbox_processing: Style::default()
+                .fg(Color::Rgb(115, 125, 140))
+                .add_modifier(Modifier::DIM),
+            inbox_selected: Style::default()
+                .bg(Color::Rgb(220, 232, 248))
+                .add_modifier(Modifier::BOLD),
+
             separator: Style::default().add_modifier(Modifier::DIM),
             scroll_badge: Style::default().add_modifier(Modifier::BOLD),
             status_bar: Style::default().add_modifier(Modifier::REVERSED),
@@ -406,6 +445,18 @@ impl Theme {
             syn_type: Style::default().fg(Color::Cyan),
             syn_fn: Style::default().fg(Color::Blue),
 
+            inbox_dir: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            inbox_idle_new: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            inbox_idle: Style::default().add_modifier(Modifier::BOLD),
+            inbox_processing: Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+            inbox_selected: Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+
             separator: Style::default().add_modifier(Modifier::DIM),
             scroll_badge: Style::default().add_modifier(Modifier::BOLD),
             status_bar: Style::default().add_modifier(Modifier::REVERSED),
@@ -462,6 +513,12 @@ impl Theme {
             syn_number: Style::default(),
             syn_type: Style::default(),
             syn_fn: Style::default(),
+
+            inbox_dir: Style::default(),
+            inbox_idle_new: Style::default(),
+            inbox_idle: Style::default(),
+            inbox_processing: Style::default(),
+            inbox_selected: Style::default(),
 
             separator: Style::default(),
             scroll_badge: Style::default(),

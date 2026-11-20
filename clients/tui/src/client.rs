@@ -613,6 +613,13 @@ impl DaemonClient {
         self.subscribe_events_inner(session_id, conversation_id, last_event_id, None)
     }
 
+    pub fn subscribe_sessions_cancellable(
+        &self,
+        cancel: &StreamCancel,
+    ) -> Result<SseStream, ClientError> {
+        self.subscribe_sse_path("/api/v1/sessions/events", None, Some(cancel))
+    }
+
     pub fn subscribe_events_cancellable(
         &self,
         session_id: &str,
@@ -633,15 +640,23 @@ impl DaemonClient {
         validate_path_segment("session_id", session_id)?;
         validate_path_segment("conversation_id", conversation_id)?;
 
-        if cancel.is_some_and(StreamCancel::is_cancelled) {
-            return Err(ClientError::Io("stream cancelled".to_string()));
-        }
-
         let path = format!(
             "/api/v1/sessions/{}/conversations/{}/events",
             percent_encode(session_id),
             percent_encode(conversation_id)
         );
+        self.subscribe_sse_path(&path, last_event_id, cancel)
+    }
+
+    fn subscribe_sse_path(
+        &self,
+        path: &str,
+        last_event_id: Option<u64>,
+        cancel: Option<&StreamCancel>,
+    ) -> Result<SseStream, ClientError> {
+        if cancel.is_some_and(StreamCancel::is_cancelled) {
+            return Err(ClientError::Io("stream cancelled".to_string()));
+        }
 
         let mut stream = self.connect(Some(DEFAULT_IO_TIMEOUT))?;
         if let Some(c) = cancel {
@@ -655,7 +670,7 @@ impl DaemonClient {
         if let Err(err) = write_request(
             &mut stream,
             "GET",
-            &path,
+            path,
             &self.target.host_header(),
             self.token.expose(),
             "text/event-stream",

@@ -619,6 +619,182 @@ impl Screen {
             }
         }
     }
+
+    pub(super) fn draw_inbox(
+        &mut self,
+        rows: &[StyledRow],
+        selected_row: Option<usize>,
+        status: &[impl AsRef<str>],
+        theme: &Theme,
+    ) -> io::Result<()> {
+        match &mut self.mode {
+            ModeState::Fullscreen(fs) => {
+                draw_inbox_fullscreen(fs, rows, selected_row, status, theme)
+            }
+            ModeState::Regular(reg) => draw_inbox_regular(reg, rows, selected_row, status, theme),
+        }
+    }
+}
+
+fn inbox_window(total: usize, view_h: usize, selected_row: Option<usize>) -> (usize, usize) {
+    if total == 0 || view_h == 0 {
+        return (0, 0);
+    }
+    if total <= view_h {
+        return (0, total);
+    }
+    let anchor = selected_row.unwrap_or(0).min(total - 1);
+    let mut top = anchor.saturating_sub(view_h / 2);
+    let max_top = total.saturating_sub(view_h);
+    if top > max_top {
+        top = max_top;
+    }
+    // Keep the parent directory header directly above the selected row visible when possible.
+    if anchor > 0 && anchor == top {
+        top = top.saturating_sub(1);
+    }
+    (top, (top + view_h).min(total))
+}
+
+fn draw_inbox_fullscreen(
+    fs: &mut FullscreenState,
+    rows: &[StyledRow],
+    selected_row: Option<usize>,
+    status: &[impl AsRef<str>],
+    theme: &Theme,
+) -> io::Result<()> {
+    fs.terminal.draw(|frame| {
+        let area = frame.area();
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let width = area.width as usize;
+        let status_h = status.len().min(area.height.saturating_sub(1) as usize) as u16;
+        let sep_h = u16::from(area.height >= status_h + 2);
+        let body_h = area.height.saturating_sub(status_h + sep_h) as usize;
+
+        let buf = frame.buffer_mut();
+        let (top, end) = inbox_window(rows.len(), body_h, selected_row);
+        for (offset, row) in rows[top..end].iter().enumerate() {
+            let y = area.y + offset as u16;
+            if let Some(fill) = row.fill_style {
+                for dx in 0..area.width {
+                    buf[(area.x + dx, y)].set_symbol(" ").set_style(fill);
+                }
+            }
+            let segs = row_to_render_segs(row);
+            write_segments_to_row(buf, area.x, y, width, &segs, Style::default());
+        }
+
+        if sep_h > 0 {
+            render_separator(buf, area.x, area.y + body_h as u16, area.width, 0, theme);
+        }
+        if status_h > 0 {
+            render_status_lines(
+                buf,
+                area.x,
+                area.y + area.height - status_h,
+                area.width,
+                &status[..status_h as usize],
+                theme,
+            );
+        }
+    })?;
+    Ok(())
+}
+
+fn draw_inbox_regular(
+    reg: &mut RegularState,
+    rows: &[StyledRow],
+    selected_row: Option<usize>,
+    status: &[impl AsRef<str>],
+    theme: &Theme,
+) -> io::Result<()> {
+    let (term_w, term_h) = reg.target.size()?;
+    if term_w == 0 || term_h == 0 {
+        return Ok(());
+    }
+    let width = term_w as usize;
+    let height = term_h as usize;
+    let status_h = status.len().min(height.saturating_sub(1));
+    let sep_h = usize::from(height >= status_h + 2);
+    let max_body = height.saturating_sub(status_h + sep_h);
+    let (top, end) = inbox_window(rows.len(), max_body, selected_row);
+    let visible = &rows[top..end];
+    let work_h = (visible.len() + sep_h + status_h).clamp(1, height);
+
+    let area = Rect::new(0, 0, term_w, work_h as u16);
+    let mut buf = Buffer::empty(area);
+    for (idx, row) in visible.iter().enumerate() {
+        if let Some(fill) = row.fill_style {
+            for dx in 0..term_w {
+                buf[(dx, idx as u16)].set_symbol(" ").set_style(fill);
+            }
+        }
+        let segs = row_to_render_segs(row);
+        write_segments_to_row(&mut buf, 0, idx as u16, width, &segs, Style::default());
+    }
+    let mut cur_y = visible.len() as u16;
+    if sep_h > 0 && (cur_y as usize) < work_h {
+        render_separator(&mut buf, 0, cur_y, term_w, 0, theme);
+        cur_y += 1;
+    }
+    if status_h > 0 {
+        render_status_lines(&mut buf, 0, cur_y, term_w, &status[..status_h], theme);
+    }
+
+    let new_working_lines: Vec<String> = (0..work_h)
+        .map(|y| buffer_row_to_ansi(&buf, y as u16, term_w, theme.is_plain))
+        .collect();
+
+    let mut out = String::new();
+    out.push_str("\x1b[?2026h");
+    if reg.cursor_visible {
+        out.push_str("\x1b[?25l");
+        reg.cursor_visible = false;
+    }
+    if !reg.flushed_visual_lines.is_empty()
+        || (reg.prev_width != 0 && reg.prev_width != term_w)
+        || (reg.prev_height != 0 && height < reg.working_lines.len())
+        || reg.working_lines.is_empty()
+    {
+        reg.flushed_visual_lines.clear();
+        out.push_str("\x1b[2J\x1b[H\x1b[3J");
+        for (i, line) in new_working_lines.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\r\n");
+            }
+            out.push_str(line);
+        }
+    } else {
+        if reg.cursor_row > 0 {
+            let _ = write!(out, "\x1b[{}A", reg.cursor_row);
+        }
+        out.push_str("\r\x1b[J");
+        for (i, line) in new_working_lines.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\r\n");
+            }
+            out.push_str(line);
+        }
+    }
+    out.push_str("\x1b[?2026l");
+    reg.target.write_bytes(out.as_bytes())?;
+    reg.target.flush()?;
+
+    reg.cursor_row = new_working_lines.len().saturating_sub(1);
+    reg.working_lines = new_working_lines;
+    reg.prev_width = term_w;
+    reg.prev_height = term_h;
+    Ok(())
+}
+
+fn row_to_render_segs(row: &StyledRow) -> Vec<RenderSeg> {
+    let mut segs = Vec::new();
+    for span in &row.spans {
+        segs.extend(sanitize_graphemes_with_style(&span.text, span.style));
+    }
+    segs
 }
 
 fn draw_fullscreen(

@@ -7,6 +7,7 @@ first word, e.g. `hi account list --data-dir /path/to/store`.
 
 | Outside a session | In a session / web |
 |---|---|
+| `hi inbox [--tui-mode <fullscreen\|regular>] [--env ID]` | `/inbox` or `Alt+I` opens the live multi-session inbox grouped by workspace (`j`/`k` or arrows move, `Tab` cycles idle/error sessions, `Enter` opens, `n` creates a session, `Ctrl+D` returns to the inbox from a session opened through it). |
 | `hi login [openai_codex [alias]]` | `/login [openai_codex [alias]]`, or sign in on Phoenix **Account settings**. |
 | `hi account list` | `/account` picker, or the accounts page. |
 | `hi account add <alias>` | `/account add <alias>`, or the add-alias form. |
