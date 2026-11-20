@@ -65,7 +65,41 @@ defmodule H.Storage.File do
     end
   end
 
+  @doc """
+  Opens a session directory in side-effect-free read-only mode without creating
+  directories, holding open file descriptors, or truncating `commit.log`.
+  """
+  @spec open_read_only(keyword()) :: {:ok, H.Storage.t()} | {:error, term()}
+  def open_read_only(opts) when is_list(opts) do
+    with {:ok, dir} <- fetch_dir(opts) do
+      if File.dir?(dir) do
+        with {:ok, base_state, snapshot_seq} <- Snapshot.load_highest(dir, %__MODULE__{}),
+             {:ok, replayed_state} <- replay_log_if_present(dir, base_state, snapshot_seq) do
+          session_meta =
+            replayed_state.session_meta
+            |> maybe_put_new(:session_id, Keyword.get(opts, :session_id))
+            |> maybe_put_new(:cwd, Keyword.get(opts, :cwd))
+
+          next_id = max(2, max(replayed_state.next_id, Engine.max_seen_id(replayed_state) + 1))
+
+          {:ok,
+           {__MODULE__,
+            %{replayed_state | dir: dir, fd: nil, session_meta: session_meta, next_id: next_id}}}
+        end
+      else
+        session_meta =
+          %{}
+          |> maybe_put_new(:session_id, Keyword.get(opts, :session_id))
+          |> maybe_put_new(:cwd, Keyword.get(opts, :cwd))
+
+        {:ok, {__MODULE__, %__MODULE__{dir: dir, fd: nil, session_meta: session_meta}}}
+      end
+    end
+  end
+
   @impl true
+  def close(%__MODULE__{fd: nil}), do: :ok
+
   def close(%__MODULE__{fd: fd}) do
     case :file.close(fd) do
       :ok -> :ok
@@ -169,6 +203,25 @@ defmodule H.Storage.File do
       with :ok <- File.mkdir_p(dir) do
         File.chmod(dir, 0o700)
       end
+    end
+  end
+
+  defp replay_log_if_present(dir, base_state, snapshot_seq) do
+    log_path = Path.join(dir, "commit.log")
+
+    case :file.open(log_path, [:raw, :binary, :read]) do
+      {:ok, fd} ->
+        try do
+          Wal.replay_read_only(fd, base_state, snapshot_seq)
+        after
+          :file.close(fd)
+        end
+
+      {:error, :enoent} ->
+        {:ok, base_state}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

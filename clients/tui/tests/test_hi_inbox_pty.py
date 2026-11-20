@@ -399,6 +399,67 @@ class HiInboxPtyTests(unittest.TestCase):
                 self.assertEqual(pty.wait(), 0)
                 self.assertTrue(pty.is_cooked_mode())
 
+    def test_opening_archived_session_shows_archived_status_and_resumes_on_prompt(self) -> None:
+        with FakeDaemon(transport="uds", cwd=self.workdir, session_id="s-active") as daemon:
+            daemon.add_session(
+                "s-archived",
+                cwd=self.workdir,
+                title="Shelved Feature",
+                attention="idle",
+                archived=True,
+                loaded=False,
+                created_at=200,
+                entries=[
+                    {
+                        "id": "1",
+                        "conversation_id": "1",
+                        "seq": 1,
+                        "kind": "assistant",
+                        "data": {"content": [{"type": "text", "text": "Shelved transcript body"}]},
+                        "created_at": 200,
+                    }
+                ],
+            )
+            with PtySession(
+                [self.hi_bin, "inbox"],
+                env=daemon.env(),
+                cwd=self.workdir,
+                rows=28,
+                cols=120,
+            ) as pty:
+                daemon.wait_for_catalog_sse_connect()
+                pty.wait_for_raw_mode()
+                pty.wait_for_output("Demo Session")
+
+                # Switch to All view, move to Shelved Feature, and press Enter to inspect cold
+                pty.send_text("a")
+                pty.wait_for_output("· Shelved Feature")
+                pty.send_text("j")
+                pty.wait_for_output("> └─ · Shelved Feature")
+                pty.send_enter()
+
+                pty.wait_for_output("Shelved transcript body")
+                pty.wait_for_output("archived")
+                pty.wait_for_output("Archived (unloaded)")
+
+                # /resume picker also shows [archived], not [idle]
+                pty.send_text("/resume")
+                pty.send_enter()
+                pty.wait_for_output("Shelved Feature [archived]")
+                pty.send_ctrl("c")
+                time.sleep(0.05)
+
+                # Submitting a prompt resumes and unarchives the session
+                pty.send_text("resume work")
+                pty.send_enter()
+                pty.wait_for_output("Forked reply: resume work")
+                self.assertFalse(daemon._extra_sessions["s-archived"]["archived"])
+
+                pty.send_text("/quit")
+                pty.send_enter()
+                self.assertEqual(pty.wait(), 0)
+                self.assertTrue(pty.is_cooked_mode())
+
 
 if __name__ == "__main__":
     unittest.main()

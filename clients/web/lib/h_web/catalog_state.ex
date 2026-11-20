@@ -36,7 +36,7 @@ defmodule HWeb.CatalogState do
           sessions: [session()]
         }
 
-  @valid_attentions ~w(idle running sleeping retrying error quarantined)
+  @valid_attentions ~w(idle running sleeping retrying error quarantined archived)
   @valid_activity_kinds ~w(generation tool user_shell compaction retry)
 
   @doc "Creates an empty catalog state."
@@ -101,9 +101,13 @@ defmodule HWeb.CatalogState do
     status = field(raw, :status, "status") || "ok"
     raw_attention = field(raw, :attention, "attention")
 
+    raw_archived = field(raw, :archived, "archived")
+    archived = status == "archived" or raw_archived == true
+
     attention =
       cond do
-        status in ["quarantined", "archived"] -> status
+        status == "quarantined" -> "quarantined"
+        archived -> "archived"
         raw_attention in @valid_attentions -> raw_attention
         true -> "idle"
       end
@@ -113,9 +117,6 @@ defmodule HWeb.CatalogState do
 
     raw_queued = field(raw, :queued_count, "queued_count")
     queued_count = if is_integer(raw_queued) and raw_queued >= 0, do: raw_queued, else: 0
-
-    raw_archived = field(raw, :archived, "archived")
-    archived = status == "archived" or raw_archived == true
 
     raw_na = field(raw, :needs_attention, "needs_attention")
 

@@ -755,6 +755,94 @@ defmodule HWeb.InboxLiveTest do
 
       assert msg2 =~ "unavailable"
     end
+
+    test "inspecting an archived session keeps it archived and unloaded until messaged or unarchived",
+         %{
+           conn: conn,
+           projects_dir: projects_dir,
+           owner_token: owner_token,
+           daemon_opts: daemon_opts,
+           fake: fake
+         } do
+      Fake.push_step(
+        fake,
+        {:reply, [],
+         %{content: [%{type: "text", text: "Cold archived reply."}], finish_reason: "stop"}}
+      )
+
+      Fake.push_step(
+        fake,
+        {:reply, [],
+         %{content: [%{type: "text", text: "Resumed from archive!"}], finish_reason: "stop"}}
+      )
+
+      {:ok, %{session: s_arch}} =
+        Daemon.create_session(%{"cwd" => projects_dir, "title" => "Shelved"}, daemon_opts)
+
+      {:ok, %{session: s_live}} =
+        Daemon.create_session(%{"cwd" => projects_dir, "title" => "Active"}, daemon_opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          s_arch.session_id,
+          %{
+            "version" => 1,
+            "request_id" => "arch-turn-1",
+            "conversation_id" => "1",
+            "command" => "submit",
+            "args" => %{"type" => "input", "content" => "Initial prompt"}
+          },
+          daemon_opts
+        )
+
+      wait_until(fn ->
+        {:ok, d} = Daemon.get_session_detail(s_arch.session_id, daemon_opts)
+        d.session.attention == "idle"
+      end)
+
+      {:ok, %{session: archived_meta}} =
+        Daemon.archive_session(s_arch.session_id, %{"archived" => true}, daemon_opts)
+
+      assert archived_meta.archived == true
+      assert archived_meta.attention == "archived"
+      assert archived_meta.loaded == false
+      assert [] == Registry.lookup(daemon_opts[:registry], {:session, s_arch.session_id})
+
+      conn = log_in_owner(conn, owner_token)
+
+      # Viewing s_live hides archived sessions from the compact sidebar switcher
+      {:ok, live_view, _} = live(conn, "/sessions/#{s_live.session_id}?from=inbox")
+
+      refute has_element?(
+               live_view,
+               ~s(#session-sidebar-inbox-tree a[data-session-id="#{s_arch.session_id}"])
+             )
+
+      # Viewing s_arch renders transcript cold WITHOUT waking OTP or clearing archived!
+      {:ok, arch_view, arch_html} = live(conn, "/sessions/#{s_arch.session_id}?from=inbox")
+
+      assert arch_html =~ "Initial prompt"
+      assert arch_html =~ "Cold archived reply."
+      assert has_element?(arch_view, "#hdr-archived-badge", "archived")
+      assert has_element?(arch_view, "#unarchive-session-btn", "Unarchive")
+      refute has_element?(arch_view, "#archive-session-btn")
+      assert [] == Registry.lookup(daemon_opts[:registry], {:session, s_arch.session_id})
+
+      # Submitting a prompt automatically unarchives, boots OTP, and streams the new turn
+      arch_view
+      |> form("#composer-form", %{content: "Wake up now"})
+      |> render_submit()
+
+      wait_until(fn ->
+        html = render(arch_view)
+
+        html =~ "Resumed from archive!" and
+          not has_element?(arch_view, "#hdr-archived-badge") and
+          has_element?(arch_view, "#archive-session-btn")
+      end)
+
+      assert [{_, _}] = Registry.lookup(daemon_opts[:registry], {:session, s_arch.session_id})
+    end
   end
 
   defp wait_until(fun, attempts \\ 60)

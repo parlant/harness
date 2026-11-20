@@ -232,6 +232,19 @@ defmodule HWeb.SessionLive do
     end
   end
 
+  def handle_event("unarchive_current_session", _params, socket) do
+    case Backend.archive_session(socket.assigns.session_id, %{"archived" => false}) do
+      {:ok, %{session: updated}} ->
+        {:noreply,
+         socket
+         |> assign(session: updated, error_banner: nil)
+         |> apply_session_to_catalog(updated)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
   def handle_event("open_fork_picker", _params, socket) do
     socket =
       socket
@@ -509,7 +522,13 @@ defmodule HWeb.SessionLive do
     sessions = socket.assigns.catalog.sessions
     current_sid = socket.assigns.session_id
     counts = CatalogState.counts(sessions)
-    groups = CatalogState.group_by_workspace(sessions)
+
+    sidebar_sessions =
+      Enum.filter(sessions, fn s ->
+        s.session_id == current_sid or CatalogState.active_inbox?(s)
+      end)
+
+    groups = CatalogState.group_by_workspace(sidebar_sessions)
     next_attention = CatalogState.next_attention_session(sessions, current_sid)
 
     other_attention_count =
@@ -708,7 +727,16 @@ defmodule HWeb.SessionLive do
 
     case Backend.execute_command(socket.assigns.session_id, envelope) do
       {:ok, _receipt} ->
-        socket = assign(socket, :error_banner, nil)
+        socket =
+          socket
+          |> assign(:error_banner, nil)
+          |> then(fn s ->
+            if s.assigns.session && Map.get(s.assigns.session, :archived) == true do
+              refresh_detail(s)
+            else
+              s
+            end
+          end)
 
         socket =
           if Keyword.get(opts, :clear_composer?, false) do

@@ -103,6 +103,13 @@
         </.link>
         <span class="mono header-sid">{@session_id}</span>
         <span class="badge mono">conv #{@conversation_id}</span>
+        <span
+          :if={@session && Map.get(@session, :archived, false)}
+          id="hdr-archived-badge"
+          class="badge badge-warn mono"
+        >
+          archived
+        </span>
         <span :if={!is_nil(@cursor_seq)} id="hdr-seq" class="badge mono">
           seq {@cursor_seq}
         </span>
@@ -136,7 +143,10 @@
           </span>
         </.link>
         <button
-          :if={@session && @session.status != "archived" && !@run_active?}
+          :if={
+            @session && @session.status != "archived" && !Map.get(@session, :archived, false) &&
+              !@run_active?
+          }
           id="session-attention-toggle"
           type="button"
           class={[
@@ -158,7 +168,7 @@
             else: "Mark attention"}
         </button>
         <button
-          :if={@session && @session.status != "archived"}
+          :if={@session && @session.status != "archived" && !Map.get(@session, :archived, false)}
           id="archive-session-btn"
           type="button"
           class="btn btn-sm btn-ghost"
@@ -166,6 +176,16 @@
           title="Archive and unload this session"
         >
           Archive
+        </button>
+        <button
+          :if={@session && @session.status != "archived" && Map.get(@session, :archived, false)}
+          id="unarchive-session-btn"
+          type="button"
+          class="btn btn-sm btn-primary"
+          phx-click="unarchive_current_session"
+          title="Restore session to Inbox"
+        >
+          Unarchive
         </button>
         <button
           :if={@run_active?}
@@ -450,6 +470,7 @@
             Continue in <span class="mono">{@picker_path}</span> →
           </button>
           <button
+            :if={!Map.get(@session, :archived, false)}
             id="missing-cwd-archive-btn"
             type="button"
             class="btn btn-ghost"
@@ -564,7 +585,11 @@
           id="prompt-input"
           name="content"
           rows="2"
-          placeholder="Message the agent…"
+          placeholder={
+            if Map.get(@session, :archived, false),
+              do: "Session is archived (unloaded) — send a message to resume…",
+              else: "Message the agent…"
+          }
           phx-hook="ComposerDraft"
           phx-mounted={JS.ignore_attributes("style")}
           data-session-id={@session_id}

@@ -11,12 +11,14 @@ defmodule H.Daemon do
 
   alias H.{
     Catalog,
+    Daemon.ColdSession,
     Daemon.Validation,
     Daemon.Workspace,
     EnvRegistry,
     ExecutionEnv,
     Harness,
     Session.Server,
+    Session.Server.Recovery,
     Session.Supervisor
   }
 
@@ -666,8 +668,21 @@ defmodule H.Daemon do
   end
 
   defp export_source_branch(source_entry, cid, at_entry_id, opts) do
-    with {:ok, source_server} <- ensure_session_started_preserving_archive(source_entry, opts) do
-      Server.export_branch(source_server, cid, at_entry_id)
+    registry = Keyword.get(opts, :registry, @default_registry)
+
+    if Map.get(source_entry, :archived) == true and
+         lookup_live_server(registry, source_entry.session_id) == :not_running do
+      ColdSession.export_branch(
+        source_entry,
+        cid,
+        at_entry_id,
+        opts,
+        cold_default_model(opts)
+      )
+    else
+      with {:ok, source_server} <- ensure_session_started_preserving_archive(source_entry, opts) do
+        Server.export_branch(source_server, cid, at_entry_id)
+      end
     end
   end
 
@@ -694,15 +709,24 @@ defmodule H.Daemon do
     with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
          :ok <- Validation.ensure_not_quarantined(entry) do
-      case entry.status do
-        "archived" -> H.Archive.detail(entry, opts)
-        _ -> live_session_detail(entry, opts, table)
+      registry = Keyword.get(opts, :registry, @default_registry)
+
+      cond do
+        entry.status == "archived" ->
+          H.Archive.detail(entry, opts)
+
+        Map.get(entry, :archived) == true and
+            lookup_live_server(registry, session_id) == :not_running ->
+          ColdSession.detail(entry, opts, &wire_session(&1, opts), &wire_conversation/1)
+
+        true ->
+          live_session_detail(entry, opts, table)
       end
     end
   end
 
   defp live_session_detail(entry, opts, table) do
-    with {:ok, server} <- ensure_session_started(entry, opts, nil),
+    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts),
          {:ok, detail} <- Server.get_detail(server) do
       session_id = entry.session_id
 
@@ -746,15 +770,24 @@ defmodule H.Daemon do
          :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, cid} <- Validation.parse_cid(conversation_id),
          {:ok, query} <- Validation.parse_scan_query(query_params) do
-      case entry.status do
-        "archived" -> H.Archive.scan(entry, cid, query, opts)
-        _ -> scan_live_entries(entry, cid, query, opts)
+      registry = Keyword.get(opts, :registry, @default_registry)
+
+      cond do
+        entry.status == "archived" ->
+          H.Archive.scan(entry, cid, query, opts)
+
+        Map.get(entry, :archived) == true and
+            lookup_live_server(registry, session_id) == :not_running ->
+          ColdSession.scan(entry, cid, query, opts, &wire_entry/1)
+
+        true ->
+          scan_live_entries(entry, cid, query, opts)
       end
     end
   end
 
   defp scan_live_entries(entry, cid, query, opts) do
-    with {:ok, server} <- ensure_session_started(entry, opts, nil),
+    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts),
          {:ok, %{items: items, next_cursor: next_cursor}} <-
            Server.scan_entries(server, cid, query) do
       {:ok,
@@ -837,15 +870,51 @@ defmodule H.Daemon do
          :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, cid} <- Validation.parse_cid(conversation_id),
          {:ok, last_event_id} <- Validation.parse_last_event_id(last_event_id_or_nil) do
-      case entry.status do
-        "archived" -> H.Archive.snapshot(entry, cid, opts)
-        _ -> subscribe_live(entry, cid, subscriber_pid, last_event_id, pubsub, opts)
+      registry = Keyword.get(opts, :registry, @default_registry)
+
+      cond do
+        entry.status == "archived" ->
+          H.Archive.snapshot(entry, cid, opts)
+
+        Map.get(entry, :archived) == true and
+            lookup_live_server(registry, session_id) == :not_running ->
+          subscribe_cold_archived(entry, cid, subscriber_pid, pubsub, opts)
+
+        true ->
+          subscribe_live(entry, cid, subscriber_pid, last_event_id, pubsub, opts)
       end
     end
   end
 
+  defp subscribe_cold_archived(entry, cid, subscriber_pid, pubsub, opts) do
+    topic = {:conversation, entry.session_id, cid}
+
+    already_registered? =
+      subscriber_pid == self() and not is_nil(pubsub) and
+        Process.whereis(pubsub) != nil and
+        topic in Registry.keys(pubsub, self())
+
+    if subscriber_pid == self() and not is_nil(pubsub) and
+         Process.whereis(pubsub) != nil and not already_registered? do
+      Registry.register(pubsub, topic, nil)
+    end
+
+    case ColdSession.snapshot(entry, cid, opts, cold_default_model(opts)) do
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, reason} ->
+        if subscriber_pid == self() and not is_nil(pubsub) and
+             Process.whereis(pubsub) != nil and not already_registered? do
+          Registry.unregister(pubsub, topic)
+        end
+
+        {:error, reason}
+    end
+  end
+
   defp subscribe_live(entry, cid, subscriber_pid, last_event_id, pubsub, opts) do
-    with {:ok, server} <- ensure_session_started(entry, opts, nil) do
+    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts) do
       topic = {:conversation, entry.session_id, cid}
 
       already_registered? =
@@ -957,13 +1026,18 @@ defmodule H.Daemon do
     if Map.get(entry, :archived) == true and not is_nil(catalog) and
          GenServer.whereis(catalog) != nil do
       try do
-        Catalog.set_archived(catalog, entry.session_id, false)
+        Catalog.set_archived(catalog, entry.session_id, false, needs_attention: true)
       catch
         :exit, _ -> :ok
       end
     end
 
     ensure_session_started_preserving_archive(entry, opts, initial_agent)
+  end
+
+  defp cold_default_model(opts) do
+    provider_mod = Keyword.get(opts, :provider, H.Provider.ReqLLM)
+    Recovery.resolve_default_model(opts[:default_model], provider_mod, provider_config(opts))
   end
 
   defp ensure_session_started_preserving_archive(entry, opts, initial_agent \\ nil) do

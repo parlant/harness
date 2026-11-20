@@ -522,7 +522,7 @@ defmodule H.Session.Server.Recovery do
     end
   end
 
-  defp build_docs_map(conversations, raw_docs, default_model) do
+  def build_docs_map(conversations, raw_docs, default_model) do
     Enum.reduce(Map.keys(conversations), %{}, fn cid, acc ->
       conv_docs = %{
         "agent" =>
@@ -582,12 +582,12 @@ defmodule H.Session.Server.Recovery do
     end)
   end
 
-  defp resolve_default_model(model, _provider_mod, _provider_config)
-       when is_binary(model) and model != "" do
+  def resolve_default_model(model, _provider_mod, _provider_config)
+      when is_binary(model) and model != "" do
     model
   end
 
-  defp resolve_default_model(_nil, provider_mod, provider_config) do
+  def resolve_default_model(_nil, provider_mod, provider_config) do
     cond do
       function_exported?(provider_mod, :default_model, 1) ->
         provider_mod.default_model(provider_config)

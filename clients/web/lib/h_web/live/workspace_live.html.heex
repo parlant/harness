@@ -239,9 +239,10 @@
               <span class="mono session-id">{s.session_id}</span>
               <span :if={s.title} class="session-title">{s.title}</span>
               <span :if={s.active} class="badge badge-active">active</span>
+              <span :if={Map.get(s, :archived, false)} class="badge mono">archived</span>
             </div>
             <.link navigate={~p"/sessions/#{s.session_id}"} class="btn btn-sm">
-              Resume
+              {if Map.get(s, :archived, false), do: "Open", else: "Resume"}
             </.link>
           </li>
         </ul>

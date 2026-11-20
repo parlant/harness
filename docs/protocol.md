@@ -32,7 +32,7 @@
 | `GET /sessions/:sid` | `session`, `conversations` with ancestry, and `tasks`. No open-waits API. |
 | `POST /sessions/:sid/triage` | Body `{needs_attention}` (boolean). Updates catalog triage state without waking unloaded sessions → `200` `{"session":...}`. |
 | `POST /sessions/:sid/stop` | Optional `{reason}`. Aborts active generation, tool, compaction, and user-shell work across all conversations in the session → `200` `{"session":...}`. |
-| `POST /sessions/:sid/archive` | Optional `{archived, stop}` (defaults `archived: true`, `stop: false`). When archiving, returns `409` `{"error":"session_busy"}` if busy unless `stop: true` (or `force: true`), cleanly unloads the session supervisor from RAM, and sets `archived: true`, `needs_attention: false`, `loaded: false`. Reopening or sending a command automatically unarchives. |
+| `POST /sessions/:sid/archive` | Optional `{archived, stop}` (defaults `archived: true`, `stop: false`). When archiving, returns `409` `{"error":"session_busy"}` if busy unless `stop: true` (or `force: true`), cleanly unloads the session supervisor from RAM, and sets `archived: true`, `attention: "archived"`, `needs_attention: false`, `loaded: false`. Read endpoints (`GET /sessions/:sid`, `/entries`, `/events`) and `POST /sessions/:sid/fork` inspect archived sessions directly from storage without waking OTP or unarchiving; `POST /sessions/:sid/commands` or `POST /sessions` (attach) automatically unarchives and starts native archived sessions. |
 | `POST /sessions/:sid/fork` | Required existing target `cwd`; optional `env_id`, `conversation_id`, `at_entry_id`, `title`, `session_id`. Copies visible branch entries into a new session bound to `cwd` → `200` `{"session":...,"seq":N}`. |
 | `GET /sessions/:sid/files` | Same bounded file discovery as `GET /fs/files`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |
 | `GET /sessions/:sid/file` | Same bounded UTF-8 file read as `GET /fs/file`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |
@@ -104,8 +104,8 @@ HTTP 429 messages explain rate limits versus quota or spending-cap restrictions 
 
 Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST /sessions`, `GET /sessions/:sid`, `POST /sessions/:sid/{triage,stop,archive,fork}`, and `GET /fs` (`sessions` and `directories[*].latest_session`) includes attention and lifecycle metadata:
 
-- `attention`: `"idle"` | `"running"` | `"sleeping"` | `"retrying"` | `"error"` | `"quarantined"` (always `"quarantined"` when `status == "quarantined"`).
-- Imported sessions have `status` and `attention` set to `"archived"`, with `active: false`.
+- `attention`: `"idle"` | `"running"` | `"sleeping"` | `"retrying"` | `"error"` | `"quarantined"` | `"archived"` (always `"quarantined"` when `status == "quarantined"`, and `"archived"` when `archived == true` and not quarantined).
+- Imported sessions have `status: "archived"`, `archived: true`, `attention: "archived"`, and `active: false`.
 - `activity_kind`: `null` | `"generation"` | `"tool"` | `"user_shell"` | `"compaction"` | `"retry"`.
 - `activity_label`: `null` or a sanitized short string (max 120 chars, no control characters), e.g. active tool name (`"bash"`), `"shell"`, `"compact"`, `"retrying"`, or failure reason/code when `attention == "error"`.
 - `queued_count`: non-negative integer count of queued inbox items across conversations in the session.

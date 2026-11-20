@@ -27,8 +27,19 @@ pub struct SessionLabels {
     pub title: Option<String>,
     pub status: Option<String>,
     pub harness_id: Option<String>,
+    pub archived: bool,
     pub cwd_exists: bool,
     pub needs_attention: bool,
+}
+
+impl SessionLabels {
+    pub fn is_imported_archive(&self) -> bool {
+        self.status.as_deref() == Some("archived")
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.archived || self.is_imported_archive()
+    }
 }
 
 impl Default for SessionLabels {
@@ -37,6 +48,7 @@ impl Default for SessionLabels {
             title: None,
             status: None,
             harness_id: None,
+            archived: false,
             cwd_exists: true,
             needs_attention: true,
         }
@@ -49,6 +61,7 @@ impl From<&SessionSummary> for SessionLabels {
             title: session.title.clone(),
             status: session.status.clone(),
             harness_id: session.harness_id.clone(),
+            archived: session.effective_archived(),
             cwd_exists: session.effective_cwd_exists(),
             needs_attention: session.effective_needs_attention(),
         }
@@ -236,8 +249,12 @@ pub fn execute(
                         .unwrap_or_else(|| "(untitled)".to_string());
                     let status = if s.status.as_deref() == Some("quarantined") {
                         "quarantined"
+                    } else if s.effective_archived() {
+                        "archived"
                     } else if s.active {
                         "active"
+                    } else if s.effective_attention() == "error" {
+                        "error"
                     } else {
                         "idle"
                     };
@@ -1264,9 +1281,14 @@ fn parse_cid(cid: &str) -> Result<u64, String> {
 
 fn sort_sessions_latest_first(sessions: &mut [SessionSummary]) {
     sessions.sort_by(|a, b| {
+        let a_arch = a.effective_archived();
+        let b_arch = b.effective_archived();
         let ta = a.updated_at.or(a.created_at).unwrap_or(0);
         let tb = b.updated_at.or(b.created_at).unwrap_or(0);
-        tb.cmp(&ta).then_with(|| a.session_id.cmp(&b.session_id))
+        a_arch
+            .cmp(&b_arch)
+            .then_with(|| tb.cmp(&ta))
+            .then_with(|| a.session_id.cmp(&b.session_id))
     });
 }
 

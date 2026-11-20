@@ -114,7 +114,7 @@ impl<'a> StatusFields<'a> {
             cwd_exists: target.labels.cwd_exists,
             needs_attention: target.labels.needs_attention,
             seq: state.seq,
-            activity: if target.labels.status.as_deref() == Some("archived") {
+            activity: if target.labels.is_archived() {
                 "archived"
             } else if state.workspace_wait().is_some() {
                 "waiting"
@@ -202,6 +202,7 @@ impl StatusMetadata {
         }
         if status.needs_branch
             && target.env_id == "host"
+            && target.labels.cwd_exists
             && Path::new(&target.cwd).is_absolute()
             && self.branch_job.is_none()
             && self.next_branch_check.is_none_or(|due| now >= due)
@@ -502,6 +503,7 @@ mod tests {
                 title: Some("Title".into()),
                 status: Some("ok".into()),
                 harness_id: Some("coding".into()),
+                archived: false,
                 cwd_exists: true,
                 needs_attention: true,
             },

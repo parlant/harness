@@ -748,18 +748,37 @@ defmodule H.SessionLifecycleTest do
       assert attach_resp.body["session"]["archived"] == false
       assert attach_resp.body["session"]["loaded"] == true
 
-      # 5. Reopening archived session (get_session_detail / attach / command) auto-unarchives and reloads into RAM!
+      # 5. Inspecting an archived session (detail, entries, SSE snapshot) reads cold from disk
+      #    WITHOUT unarchiving or booting H.Session.Server!
       detail_resp =
         Req.get!("#{ctx.base_url}/api/v1/sessions/arch-busy", headers: ctx.headers)
 
       assert detail_resp.status == 200
-      assert detail_resp.body["session"]["archived"] == false
-      assert detail_resp.body["session"]["loaded"] == true
+      assert detail_resp.body["session"]["archived"] == true
+      assert detail_resp.body["session"]["attention"] == "archived"
+      assert detail_resp.body["session"]["loaded"] == false
       assert detail_resp.body["session"]["status"] == "ok"
       assert detail_resp.body["session"]["session_id"] == "arch-busy"
-      assert [{_, _}] = Registry.lookup(ctx.registry, {:session, "arch-busy"})
+      assert [] == Registry.lookup(ctx.registry, {:session, "arch-busy"})
 
-      # Sending a new command on the reopened session works cleanly
+      cold_entries_resp =
+        Req.get!(
+          "#{ctx.base_url}/api/v1/sessions/arch-busy/conversations/1/entries?order=asc",
+          headers: ctx.headers
+        )
+
+      assert cold_entries_resp.status == 200
+      assert [_ | _] = cold_entries_resp.body["items"]
+      assert [] == Registry.lookup(ctx.registry, {:session, "arch-busy"})
+
+      assert {:ok, {:snapshot, cold_seq, cold_snap_bin}} =
+               Daemon.subscribe_conversation("arch-busy", "1", self(), nil, ctx.daemon_opts)
+
+      assert is_integer(cold_seq) and cold_seq > 0
+      assert [_ | _] = JSON.decode!(cold_snap_bin)["entries"]
+      assert [] == Registry.lookup(ctx.registry, {:session, "arch-busy"})
+
+      # 6. Sending a command to an archived native session auto-unarchives, boots OTP, and streams commits!
       {:ok, _} =
         Daemon.execute_command(
           "arch-busy",
@@ -767,9 +786,13 @@ defmodule H.SessionLifecycleTest do
           ctx.daemon_opts
         )
 
+      assert [{_, _}] = Registry.lookup(ctx.registry, {:session, "arch-busy"})
+      assert_receive {:commit_frame, resumed_seq, _resumed_bin}, 2_000
+      assert resumed_seq > cold_seq
+
       wait_until(fn ->
         {:ok, d} = Daemon.get_session_detail("arch-busy", ctx.daemon_opts)
-        d.session.attention == "idle"
+        d.session.archived == false and d.session.loaded == true and d.session.attention == "idle"
       end)
 
       # Quarantined sessions can be archived (dismissed out of active Inbox), but not unarchived

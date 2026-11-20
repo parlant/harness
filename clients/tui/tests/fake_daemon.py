@@ -335,7 +335,7 @@ class FakeDaemon:
         eff_attention = (
             "quarantined"
             if status == "quarantined"
-            else ("archived" if status == "archived" else attention)
+            else ("archived" if eff_archived else attention)
         )
         eff_needs_attention = (
             False
@@ -504,6 +504,11 @@ class FakeDaemon:
         if activity_kind is None and attention == "running":
             activity_kind = "generation"
         eff_archived = self._primary_archived or self._primary_status == "archived"
+        eff_attention = (
+            "quarantined"
+            if self._primary_status == "quarantined"
+            else ("archived" if eff_archived else attention)
+        )
         eff_needs_attention = (
             False
             if eff_archived
@@ -528,7 +533,7 @@ class FakeDaemon:
             "created_at": self._primary_created_at,
             "updated_at": now,
             "active": self._active,
-            "attention": attention,
+            "attention": eff_attention,
             "activity_kind": activity_kind,
             "activity_label": self._primary_activity_label,
             "queued_count": len(self._inbox),
@@ -1120,14 +1125,20 @@ class FakeDaemon:
                             return
                         if archived:
                             sess["active"] = False
-                            sess["attention"] = "idle"
+                            if sess.get("status") != "quarantined":
+                                sess["attention"] = "archived"
                             sess["activity_kind"] = None
                             sess["activity_label"] = None
                             sess["archived"] = True
                             sess["needs_attention"] = False
                             sess["loaded"] = False
                         else:
+                            if sess.get("status") == "archived":
+                                self._send_json(409, {"error": "session is archived"})
+                                return
                             sess["archived"] = False
+                            if sess.get("status") != "quarantined":
+                                sess["attention"] = "idle"
                             sess["needs_attention"] = True
                         sess["updated_at"] = int(time.time())
                         wire = dict(sess)
@@ -1184,6 +1195,9 @@ class FakeDaemon:
             def _handle_commands(self, sid: str, body: dict[str, Any]) -> None:
                 with daemon._lock:
                     if sid == daemon.session_id:
+                        if daemon._primary_status == "archived":
+                            self._send_json(409, {"error": "session is archived"})
+                            return
                         wire = daemon._wire_session()
                         if not wire.get("cwd_exists", True) and body.get("command") in (
                             "submit",
@@ -1193,9 +1207,17 @@ class FakeDaemon:
                         ):
                             self._send_json(409, {"error": "cwd_missing"})
                             return
+                        if daemon._primary_archived:
+                            daemon._primary_archived = False
+                            daemon._primary_loaded = True
+                            daemon._primary_needs_attention = True
+                            daemon._broadcast_catalog_upsert_locked(daemon._wire_session())
                         status, payload = daemon._execute_command_locked(body)
                     elif sid in daemon._extra_sessions:
                         sess = daemon._extra_sessions[sid]
+                        if sess.get("status") == "archived":
+                            self._send_json(409, {"error": "session is archived"})
+                            return
                         if not sess.get("cwd_exists", True) and body.get("command") in (
                             "submit",
                             "fork_and_submit",
@@ -1204,6 +1226,13 @@ class FakeDaemon:
                         ):
                             self._send_json(409, {"error": "cwd_missing"})
                             return
+                        if sess.get("archived"):
+                            sess["archived"] = False
+                            sess["loaded"] = True
+                            sess["attention"] = "idle"
+                            sess["needs_attention"] = True
+                            sess["updated_at"] = int(time.time())
+                            daemon._broadcast_catalog_upsert_locked(dict(sess))
                         # Minimal submit handler for extra/forked sessions in PTY tests
                         req_id = body.get("request_id", "r")
                         cmd = body.get("command")

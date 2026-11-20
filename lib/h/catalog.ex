@@ -72,10 +72,10 @@ defmodule H.Catalog do
     registry = Keyword.get(opts, :registry, @default_registry)
 
     attention =
-      if status == "quarantined" do
-        "quarantined"
-      else
-        normalize_attention(Map.get(entry, :attention), status)
+      cond do
+        status == "quarantined" -> "quarantined"
+        archived -> "archived"
+        true -> normalize_attention(Map.get(entry, :attention), status)
       end
 
     needs_attention =

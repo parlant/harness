@@ -48,7 +48,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/archive",
-        "Archive and unload this session (add 'force' to stop active work)",
+        "Archive and unload this session ('force' to stop work, 'off' to restore)",
     ),
     (
         "/stop",
@@ -180,6 +180,7 @@ struct Ui {
     state: TranscriptState,
     historical: Option<TranscriptState>,
     sub: Option<Subscription>,
+    catalog_sub: Option<CatalogSubscription>,
     inbox: Option<InboxMode>,
     entered_from_inbox: bool,
     online: bool,
@@ -225,6 +226,7 @@ pub fn run(
 ) -> Result<(), String> {
     let config = UserConfig::load(data_dir)?;
     let sub = Subscription::start(client.clone(), target.sid.clone(), target.cid.clone(), None);
+    let catalog_sub = CatalogSubscription::start(client.clone());
     let state = TranscriptState::new(Some(target.sid.clone()), Some(target.cid.clone()));
     let launch_env_id = target.env_id.clone();
     let launch_cwd = target.cwd.clone();
@@ -236,6 +238,7 @@ pub fn run(
         state,
         historical: None,
         sub: Some(sub),
+        catalog_sub: Some(catalog_sub),
         inbox: None,
         entered_from_inbox: false,
         online: false,
@@ -290,6 +293,7 @@ pub fn run_inbox(
         state: TranscriptState::default(),
         historical: None,
         sub: None,
+        catalog_sub: None,
         inbox: Some(InboxMode {
             state: inbox_state,
             sub: catalog_sub,
@@ -358,6 +362,7 @@ fn run_loop(
                 ui.update(update);
                 repaint = true;
             }
+            repaint |= ui.drain_session_catalog_updates();
             repaint |= ui.complete_path_lookup();
             repaint |=
                 ui.status_metadata
@@ -503,6 +508,46 @@ impl Ui {
         changed
     }
 
+    fn drain_session_catalog_updates(&mut self) -> bool {
+        let mut changed = false;
+        for _ in 0..32 {
+            let Some(update) = self
+                .catalog_sub
+                .as_ref()
+                .and_then(CatalogSubscription::next)
+            else {
+                break;
+            };
+            match update {
+                CatalogUpdate::Snapshot(list) => {
+                    if let Some(session) = list.iter().find(|s| s.session_id == self.target.sid) {
+                        changed |= self.sync_target_labels(session);
+                    }
+                }
+                CatalogUpdate::Upsert(session) if session.session_id == self.target.sid => {
+                    changed |= self.sync_target_labels(&session);
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    fn sync_target_labels(&mut self, session: &crate::protocol::SessionSummary) -> bool {
+        let next = super::actions::SessionLabels::from(session);
+        if self.target.labels != next {
+            let became_archived = !self.target.labels.archived && next.archived;
+            self.target.labels = next;
+            if became_archived && !self.target.labels.is_imported_archive() {
+                self.note =
+                    "Session archived (unloaded) · send a message or /archive off to resume".into();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     fn enter_inbox(&mut self) {
         self.dismiss_completion();
         if !self.target.sid.is_empty() {
@@ -516,6 +561,7 @@ impl Ui {
         self.pending_cwd_fork = None;
         self.historical = None;
         self.sub = None;
+        self.catalog_sub = None;
         let preselect = (!self.target.sid.is_empty()).then(|| self.target.sid.clone());
         let catalog_sub = CatalogSubscription::start(self.client.clone());
         let inbox_state = InboxState::new(
@@ -792,9 +838,17 @@ impl Ui {
                 match f {
                     ServerFrame::Snapshot(s) => {
                         self.state.apply_snapshot(s);
-                        if self.target.labels.status.as_deref() == Some("archived") {
+                        if self.target.labels.is_imported_archive() {
                             self.note =
-                                "Archived session (read-only) · use /cwd <path> to fork".into();
+                                "Imported archive (read-only) · use /cwd <path> to fork".into();
+                        } else if self.target.labels.archived && !self.target.labels.cwd_exists {
+                            self.note =
+                                "Archived [missing cwd] — use /cwd <path> to fork into an existing directory"
+                                    .into();
+                        } else if self.target.labels.archived {
+                            self.note =
+                                "Archived (unloaded) · send a message or /archive off to resume"
+                                    .into();
                         } else if !self.target.labels.cwd_exists {
                             self.note =
                                 "Missing cwd — use /cwd <path> to fork into an existing directory"
@@ -1045,11 +1099,7 @@ impl Ui {
                     inbox.state.apply(CatalogUpdate::Upsert(session.clone()));
                 }
                 if session.session_id == self.target.sid {
-                    self.target.labels.needs_attention = session.effective_needs_attention();
-                    self.target.labels.cwd_exists = session.effective_cwd_exists();
-                    if session.status.is_some() {
-                        self.target.labels.status = session.status.clone();
-                    }
+                    self.target.labels = super::actions::SessionLabels::from(session.as_ref());
                 }
                 self.note = note;
             }
@@ -1126,6 +1176,9 @@ impl Ui {
                     self.draft.retry = None;
                 }
                 self.switch(target, screen);
+                if self.target.labels.archived && !self.target.labels.is_imported_archive() {
+                    self.target.labels.archived = false;
+                }
                 self.note = format!(
                     "Forked to #{} · {} · seq {}",
                     sanitize_single_line(&self.target.cid),
@@ -1134,6 +1187,9 @@ impl Ui {
                 );
             }
             Ok(Reply::Receipt(r)) => {
+                if self.target.labels.archived && !self.target.labels.is_imported_archive() {
+                    self.target.labels.archived = false;
+                }
                 // Only the daemon can return queue items to a draft. Never fabricate a dequeue from a local inbox snapshot.
                 for item in &r.withdrawn {
                     if let Some(blocks) = item.get("content").and_then(Value::as_array) {
@@ -1176,8 +1232,9 @@ impl Ui {
     }
     fn switch(&mut self, t: Target, screen: &mut Screen) {
         self.dismiss_completion();
-        if self.inbox.take().is_some() {
+        if let Some(prev_inbox) = self.inbox.take() {
             self.entered_from_inbox = true;
+            self.catalog_sub = Some(prev_inbox.sub);
         } else if !self.target.sid.is_empty() {
             let key = (self.target.sid.clone(), self.target.cid.clone());
             self.saved.insert(key, std::mem::take(&mut self.draft));
@@ -1202,8 +1259,12 @@ impl Ui {
         self.target = t;
         self.online = false;
         self.rows_dirty = true;
-        self.note = if self.target.labels.status.as_deref() == Some("archived") {
-            "Connecting (archived · read-only)".into()
+        self.note = if self.target.labels.is_imported_archive() {
+            "Connecting (imported archive · read-only)".into()
+        } else if self.target.labels.archived && !self.target.labels.cwd_exists {
+            "Connecting [archived · missing cwd — use /cwd <path> to fork]".into()
+        } else if self.target.labels.archived {
+            "Connecting (archived · unloaded)".into()
         } else if !self.target.labels.cwd_exists {
             "Connecting [missing cwd — use /cwd <path> to fork into an existing directory]".into()
         } else {
@@ -1213,9 +1274,9 @@ impl Ui {
     }
     fn check_writable_workspace(&mut self, retain_draft: bool) -> bool {
         let suffix = if retain_draft { "; draft retained" } else { "" };
-        if self.target.labels.status.as_deref() == Some("archived") {
+        if self.target.labels.is_imported_archive() {
             self.note = format!(
-                "Archived session is read-only · use /cwd <path> to fork into a live workspace{suffix}"
+                "Imported archive is read-only · use /cwd <path> to fork into a live workspace{suffix}"
             );
             return false;
         }
@@ -1892,10 +1953,12 @@ impl Ui {
             }
             "/inbox" => self.enter_inbox(),
             "/cwd" if arg.is_empty() => {
-                let status = if self.target.labels.status.as_deref() == Some("archived") {
-                    " (archived — use /cwd <existing-dir> to fork session)"
+                let status = if self.target.labels.is_imported_archive() {
+                    " (imported archive — use /cwd <existing-dir> to fork session)"
                 } else if !self.target.labels.cwd_exists {
                     " (missing — use /cwd <existing-dir> to fork session)"
+                } else if self.target.labels.archived {
+                    " (archived)"
                 } else {
                     ""
                 };
@@ -1954,21 +2017,45 @@ impl Ui {
                 );
             }
             "/archive" => {
-                if self.target.labels.status.as_deref() == Some("archived") {
+                if self.target.labels.is_imported_archive() {
                     self.note = "Imported archives are read-only".into();
                     return;
                 }
-                let stop = matches!(arg.to_ascii_lowercase().as_str(), "force" | "stop");
-                if !arg.is_empty() && !stop {
-                    self.note = "Usage: /archive [force]".into();
-                    return;
+                match arg.to_ascii_lowercase().as_str() {
+                    "off" | "false" | "unarchive" | "restore" => {
+                        if !self.target.labels.archived {
+                            self.note = "Session is already active (not archived)".into();
+                            return;
+                        }
+                        self.note =
+                            format!("Unarchiving {}…", sanitize_single_line(&self.target.sid));
+                        self.start(
+                            Effect::ArchiveSession {
+                                sid: self.target.sid.clone(),
+                                archived: false,
+                                stop: false,
+                            },
+                            None,
+                        );
+                    }
+                    "" | "on" | "true" => {
+                        if self.target.labels.archived {
+                            self.note =
+                                "Session is already archived · use /archive off to restore or send a message to resume"
+                                    .into();
+                            return;
+                        }
+                        self.note = "Archiving session…".into();
+                        self.start(Effect::ArchiveCurrent { stop: false }, None);
+                    }
+                    "force" | "stop" => {
+                        self.note = "Stopping & archiving session…".into();
+                        self.start(Effect::ArchiveCurrent { stop: true }, None);
+                    }
+                    _ => {
+                        self.note = "Usage: /archive [force|off]".into();
+                    }
                 }
-                self.note = if stop {
-                    "Stopping & archiving session…".into()
-                } else {
-                    "Archiving session…".into()
-                };
-                self.start(Effect::ArchiveCurrent { stop }, None);
             }
             "/stop" => {
                 if self.target.labels.status.as_deref() == Some("archived") {
@@ -2598,6 +2685,7 @@ mod tests {
             state,
             historical: None,
             sub: Some(sub),
+            catalog_sub: None,
             inbox: None,
             entered_from_inbox: false,
             online: true,
@@ -4438,12 +4526,28 @@ mod tests {
         assert_eq!(ui.draft.editor.text(), "unsent prompt after delete");
         assert!(ui.note.contains("/tmp/valid-dir"), "note={}", ui.note);
 
-        // 4. Imported archived session is read-only
+        // 4. Native archived session shows activity="archived" (not "idle") while allowing /archive off or prompts;
+        //    imported archive (status == "archived") is read-only.
+        ui.target.labels.status = Some("ok".into());
+        ui.target.labels.archived = true;
+        let rendered_status = ui.config.status.render(&ui.status_fields());
+        assert!(
+            rendered_status[0].contains("archived"),
+            "status={rendered_status:?}"
+        );
+        ui.command("/archive");
+        assert!(ui.note.contains("already archived"), "note={}", ui.note);
+
         ui.target.labels.status = Some("archived".into());
+        let rendered_imported = ui.config.status.render(&ui.status_fields());
+        assert!(
+            rendered_imported[0].contains("archived"),
+            "status={rendered_imported:?}"
+        );
         ui.send(false);
         assert!(ui.job.is_none());
         assert!(
-            ui.note.contains("Archived session is read-only"),
+            ui.note.contains("Imported archive is read-only"),
             "note={}",
             ui.note
         );

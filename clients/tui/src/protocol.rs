@@ -132,10 +132,13 @@ impl SessionSummary {
             Some("archived") => return "archived",
             _ => (),
         }
+        if self.archived {
+            return "archived";
+        }
         match self.attention.as_deref() {
-            Some("idle" | "running" | "sleeping" | "retrying" | "error" | "quarantined") => {
-                self.attention.as_deref().unwrap()
-            }
+            Some(
+                "idle" | "running" | "sleeping" | "retrying" | "error" | "quarantined" | "archived",
+            ) => self.attention.as_deref().unwrap(),
             _ if self.active => "running",
             _ => "idle",
         }
