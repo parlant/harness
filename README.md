@@ -12,7 +12,8 @@ Development target: Elixir 1.20 / OTP 29 (plus Rust for `clients/tui`).
 
 # Alternatively, for API and terminal clients only (no browser UI):
 mix deps.get
-mix run --no-halt -e 'H.serve()'
+mix compile
+bin/h-daemon
 ```
 
 Run only one server per data directory. For Phoenix, open `http://127.0.0.1:4000` and sign in with the owner token in `${H_DATA_DIR:-$HOME/.local/share/h}/auth.token`.
@@ -31,11 +32,39 @@ h -r                       # original line-oriented client
 h -s SESSION_ID            # attach by ID, including when using a symlink to the workspace
 ```
 
-The standalone daemon prints its API address. Its default data directory is `~/.local/share/h`; override it with `H.serve(data_dir: "...")`. Phoenix and `h` honor `H_DATA_DIR`. Host tools run with your user's filesystem and shell access, not in a sandbox.
+The standalone daemon prints its API address. Its default data directory is `~/.local/share/h`; override it with `--data-dir DIR` or `H_DATA_DIR`. Phoenix and `h` also honor `H_DATA_DIR`. Use `h-daemon -ne` (or `--no-extensions`) to bypass [configured extensions](docs/extensions/daemon.md). [Managed Codex device login](docs/providers.md#managed-device-login) is built in and opt-in; it needs no Codex executable. [MultiCodex](extensions/multicodex/README.md) is a separate path-loaded extension. Host tools run with your user's filesystem and shell access, not in a sandbox.
 
-## Model providers
+## Manage H with `hi`
 
-See [model provider setup](docs/providers.md) for OpenAI Codex with OAuth and Gemini 4 on Vertex AI with ADC or an API key.
+`hi login` sets up the first Codex alias without creating a session or editing
+JSON. It is also available as `/login` during a session and in Phoenix under
+**Account settings**. Use `hi account list`, `hi account add <alias>`, or
+`hi account use <alias>` to manage the daemon's aliases.
+
+```sh
+hi daemon status
+hi daemon start --launcher "$PWD/bin/h-daemon"    # foreground, from a built checkout
+```
+
+For a standalone bundle with the runtime included:
+
+```sh
+mix h.bundle dist/harness
+dist/harness/bin/hi daemon start
+```
+
+For daily use from any project, run `mix h.install dist/harness --service`
+after stopping any manually started daemon. The installer puts `hi` in
+`~/.bin` by default; use `--bin-dir` to choose another directory on `PATH`.
+This installs a versioned bundle and a per-user macOS service. `hi` resolves
+its sibling `h-daemon`; `H_DAEMON_BIN` or `--launcher` can override
+it. On macOS, `hi daemon install-service` registers a per-user LaunchAgent.
+Use `mix h.build` for a development build of all three applications. See
+[local daemon management](docs/hi-management.md) for idle-only restarts and
+resuming the same conversation with `/restart-ui`.
+
+See [model provider setup](docs/providers.md) for `/key set` and named API-key
+profiles, Codex device login, and Gemini on Vertex AI.
 
 ## Test
 
@@ -49,5 +78,5 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 - [hi build and cutover status](docs/hi-build.md) — shipped workflows, verification and ordered remaining batches
 - [hi status lines](docs/hi-status.md) — user templates, available fields and `/reload`
 - [hi design and parity target](docs/hi.md) — interaction parity, Rust choices and durable differences
-- [Bringing a harness or tool to hi](docs/hi-extensions.md) — proposed contributor boundaries
+- [Extensions](docs/extensions.md) — daemon packages, profiles, environments, providers and clients
 - [Design references](docs/references.md)

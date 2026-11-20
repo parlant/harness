@@ -1,0 +1,12 @@
+#!/bin/sh
+# Use the adjacent OTP release, not `elixir` or `mix` from the operator's PATH.
+set -eu
+bin=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+# ERTS prepends its own bin directories to PATH. Pass the operator PATH as
+# an argv item (not a service secret or an Erlang flag) and restore it in H.
+exec "$bin/harness" eval '
+  Code.delete_path(".")
+  [host_path | args] = System.argv()
+  System.put_env("PATH", host_path)
+  H.Daemon.CLI.main(args)
+' "${PATH:-/usr/bin:/bin}" "$@"

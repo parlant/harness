@@ -9,6 +9,7 @@ defmodule H.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: [test: "test --no-start"],
+      releases: [harness: [include_erts: true]],
       deps: deps()
     ]
   end
