@@ -587,6 +587,32 @@ defmodule H.Context do
   defp to_req_llm_part(%{type: "image"} = block) do
     meta = merge_part_metadata(block)
     data = fetch(block, :data)
+
+    # Older hi clients persisted base64 without an encoding marker. Decode only
+    # recognizable image bytes so raw binary callers keep their existing meaning.
+    data =
+      if is_binary(data) and is_nil(fetch(block, :encoding)) do
+        case Base.decode64(data) do
+          {:ok, <<137, 80, 78, 71, 13, 10, 26, 10, _::binary>> = bytes} ->
+            bytes
+
+          {:ok, <<255, 216, 255, _::binary>> = bytes} ->
+            bytes
+
+          {:ok, <<"GIF", version::binary-size(3), _::binary>> = bytes}
+          when version in ["87a", "89a"] ->
+            bytes
+
+          {:ok, <<"RIFF", _::binary-size(4), "WEBP", _::binary>> = bytes} ->
+            bytes
+
+          _ ->
+            data
+        end
+      else
+        data
+      end
+
     url = fetch(block, :url)
     media_type = fetch(block, :media_type) || "image/png"
 

@@ -372,6 +372,43 @@ defmodule H.ContextTest do
               }, []} = Context.to_req_llm(request)
     end
 
+    test "decodes legacy hi attachments without changing raw image bytes" do
+      for {media_type, bytes} <- [
+            {"image/png", <<137, 80, 78, 71, 13, 10, 26, 10, 0, 255>>},
+            {"image/jpeg", <<255, 216, 255, 224, 255, 217>>},
+            {"image/gif", <<"GIF89a", 0, 255>>},
+            {"image/webp", <<"RIFF", 0, 0, 0, 0, "WEBP", 255>>}
+          ],
+          data <- [Base.encode64(bytes), bytes] do
+        block = %{"type" => "image", "media_type" => media_type, "data" => data}
+        request = Context.build_request([%{kind: "user", data: %{"content" => [block]}}], %{})
+
+        assert {%{messages: [%{content: [part]}]} = context, []} = Context.to_req_llm(request)
+        assert %ContentPart{type: :image, media_type: ^media_type, data: ^bytes} = part
+
+        assert [%{"role" => "user", "content" => [wire_part]}] =
+                 ReqLLM.Providers.OpenAI.ResponsesAPI.encode_input_items(
+                   context,
+                   "gpt-6.1-sol",
+                   :openai_codex,
+                   false
+                 )
+
+        assert wire_part == %{
+                 "type" => "input_image",
+                 "image_url" => "data:#{media_type};base64,#{Base.encode64(bytes)}"
+               }
+      end
+    end
+
+    test "does not reinterpret arbitrary base64-looking raw data as a legacy image" do
+      block = %{type: "image", media_type: "image/png", data: "aGVsbG8="}
+      request = Context.build_request([%{kind: "user", data: %{content: [block]}}], %{})
+
+      assert {%{messages: [%{content: [%ContentPart{data: "aGVsbG8="}]}]}, []} =
+               Context.to_req_llm(request)
+    end
+
     test "rehydrates committed Codex reasoning details for a subsequent turn" do
       entries = [
         %{id: 1, kind: "user", data: %{text: "Start"}},

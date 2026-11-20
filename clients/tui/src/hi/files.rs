@@ -185,6 +185,7 @@ pub fn attach(dir: &Path, path: &str) -> io::Result<Value> {
         let block = json!({
             "type": "image",
             "media_type": media_type,
+            "encoding": "base64",
             "data": encoded,
         });
         enforce_json_budget(&block, path)?;
@@ -667,6 +668,7 @@ mod tests {
         let block = attach(tmp.path(), "pic.png").unwrap();
         assert_eq!(block["type"], "image");
         assert_eq!(block["media_type"], "image/png");
+        assert_eq!(block["encoding"], "base64");
         assert_eq!(block["data"], encode_base64(&png));
 
         let jpeg = vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10];
