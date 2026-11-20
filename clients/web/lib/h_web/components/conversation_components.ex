@@ -46,8 +46,8 @@ defmodule HWeb.ConversationComponents do
 
     <div :if={@kind != "tool_result"}>
       <img
-        :for={encoded <- @images}
-        src={"data:image/jpeg;base64," <> encoded}
+        :for={{media_type, encoded} <- @images}
+        src={"data:" <> media_type <> ";base64," <> encoded}
         class="feedback-image"
         alt="Attached screenshot"
         loading="lazy"
@@ -426,12 +426,13 @@ defmodule HWeb.ConversationComponents do
   defp images(data) do
     for %{
           "type" => "image",
-          "encoding" => "base64",
-          "media_type" => "image/jpeg",
+          "media_type" => media_type,
           "data" => encoded
-        } <- List.wrap(data["content"]),
+        } = image <- List.wrap(data["content"]),
+        Map.get(image, "encoding", "base64") == "base64",
+        media_type in ["image/jpeg", "image/png", "image/webp"],
         is_binary(encoded),
-        do: encoded
+        do: {media_type, encoded}
   end
 
   defp message_text(data) do
