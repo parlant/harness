@@ -2,13 +2,17 @@ defmodule HWeb.ConversationComponents do
   @moduledoc "Stateless rendering for committed entries and in-flight conversation activity."
   use HWeb, :html
 
+  alias HWeb.CatalogState
+
   attr(:entry, :map, required: true)
+  attr(:catalog_by_id, :map, default: %{})
 
   def entry_body(assigns) do
     data = assigns.entry["data"] || %{}
     kind = assigns.entry["kind"]
     {thinking, text} = extract_parts(data)
     tool_calls = if is_list(data["tool_calls"]), do: data["tool_calls"], else: []
+    tool_name = data["tool_name"] || data["name"]
 
     assigns =
       assign(assigns,
@@ -16,7 +20,8 @@ defmodule HWeb.ConversationComponents do
         kind: kind,
         thinking: thinking,
         text: text,
-        tool_calls: tool_calls
+        tool_calls: tool_calls,
+        tool_name: tool_name
       )
 
     ~H"""
@@ -26,7 +31,15 @@ defmodule HWeb.ConversationComponents do
     </details>
 
     <div :if={@kind == "tool_result"}>
-      <details class="collapsible">
+      <.subagent_card
+        :if={@tool_name == "subagent"}
+        source={:tool_result}
+        data={@data}
+        text={@text}
+        catalog_by_id={@catalog_by_id}
+      />
+
+      <details :if={@tool_name != "subagent"} class="collapsible">
         <summary>Tool Output</summary>
         <pre class="code-pre">{format_tool_output(@data, @text)}</pre>
       </details>
@@ -49,12 +62,22 @@ defmodule HWeb.ConversationComponents do
       />
       <p :if={@text != ""} class="entry-text">{@text}</p>
 
-      <div :for={tc <- @tool_calls} class="tool-call-card">
-        <div class="tool-call-head">
-          <span class="badge mono">{tc["name"] || "tool"}</span>
-          <span :if={tc["id"]} class="muted mono">{tc["id"]}</span>
+      <div :for={tc <- @tool_calls}>
+        <.subagent_card
+          :if={tc["name"] == "subagent"}
+          source={:tool_call}
+          data={tc}
+          text=""
+          catalog_by_id={@catalog_by_id}
+        />
+
+        <div :if={tc["name"] != "subagent"} class="tool-call-card">
+          <div class="tool-call-head">
+            <span class="badge mono">{tc["name"] || "tool"}</span>
+            <span :if={tc["id"]} class="muted mono">{tc["id"]}</span>
+          </div>
+          <pre class="code-pre">{format_json(tc["arguments"] || tc["args"] || tc["input"] || %{})}</pre>
         </div>
-        <pre class="code-pre">{format_json(tc["arguments"] || tc["args"] || tc["input"] || %{})}</pre>
       </div>
 
       <pre :if={@text == "" and @thinking == "" and @tool_calls == []} class="code-pre">{format_json(@data)}</pre>
@@ -64,6 +87,7 @@ defmodule HWeb.ConversationComponents do
 
   attr(:live, :map, required: true)
   attr(:inbox, :list, required: true)
+  attr(:catalog_by_id, :map, default: %{})
 
   def live_region(assigns) do
     live = assigns.live || %{}
@@ -124,12 +148,22 @@ defmodule HWeb.ConversationComponents do
 
       <div :if={@tools != []} id="live-tools" class="live-tools">
         <div class="role-label">Running Tools</div>
-        <div :for={slot <- @tools} class="tool-call-card">
-          <div class="tool-call-head">
-            <span class="badge mono">{slot["name"] || "tool"}</span>
-            <span :if={slot["status"]} class="badge">{slot["status"]}</span>
+        <div :for={slot <- @tools}>
+          <.subagent_card
+            :if={slot["name"] == "subagent"}
+            source={:live_slot}
+            data={slot}
+            text={tool_slot_output(slot)}
+            catalog_by_id={@catalog_by_id}
+          />
+
+          <div :if={slot["name"] != "subagent"} class="tool-call-card">
+            <div class="tool-call-head">
+              <span class="badge mono">{slot["name"] || "tool"}</span>
+              <span :if={slot["status"]} class="badge">{slot["status"]}</span>
+            </div>
+            <pre :if={tool_slot_output(slot) != ""} class="code-pre">{tool_slot_output(slot)}</pre>
           </div>
-          <pre :if={tool_slot_output(slot) != ""} class="code-pre">{tool_slot_output(slot)}</pre>
         </div>
       </div>
 
@@ -161,6 +195,167 @@ defmodule HWeb.ConversationComponents do
     </section>
     """
   end
+
+  attr(:source, :atom, required: true)
+  attr(:data, :map, required: true)
+  attr(:text, :string, default: "")
+  attr(:catalog_by_id, :map, default: %{})
+
+  defp subagent_card(assigns) do
+    data = assigns.data || %{}
+    details = if is_map(data["details"]), do: data["details"], else: %{}
+    args = extract_tool_args(data)
+    catalog_by_id = if is_map(assigns.catalog_by_id), do: assigns.catalog_by_id, else: %{}
+
+    child_sid =
+      non_empty_string(details["child_session_id"]) ||
+        non_empty_string(data["child_session_id"]) ||
+        non_empty_string(args["session_id"])
+
+    child_session = if child_sid, do: Map.get(catalog_by_id, child_sid), else: nil
+
+    mode =
+      non_empty_string(args["mode"]) ||
+        non_empty_string(details["mode"]) ||
+        if(assigns.source == :tool_call, do: "wait", else: nil)
+
+    read_only? = args["read_only"] == true or details["read_only"] == true
+
+    title =
+      non_empty_string(args["title"]) ||
+        non_empty_string(details["title"]) ||
+        if(child_session, do: non_empty_string(child_session.title), else: nil)
+
+    prompt_preview = preview_text(args["prompt"] || data["prompt"])
+
+    live_status =
+      cond do
+        not is_nil(child_session) ->
+          format_child_status(child_session)
+
+        is_binary(details["status"]) and details["status"] != "" ->
+          details["status"]
+
+        is_binary(data["status"]) and data["status"] != "" ->
+          data["status"]
+
+        true ->
+          nil
+      end
+
+    live_status_class =
+      cond do
+        child_session && child_session.attention in ["error", "quarantined"] ->
+          "badge-danger"
+
+        child_session && CatalogState.processing?(child_session) ->
+          "badge-active"
+
+        data["is_error"] == true or not is_nil(data["error"]) ->
+          "badge-danger"
+
+        true ->
+          nil
+      end
+
+    output =
+      case assigns.source do
+        :tool_result -> format_tool_output(data, assigns.text)
+        :live_slot -> assigns.text
+        _ -> ""
+      end
+
+    assigns =
+      assign(assigns,
+        child_sid: child_sid,
+        child_session: child_session,
+        mode: mode,
+        read_only?: read_only?,
+        title: title,
+        prompt_preview: prompt_preview,
+        live_status: live_status,
+        live_status_class: live_status_class,
+        output: output
+      )
+
+    ~H"""
+    <div
+      class="tool-call-card subagent-card"
+      data-subagent-card="true"
+      data-child-session-id={@child_sid}
+    >
+      <div class="subagent-card-head">
+        <div class="tool-call-head">
+          <span class="badge mono">subagent</span>
+          <span :if={@mode} class="badge mono">{@mode}</span>
+          <span :if={@read_only?} class="badge mono">read-only</span>
+          <span :if={@live_status} class={["badge mono subagent-status-pill", @live_status_class]}>
+            {@live_status}
+          </span>
+          <span :if={@child_sid} class="muted mono">{@child_sid}</span>
+        </div>
+
+        <.link
+          :if={@child_sid}
+          navigate={~p"/sessions/#{@child_sid}"}
+          class="btn btn-sm btn-ghost subagent-open-link"
+        >
+          Open subsession →
+        </.link>
+      </div>
+
+      <div :if={@title} class="subagent-card-title">{@title}</div>
+      <p :if={@prompt_preview} class="subagent-card-preview muted">{@prompt_preview}</p>
+
+      <details :if={@source == :tool_result && @output != ""} class="collapsible">
+        <summary>Subagent Output</summary>
+        <pre class="code-pre">{@output}</pre>
+      </details>
+
+      <pre :if={@source == :live_slot && @output != ""} class="code-pre">{@output}</pre>
+    </div>
+    """
+  end
+
+  defp extract_tool_args(data) when is_map(data) do
+    case data["arguments"] || data["args"] || data["input"] do
+      args when is_map(args) -> args
+      _ -> %{}
+    end
+  end
+
+  defp extract_tool_args(_), do: %{}
+
+  defp format_child_status(child_session) do
+    detail = CatalogState.status_detail(child_session)
+
+    case {child_session.attention, detail} do
+      {att, d} when is_binary(d) and d != "" and d != att -> "#{att} · #{d}"
+      {att, _} -> att
+    end
+  end
+
+  defp preview_text(val) when is_binary(val) do
+    cleaned =
+      val
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    cond do
+      cleaned == "" -> nil
+      String.length(cleaned) > 160 -> String.slice(cleaned, 0, 159) <> "…"
+      true -> cleaned
+    end
+  end
+
+  defp preview_text(_), do: nil
+
+  defp non_empty_string(val) when is_binary(val) do
+    trimmed = String.trim(val)
+    if trimmed == "", do: nil, else: trimmed
+  end
+
+  defp non_empty_string(_), do: nil
 
   defp extract_parts(data) when is_map(data) do
     thinking =

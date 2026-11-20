@@ -17,9 +17,14 @@ defmodule HWeb.InboxComponents do
   attr :filter_event, :string, default: "set_filter"
   attr :search_event, :string, default: "search"
   attr :show_search, :boolean, default: true
+  attr :show_subsessions, :boolean, default: false
+  attr :toggle_subsessions_event, :string, default: nil
   attr :compact, :boolean, default: false
 
   def filter_bar(assigns) do
+    subsessions_count = Map.get(assigns.counts, :subsessions, 0)
+    assigns = assign(assigns, :subsessions_count, subsessions_count)
+
     ~H"""
     <div id={@id} class={["inbox-filter-bar", if(@compact, do: "is-compact")]}>
       <div class="inbox-filter-pills" role="tablist" aria-label="Session filter">
@@ -53,6 +58,18 @@ defmodule HWeb.InboxComponents do
         >
           <span>All Sessions</span>
           <span class="inbox-pill-count mono">{@counts.all}</span>
+        </button>
+
+        <button
+          :if={@toggle_subsessions_event && (@subsessions_count > 0 or @show_subsessions)}
+          id={"#{@id}-subsessions"}
+          type="button"
+          aria-pressed={to_string(@show_subsessions)}
+          class={["inbox-pill inbox-subsessions-pill", if(@show_subsessions, do: "is-active")]}
+          phx-click={@toggle_subsessions_event}
+        >
+          <span>Subsessions</span>
+          <span class="inbox-pill-count mono">{@subsessions_count}</span>
         </button>
 
         <span :if={@counts.processing > 0} class="inbox-running-pill mono">
@@ -138,9 +155,9 @@ defmodule HWeb.InboxComponents do
 
         <ul class="inbox-session-list">
           <li :for={s <- group.sessions} class="inbox-session-item">
-            <.session_row
+            <.session_node
               session={s}
-              current?={@current_session_id == s.session_id}
+              current_session_id={@current_session_id}
               from_inbox={@from_inbox}
               compact={@compact}
             />
@@ -152,29 +169,76 @@ defmodule HWeb.InboxComponents do
   end
 
   attr :session, :map, required: true
+  attr :current_session_id, :string, default: nil
+  attr :from_inbox, :boolean, default: true
+  attr :compact, :boolean, default: false
+  attr :parent_cwd, :string, default: nil
+
+  defp session_node(assigns) do
+    children = Map.get(assigns.session, :children, [])
+    assigns = assign(assigns, :children, children)
+
+    ~H"""
+    <.session_row
+      session={@session}
+      current?={@current_session_id == @session.session_id}
+      from_inbox={@from_inbox}
+      compact={@compact}
+      parent_cwd={@parent_cwd}
+    />
+    <ul :if={@children != []} class="inbox-subsession-list">
+      <li :for={child <- @children} class="inbox-subsession-item">
+        <.session_node
+          session={child}
+          current_session_id={@current_session_id}
+          from_inbox={@from_inbox}
+          compact={@compact}
+          parent_cwd={@session.cwd}
+        />
+      </li>
+    </ul>
+    """
+  end
+
+  attr :session, :map, required: true
   attr :current?, :boolean, default: false
   attr :from_inbox, :boolean, default: true
   attr :compact, :boolean, default: false
+  attr :parent_cwd, :string, default: nil
 
   def session_row(assigns) do
-    detail = CatalogState.status_detail(assigns.session)
-    needs_attention? = CatalogState.needs_attention?(assigns.session)
-    processing? = CatalogState.processing?(assigns.session)
-    error? = assigns.session.attention in ["error", "quarantined"]
+    session = assigns.session
+    detail = CatalogState.status_detail(session)
+    subsession? = CatalogState.subsession?(session)
+    needs_attention? = CatalogState.needs_attention?(session)
+    processing? = CatalogState.processing?(session)
+    error? = session.attention in ["error", "quarantined"]
+    parent = Map.get(session, :parent)
+    at_entry_id = if is_map(parent), do: parent.at_entry_id, else: nil
+
+    worktree_label =
+      if subsession? and is_binary(assigns.parent_cwd) and assigns.parent_cwd != session.cwd do
+        CatalogState.format_workspace_label(session.env_id, session.cwd, System.user_home())
+      else
+        nil
+      end
 
     href =
       if assigns.from_inbox do
-        ~p"/sessions/#{assigns.session.session_id}?from=inbox"
+        ~p"/sessions/#{session.session_id}?from=inbox"
       else
-        ~p"/sessions/#{assigns.session.session_id}"
+        ~p"/sessions/#{session.session_id}"
       end
 
     assigns =
       assigns
       |> assign(:detail, detail)
+      |> assign(:subsession?, subsession?)
       |> assign(:needs_attention?, needs_attention?)
       |> assign(:processing?, processing?)
       |> assign(:error?, error?)
+      |> assign(:at_entry_id, at_entry_id)
+      |> assign(:worktree_label, worktree_label)
       |> assign(:href, href)
 
     ~H"""
@@ -184,24 +248,41 @@ defmodule HWeb.InboxComponents do
       data-session-id={@session.session_id}
       data-attention={@session.attention}
       data-needs-attention={to_string(@needs_attention?)}
+      data-subsession={to_string(@subsession?)}
       class={[
         "inbox-row",
         if(@compact, do: "is-compact"),
+        if(@subsession?, do: "is-subsession"),
         if(@current?, do: "is-current"),
         if(@error?, do: "is-error"),
         if(@needs_attention?, do: "needs-attention"),
         if(@processing?, do: "is-processing")
       ]}
     >
-      <.status_indicator attention={@session.attention} />
+      <.status_indicator attention={@session.attention} subsession?={@subsession?} />
 
       <div class="inbox-row-main">
         <div class="inbox-row-top">
+          <span :if={@subsession?} class="inbox-lineage-prefix mono muted" aria-hidden="true">↳</span>
           <span class="inbox-row-name">
             {@session.title || @session.session_id}
           </span>
           <span :if={@session.title} class="inbox-row-sid mono muted">
             {@session.session_id}
+          </span>
+          <span
+            :if={@subsession? && @at_entry_id}
+            class="inbox-step-badge mono muted"
+            title={"Spawned at parent entry ##{@at_entry_id}"}
+          >
+            @{@at_entry_id}
+          </span>
+          <span
+            :if={@worktree_label}
+            class="inbox-worktree-badge mono muted"
+            title={@session.cwd}
+          >
+            {@worktree_label}
           </span>
         </div>
       </div>
@@ -222,7 +303,10 @@ defmodule HWeb.InboxComponents do
           {@detail}
         </span>
 
-        <span :if={@session.attention == "idle"} class="inbox-ready-tag mono">
+        <span
+          :if={@session.attention == "idle"}
+          class={["inbox-ready-tag mono", if(@subsession?, do: "is-subsession-idle")]}
+        >
           idle
         </span>
       </div>
@@ -231,6 +315,7 @@ defmodule HWeb.InboxComponents do
   end
 
   attr :attention, :string, required: true
+  attr :subsession?, :boolean, default: false
 
   def status_indicator(%{attention: att} = assigns) when att in ["error", "quarantined"] do
     ~H"""
@@ -239,6 +324,16 @@ defmodule HWeb.InboxComponents do
       title={if @attention == "quarantined", do: "Quarantined", else: "Error — needs attention"}
       aria-label={@attention}
     >!</span>
+    """
+  end
+
+  def status_indicator(%{attention: "idle", subsession?: true} = assigns) do
+    ~H"""
+    <span
+      class="inbox-status inbox-status-subsession-idle"
+      title="Subsession idle"
+      aria-label="idle"
+    >○</span>
     """
   end
 

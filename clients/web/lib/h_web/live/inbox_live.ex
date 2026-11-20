@@ -12,6 +12,7 @@ defmodule HWeb.InboxLive do
   def mount(params, _session, socket) do
     initial_filter = if params["filter"] == "attention", do: "attention", else: "all"
     initial_search = if is_binary(params["q"]), do: params["q"], else: ""
+    initial_subsessions = params["subsessions"] in ["1", "true"]
 
     socket =
       socket
@@ -20,6 +21,7 @@ defmodule HWeb.InboxLive do
         catalog_subscribed?: false,
         filter_mode: initial_filter,
         search: initial_search,
+        show_subsessions?: initial_subsessions,
         error_banner: nil
       )
       |> load_catalog()
@@ -64,6 +66,13 @@ defmodule HWeb.InboxLive do
     {:noreply,
      socket
      |> assign(:filter_mode, normalized)
+     |> recompute_view()}
+  end
+
+  def handle_event("toggle_subsessions", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:show_subsessions?, not socket.assigns.show_subsessions?)
      |> recompute_view()}
   end
 
@@ -138,16 +147,18 @@ defmodule HWeb.InboxLive do
 
   defp recompute_view(socket) do
     all_sessions = socket.assigns.catalog.sessions
+    show_subsessions? = socket.assigns.show_subsessions?
     counts = CatalogState.counts(all_sessions)
 
     filtered =
       CatalogState.filter_sessions(
         all_sessions,
         socket.assigns.filter_mode,
-        socket.assigns.search
+        socket.assigns.search,
+        include_subsessions: show_subsessions?
       )
 
-    groups = CatalogState.group_by_workspace(filtered)
+    groups = CatalogState.group_by_workspace(filtered, include_subsessions: show_subsessions?)
     next_attention = CatalogState.next_attention_session(all_sessions)
 
     assign(socket,

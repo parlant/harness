@@ -36,9 +36,11 @@ defmodule HWeb.SessionLive do
         catalog_subscribed?: false,
         catalog_groups: [],
         catalog_counts: CatalogState.counts([]),
+        show_subsessions?: false,
         other_attention_count: 0,
         next_attention_session: nil,
         session: nil,
+        session_parent: nil,
         conversations: [],
         tasks: [],
         models: Backend.list_models(),
@@ -173,6 +175,13 @@ defmodule HWeb.SessionLive do
   @impl true
   def handle_event("toggle_drawer", _params, socket) do
     {:noreply, assign(socket, :drawer_open?, not socket.assigns.drawer_open?)}
+  end
+
+  def handle_event("toggle_subsessions", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:show_subsessions?, not socket.assigns.show_subsessions?)
+     |> recompute_catalog_assigns()}
   end
 
   def handle_event("dismiss_error", _params, socket) do
@@ -369,8 +378,9 @@ defmodule HWeb.SessionLive do
   defp recompute_catalog_assigns(socket) do
     sessions = socket.assigns.catalog.sessions
     current_sid = socket.assigns.session_id
+    show_subsessions? = socket.assigns.show_subsessions?
     counts = CatalogState.counts(sessions)
-    groups = CatalogState.group_by_workspace(sessions)
+    groups = CatalogState.group_by_workspace(sessions, include_subsessions: show_subsessions?)
     next_attention = CatalogState.next_attention_session(sessions, current_sid)
 
     other_attention_count =
@@ -382,7 +392,9 @@ defmodule HWeb.SessionLive do
       catalog_counts: counts,
       catalog_groups: groups,
       next_attention_session: next_attention,
-      other_attention_count: other_attention_count
+      other_attention_count: other_attention_count,
+      session_parent:
+        resolve_session_parent(socket.assigns.session, socket.assigns.catalog, current_sid)
     )
   end
 
@@ -398,6 +410,8 @@ defmodule HWeb.SessionLive do
         socket
         |> assign(
           session: detail.session,
+          session_parent:
+            resolve_session_parent(detail.session, socket.assigns.catalog, session_id),
           conversations: detail.conversations,
           tasks: detail.tasks
         )
@@ -487,6 +501,12 @@ defmodule HWeb.SessionLive do
       {:ok, detail} ->
         assign(socket,
           session: detail.session,
+          session_parent:
+            resolve_session_parent(
+              detail.session,
+              socket.assigns.catalog,
+              socket.assigns.session_id
+            ),
           conversations: detail.conversations,
           tasks: detail.tasks
         )
@@ -494,6 +514,25 @@ defmodule HWeb.SessionLive do
       _ ->
         socket
     end
+  end
+
+  defp resolve_session_parent(session, catalog, session_id) do
+    raw_parent =
+      cond do
+        is_map(session) and not is_nil(session[:parent] || session["parent"]) ->
+          session[:parent] || session["parent"]
+
+        is_map(catalog) ->
+          case Map.get(catalog.by_id, session_id) do
+            %{parent: parent} when not is_nil(parent) -> parent
+            _ -> nil
+          end
+
+        true ->
+          nil
+      end
+
+    CatalogState.normalize_parent(raw_parent)
   end
 
   defp send_submit(socket, args, request_id, opts) do

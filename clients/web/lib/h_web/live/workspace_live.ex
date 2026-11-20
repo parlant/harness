@@ -163,9 +163,11 @@ defmodule HWeb.WorkspaceLive do
   end
 
   defp apply_catalog_assigns(socket, catalog) do
+    root_sessions = Enum.filter(catalog.sessions, &CatalogState.root_session?/1)
+
     assign(socket,
       catalog: catalog,
-      sessions: catalog.sessions,
+      sessions: root_sessions,
       session_groups: CatalogState.group_by_workspace(catalog.sessions),
       session_counts: CatalogState.counts(catalog.sessions)
     )

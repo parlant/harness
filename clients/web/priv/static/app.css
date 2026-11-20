@@ -1299,6 +1299,127 @@ html.inspect-picking * { cursor: crosshair !important; }
   opacity: 0.55;
 }
 
+/* Subsessions hierarchy, parent breadcrumb, and subagent delegation cards */
+.inbox-pill-xs {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.inbox-subsession-list {
+  list-style: none;
+  margin: 0 0 6px 18px;
+  padding: 0 0 0 8px;
+  border-left: 2px solid var(--border);
+}
+
+.inbox-tree.is-compact .inbox-subsession-list {
+  margin: 0 0 4px 12px;
+  padding: 0 0 0 6px;
+}
+
+.inbox-subsession-item {
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.inbox-row.is-subsession {
+  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.inbox-row.is-subsession.is-compact {
+  min-height: 32px;
+  padding: 5px 8px;
+}
+
+.inbox-lineage-prefix {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.inbox-step-badge,
+.inbox-worktree-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 11px;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-status-subsession-idle {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inbox-ready-tag.is-subsession-idle {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.header-parent-link {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.header-parent-link:hover {
+  background: var(--user-bg);
+  border-color: var(--accent);
+}
+
+.session-parent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.session-parent-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.session-parent-link:hover {
+  text-decoration: underline;
+}
+
+.subagent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 3px solid var(--accent);
+}
+
+.subagent-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.subagent-card-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.subagent-card-preview {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.subagent-open-link {
+  flex-shrink: 0;
+}
+
 @media (max-width: 860px) {
   .topbar {
     flex-wrap: wrap;

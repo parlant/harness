@@ -436,6 +436,141 @@ defmodule HWeb.InboxLiveTest do
     end
   end
 
+  describe "root-first subsessions exemption and hierarchical toggle" do
+    test "hides subsessions by default, exempts them from attention badges and Jump to next, and reveals them hierarchically on toggle",
+         %{
+           conn: conn,
+           projects_dir: projects_dir,
+           owner_token: owner_token,
+           daemon_opts: daemon_opts
+         } do
+      catalog = Keyword.fetch!(daemon_opts, :catalog)
+
+      repo_dir = Path.join(projects_dir, "main-repo") |> Path.expand()
+      worktree_dir = Path.join(projects_dir, "wt-lane-1") |> Path.expand()
+      File.mkdir_p!(repo_dir)
+      File.mkdir_p!(worktree_dir)
+
+      {:ok, _} =
+        Catalog.put_session(catalog, %{
+          session_id: "coord-root",
+          cwd: repo_dir,
+          title: "Coordinator Root",
+          active: true,
+          attention: "running",
+          activity_kind: "tool",
+          activity_label: "subagent"
+        })
+
+      {:ok, _} =
+        Catalog.put_session(catalog, %{
+          session_id: "sub-lane-idle",
+          cwd: worktree_dir,
+          title: "Lane 1 Explorer",
+          attention: "idle",
+          parent: %{
+            session_id: "coord-root",
+            conversation_id: 1,
+            at_entry_id: 12,
+            task_id: 13,
+            depth: 1
+          },
+          role: "subagent"
+        })
+
+      {:ok, _} =
+        Catalog.put_session(catalog, %{
+          session_id: "sub-lane-err",
+          cwd: repo_dir,
+          title: "Lane 2 Failed",
+          attention: "error",
+          activity_label: "model_error",
+          parent: %{
+            session_id: "coord-root",
+            conversation_id: 1,
+            at_entry_id: 14,
+            depth: 1
+          },
+          role: "subagent"
+        })
+
+      conn = log_in_owner(conn, owner_token)
+      {:ok, view, _html} = live(conn, "/inbox")
+
+      # Root session visible; subsessions hidden by default; no separate worktree workspace group
+      assert has_element?(view, ~s(a[data-session-id="coord-root"]))
+      refute has_element?(view, ~s(a[data-session-id="sub-lane-idle"]))
+      refute has_element?(view, ~s(a[data-session-id="sub-lane-err"]))
+      refute has_element?(view, ~s([data-workspace-root="#{worktree_dir}"]))
+
+      # Attention badges and Jump to next exempt idle/error subsessions
+      assert has_element?(view, "#inbox-filter-attention", "0")
+      assert has_element?(view, "#inbox-filter-all", "1")
+      refute has_element?(view, "#inbox-topbar-attention")
+      refute has_element?(view, "#inbox-jump-next-btn")
+
+      # Subsessions toggle pill shows count (2) and reveals nested children on click
+      assert has_element?(view, "#inbox-filter-subsessions", "Subsessions")
+      assert has_element?(view, "#inbox-filter-subsessions", "2")
+
+      view |> element("#inbox-filter-subsessions") |> render_click()
+
+      assert has_element?(view, "#inbox-filter-subsessions.is-active")
+
+      # Still only one workspace group (repo_dir); worktree subsession nests under coord-root
+      assert has_element?(view, ~s([data-workspace-root="#{repo_dir}"]))
+      refute has_element?(view, ~s([data-workspace-root="#{worktree_dir}"]))
+
+      assert has_element?(
+               view,
+               ~s(.inbox-subsession-list a[data-session-id="sub-lane-idle"].is-subsession)
+             )
+
+      assert has_element?(
+               view,
+               ~s(.inbox-subsession-list a[data-session-id="sub-lane-idle"] .inbox-status-subsession-idle)
+             )
+
+      refute has_element?(
+               view,
+               ~s(a[data-session-id="sub-lane-idle"].needs-attention)
+             )
+
+      assert has_element?(
+               view,
+               ~s(.inbox-subsession-list a[data-session-id="sub-lane-idle"] .inbox-step-badge),
+               "@12"
+             )
+
+      assert has_element?(
+               view,
+               ~s(.inbox-subsession-list a[data-session-id="sub-lane-idle"] .inbox-worktree-badge),
+               "wt-lane-1"
+             )
+
+      # Same-cwd subsession has step badge but no redundant worktree badge
+      assert has_element?(
+               view,
+               ~s(.inbox-subsession-list a[data-session-id="sub-lane-err"] .inbox-step-badge),
+               "@14"
+             )
+
+      refute has_element?(
+               view,
+               ~s(.inbox-subsession-list a[data-session-id="sub-lane-err"] .inbox-worktree-badge)
+             )
+
+      # Query param ?subsessions=1 starts expanded
+      {:ok, expanded_view, _html} = live(conn, "/inbox?subsessions=1")
+      assert has_element?(expanded_view, "#inbox-filter-subsessions.is-active")
+
+      assert has_element?(
+               expanded_view,
+               ~s(.inbox-subsession-list a[data-session-id="sub-lane-idle"])
+             )
+    end
+  end
+
   defp wait_until(fun, attempts \\ 60)
   defp wait_until(fun, 0), do: assert(fun.())
 

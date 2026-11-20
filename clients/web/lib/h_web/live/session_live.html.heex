@@ -27,6 +27,22 @@
       <div :if={@session} class="muted mono session-cwd">
         {@session.env_id}: {@session.cwd}
       </div>
+      <div
+        :if={@session_parent}
+        id="sidebar-parent-lineage"
+        class="session-parent-meta muted mono"
+      >
+        <span>Spawned from</span>
+        <.link
+          navigate={
+            ~p"/sessions/#{@session_parent.session_id}/conversations/#{@session_parent.conversation_id}"
+          }
+          class="session-parent-link"
+        >
+          {@session_parent.session_id} conv #{@session_parent.conversation_id}
+          <span :if={@session_parent.at_entry_id}> @ entry #{@session_parent.at_entry_id}</span>
+        </.link>
+      </div>
     </div>
 
     <div class="sidebar-section">
@@ -52,15 +68,31 @@
     <div id="session-inbox-switcher" class="sidebar-section sidebar-inbox-section">
       <div class="sidebar-section-head">
         <span class="section-title">All Sessions (Inbox)</span>
-        <span
-          :if={@catalog_counts.attention > 0}
-          class={[
-            "badge mono",
-            if(@catalog_counts.error > 0, do: "badge-danger", else: "badge-attention")
-          ]}
-        >
-          {@catalog_counts.attention}
-        </span>
+        <div class="sidebar-header-actions">
+          <button
+            :if={@catalog_counts.subsessions > 0 or @show_subsessions?}
+            id="session-sidebar-subsessions-toggle"
+            type="button"
+            aria-pressed={to_string(@show_subsessions?)}
+            class={[
+              "inbox-pill inbox-pill-xs inbox-subsessions-pill",
+              if(@show_subsessions?, do: "is-active")
+            ]}
+            phx-click="toggle_subsessions"
+          >
+            <span>Subsessions</span>
+            <span class="inbox-pill-count mono">{@catalog_counts.subsessions}</span>
+          </button>
+          <span
+            :if={@catalog_counts.attention > 0}
+            class={[
+              "badge mono",
+              if(@catalog_counts.error > 0, do: "badge-danger", else: "badge-attention")
+            ]}
+          >
+            {@catalog_counts.attention}
+          </span>
+        </div>
       </div>
 
       <InboxComponents.workspace_tree
@@ -100,6 +132,23 @@
           class={["btn btn-sm", if(@from_inbox?, do: "btn-inbox-return", else: "btn-ghost")]}
         >
           ← Inbox
+        </.link>
+        <.link
+          :if={@session_parent}
+          id="header-parent-session-link"
+          navigate={
+            ~p"/sessions/#{@session_parent.session_id}/conversations/#{@session_parent.conversation_id}"
+          }
+          class="btn btn-sm header-parent-link"
+          title={"Return to parent session #{@session_parent.session_id}"}
+        >
+          <span>← Parent session</span>
+          <span class="mono muted">
+            {@session_parent.session_id}
+            <span :if={@session_parent.at_entry_id}>
+              @{@session_parent.at_entry_id}
+            </span>
+          </span>
         </.link>
         <span class="mono header-sid">{@session_id}</span>
         <span class="badge mono">conv #{@conversation_id}</span>
@@ -211,12 +260,16 @@
           </header>
 
           <div class="entry-body">
-            <ConversationComponents.entry_body entry={entry} />
+            <ConversationComponents.entry_body entry={entry} catalog_by_id={@catalog.by_id} />
           </div>
         </article>
       </div>
 
-      <ConversationComponents.live_region live={@ephemeral_live} inbox={@inbox} />
+      <ConversationComponents.live_region
+        live={@ephemeral_live}
+        inbox={@inbox}
+        catalog_by_id={@catalog.by_id}
+      />
     </div>
 
     <button type="button" id="jump-latest" class="btn btn-sm jump-latest" hidden>Latest ↓</button>
