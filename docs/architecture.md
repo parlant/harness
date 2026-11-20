@@ -48,6 +48,9 @@ Named Chat Completions providers are startup data, not extensions. The
 validated catalog supplies the route and limits, while the account service
 alone stores and resolves the active API-key profile. Both generation and
 compaction commit a one-dispatch, no-auto-resume policy for these routes.
+The owner web editor stages catalog writes through the account service under
+that same lock. An edit does not mutate the booted registry or change which
+endpoint can receive an existing provider's key.
 
 ## Planned shutdown
 

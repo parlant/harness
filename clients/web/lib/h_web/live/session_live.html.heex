@@ -425,33 +425,91 @@
       }
       class="composer-shell"
     >
-      <form id="agent-config-form" phx-change="configure" class="composer-config">
-        <label class="composer-select-group">
-          <span class="field-label">Model</span>
-          <select id="model-select" name="model" class="input composer-select">
+      <% provider = @provider_filter || model_provider(@model_groups, @agent["model"]) %>
+      <% visible_models = Map.get(@model_groups, provider, []) %>
+      <% current_visible? = Enum.any?(visible_models, &(&1.id == @agent["model"])) %>
+      <div class="composer-config">
+        <form id="provider-filter-form" phx-change="select_provider" class="composer-select-group">
+          <label class="field-label" for="provider-select">Provider</label>
+          <select
+            id="provider-select"
+            name="provider"
+            class="input composer-select"
+            disabled={@model_groups == %{}}
+          >
+            <option :if={@model_groups == %{}}>No providers</option>
             <option
-              :for={model <- @models}
-              value={model.id}
-              selected={model.id == @agent["model"]}
+              :for={{id, models} <- Enum.sort(@model_groups)}
+              value={id}
+              selected={id == provider}
             >
-              {model.name || model.id}
+              {provider_label(id, models)}
             </option>
           </select>
-        </label>
-
-        <label class="composer-select-group">
-          <span class="field-label">Thinking</span>
-          <select id="thinking-select" name="thinking" class="input composer-select">
-            <option
-              :for={level <- @thinking_levels}
-              value={level}
-              selected={level == (@agent["thinking"] || "medium")}
+        </form>
+        <form
+          id="agent-config-form"
+          phx-change="configure"
+          phx-auto-recover="ignore"
+          class="composer-model-config"
+        >
+          <label class="composer-select-group">
+            <span class="field-label">Model</span>
+            <select
+              id="model-select"
+              name="model"
+              class="input composer-select"
+              disabled={visible_models == []}
             >
-              {level}
-            </option>
-          </select>
-        </label>
-      </form>
+              <option :if={!current_visible?} value="" selected disabled>Choose a model</option>
+              <option
+                :for={model <- visible_models}
+                value={model.id}
+                selected={model.id == @agent["model"]}
+              >
+                {model.name || model.id}{if model[:unavailable_reason], do: " · unavailable"}
+              </option>
+            </select>
+          </label>
+          <label class="composer-select-group">
+            <span class="field-label">Thinking</span>
+            <select id="thinking-select" name="thinking" class="input composer-select">
+              <option
+                :for={level <- @thinking_levels}
+                value={level}
+                selected={level == (@agent["thinking"] || "medium")}
+              >
+                {level}
+              </option>
+            </select>
+          </label>
+        </form>
+        <.link
+          id="provider-settings-link"
+          navigate={~p"/settings/providers"}
+          class="btn btn-sm btn-ghost"
+        >
+          Manage providers
+        </.link>
+      </div>
+      <p
+        :if={@agent["model"] && !current_visible?}
+        id="active-model-note"
+        class="muted composer-model-note"
+      >
+        Current model: <code>{@agent["model"]}</code>. Choosing a provider only filters this list.
+      </p>
+      <% reason =
+        Enum.find_value(visible_models, fn model ->
+          if model.id == @agent["model"], do: model[:unavailable_reason]
+        end) %>
+      <p
+        :if={reason}
+        id="model-unavailable-note"
+        class="muted composer-model-note"
+      >
+        {reason}
+      </p>
 
       <form
         id="composer-form"

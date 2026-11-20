@@ -28,6 +28,7 @@ defmodule HWeb.Router do
   scope "/", HWeb do
     pipe_through([:browser, :owner_auth])
 
+    post("/settings/providers", ProviderConfigController, :create)
     post("/settings/accounts/keys", AccountKeyController, :create)
     post("/settings/accounts/keys/use", AccountKeyController, :use)
 
@@ -35,6 +36,7 @@ defmodule HWeb.Router do
       live("/", WorkspaceLive, :index)
       live("/workspaces", WorkspaceLive, :index)
       live("/inbox", InboxLive, :index)
+      live("/settings/providers", ProvidersLive, :index)
       live("/settings/accounts", AccountsLive, :index)
       live("/sessions/:session_id", SessionLive, :show)
       live("/sessions/:session_id/conversations/:conversation_id", SessionLive, :show)

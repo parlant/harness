@@ -65,6 +65,21 @@ an API-key vault containing named profiles; plan rollback before adding the
 first named key. Use a new provider ID for a different service or
 trust boundary rather than repointing an ID that has keys saved.
 
+### Web settings
+
+Open **Providers** (`/settings/providers`) from Workspaces, Inbox, or a
+conversation. Owners can add a named endpoint or edit a saved provider's
+name and model catalog. The form uses the exact model IDs as JSON object keys
+and includes an example entry for new providers. The daemon validates the same
+schema as at boot, rejects stale edits, and atomically writes the catalog for
+the next restart. No requests go to the provider when saving. An existing
+provider ID cannot be repointed through the web editor; add a new ID for a
+new endpoint. Stock endpoint configuration and MultiCodex are not edited here.
+
+Use **Keys & accounts** to save or switch a write-only API key profile after
+the provider is registered. In a conversation, **Provider** filters the model
+list; only choosing a **Model** changes the session's stored model ID.
+
 ### Configure a named provider
 
 1. Save your catalog to `~/.local/share/h/openai-compatible.json` (or the

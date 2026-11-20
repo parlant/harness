@@ -308,7 +308,7 @@ defmodule H.CompatibleProviderTest do
                Accounts.resolve_api_key(accounts, "example-router")
 
       :ok = stop_supervised!(Accounts)
-      accounts = start_supervised!({Accounts, Keyword.delete(opts, :named_key_providers)})
+      accounts = start_supervised!({Accounts, Keyword.delete(opts, :compatible_providers)})
       assert :not_configured = Accounts.resolve_api_key(accounts, "example-router")
       assert {:ok, %{providers: providers}} = Accounts.api_keys(accounts)
       refute Enum.any?(providers, &(&1.provider == "example-router"))

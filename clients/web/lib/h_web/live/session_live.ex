@@ -41,7 +41,8 @@ defmodule HWeb.SessionLive do
         session: nil,
         conversations: [],
         tasks: [],
-        models: Backend.list_models(),
+        model_groups: Backend.list_models() |> Enum.group_by(& &1.provider),
+        provider_filter: nil,
         thinking_levels: @thinking_levels,
         transcript: Transcript.new(session_id: session_id, conversation_id: cid),
         cursor_seq: nil,
@@ -92,6 +93,7 @@ defmodule HWeb.SessionLive do
          |> assign(
            session_id: sid,
            conversation_id: cid,
+           provider_filter: nil,
            drawer_open?: false,
            cwd_missing?: false,
            show_fork_picker?: false,
@@ -104,7 +106,7 @@ defmodule HWeb.SessionLive do
         {:noreply,
          socket
          |> unsubscribe_current()
-         |> assign(conversation_id: cid)
+         |> assign(conversation_id: cid, provider_filter: nil)
          |> load_conversation(sid, cid)}
 
       true ->
@@ -153,8 +155,7 @@ defmodule HWeb.SessionLive do
 
         {:noreply,
          socket
-         |> assign(:transcript, next_t)
-         |> assign(Transcript.compact_assigns(next_t))}
+         |> apply_transcript(next_t)}
 
       {:stale, _t} ->
         {:noreply, socket}
@@ -358,11 +359,37 @@ defmodule HWeb.SessionLive do
     end
   end
 
+  def handle_event("select_provider", %{"provider" => provider}, socket)
+      when is_binary(provider) do
+    if is_map_key(socket.assigns.model_groups, provider) do
+      {:noreply, assign(socket, :provider_filter, provider)}
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_event("configure", params, socket) do
+    groups = socket.assigns.model_groups
+    current = socket.assigns.agent["model"]
+    provider = socket.assigns.provider_filter || model_provider(groups, current)
+    models = groups[provider] || []
+
     args =
-      %{}
-      |> maybe_put("model", non_empty(params["model"]))
-      |> maybe_put("thinking", non_empty(params["thinking"]))
+      case params["_target"] do
+        ["model"] -> Map.take(params, ["model"])
+        ["thinking"] -> Map.take(params, ["thinking"])
+        nil -> Map.take(params, ["model", "thinking"])
+        _ -> %{}
+      end
+
+    args =
+      Map.reject(args, fn
+        {"model", id} ->
+          id == current or not Enum.any?(models, &(&1.id == id))
+
+        {"thinking", level} ->
+          level == socket.assigns.agent["thinking"] or level not in @thinking_levels
+      end)
 
     if map_size(args) == 0 do
       {:noreply, socket}
@@ -500,6 +527,45 @@ defmodule HWeb.SessionLive do
     )
   end
 
+  defp apply_transcript(socket, transcript) do
+    assigns = Transcript.compact_assigns(transcript)
+
+    socket =
+      if socket.assigns.agent["model"] != assigns.agent["model"],
+        do: assign(socket, :provider_filter, nil),
+        else: socket
+
+    socket |> assign(:transcript, transcript) |> assign(assigns)
+  end
+
+  defp model_provider(groups, id) do
+    Enum.find_value(groups, fn {provider, models} ->
+      if Enum.any?(models, &(&1.id == id)), do: provider
+    end) ||
+      case id do
+        model when is_binary(model) ->
+          [provider | _] = String.split(model, [":", "/"], parts: 2)
+          if is_map_key(groups, provider), do: provider
+
+        _ ->
+          nil
+      end || groups |> Map.keys() |> Enum.min(fn -> nil end)
+  end
+
+  defp provider_label(provider, [model | _]) do
+    model[:provider_name] ||
+      case provider do
+        "openai" -> "OpenAI"
+        "openai_codex" -> "OpenAI Codex"
+        "anthropic" -> "Anthropic"
+        "google" -> "Google Gemini"
+        "google_vertex" -> "Google Vertex AI"
+        "deepseek" -> "DeepSeek"
+        "openrouter" -> "OpenRouter"
+        id -> id
+      end
+  end
+
   defp conversation_path(session_id, conversation_id, true),
     do: ~p"/sessions/#{session_id}/conversations/#{conversation_id}?from=inbox"
 
@@ -572,8 +638,8 @@ defmodule HWeb.SessionLive do
         case Transcript.apply_snapshot(t0, bin) do
           {:ok, entries, next_t} ->
             socket
-            |> assign(transcript: next_t, subscribed_cid: cid, error_banner: nil)
-            |> assign(Transcript.compact_assigns(next_t))
+            |> assign(subscribed_cid: cid, error_banner: nil)
+            |> apply_transcript(next_t)
             |> stream(:entries, entries, reset: true)
 
           {:error, reason} ->

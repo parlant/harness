@@ -5,51 +5,120 @@ defmodule H.Provider.Compatible do
 
   @provider_limit 8
 
+  @max_bytes 256_000
+  @filename "openai-compatible.json"
+
   # Keep the registry local to the daemon, and use one fixed ReqLLM provider
   # tag for the codec. External provider names never become VM atoms.
   def load(opts) do
-    dir = Keyword.fetch!(opts, :data_dir)
-    path = Path.join(dir, "openai-compatible.json")
+    with {:ok, _document, providers} <- read(Keyword.fetch!(opts, :data_dir)) do
+      {:ok, Keyword.put(opts, :compatible_providers, providers)}
+    end
+  end
 
-    result =
-      case File.lstat(path) do
-        {:error, :enoent} ->
-          {:ok, %{}}
+  def read(dir) do
+    path = Path.join(dir, @filename)
 
-        {:ok, %File.Stat{type: :regular, mode: mode, size: size}}
-        when size <= 256_000 and Bitwise.band(mode, 0o022) == 0 ->
-          with {:ok, body} when byte_size(body) <= 256_000 <- File.read(path),
-               {:ok, data} <- JSON.decode(body),
-               do: parse(data)
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        {:ok, %{"version" => 1, "providers" => %{}}, %{}}
 
-        _ ->
-          :error
+      {:ok, %File.Stat{type: :regular, mode: mode, size: size}}
+      when size <= @max_bytes and Bitwise.band(mode, 0o022) == 0 ->
+        with {:ok, body} when byte_size(body) <= @max_bytes <- File.read(path),
+             {:ok, document} <- JSON.decode(body),
+             {:ok, providers} <- parse(document) do
+          {:ok, document, providers}
+        else
+          _ -> {:error, :invalid_openai_compatible_json}
+        end
+
+      _ ->
+        {:error, :invalid_openai_compatible_json}
+    end
+  end
+
+  def revision(document),
+    do: Base.url_encode64(:crypto.hash(:sha256, JSON.encode!(document)), padding: false)
+
+  def parse_edit(
+        %{
+          "id" => id,
+          "name" => name,
+          "base_url" => url,
+          "models" => models_json,
+          "revision" => revision
+        } = edit
+      )
+      when map_size(edit) == 5 and is_binary(models_json) and byte_size(models_json) <= @max_bytes and
+             is_binary(revision) and byte_size(revision) == 43 do
+    with true <- provider_id?(id),
+         {:ok, models} <- JSON.decode(models_json),
+         provider = %{"name" => name, "base_url" => url, "models" => models},
+         {:ok, {^id, parsed}} <- parse_provider(id, provider) do
+      {:ok, {id, provider, parsed.base_url, revision}}
+    else
+      _ -> {:error, :invalid_provider_config}
+    end
+  end
+
+  def parse_edit(_), do: {:error, :invalid_provider_config}
+
+  # Called only by Accounts, the serialized writer under the daemon's store lock.
+  def stage(dir, {id, provider, url, expected}, running, key_exists?) do
+    with {:ok, document, saved} <- read(dir),
+         :ok <- check_revision(document, expected),
+         :ok <- check_binding(saved[id], running[id], url, key_exists?),
+         next = put_in(document["providers"][id], provider),
+         {:ok, _} <- parse(next),
+         bytes when byte_size(bytes) <= @max_bytes <- JSON.encode!(next) <> "\n" do
+      case H.Accounts.File.replace(dir, Path.join(dir, @filename), bytes) do
+        :ok -> :ok
+        _ -> {:error, :provider_config_unavailable}
       end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_provider_config}
+    end
+  end
 
-    case result do
-      {:ok, providers} -> {:ok, Keyword.put(opts, :compatible_providers, providers)}
-      _ -> {:error, :invalid_openai_compatible_json}
+  defp check_revision(document, expected) do
+    if revision(document) == expected, do: :ok, else: {:error, :stale_provider_config}
+  end
+
+  defp check_binding(saved, running, url, key_exists?) do
+    case {saved, running} do
+      {nil, nil} when key_exists? -> {:error, :provider_key_binding}
+      {%{base_url: existing}, _} when existing != url -> {:error, :provider_key_binding}
+      {_, %{base_url: existing}} when existing != url -> {:error, :provider_key_binding}
+      _ -> :ok
     end
   end
 
   defp parse(%{"version" => 1, "providers" => providers} = data)
        when map_size(data) == 2 and is_map(providers) and map_size(providers) <= @provider_limit do
-    reserved =
-      ([:openai_codex, :google_vertex, :ollama, :github_copilot, :typesafe] ++
-         LLMDB.Generated.ProviderRegistry.list() ++ ReqLLM.Providers.list())
-      |> Enum.map(&Atom.to_string/1)
-      |> MapSet.new()
-      |> MapSet.union(MapSet.new(H.Credentials.api_key_providers()))
-      |> MapSet.put("h_openai_compatible")
-
     reduce_valid(providers, fn {id, raw} ->
-      if Config.valid_source?(id) and not MapSet.member?(reserved, String.replace(id, "-", "_")),
-        do: parse_provider(id, raw),
-        else: :error
+      if provider_id?(id), do: parse_provider(id, raw), else: :error
     end)
   end
 
   defp parse(_), do: :error
+
+  defp provider_id?(id) do
+    if Config.valid_source?(id) do
+      normalized = String.replace(id, "-", "_")
+
+      normalized not in H.Credentials.api_key_providers() and
+        normalized != "h_openai_compatible" and
+        not Enum.any?(
+          [:openai_codex, :google_vertex, :ollama, :github_copilot, :typesafe] ++
+            LLMDB.Generated.ProviderRegistry.list() ++ ReqLLM.Providers.list(),
+          &(Atom.to_string(&1) == normalized)
+        )
+    else
+      false
+    end
+  end
 
   defp valid_base_url?(url) when is_binary(url) and byte_size(url) <= 512 do
     case URI.new(url) do

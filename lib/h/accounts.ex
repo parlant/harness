@@ -7,6 +7,7 @@ defmodule H.Accounts do
   use GenServer
 
   alias H.Accounts.{Codex, Config, Vault}
+  alias H.Provider.Compatible
 
   @login_ttl 900_000
   @retention 60_000
@@ -26,7 +27,7 @@ defmodule H.Accounts do
           sources: sources,
           active: active,
           name: __MODULE__,
-          named_key_providers: Map.keys(opts[:compatible_providers] || %{})}
+          compatible_providers: opts[:compatible_providers] || %{}}
        ]}
     end
   end
@@ -60,6 +61,15 @@ defmodule H.Accounts do
   def key_providers(server), do: call(server, :key_providers)
 
   def api_keys(server), do: call(server, :api_keys)
+
+  @doc "Returns the validated, credential-free startup catalog and whether changes are pending."
+  def provider_catalog(server), do: call(server, :provider_catalog)
+
+  @doc "Stages one named provider for the next daemon boot without rebinding existing URLs."
+  def stage_provider(server, params) do
+    with {:ok, edit} <- Compatible.parse_edit(params),
+         do: call(server, {:stage_provider, edit})
+  end
 
   def put_api_key(
         server,
@@ -162,8 +172,8 @@ defmodule H.Accounts do
 
     dir = Keyword.fetch!(opts, :data_dir)
 
-    providers =
-      Enum.sort(H.Credentials.api_key_providers() ++ Keyword.get(opts, :named_key_providers, []))
+    compatible_providers = Keyword.get(opts, :compatible_providers, %{})
+    providers = Enum.sort(H.Credentials.api_key_providers() ++ Map.keys(compatible_providers))
 
     result =
       with {:ok, vault, credentials} <- Vault.open(dir, sources),
@@ -188,6 +198,7 @@ defmodule H.Accounts do
            credentials: credentials,
            keys: keys,
            key_providers: providers,
+           compatible_providers: compatible_providers,
            http: Keyword.get(opts, :http, &Req.post/1),
            ttl: Keyword.get(opts, :login_ttl, @login_ttl),
            poll_cap: Keyword.get(opts, :test_poll_cap, 120_000),
@@ -229,6 +240,27 @@ defmodule H.Accounts do
   end
 
   def handle_call(:configured, _from, state), do: {:reply, state.sources != [], state}
+
+  def handle_call(:provider_catalog, _from, state) do
+    result =
+      with {:ok, document, saved} <- Compatible.read(state.dir) do
+        {:ok,
+         %{
+           providers: document["providers"],
+           revision: Compatible.revision(document),
+           pending?: saved != state.compatible_providers
+         }}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:stage_provider, {id, _, _, _} = edit}, _from, state) do
+    result =
+      Compatible.stage(state.dir, edit, state.compatible_providers, Map.has_key?(state.keys, id))
+
+    {:reply, result, state}
+  end
 
   def handle_call(:api_keys, _from, state) do
     providers =

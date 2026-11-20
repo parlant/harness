@@ -71,6 +71,72 @@ defmodule HWeb.SessionLiveTest do
     assert length(Fake.requests(fake)) == 1
   end
 
+  test "provider filters the model list without changing the conversation", ctx do
+    id = "example-router:vendor/Exact-Model"
+
+    models =
+      Fake.list_models(%{}) ++
+        [
+          %{
+            id: id,
+            provider: "example-router",
+            provider_name: "Example Model Router",
+            name: "Exact Model",
+            unavailable_reason: "API key required"
+          }
+        ]
+
+    opts = Keyword.update!(ctx.daemon_opts, :provider_config, &Map.put(&1, :models, models))
+    Application.put_env(:harness_web, :daemon_opts, opts)
+
+    assert {:ok, %{session: session}} = Daemon.create_session(%{"cwd" => ctx.projects_dir}, opts)
+    sid = session.session_id
+    {:ok, view, _} = live(log_in_owner(ctx.conn, ctx.owner_token), "/sessions/#{sid}")
+    assert has_element?(view, ~s(#provider-select option[value="fake"][selected]))
+    assert has_element?(view, ~s(#model-select option[value="fake:coder"][selected]))
+
+    view |> form("#provider-filter-form", %{provider: "example-router"}) |> render_change()
+
+    assert has_element?(
+             view,
+             ~s(#provider-select option[value="example-router"][selected]),
+             "Example Model Router"
+           )
+
+    assert has_element?(view, "#active-model-note", "fake:coder")
+    refute has_element?(view, ~s(#model-select option[value="fake:coder"]))
+
+    assert has_element?(
+             view,
+             ~s(#model-select option[value="#{id}"]),
+             "Exact Model · unavailable"
+           )
+
+    # A thinking event includes the model field in the browser form, but does not change it.
+    render_change(element(view, "#agent-config-form"), %{
+      "_target" => ["thinking"],
+      "model" => id,
+      "thinking" => "high"
+    })
+
+    wait_until(fn -> has_element?(view, ~s(#thinking-select option[value="high"][selected])) end)
+    assert has_element?(view, "#active-model-note", "fake:coder")
+
+    render_change(element(view, "#agent-config-form"), %{
+      "_target" => ["model"],
+      "model" => id,
+      "thinking" => "off"
+    })
+
+    wait_until(fn -> has_element?(view, ~s(#model-select option[value="#{id}"][selected])) end)
+    assert has_element?(view, ~s(#thinking-select option[value="high"][selected]))
+    assert has_element?(view, "#model-unavailable-note", "API key required")
+
+    # A fresh view reads the exact qualified model back from the daemon.
+    {:ok, new_view, _} = live(log_in_owner(ctx.conn, ctx.owner_token), "/sessions/#{sid}")
+    assert has_element?(new_view, ~s(#model-select option[value="#{id}"][selected]))
+  end
+
   test "supports configure, steer, abort, fork, and resnapshot on sequence gap", %{
     conn: conn,
     projects_dir: projects_dir,
