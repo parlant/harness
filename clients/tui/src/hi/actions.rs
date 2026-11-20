@@ -22,11 +22,25 @@ pub struct Target {
     pub labels: SessionLabels,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLabels {
     pub title: Option<String>,
     pub status: Option<String>,
     pub harness_id: Option<String>,
+    pub cwd_exists: bool,
+    pub needs_attention: bool,
+}
+
+impl Default for SessionLabels {
+    fn default() -> Self {
+        Self {
+            title: None,
+            status: None,
+            harness_id: None,
+            cwd_exists: true,
+            needs_attention: true,
+        }
+    }
 }
 
 impl From<&SessionSummary> for SessionLabels {
@@ -35,6 +49,8 @@ impl From<&SessionSummary> for SessionLabels {
             title: session.title.clone(),
             status: session.status.clone(),
             harness_id: session.harness_id.clone(),
+            cwd_exists: session.effective_cwd_exists(),
+            needs_attention: session.effective_needs_attention(),
         }
     }
 }
@@ -80,6 +96,24 @@ pub enum Effect {
         include_in_context: bool,
     },
     Compact(Option<String>),
+    TriageSession {
+        sid: String,
+        needs_attention: bool,
+    },
+    StopSession {
+        sid: String,
+    },
+    ArchiveSession {
+        sid: String,
+        archived: bool,
+        stop: bool,
+    },
+    ArchiveCurrent {
+        stop: bool,
+    },
+    ForkSessionCwd {
+        cwd: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +137,13 @@ pub enum Reply {
         env_id: String,
         truncated: bool,
         block: Value,
+    },
+    CatalogSession {
+        session: Box<SessionSummary>,
+        note: String,
+    },
+    ArchivedCurrent {
+        sid: String,
     },
 }
 
@@ -749,6 +790,108 @@ pub fn execute(
             let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
             Ok(Reply::Receipt(receipt))
         }
+
+        Effect::TriageSession {
+            sid,
+            needs_attention,
+        } => {
+            if sid.trim().is_empty() {
+                return Err("cannot triage session: missing session_id".to_string());
+            }
+            let session = client
+                .triage_session(&sid, needs_attention)
+                .map_err(|e| format_client_error(&e))?;
+            let note = if session.effective_needs_attention() {
+                "Marked as needing attention".to_string()
+            } else {
+                "Marked as not needing attention".to_string()
+            };
+            Ok(Reply::CatalogSession {
+                session: Box::new(session),
+                note,
+            })
+        }
+
+        Effect::StopSession { sid } => {
+            if sid.trim().is_empty() {
+                return Err("cannot stop session: missing session_id".to_string());
+            }
+            let session = client
+                .stop_session(&sid, Some("user_stop"))
+                .map_err(|e| format_client_error(&e))?;
+            let note = format!("Stopped {}", sanitize_single_line(&session.session_id));
+            Ok(Reply::CatalogSession {
+                session: Box::new(session),
+                note,
+            })
+        }
+
+        Effect::ArchiveSession {
+            sid,
+            archived,
+            stop,
+        } => {
+            if sid.trim().is_empty() {
+                return Err("cannot archive session: missing session_id".to_string());
+            }
+            let session = client
+                .archive_session(&sid, archived, stop)
+                .map_err(|e| format_archive_error(&e))?;
+            let note = if session.effective_archived() {
+                format!("Archived {}", sanitize_single_line(&session.session_id))
+            } else {
+                format!("Unarchived {}", sanitize_single_line(&session.session_id))
+            };
+            Ok(Reply::CatalogSession {
+                session: Box::new(session),
+                note,
+            })
+        }
+
+        Effect::ArchiveCurrent { stop } => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot archive: missing session_id".to_string());
+            }
+            let session = client
+                .archive_session(&target.sid, true, stop)
+                .map_err(|e| format_archive_error(&e))?;
+            Ok(Reply::ArchivedCurrent {
+                sid: session.session_id,
+            })
+        }
+
+        Effect::ForkSessionCwd { cwd } => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot fork session: missing session_id".to_string());
+            }
+            let env_id = (!target.env_id.trim().is_empty()).then_some(target.env_id.as_str());
+            let cid = (!target.cid.trim().is_empty()).then_some(target.cid.as_str());
+            let forked = client
+                .fork_session(&target.sid, &cwd, env_id, cid, None)
+                .map_err(|e| format_client_error(&e))?;
+            if forked.session.status.as_deref() == Some("quarantined") {
+                return Err(format!(
+                    "forked session {} is quarantined",
+                    sanitize_single_line(&forked.session.session_id)
+                ));
+            }
+            let labels = SessionLabels::from(&forked.session);
+            let actual_env_id = forked
+                .session
+                .env_id
+                .unwrap_or_else(|| target.env_id.clone());
+            let new_cid = forked
+                .session
+                .root_conversation_id
+                .unwrap_or_else(|| "1".to_string());
+            Ok(Reply::Target(Target {
+                sid: forked.session.session_id,
+                cid: new_cid,
+                cwd: forked.session.cwd,
+                env_id: actual_env_id,
+                labels,
+            }))
+        }
     }
 }
 
@@ -1056,6 +1199,19 @@ fn is_ambiguous_io_error(err: &ClientError) -> bool {
         | ClientError::ConnectionFailed { .. }
         | ClientError::RedirectDisabled { .. }
         | ClientError::HttpStatus { .. } => false,
+    }
+}
+
+fn format_archive_error(err: &ClientError) -> String {
+    match err {
+        ClientError::HttpStatus {
+            status: 409,
+            message,
+        } if message.contains("session_busy") => {
+            "Session is busy; stop first (s / Esc) or force archive (X / /archive force)"
+                .to_string()
+        }
+        other => format_client_error(other),
     }
 }
 
@@ -1705,6 +1861,10 @@ mod tests {
                 queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
+                needs_attention: None,
+                archived: false,
+                loaded: None,
+                cwd_exists: None,
             },
             seq: 1,
         };
@@ -1731,6 +1891,10 @@ mod tests {
                 queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
+                needs_attention: None,
+                archived: false,
+                loaded: None,
+                cwd_exists: None,
             },
             seq: 1,
         };

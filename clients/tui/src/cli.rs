@@ -355,7 +355,7 @@ fn sort_sessions_latest_first(sessions: &mut [SessionSummary]) {
 fn pick_latest_session(sessions: &[SessionSummary]) -> Option<&SessionSummary> {
     sessions
         .iter()
-        .filter(|s| s.status.as_deref() != Some("archived"))
+        .filter(|s| !s.effective_archived())
         .min_by_key(|s| s.status.as_deref() == Some("quarantined"))
 }
 
@@ -790,6 +790,10 @@ mod tests {
                 queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
+                needs_attention: None,
+                archived: false,
+                loaded: None,
+                cwd_exists: None,
             },
             SessionSummary {
                 session_id: "quar".to_string(),
@@ -807,6 +811,52 @@ mod tests {
                 queued_count: 0,
                 next_wake_at: None,
                 status: Some("quarantined".to_string()),
+                needs_attention: None,
+                archived: false,
+                loaded: None,
+                cwd_exists: None,
+            },
+            SessionSummary {
+                session_id: "arch-user".to_string(),
+                title: None,
+                env_id: Some("host".to_string()),
+                harness_id: None,
+                cwd: "/tmp/p".to_string(),
+                root_conversation_id: Some("1".to_string()),
+                created_at: Some(300),
+                updated_at: Some(300),
+                active: false,
+                attention: Some("idle".to_string()),
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
+                next_wake_at: None,
+                status: Some("ok".to_string()),
+                needs_attention: Some(false),
+                archived: true,
+                loaded: Some(false),
+                cwd_exists: Some(true),
+            },
+            SessionSummary {
+                session_id: "arch-import".to_string(),
+                title: None,
+                env_id: Some("host".to_string()),
+                harness_id: None,
+                cwd: "/tmp/p".to_string(),
+                root_conversation_id: Some("1".to_string()),
+                created_at: Some(400),
+                updated_at: Some(400),
+                active: false,
+                attention: Some("archived".to_string()),
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
+                next_wake_at: None,
+                status: Some("archived".to_string()),
+                needs_attention: Some(false),
+                archived: true,
+                loaded: Some(false),
+                cwd_exists: Some(true),
             },
         ];
         sort_sessions_latest_first(&mut sessions);
