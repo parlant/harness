@@ -26,6 +26,17 @@ pub struct RunFailureInfo {
     pub code: Option<String>,
     pub message: Option<String>,
     pub is_compaction: bool,
+    pub automatic: bool,
+}
+
+impl RunFailureInfo {
+    pub fn label(&self) -> &'static str {
+        match (self.is_compaction, self.automatic) {
+            (true, true) => "Run paused during automatic compaction",
+            (true, false) => "Compaction failed",
+            (false, _) => "Run paused",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +247,7 @@ impl TranscriptState {
                 code: None,
                 message: None,
                 is_compaction,
+                automatic: false,
             }),
             Value::Object(map) => {
                 let reason = map
@@ -258,6 +270,7 @@ impl TranscriptState {
                     code,
                     message,
                     is_compaction,
+                    automatic: map.get("automatic").and_then(Value::as_bool) == Some(true),
                 })
             }
             _ => Some(RunFailureInfo {
@@ -270,6 +283,7 @@ impl TranscriptState {
                 code: None,
                 message: None,
                 is_compaction,
+                automatic: false,
             }),
         }
     }

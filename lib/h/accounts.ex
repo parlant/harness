@@ -78,7 +78,8 @@ defmodule H.Accounts do
   @doc false
   def resolve_api_key(server, provider), do: call(server, {:api_key, Atom.to_string(provider)})
 
-  def codex_ready?(server, sources), do: call(server, {:codex_ready, sources}) == true
+  @doc false
+  def codex_status(server, sources), do: call(server, {:codex_status, sources})
 
   def add(server, %{"source" => source} = params) when map_size(params) == 1 do
     if Config.valid_source?(source),
@@ -196,10 +197,17 @@ defmodule H.Accounts do
 
   def handle_call(:key_providers, _from, state), do: {:reply, Map.keys(state.keys), state}
 
-  def handle_call({:codex_ready, sources}, _from, state) do
-    sources = if sources, do: sources, else: [state.active]
-    ready = Enum.any?(sources, &match?(%{"refresh_token" => _}, state.credentials[&1]))
-    {:reply, ready, state}
+  def handle_call({:codex_status, pool}, _from, state) do
+    sources = if pool, do: Enum.filter(pool, &(&1 in state.sources)), else: [state.active]
+
+    status =
+      cond do
+        sources == [] and state.sources != [] -> :alias_mismatch
+        Enum.any?(sources, &match?(%{"refresh_token" => _}, state.credentials[&1])) -> :signed_in
+        true -> :sign_in_required
+      end
+
+    {:reply, status, state}
   end
 
   def handle_call(:configured, _from, state), do: {:reply, state.sources != [], state}

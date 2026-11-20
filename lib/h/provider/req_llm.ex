@@ -138,7 +138,14 @@ defmodule H.Provider.ReqLLM do
     result =
       if policy do
         deadline = System.monotonic_time(:millisecond) + 15_000
-        pooled_dispatch(config, policy, model.id, dispatch, deadline, nil)
+        result = pooled_dispatch(config, policy, model.id, dispatch, deadline, nil)
+
+        if result == {:error, :credential_unavailable} and
+             H.Accounts.codex_status(config.accounts, policy.sources) == :alias_mismatch do
+          {:error, :codex_pool_alias_mismatch}
+        else
+          result
+        end
       else
         with {:ok, credential} <- H.Accounts.resolve_codex(config.accounts),
              do: dispatch.(credential)
@@ -267,8 +274,9 @@ defmodule H.Provider.ReqLLM do
   defp managed_result({:error, :account_policy_unavailable}),
     do: managed_codex_error(:account_policy_unavailable)
 
-  defp managed_result({:error, reason}) when reason in [:invalid_token, :rate_limited],
-    do: managed_codex_error(reason)
+  defp managed_result({:error, reason})
+       when reason in [:codex_pool_alias_mismatch, :invalid_token, :rate_limited],
+       do: managed_codex_error(reason)
 
   defp managed_result(_), do: managed_codex_error(:codex_request_failed)
 
@@ -305,7 +313,10 @@ defmodule H.Provider.ReqLLM do
     message =
       case code do
         :codex_accounts_unavailable ->
-          "No eligible Codex credential is available. Use /login or /account; a configured pool may be waiting for fresh usage data."
+          "No eligible Codex credential is available. If a pool is enabled, check its aliases and allow time for a fresh usage check. Otherwise use /login or /account."
+
+        :codex_pool_alias_mismatch ->
+          "None of the Codex pool aliases match the daemon's accounts. Check /account, update the pool's sources in extensions.json (or disable the pool), then restart the daemon. /account only selects the stock account."
 
         :account_policy_unavailable ->
           "The configured Codex account policy is unavailable."
@@ -354,6 +365,14 @@ defmodule H.Provider.ReqLLM do
           %{id: id} -> id
           nil -> "openai:gpt-5.4"
         end
+    end
+  end
+
+  @doc false
+  def context_window(model_spec) do
+    case resolve_model(model_spec) do
+      {:ok, %LLMDB.Model{limits: %{context: window}}} -> window
+      _ -> nil
     end
   end
 
@@ -920,36 +939,45 @@ defmodule H.Provider.ReqLLM do
   # Model catalog listing
 
   defp fetch_curated_models(config, settings) do
-    config
-    |> resolve_target_providers(settings)
-    |> Enum.flat_map(&curated_models_for_provider/1)
-    |> Enum.map(fn
-      %{provider: "openai_codex"} = model ->
-        managed =
-          config[:codex_account_policy] ||
-            (config[:accounts] && H.Accounts.configured?(config.accounts))
+    models =
+      config
+      |> resolve_target_providers(settings)
+      |> Enum.flat_map(&curated_models_for_provider/1)
 
-        ready =
-          if managed do
-            H.Accounts.codex_ready?(
-              config[:accounts],
-              get_in(config, [:codex_account_policy, :sources])
-            )
-          else
-            Credentials.configured?(
-              :openai_codex,
-              Keyword.put(Map.get(config, :credentials_opts, []), :settings, settings)
-            )
-          end
-
-        if ready,
-          do: model,
-          else: Map.put(model, :unavailable_reason, "Codex sign-in required (/login)")
-
-      model ->
-        model
-    end)
+    if Enum.any?(models, &(&1.provider == "openai_codex")) do
+      case codex_unavailable_reason(config, settings) do
+        nil -> models
+        reason -> Enum.map(models, &mark_codex_unavailable(&1, reason))
+      end
+    else
+      models
+    end
   end
+
+  defp codex_unavailable_reason(config, settings) do
+    policy = config[:codex_account_policy]
+    accounts = config[:accounts]
+
+    status =
+      if policy || (accounts && H.Accounts.configured?(accounts)) do
+        H.Accounts.codex_status(accounts, get_in(policy, [:sources]))
+      else
+        opts = Keyword.put(Map.get(config, :credentials_opts, []), :settings, settings)
+        if Credentials.configured?(:openai_codex, opts), do: :signed_in, else: :sign_in_required
+      end
+
+    case status do
+      :signed_in -> nil
+      :alias_mismatch -> "Codex pool aliases do not match accounts (extensions.json)"
+      :sign_in_required -> "Codex sign-in required (/login)"
+      {:error, _} -> "Codex account store unavailable"
+    end
+  end
+
+  defp mark_codex_unavailable(%{provider: "openai_codex"} = model, reason),
+    do: Map.put(model, :unavailable_reason, reason)
+
+  defp mark_codex_unavailable(model, _reason), do: model
 
   defp resolve_target_providers(config, settings) do
     case Map.get(config, :provider) do

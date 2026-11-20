@@ -863,6 +863,60 @@ defmodule H.CompactionIntegrationTest do
   end
 
   describe "failure visibility, fencing, and abort" do
+    test "a prompt paused during automatic compaction identifies the phase and preserves the history" do
+      %{opts: opts, cwd: cwd, fake: fake} =
+        start_daemon_env(
+          [
+            {:reply, [], %{content: [%{type: "text", text: "First reply"}]}},
+            {:error,
+             %{
+               code: "codex_pool_alias_mismatch",
+               message: "Update the pool sources in extensions.json",
+               retryable: false
+             }}
+          ],
+          auto_compaction: %{:default => 150}
+        )
+
+      sid = "automatic-failure"
+      {:ok, _} = Daemon.create_session(%{"session_id" => sid, "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          sid,
+          cmd("first", "submit", "1", %{"type" => "input", "content" => "First question"}),
+          opts
+        )
+
+      wait_until(fn ->
+        {:ok, %{items: items}} = Daemon.scan_entries(sid, "1", %{"order" => "asc"}, opts)
+        length(items) == 2
+      end)
+
+      command =
+        cmd("second", "submit", "1", %{
+          "type" => "input",
+          "content" => String.duplicate("x", 1_000)
+        })
+
+      assert {:ok, %{status: "placed"}} = Daemon.execute_command(sid, command, opts)
+
+      failure =
+        wait_until(fn ->
+          {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation(sid, "1", self(), nil, opts)
+          get_in(JSON.decode!(bin), ["docs", "live", "compaction_failure"])
+        end)
+
+      assert %{"automatic" => true, "code" => "codex_pool_alias_mismatch", "message" => message} =
+               failure
+
+      assert message =~ "extensions.json"
+      assert {:ok, %{status: "unanswered"}} = Daemon.execute_command(sid, command, opts)
+      assert {:ok, %{items: items}} = Daemon.scan_entries(sid, "1", %{"order" => "asc"}, opts)
+      assert Enum.map(items, & &1.kind) == ["user", "assistant", "user"]
+      assert length(Fake.requests(fake)) == 2
+    end
+
     test "keeps compaction_failure visible without committing marker or auto-resubmitting" do
       %{opts: opts, cwd: cwd, fake: fake} =
         start_daemon_env([
@@ -899,6 +953,7 @@ defmodule H.CompactionIntegrationTest do
 
       failure = snap["docs"]["live"]["compaction_failure"]
       assert failure["code"] == "truncated_summary"
+      assert failure["automatic"] == false
       assert failure["message"] =~ "token cap"
       assert snap["docs"]["live"]["compaction"] == nil
 

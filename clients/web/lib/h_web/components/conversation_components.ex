@@ -72,7 +72,19 @@ defmodule HWeb.ConversationComponents do
     msg = if is_map(gen), do: Map.get(gen, "message") || gen, else: %{}
     {thinking, text} = extract_parts(msg)
     tools = normalize_live_tools(Map.get(live, "tools"))
-    failure = Map.get(live, "run_failure") || Map.get(live, "compaction_failure")
+
+    {failure, failure_label} =
+      case {live["run_failure"], live["compaction_failure"]} do
+        {run_failure, _} when not is_nil(run_failure) ->
+          {run_failure, "Run paused"}
+
+        {nil, %{"automatic" => true} = failure} ->
+          {failure, "Run paused during automatic compaction"}
+
+        {nil, failure} ->
+          {failure, "Compaction failed"}
+      end
+
     inbox = assigns.inbox || []
 
     visible? =
@@ -87,6 +99,7 @@ defmodule HWeb.ConversationComponents do
         text: text,
         tools: tools,
         failure: failure,
+        failure_label: failure_label,
         inbox: inbox
       )
 
@@ -129,7 +142,7 @@ defmodule HWeb.ConversationComponents do
 
       <div :if={@failure} id="run-failure-banner" class="run-failure-banner">
         <div>
-          <strong>Run paused:</strong>
+          <strong>{@failure_label}:</strong>
           <span>{format_failure(@failure)}</span>
         </div>
         <button
@@ -226,7 +239,7 @@ defmodule HWeb.ConversationComponents do
   defp format_failure(failure) when is_binary(failure), do: failure
 
   defp format_failure(failure) when is_map(failure) do
-    failure["reason"] || failure["detail"] || failure["message"] || format_json(failure)
+    failure["message"] || failure["detail"] || failure["reason"] || format_json(failure)
   end
 
   defp format_failure(other), do: inspect(other)

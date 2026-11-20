@@ -157,10 +157,39 @@ defmodule H.ExtensionsTest do
 
       assert output =~ "MULTICODEX_LOADED"
 
+      # Reuse the same pool with signed-in aliases that aren't in its configuration.
       File.write!(
         path,
-        JSON.encode!(%{version: 1, openai_codex: %{sources: ["personal", "work"]}})
+        JSON.encode!(%{version: 1, openai_codex: %{sources: ["current", "other"]}})
       )
+
+      assert {output, 0} =
+               launch("""
+               dir = #{inspect(ctx.data_dir)}
+               File.chmod!(dir, 0o700)
+               {:ok, vault, _} = H.Accounts.Vault.open(dir, [])
+               for source <- ["current", "other"] do
+                 :ok = H.Accounts.Vault.write(vault, source, %{
+                   "access_token" => "fixture-access",
+                   "refresh_token" => "fixture-refresh",
+                   "account_id" => source,
+                   "subject" => source,
+                   "expires_at_ms" => System.system_time(:millisecond) + 120_000
+                 })
+               end
+               {:ok, _} = H.serve(data_dir: dir, port: 0)
+               opts = H.Daemon.instance_options()
+               {:ok, %{providers: [%{sources: [%{state: "available"}, %{state: "available"}]}]}} = H.Accounts.discover(opts[:accounts])
+               models = H.Daemon.list_models(opts)
+               true = Enum.any?(models, &match?(%{provider: "openai_codex", unavailable_reason: "Codex pool aliases do not match accounts (extensions.json)"}, &1))
+               config = opts |> Keyword.take([:accounts, :codex_account_policy]) |> Map.new() |> Map.put(:stream_fn, fn _, _, _ -> send(self(), :dispatched); {:error, :unexpected_dispatch} end)
+               {:error, %{code: "codex_pool_alias_mismatch", message: message, retryable: false}} = H.Provider.ReqLLM.stream_turn(config, %{model: "openai_codex:gpt-6.2-sol"}, fn _ -> :ok end)
+               true = String.contains?(message, "extensions.json")
+               receive do :dispatched -> raise "unexpected inference" after 0 -> :ok end
+               IO.puts("POOL_ALIAS_MISMATCH")
+               """)
+
+      assert output =~ "POOL_ALIAS_MISMATCH"
 
       assert {output, 0} =
                launch("""
@@ -169,7 +198,7 @@ defmodule H.ExtensionsTest do
                nil = opts[:codex_account_policy]
                nil = Process.whereis(Extensions.MultiCodex)
                true = is_pid(Process.whereis(H.Accounts))
-               {:ok, %{providers: [%{sources: [%{id: "personal", active: true}, %{id: "work", active: false}]}]}} = H.Accounts.discover(H.Accounts)
+               {:ok, %{providers: [%{sources: [%{id: "current", active: true}, %{id: "other", active: false}]}]}} = H.Accounts.discover(H.Accounts)
                IO.puts("STOCK_ACCOUNTS")
                """)
 

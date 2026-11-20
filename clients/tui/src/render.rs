@@ -365,11 +365,7 @@ impl<W: Write> InlineRenderer<W> {
 
     fn print_failure_if_any(&mut self, state: &TranscriptState) -> io::Result<()> {
         if let Some(fail) = state.run_failure() {
-            let label = if fail.is_compaction {
-                "Compaction failed"
-            } else {
-                "Run paused"
-            };
+            let label = fail.label();
             let reason = sanitize_single_line(&fail.reason);
             let detail = fail
                 .message

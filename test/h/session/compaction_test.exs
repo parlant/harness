@@ -47,6 +47,19 @@ defmodule H.Session.CompactionTest do
     assert_raise ArgumentError, fn -> Compaction.validate_limits!(%{:default => -1}) end
   end
 
+  test "automatic compaction uses the bundled Codex window rather than the unknown-model threshold" do
+    entries = [
+      entry(1, "user", %{"text" => String.duplicate("a", 390_000)}),
+      entry(2, "user", %{"text" => "next"})
+    ]
+
+    for model <- ["openai_codex:gpt-6.2-sol", "openai-codex:gpt-6.2-astra"] do
+      request = Context.build_request(entries, %{model: model})
+      refute Compaction.auto_boundary(entries, request, "/work", %{}, 0, H.Provider.ReqLLM)
+      assert Compaction.auto_boundary(entries, request, "/work", %{}, 0, Fake) == 2
+    end
+  end
+
   describe "provider_visible_entry?/1" do
     test "accepts user, non-aborted assistant, and tool_result entries unless excluded" do
       assert Compaction.provider_visible_entry?(entry(1, "user", %{"text" => "hi"}))

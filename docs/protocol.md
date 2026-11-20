@@ -68,7 +68,7 @@ H.serve(auto_compaction: %{
 })
 ```
 
-Exact cwd + qualified model wins, then cwd, model, provider, `:default`, and finally the built-in threshold. Use positive integer token counts, or `:off` at any scope. Changing the threshold does not change the provider's actual context window. A successful automatic summary commits a boundary and resumes the original input; queued follow-ups still wait. No `/continue` or second prompt needed. If there is no safe prefix to summarize, the daemon attempts the original request instead of looping. Failed or aborted summarization does not discard history or start another turn. Manual `/compact` remains available.
+Exact cwd + qualified model wins, then cwd, model, provider, `:default`, and finally the built-in threshold. Use positive integer token counts, or `:off` at any scope. Changing the threshold does not change the provider's actual context window. A successful automatic summary commits a boundary and resumes the original input; queued follow-ups still wait. No `/continue` or second prompt needed. If there is no safe prefix to summarize, the daemon attempts the original request instead of looping. Failed or aborted summarization does not discard history or start another turn. Automatic failures carry `automatic: true` in `live.compaction_failure`, so clients can distinguish a paused prompt from a failed `/compact`. Manual `/compact` remains available.
 
 There is no built-in tool-round cap. An optional future extension could enforce a round, cost, or elapsed-time budget to bound unattended work or catch a looping model. That is separate from context management. Without that policy a model that keeps calling tools may keep spending until you abort it.
 

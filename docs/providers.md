@@ -111,8 +111,14 @@ H is stopped) looks like this:
 Without configured aliases or an enabled pool, the manual credential chain is
 unchanged. An enabled MultiCodex pool can boot before its accounts exist or
 are signed in. Until a pool alias is ready, only Codex inference is unavailable;
-there is no fallback to a different billing identity. Once an
-alias exists, managed Codex uses SSE without opaque continuation history and
+there is no fallback to a different billing identity. If sign-in looks healthy
+but Codex reports `codex_pool_alias_mismatch`, compare `hi account list` with
+MultiCodex's `settings.sources` in `extensions.json`. Use the exact alias
+names, then restart the daemon. To use the stock active account instead,
+disable the MultiCodex entry and restart. `/account` changes only the stock
+selection; it cannot override the enabled pool.
+
+Once an alias exists, managed Codex uses SSE without opaque continuation history and
 won't fall through to a different alias or a manual token on error. Remove
 `accounts.json` with H stopped and restart to return to manual credentials
 (disable any configured pool first).

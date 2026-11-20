@@ -581,13 +581,12 @@ defmodule H.Session.Server do
       if cid do
         live =
           if task.kind == "compaction" do
-            state.docs[cid]["live"]
-            |> Map.delete("compaction")
-            |> Map.put("compaction_failure", %{
-              "reason" => "restart_limit",
-              "code" => "restart_limit",
-              "message" => "Compaction exceeded restart limit"
-            })
+            compaction_failure(
+              state.docs[cid]["live"],
+              task,
+              "restart_limit",
+              "Compaction exceeded restart limit"
+            )
           else
             state.docs[cid]["live"]
             |> Map.delete("run")
@@ -740,13 +739,12 @@ defmodule H.Session.Server do
       {sub_writes, state} = settle_submissions(sub_ids, :unanswered, "interrupted", state, now)
 
       next_live =
-        live
-        |> Map.delete("compaction")
-        |> Map.put("compaction_failure", %{
-          "reason" => "interrupted",
-          "code" => "interrupted",
-          "message" => "Compaction interrupted across restart"
-        })
+        compaction_failure(
+          live,
+          comp_task,
+          "interrupted",
+          "Compaction interrupted across restart"
+        )
 
       state =
         state
@@ -2049,13 +2047,7 @@ defmodule H.Session.Server do
     {sub_writes, state} = settle_submissions(sub_ids, :unanswered, reason, state, now)
 
     next_live =
-      (state.docs[cid]["live"] || %{})
-      |> Map.delete("compaction")
-      |> Map.put("compaction_failure", %{
-        "reason" => reason,
-        "code" => reason,
-        "message" => "Compaction aborted"
-      })
+      compaction_failure(state.docs[cid]["live"], comp_task, reason, "Compaction aborted")
 
     state = put_doc_in_state(state, cid, "live", next_live)
 
@@ -2911,14 +2903,7 @@ defmodule H.Session.Server do
       sub_ids = comp_task.checkpoint["submission_ids"] || []
       {sub_writes, state} = settle_submissions(sub_ids, :unanswered, code, state, now)
 
-      next_live =
-        live
-        |> Map.delete("compaction")
-        |> Map.put("compaction_failure", %{
-          "reason" => code,
-          "code" => code,
-          "message" => message
-        })
+      next_live = compaction_failure(live, comp_task, code, message)
 
       state =
         state
@@ -2940,6 +2925,17 @@ defmodule H.Session.Server do
 
       {:batch, staged, state}
     end
+  end
+
+  defp compaction_failure(live, task, code, message) do
+    (live || %{})
+    |> Map.delete("compaction")
+    |> Map.put("compaction_failure", %{
+      "reason" => code,
+      "code" => code,
+      "message" => message,
+      "automatic" => task.checkpoint["automatic"] == true
+    })
   end
 
   defp stage_after_tool_settled(cid, done_tool_task, entry, live, state, now, base_effects) do
@@ -3371,14 +3367,7 @@ defmodule H.Session.Server do
     sub_ids = comp_task.checkpoint["submission_ids"] || []
     {sub_writes, state} = settle_submissions(sub_ids, :unanswered, code, state, now)
 
-    next_live =
-      (state.docs[cid]["live"] || %{})
-      |> Map.delete("compaction")
-      |> Map.put("compaction_failure", %{
-        "reason" => code,
-        "code" => code,
-        "message" => message
-      })
+    next_live = compaction_failure(state.docs[cid]["live"], comp_task, code, message)
 
     state =
       state

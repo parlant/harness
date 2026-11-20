@@ -831,15 +831,11 @@ fn render_failure(out: &mut Vec<String>, state: &TranscriptState) {
         return;
     };
     separate(out);
-    let label = if fail.is_compaction {
-        "Compaction failed"
-    } else {
-        "Run paused"
-    };
+    let label = fail.label();
     let code = fail
         .code
         .as_deref()
-        .filter(|c| !c.is_empty())
+        .filter(|c| !c.is_empty() && *c != fail.reason)
         .map(|c| format!(" ({})", sanitize_single_line(c)))
         .unwrap_or_default();
     out.push(format!(
@@ -1210,6 +1206,26 @@ mod tests {
         assert!(expanded.contains("1200 bytes omitted · full output: /tmp/full.log"));
         assert!(expanded.contains("  Summary 1\n  Summary 2"));
         assert!(expanded.contains("<omitted 500 chars>"));
+    }
+
+    #[test]
+    fn automatic_compaction_failure_explains_the_pause_without_repeating_the_code() {
+        let mut state = TranscriptState::default();
+        state.docs.insert(
+            "live".into(),
+            json!({"compaction_failure": {
+                "reason": "codex_pool_alias_mismatch",
+                "code": "codex_pool_alias_mismatch",
+                "message": "Update the pool sources in extensions.json",
+                "automatic": true
+            }}),
+        );
+
+        let text = rows(&state, false, false).join("\n");
+        assert!(
+            text.contains("[! Run paused during automatic compaction: codex_pool_alias_mismatch]")
+        );
+        assert!(text.contains("Update the pool sources in extensions.json"));
     }
 
     #[test]

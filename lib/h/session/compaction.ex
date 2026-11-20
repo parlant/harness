@@ -102,8 +102,8 @@ defmodule H.Session.Compaction do
   def auto_boundary(_, _, _, _, _, _), do: nil
 
   defp model_threshold(H.Provider.ReqLLM, model) do
-    case LLMDB.model(model) do
-      {:ok, %{limits: %{context: window}}} when is_integer(window) and window > 0 ->
+    case H.Provider.ReqLLM.context_window(model) do
+      window when is_integer(window) and window > 0 ->
         window - min(16_384, div(window, 2))
 
       _ ->
