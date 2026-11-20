@@ -8,7 +8,8 @@ await build({
   absWorkingDir: fileURLToPath(new URL('.', import.meta.url)),
   entryPoints: {
     editor: vs + 'editor/editor.main.js',
-    'editor.worker': vs + 'editor/editor.worker.start.js',
+    // The entry point installs the worker message handler; .start.js only exports a helper.
+    'editor.worker': vs + 'editor/editor.worker.js',
     'css.worker': vs + 'languages/features/css/css.worker.js',
     'html.worker': vs + 'languages/features/html/html.worker.js',
     'json.worker': vs + 'languages/features/json/json.worker.js',

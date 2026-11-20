@@ -279,6 +279,9 @@ export const ReviewEditor = {
     }
     this.fields.monaco.hidden = false;
     this.editor = this.api.editor.createDiffEditor(this.fields.monaco, {
+      renderSideBySide: false,
+      hideUnchangedRegions: {enabled: true, contextLineCount: 3},
+      ignoreTrimWhitespace: false,
       readOnly: true, originalEditable: false, automaticLayout: true,
       minimap: {enabled: false}, theme: this.theme(), links: false
     });

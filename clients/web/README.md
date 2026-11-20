@@ -128,6 +128,10 @@ requires a provider call.
   including deleted text. History never checks out or writes a commit, and
   doesn't fetch missing history in a shallow clone. **Working tree** returns
   to the editable view.
+- **Diff** shows one inline view of additions and deletions, including
+  whitespace-only changes. Long unchanged sections are collapsed with three
+  lines of context and can be expanded in place. This applies to both working
+  changes and historical commits.
 - Select text in a file view, choose **Use selected text**, and enter a comment.
   **Save comment** writes the verified path, revision, range, and excerpt to the
   active conversation without a provider call. Historical comments include the
