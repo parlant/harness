@@ -34,6 +34,7 @@ defmodule HWeb.Router do
     live_session :owner, on_mount: [{HWeb.Auth, :require_owner}] do
       live("/", WorkspaceLive, :index)
       live("/workspaces", WorkspaceLive, :index)
+      live("/inbox", InboxLive, :index)
       live("/settings/accounts", AccountsLive, :index)
       live("/sessions/:session_id", SessionLive, :show)
       live("/sessions/:session_id/conversations/:conversation_id", SessionLive, :show)

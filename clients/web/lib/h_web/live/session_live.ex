@@ -9,20 +9,35 @@ defmodule HWeb.SessionLive do
   """
   use HWeb, :live_view
 
-  alias HWeb.{Backend, ConversationComponents, Transcript, Workbench}
+  alias HWeb.{
+    Backend,
+    CatalogState,
+    ConversationComponents,
+    InboxComponents,
+    Transcript,
+    Workbench
+  }
 
   @thinking_levels ~w(off minimal low medium high xhigh)
 
   @impl true
   def mount(%{"session_id" => session_id} = params, _session, socket) do
     cid = normalize_cid(params["conversation_id"])
+    from_inbox? = params["from"] == "inbox"
 
     socket =
       socket
       |> assign(
         session_id: session_id,
         conversation_id: cid,
+        from_inbox?: from_inbox?,
         subscribed_cid: nil,
+        catalog: CatalogState.new(),
+        catalog_subscribed?: false,
+        catalog_groups: [],
+        catalog_counts: CatalogState.counts([]),
+        other_attention_count: 0,
+        next_attention_session: nil,
         session: nil,
         conversations: [],
         tasks: [],
@@ -43,6 +58,7 @@ defmodule HWeb.SessionLive do
         error_banner: nil
       )
       |> stream_configure(:entries, dom_id: &"entry-#{&1["id"]}")
+      |> load_catalog()
       |> load_initial(session_id, cid)
 
     {:ok, socket}
@@ -52,12 +68,22 @@ defmodule HWeb.SessionLive do
   def handle_params(%{"session_id" => sid} = params, _uri, socket) do
     cid = normalize_cid(params["conversation_id"])
 
+    from_inbox? =
+      if Map.has_key?(params, "from") do
+        params["from"] == "inbox"
+      else
+        socket.assigns.from_inbox?
+      end
+
+    socket = assign(socket, :from_inbox?, from_inbox?)
+
     cond do
       sid != socket.assigns.session_id ->
         {:noreply,
          socket
          |> unsubscribe_current()
-         |> assign(session_id: sid, conversation_id: cid)
+         |> assign(session_id: sid, conversation_id: cid, drawer_open?: false)
+         |> recompute_catalog_assigns()
          |> load_initial(sid, cid)}
 
       cid != socket.assigns.conversation_id ->
@@ -75,10 +101,31 @@ defmodule HWeb.SessionLive do
   @impl true
   def terminate(_reason, socket) do
     unsubscribe_current(socket)
+
+    if socket.assigns[:catalog_subscribed?] do
+      Backend.unsubscribe_sessions()
+    end
+
     :ok
   end
 
   @impl true
+  def handle_info({:catalog_frame, seq, json_bin}, socket) do
+    case CatalogState.apply_frame(socket.assigns.catalog, seq, json_bin) do
+      {:ok, next_catalog} ->
+        {:noreply,
+         socket
+         |> assign(:catalog, next_catalog)
+         |> recompute_catalog_assigns()}
+
+      :stale ->
+        {:noreply, socket}
+
+      {:error, _reason} ->
+        {:noreply, load_catalog(socket)}
+    end
+  end
+
   def handle_info({:commit_frame, _seq, json}, socket) do
     case Transcript.apply_commit(socket.assigns.transcript, json) do
       {:ok, appended, next_t} ->
@@ -232,7 +279,12 @@ defmodule HWeb.SessionLive do
             if new_cid != "" do
               {:noreply,
                push_patch(socket,
-                 to: ~p"/sessions/#{socket.assigns.session_id}/conversations/#{new_cid}"
+                 to:
+                   conversation_path(
+                     socket.assigns.session_id,
+                     new_cid,
+                     socket.assigns.from_inbox?
+                   )
                )}
             else
               {:noreply, socket}
@@ -279,6 +331,66 @@ defmodule HWeb.SessionLive do
       end
     end
   end
+
+  defp load_catalog(socket) do
+    if connected?(socket) do
+      case Backend.subscribe_sessions(self()) do
+        {:ok, {:snapshot, seq, json_bin}} ->
+          case CatalogState.apply_snapshot(CatalogState.new(), seq, json_bin) do
+            {:ok, catalog} ->
+              socket
+              |> assign(catalog: catalog, catalog_subscribed?: true)
+              |> recompute_catalog_assigns()
+
+            {:error, _} ->
+              assign(socket, :catalog_subscribed?, true)
+          end
+
+        _ ->
+          load_catalog_disconnected(socket)
+      end
+    else
+      load_catalog_disconnected(socket)
+    end
+  end
+
+  defp load_catalog_disconnected(socket) do
+    case Backend.list_sessions(%{}) do
+      {:ok, sessions} ->
+        socket
+        |> assign(:catalog, CatalogState.from_list(sessions))
+        |> recompute_catalog_assigns()
+
+      _ ->
+        recompute_catalog_assigns(socket)
+    end
+  end
+
+  defp recompute_catalog_assigns(socket) do
+    sessions = socket.assigns.catalog.sessions
+    current_sid = socket.assigns.session_id
+    counts = CatalogState.counts(sessions)
+    groups = CatalogState.group_by_workspace(sessions)
+    next_attention = CatalogState.next_attention_session(sessions, current_sid)
+
+    other_attention_count =
+      Enum.count(sessions, fn s ->
+        s.session_id != current_sid and CatalogState.needs_attention?(s)
+      end)
+
+    assign(socket,
+      catalog_counts: counts,
+      catalog_groups: groups,
+      next_attention_session: next_attention,
+      other_attention_count: other_attention_count
+    )
+  end
+
+  defp conversation_path(session_id, conversation_id, true),
+    do: ~p"/sessions/#{session_id}/conversations/#{conversation_id}?from=inbox"
+
+  defp conversation_path(session_id, conversation_id, _false),
+    do: ~p"/sessions/#{session_id}/conversations/#{conversation_id}"
 
   defp load_initial(socket, session_id, cid) do
     case Backend.get_session_detail(session_id) do

@@ -3,7 +3,13 @@ defmodule HWeb.AuthAndSecurityTest do
 
   describe "owner authentication and CSRF/origin protections" do
     test "redirects unauthenticated browsing and LiveView mounts to /login", %{conn: conn} do
-      for path <- ["/", "/workspaces", "/sessions/demo", "/sessions/demo/conversations/1"] do
+      for path <- [
+            "/",
+            "/workspaces",
+            "/inbox",
+            "/sessions/demo",
+            "/sessions/demo/conversations/1"
+          ] do
         resp_conn = get(conn, path)
         assert redirected_to(resp_conn) == "/login"
 

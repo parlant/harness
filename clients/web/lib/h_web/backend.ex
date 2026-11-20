@@ -13,6 +13,9 @@ defmodule HWeb.Backend do
   @callback scan_entries(String.t(), term(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback list_models(keyword()) :: [map()]
   @callback execute_command(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  @callback subscribe_sessions(pid(), keyword()) ::
+              {:ok, {:snapshot, non_neg_integer(), binary()}} | {:error, term()}
+  @callback unsubscribe_sessions(keyword()) :: :ok
   @callback subscribe_conversation(String.t(), term(), pid(), term(), keyword()) ::
               {:ok,
                {:snapshot, non_neg_integer(), binary()}
@@ -43,6 +46,11 @@ defmodule HWeb.Backend do
 
   def execute_command(session_id, envelope, opts \\ []),
     do: impl().execute_command(session_id, envelope, opts)
+
+  def subscribe_sessions(subscriber_pid, opts \\ []),
+    do: impl().subscribe_sessions(subscriber_pid, opts)
+
+  def unsubscribe_sessions(opts \\ []), do: impl().unsubscribe_sessions(opts)
 
   def subscribe_conversation(
         session_id,

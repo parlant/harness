@@ -41,3 +41,112 @@ export const FollowTranscript = {
   },
   destroyed() { this.observer.disconnect(); }
 };
+
+// Desktop keyboard navigation for /inbox: j/k/arrows move across rows,
+// Tab/Shift+Tab cycle through non-processing (attention/idle) rows, Enter opens.
+export const InboxBrowser = {
+  mounted() {
+    this.selectedSid = null;
+
+    const getRows = () => Array.from(this.el.querySelectorAll("a[data-inbox-row='true']"));
+
+    const isEditable = target => {
+      if (!target) return false;
+      const tag = target.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+    };
+
+    this.applySelection = (rows, scrollIntoView = false) => {
+      let activeRow = null;
+      if (this.selectedSid) {
+        activeRow = rows.find(r => r.dataset.sessionId === this.selectedSid) || null;
+      }
+      if (!activeRow && rows.length > 0) {
+        activeRow = rows[0];
+        this.selectedSid = activeRow.dataset.sessionId;
+      }
+      for (const row of rows) {
+        const selected = row === activeRow;
+        row.classList.toggle("is-selected", selected);
+        row.setAttribute("aria-current", selected ? "true" : "false");
+      }
+      if (activeRow && scrollIntoView) {
+        activeRow.scrollIntoView({block: "nearest"});
+      }
+      return activeRow;
+    };
+
+    const move = delta => {
+      const rows = getRows();
+      if (rows.length === 0) return;
+      const currentIdx = rows.findIndex(r => r.dataset.sessionId === this.selectedSid);
+      const nextIdx =
+        currentIdx === -1
+          ? (delta > 0 ? 0 : rows.length - 1)
+          : (currentIdx + delta + rows.length) % rows.length;
+      this.selectedSid = rows[nextIdx].dataset.sessionId;
+      this.applySelection(rows, true);
+    };
+
+    const cycleAttention = direction => {
+      const rows = getRows();
+      const attentionRows = rows.filter(r => r.dataset.needsAttention === "true");
+      if (attentionRows.length === 0) return;
+      const currentIdx = attentionRows.findIndex(r => r.dataset.sessionId === this.selectedSid);
+      const nextIdx =
+        currentIdx === -1
+          ? (direction > 0 ? 0 : attentionRows.length - 1)
+          : (currentIdx + direction + attentionRows.length) % attentionRows.length;
+      this.selectedSid = attentionRows[nextIdx].dataset.sessionId;
+      this.applySelection(rows, true);
+    };
+
+    this.onKeydown = event => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isEditable(event.target)) return;
+
+      if (event.key === "j" || event.key === "ArrowDown") {
+        event.preventDefault();
+        move(1);
+      } else if (event.key === "k" || event.key === "ArrowUp") {
+        event.preventDefault();
+        move(-1);
+      } else if (event.key === "Tab") {
+        const rows = getRows();
+        if (rows.some(r => r.dataset.needsAttention === "true")) {
+          event.preventDefault();
+          cycleAttention(event.shiftKey ? -1 : 1);
+        }
+      } else if (event.key === "Enter") {
+        const rows = getRows();
+        const selected = this.applySelection(rows, false);
+        if (selected && event.target !== selected) {
+          event.preventDefault();
+          selected.click();
+        }
+      }
+    };
+
+    this.onPointerOver = event => {
+      const row = event.target?.closest?.("a[data-inbox-row='true']");
+      if (row && this.el.contains(row)) {
+        this.selectedSid = row.dataset.sessionId;
+        this.applySelection(getRows(), false);
+      }
+    };
+
+    window.addEventListener("keydown", this.onKeydown);
+    this.el.addEventListener("pointerover", this.onPointerOver);
+    this.applySelection(getRows(), false);
+  },
+
+  updated() {
+    const rows = Array.from(this.el.querySelectorAll("a[data-inbox-row='true']"));
+    this.applySelection(rows, false);
+  },
+
+  destroyed() {
+    if (this.onKeydown) window.removeEventListener("keydown", this.onKeydown);
+    if (this.onPointerOver) this.el.removeEventListener("pointerover", this.onPointerOver);
+  }
+};

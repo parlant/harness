@@ -56,6 +56,32 @@ defmodule HWeb.Backend.InVM do
   end
 
   @impl HWeb.Backend
+  def subscribe_sessions(subscriber_pid, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    case H.Daemon.subscribe_sessions(subscriber_pid, resolved) do
+      {:ok, result} ->
+        ensure_catalog_registered(resolved, subscriber_pid)
+        {:ok, result}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl HWeb.Backend
+  def unsubscribe_sessions(opts \\ []) do
+    resolved = daemon_opts(opts)
+    pubsub = Keyword.get(resolved, :pubsub, @default_pubsub)
+
+    if not is_nil(pubsub) and not is_nil(Process.whereis(pubsub)) do
+      Registry.unregister(pubsub, :catalog)
+    end
+
+    :ok
+  end
+
+  @impl HWeb.Backend
   def subscribe_conversation(
         session_id,
         conversation_id,
@@ -89,6 +115,18 @@ defmodule HWeb.Backend.InVM do
     with cid when is_integer(cid) <- parse_cid(conversation_id),
          true <- not is_nil(pubsub) and not is_nil(Process.whereis(pubsub)) do
       Registry.unregister(pubsub, {:conversation, session_id, cid})
+    end
+
+    :ok
+  end
+
+  defp ensure_catalog_registered(resolved, subscriber_pid) do
+    pubsub = Keyword.get(resolved, :pubsub, @default_pubsub)
+
+    with true <-
+           subscriber_pid == self() and not is_nil(pubsub) and not is_nil(Process.whereis(pubsub)),
+         false <- :catalog in Registry.keys(pubsub, self()) do
+      Registry.register(pubsub, :catalog, nil)
     end
 
     :ok

@@ -50,7 +50,11 @@ defmodule HWeb.ConnCase do
     start_supervised!({Registry, keys: :unique, name: registry})
     start_supervised!({Registry, keys: :duplicate, name: pubsub})
     start_supervised!({Auth, data_dir: data_dir, name: auth, table: auth_table})
-    start_supervised!({Catalog, data_dir: data_dir, name: catalog, table: catalog_table})
+
+    start_supervised!(
+      {Catalog, data_dir: data_dir, name: catalog, table: catalog_table, pubsub: pubsub}
+    )
+
     start_supervised!({WorkspaceLease, name: lease})
     start_supervised!({DynamicSupervisor, strategy: :one_for_one, name: runtime_sup})
 

@@ -1,0 +1,88 @@
+<div id="inbox-shell" class="inbox-shell" phx-hook="InboxBrowser">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">H</span>
+      <span class="brand-title">Inbox</span>
+      <span
+        :if={@counts.attention > 0}
+        id="inbox-topbar-attention"
+        class={["badge mono", if(@counts.error > 0, do: "badge-danger", else: "badge-attention")]}
+      >
+        {@counts.attention} attention
+      </span>
+      <span :if={@counts.processing > 0} class="badge mono inbox-topbar-running">
+        {@counts.processing} running
+      </span>
+    </div>
+
+    <nav class="topbar-actions" aria-label="Primary navigation">
+      <.link
+        :if={@next_attention}
+        id="inbox-jump-next-btn"
+        navigate={~p"/sessions/#{@next_attention.session_id}?from=inbox"}
+        class="btn btn-sm btn-primary"
+      >
+        Jump to next →
+      </.link>
+      <.link navigate={~p"/workspaces"} class="btn btn-sm">Workspaces</.link>
+      <button
+        id="inbox-refresh-btn"
+        type="button"
+        class="btn btn-sm btn-ghost"
+        phx-click="refresh"
+      >
+        Refresh
+      </button>
+      <form action={~p"/logout"} method="post" class="inline-form">
+        <input type="hidden" name="_csrf_token" value={get_csrf_token()} />
+        <button type="submit" class="btn btn-sm btn-ghost">Sign out</button>
+      </form>
+    </nav>
+  </header>
+
+  <main class="inbox-main" aria-label="Multi-session inbox">
+    <div class="inbox-container">
+      <div
+        :if={@error_banner}
+        id="inbox-error-banner"
+        role="alert"
+        class="flash-banner flash-error"
+      >
+        <span>{@error_banner}</span>
+        <button type="button" class="btn btn-sm btn-ghost" phx-click="dismiss_error">
+          Dismiss
+        </button>
+      </div>
+
+      <section class="inbox-toolbar">
+        <InboxComponents.filter_bar
+          id="inbox-filter"
+          counts={@counts}
+          filter_mode={@filter_mode}
+          search={@search}
+        />
+
+        <div class="inbox-shortcuts muted" aria-hidden="true">
+          <span class="mono">j/k</span>
+          move · <span class="mono">Tab</span>
+          next attention · <span class="mono">Enter</span>
+          open
+        </div>
+      </section>
+
+      <InboxComponents.workspace_tree
+        id="inbox-workspace-tree"
+        groups={@groups}
+        from_inbox={true}
+        new_session_event="new_session"
+        empty_message={
+          if @counts.all == 0 do
+            "No sessions yet. Open Workspaces to start one in any folder."
+          else
+            "No sessions match the current filter."
+          end
+        }
+      />
+    </div>
+  </main>
+</div>

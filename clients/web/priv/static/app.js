@@ -1,4 +1,4 @@
-import {PaneSplitter, FollowTranscript} from "./workbench.js";
+import {PaneSplitter, FollowTranscript, InboxBrowser} from "./workbench.js";
 import {Inspector} from "./inspector.js";
 
 (() => {
@@ -12,7 +12,7 @@ import {Inspector} from "./inspector.js";
   }
 
   const Hooks = {
-    PaneSplitter, FollowTranscript, Inspector,
+    PaneSplitter, FollowTranscript, InboxBrowser, Inspector,
     ComposerDraft: {
       mounted() {
         const key = draftKey(this.el);

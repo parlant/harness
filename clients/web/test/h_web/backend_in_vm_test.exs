@@ -26,7 +26,11 @@ defmodule HWeb.BackendInVMTest do
     start_supervised!({Registry, keys: :unique, name: registry})
     start_supervised!({Registry, keys: :duplicate, name: pubsub})
     start_supervised!({Auth, data_dir: data_dir, name: auth, table: auth_table})
-    start_supervised!({Catalog, data_dir: data_dir, name: catalog, table: catalog_table})
+
+    start_supervised!(
+      {Catalog, data_dir: data_dir, name: catalog, table: catalog_table, pubsub: pubsub}
+    )
+
     start_supervised!({WorkspaceLease, name: lease})
     start_supervised!({DynamicSupervisor, strategy: :one_for_one, name: runtime_sup})
 
@@ -94,5 +98,13 @@ defmodule HWeb.BackendInVMTest do
 
     assert :ok = InVM.unsubscribe_conversation(sid, "1")
     refute {:conversation, sid, 1} in Registry.keys(pubsub, self())
+
+    assert {:ok, {:snapshot, snap_seq, snap_bin}} = InVM.subscribe_sessions(self())
+    assert is_integer(snap_seq) and snap_seq >= 1
+    assert %{"version" => 1, "sessions" => [%{"session_id" => ^sid}]} = JSON.decode!(snap_bin)
+    assert :catalog in Registry.keys(pubsub, self())
+
+    assert :ok = InVM.unsubscribe_sessions()
+    refute :catalog in Registry.keys(pubsub, self())
   end
 end

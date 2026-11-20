@@ -40,11 +40,15 @@ server on loopback, not behind a public proxy. Neither is enabled in prod.
 ## Pane composition
 
 `HWeb.Workbench.split/1` is a function component with `:sidebar` and `:main`
-slots, not a registry of pane processes. Both routes use it. The separator is
-draggable or keyboard adjustable (arrows, Home, End); widths are per view and
-browser tab. On narrow screens the workspace stacks and the session sidebar
-becomes a drawer. The chat keeps its composer in place and follows output
-only while you're at the bottom; **Latest** returns there.
+slots, not a registry of pane processes. Workspace and session routes use it;
+`/inbox` (`HWeb.InboxLive`) renders a live working-directory-grouped overview
+backed by `H.Daemon.subscribe_sessions/2` (`:catalog` PubSub) and shared
+`HWeb.InboxComponents` also used by the workspace sidebar and the session
+drawer/switcher. The separator is draggable or keyboard adjustable (arrows,
+Home, End); widths are per view and browser tab. On narrow screens the
+workspace stacks and the session sidebar becomes a drawer. The chat keeps its
+composer in place and follows output only while you're at the bottom; **Latest**
+returns there.
 
 - Put presentation in function components (`ConversationComponents`), and
   page markup in colocated `*.html.heex`. Keep URL params, subscriptions,

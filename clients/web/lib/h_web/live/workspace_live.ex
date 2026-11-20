@@ -4,7 +4,7 @@ defmodule HWeb.WorkspaceLive do
   """
   use HWeb, :live_view
 
-  alias HWeb.{Backend, Workbench}
+  alias HWeb.{Backend, CatalogState, InboxComponents, Workbench}
 
   @impl true
   def mount(params, _session, socket) do
@@ -29,7 +29,11 @@ defmodule HWeb.WorkspaceLive do
         parent_path: nil,
         directories: [],
         folder_sessions: [],
+        catalog: CatalogState.new(),
+        catalog_subscribed?: false,
         sessions: [],
+        session_groups: [],
+        session_counts: CatalogState.counts([]),
         selected_dir: "",
         filter: "",
         new_session_id: "",
@@ -40,6 +44,29 @@ defmodule HWeb.WorkspaceLive do
       |> browse(initial_env, initial_path)
 
     {:ok, socket}
+  end
+
+  @impl true
+  def terminate(_reason, socket) do
+    if socket.assigns[:catalog_subscribed?] do
+      Backend.unsubscribe_sessions()
+    end
+
+    :ok
+  end
+
+  @impl true
+  def handle_info({:catalog_frame, seq, json_bin}, socket) do
+    case CatalogState.apply_frame(socket.assigns.catalog, seq, json_bin) do
+      {:ok, next_catalog} ->
+        {:noreply, apply_catalog_assigns(socket, next_catalog)}
+
+      :stale ->
+        {:noreply, socket}
+
+      {:error, _reason} ->
+        {:noreply, load_sessions(socket)}
+    end
   end
 
   @impl true
@@ -104,10 +131,44 @@ defmodule HWeb.WorkspaceLive do
   end
 
   defp load_sessions(socket) do
-    case Backend.list_sessions(%{}) do
-      {:ok, sessions} -> assign(socket, :sessions, sessions)
-      _ -> assign(socket, :sessions, [])
+    if connected?(socket) do
+      case Backend.subscribe_sessions(self()) do
+        {:ok, {:snapshot, seq, json_bin}} ->
+          case CatalogState.apply_snapshot(CatalogState.new(), seq, json_bin) do
+            {:ok, catalog} ->
+              socket
+              |> assign(:catalog_subscribed?, true)
+              |> apply_catalog_assigns(catalog)
+
+            {:error, _} ->
+              assign(socket, :catalog_subscribed?, true)
+          end
+
+        _ ->
+          load_sessions_disconnected(socket)
+      end
+    else
+      load_sessions_disconnected(socket)
     end
+  end
+
+  defp load_sessions_disconnected(socket) do
+    case Backend.list_sessions(%{}) do
+      {:ok, sessions} ->
+        apply_catalog_assigns(socket, CatalogState.from_list(sessions))
+
+      _ ->
+        apply_catalog_assigns(socket, CatalogState.new())
+    end
+  end
+
+  defp apply_catalog_assigns(socket, catalog) do
+    assign(socket,
+      catalog: catalog,
+      sessions: catalog.sessions,
+      session_groups: CatalogState.group_by_workspace(catalog.sessions),
+      session_counts: CatalogState.counts(catalog.sessions)
+    )
   end
 
   defp browse(socket, env_id, path) do

@@ -6,7 +6,12 @@
 >
   <:sidebar>
     <div class="sidebar-top">
-      <.link navigate={~p"/"} class="btn btn-sm btn-ghost">← Workspaces</.link>
+      <div class="sidebar-nav-links">
+        <.link id="sidebar-inbox-link" navigate={~p"/inbox"} class="btn btn-sm btn-ghost">
+          ← Inbox
+        </.link>
+        <.link navigate={~p"/"} class="btn btn-sm btn-ghost">Workspaces</.link>
+      </div>
       <button
         type="button"
         class="btn btn-sm btn-ghost mobile-only"
@@ -29,7 +34,7 @@
       <ul id="branches-list" class="branch-list">
         <li :for={conv <- @conversations}>
           <.link
-            patch={~p"/sessions/#{@session_id}/conversations/#{conv.id}"}
+            patch={conversation_path(@session_id, conv.id, @from_inbox?)}
             class={[
               "branch-link mono",
               if(to_string(conv.id) == @conversation_id, do: "is-active")
@@ -43,18 +48,59 @@
         </li>
       </ul>
     </div>
+
+    <div id="session-inbox-switcher" class="sidebar-section sidebar-inbox-section">
+      <div class="sidebar-section-head">
+        <span class="section-title">All Sessions (Inbox)</span>
+        <span
+          :if={@catalog_counts.attention > 0}
+          class={[
+            "badge mono",
+            if(@catalog_counts.error > 0, do: "badge-danger", else: "badge-attention")
+          ]}
+        >
+          {@catalog_counts.attention}
+        </span>
+      </div>
+
+      <InboxComponents.workspace_tree
+        id="session-sidebar-inbox-tree"
+        groups={@catalog_groups}
+        current_session_id={@session_id}
+        from_inbox={true}
+        compact={true}
+        empty_message="No other sessions."
+      />
+    </div>
   </:sidebar>
 
   <:main>
     <header class="session-header">
       <div class="header-left">
         <button
+          id="mobile-drawer-btn"
           type="button"
           class="btn btn-sm mobile-only"
           phx-click="toggle_drawer"
         >
-          Menu
+          <span>Menu</span>
+          <span
+            :if={@other_attention_count > 0}
+            class={[
+              "badge mono",
+              if(@catalog_counts.error > 0, do: "badge-danger", else: "badge-attention")
+            ]}
+          >
+            {@other_attention_count}
+          </span>
         </button>
+        <.link
+          id="header-inbox-link"
+          navigate={~p"/inbox"}
+          class={["btn btn-sm", if(@from_inbox?, do: "btn-inbox-return", else: "btn-ghost")]}
+        >
+          ← Inbox
+        </.link>
         <span class="mono header-sid">{@session_id}</span>
         <span class="badge mono">conv #{@conversation_id}</span>
         <span :if={!is_nil(@cursor_seq)} id="hdr-seq" class="badge mono">
@@ -66,6 +112,29 @@
       </div>
 
       <div class="header-right">
+        <.link
+          :if={@next_attention_session}
+          id="next-attention-btn"
+          navigate={~p"/sessions/#{@next_attention_session.session_id}?from=inbox"}
+          class={[
+            "btn btn-sm session-attention-pill",
+            if(@next_attention_session.attention in ["error", "quarantined"],
+              do: "is-error",
+              else: "is-idle"
+            )
+          ]}
+          title={"Jump to #{@next_attention_session.title || @next_attention_session.session_id}"}
+        >
+          <span :if={@other_attention_count > 0} class="mono">
+            {@other_attention_count} need attention
+          </span>
+          <span class="attention-pill-sep" aria-hidden="true">·</span>
+          <span>
+            {if @next_attention_session.attention in ["error", "quarantined"],
+              do: "Next error →",
+              else: "Next idle →"}
+          </span>
+        </.link>
         <button
           :if={@run_active?}
           id="stop-btn"
