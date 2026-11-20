@@ -6,8 +6,44 @@ defmodule H.Session.Server.Tools do
   """
 
   alias H.{Document, Storage, Task, Tool}
-  alias H.Session.LiveOutput
+  alias H.Session.{LiveOutput, Subagents}
   alias H.Session.Server.{State, Stream, Submissions}
+
+  @doc """
+  Computes the next `{:spawn_tool, cid, tid}` effects for a generation's tool round.
+
+  Regular worker tools execute sequentially one at a time, whereas consecutive
+  pending `"subagent"` tool calls dispatch and park concurrently without holding
+  `Task.Supervisor` workers.
+  """
+  def next_tool_spawn_effects(cid, child_ids, state) when is_list(child_ids) do
+    children =
+      child_ids
+      |> Enum.map(&Map.get(state.tasks, &1))
+      |> Enum.reject(&is_nil/1)
+
+    non_subagent_running? =
+      Enum.any?(children, fn t ->
+        t.status == "running" and t.checkpoint["name"] != "subagent"
+      end)
+
+    if non_subagent_running? do
+      []
+    else
+      case Enum.find(children, &(&1.status == "pending")) do
+        nil ->
+          []
+
+        %{checkpoint: %{"name" => "subagent"}} ->
+          children
+          |> Enum.filter(&(&1.status == "pending" and &1.checkpoint["name"] == "subagent"))
+          |> Enum.map(&{:spawn_tool, cid, &1.id})
+
+        first_pending ->
+          [{:spawn_tool, cid, first_pending.id}]
+      end
+    end
+  end
 
   def spawn_worker(cid, tool_task_id, state, apply_effects_fn) do
     case Map.get(state.tasks, tool_task_id) do
@@ -50,104 +86,115 @@ defmodule H.Session.Server.Tools do
                 )
 
               {:ok, validated_args} ->
-                case maybe_acquire_tool_lease(tool_mod, cid, state) do
-                  {:error, {:workspace_busy, holder_key}} ->
-                    commit_immediate_error(
-                      cid,
-                      tool_task,
-                      call_id,
-                      name,
-                      "Workspace #{state.cwd} is currently busy with mutating work by #{inspect(holder_key)}.",
-                      "workspace_busy",
-                      state,
-                      now,
-                      apply_effects_fn
-                    )
+                if tool_mod == H.Tools.Subagent do
+                  Subagents.spawn_or_dispatch(
+                    cid,
+                    tool_task,
+                    validated_args,
+                    state,
+                    apply_effects_fn
+                  )
+                else
+                  case maybe_acquire_tool_lease(tool_mod, cid, state) do
+                    {:error, {:workspace_busy, holder_key}} ->
+                      commit_immediate_error(
+                        cid,
+                        tool_task,
+                        call_id,
+                        name,
+                        "Workspace #{state.cwd} is currently busy with mutating work by #{inspect(holder_key)}.",
+                        "workspace_busy",
+                        state,
+                        now,
+                        apply_effects_fn
+                      )
 
-                  {:ok, state} ->
-                    {:ok, attempt_id, store} = Storage.mint_id(state.store)
-                    state = %{state | store: store}
+                    {:ok, state} ->
+                      {:ok, attempt_id, store} = Storage.mint_id(state.store)
+                      state = %{state | store: store}
 
-                    running_task =
-                      Task.start_running(tool_task, attempt_id, now, %{
-                        "phase" => "execute",
-                        "replay" => Atom.to_string(tool_mod.replay())
-                      })
+                      running_task =
+                        Task.start_running(tool_task, attempt_id, now, %{
+                          "phase" => "execute",
+                          "replay" => Atom.to_string(tool_mod.replay())
+                        })
 
-                    live = State.put_tool_status(state.docs[cid]["live"], call_id, "running")
+                      live = State.put_tool_status(state.docs[cid]["live"], call_id, "running")
 
-                    state =
-                      state
-                      |> State.put_task(running_task)
-                      |> State.put_doc(cid, "live", live)
+                      state =
+                        state
+                        |> State.put_task(running_task)
+                        |> State.put_doc(cid, "live", live)
 
-                    case Storage.commit(state.store, [
-                           [
-                             {:put_task, running_task},
-                             {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}
-                           ]
-                         ]) do
-                      {:error, _io_err} ->
-                        State.release_lease(cid, state)
+                      case Storage.commit(state.store, [
+                             [
+                               {:put_task, running_task},
+                               {:put_doc, {:conversation, cid, "live"},
+                                Document.wrap("live", live)}
+                             ]
+                           ]) do
+                        {:error, _io_err} ->
+                          State.release_lease(cid, state)
 
-                      {:ok, %{seqs: [batch_seq]}, committed_store} ->
-                        state = %{state | store: committed_store, seq: batch_seq}
+                        {:ok, %{seqs: [batch_seq]}, committed_store} ->
+                          state = %{state | store: committed_store, seq: batch_seq}
 
-                        state =
-                          Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
-                            "live" => [["set", ["tools", call_id, "status"], "running"]]
-                          })
+                          state =
+                            Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
+                              "live" => [["set", ["tools", call_id, "status"], "running"]]
+                            })
 
-                        server_pid = self()
-                        inc = state.incarnation
-                        env = state.execution_env
-                        sid = state.session_id
+                          server_pid = self()
+                          inc = state.incarnation
+                          env = state.execution_env
+                          sid = state.session_id
 
-                        output_preview =
-                          LiveOutput.limit(fn chunk ->
-                            send(
-                              server_pid,
-                              {:tool_output, inc, tool_task_id, attempt_id, cid, call_id, chunk}
-                            )
-                          end)
+                          output_preview =
+                            LiveOutput.limit(fn chunk ->
+                              send(
+                                server_pid,
+                                {:tool_output, inc, tool_task_id, attempt_id, cid, call_id, chunk}
+                              )
+                            end)
 
-                        tool_ctx = %{
-                          env: env,
-                          session_id: sid,
-                          conversation_id: cid,
-                          task_id: tool_task_id,
-                          scan_entries: fn q ->
-                            H.Session.Server.scan_entries(server_pid, cid, q)
-                          end,
-                          on_output: fn chunk, _total -> output_preview.(chunk) end
-                        }
+                          tool_ctx = %{
+                            env: env,
+                            session_id: sid,
+                            conversation_id: cid,
+                            task_id: tool_task_id,
+                            scan_entries: fn q ->
+                              H.Session.Server.scan_entries(server_pid, cid, q)
+                            end,
+                            on_output: fn chunk, _total -> output_preview.(chunk) end
+                          }
 
-                        {:ok, worker_pid} =
-                          Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
-                            t0 = System.monotonic_time(:millisecond)
-                            res = tool_mod.execute(validated_args, tool_ctx)
-                            dur = max(0, System.monotonic_time(:millisecond) - t0)
+                          {:ok, worker_pid} =
+                            Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
+                              t0 = System.monotonic_time(:millisecond)
+                              res = tool_mod.execute(validated_args, tool_ctx)
+                              dur = max(0, System.monotonic_time(:millisecond) - t0)
 
-                            send(
-                              server_pid,
-                              {:worker_done, inc, tool_task_id, attempt_id,
-                               {:tool_result, dur, res}}
-                            )
-                          end)
+                              send(
+                                server_pid,
+                                {:worker_done, inc, tool_task_id, attempt_id,
+                                 {:tool_result, dur, res}}
+                              )
+                            end)
 
-                        ref = Process.monitor(worker_pid)
+                          ref = Process.monitor(worker_pid)
 
-                        worker_info = %{
-                          task_id: tool_task_id,
-                          conv_id: cid,
-                          kind: :tool_call,
-                          pid: worker_pid,
-                          monitor_ref: ref,
-                          started_at: now
-                        }
+                          worker_info = %{
+                            task_id: tool_task_id,
+                            conv_id: cid,
+                            kind: :tool_call,
+                            pid: worker_pid,
+                            monitor_ref: ref,
+                            started_at: now
+                          }
 
-                        %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
-                    end
+                          %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
+                      end
+                  end
                 end
             end
         end
@@ -220,63 +267,90 @@ defmodule H.Session.Server.Tools do
     gen_task = Map.fetch!(state.tasks, gen_task_id)
     child_ids = gen_task.checkpoint["tool_task_ids"] || []
 
-    next_pending =
+    children =
       child_ids
       |> Enum.map(&Map.get(state.tasks, &1))
-      |> Enum.find(&(&1 != nil and &1.status == "pending"))
+      |> Enum.reject(&is_nil/1)
 
-    if next_pending do
-      writes = [
-        {:append_entry, entry},
-        {:put_task, done_tool_task},
-        {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}
-      ]
+    next_spawn_effects = next_tool_spawn_effects(cid, child_ids, state)
+    all_terminal? = Enum.all?(children, &(&1.status == "terminal"))
 
-      staged = %{
-        raw_item: {:worker_done, done_tool_task.id, :none, :settled},
-        writes: writes,
-        conv_events: %{cid => %{entries: [entry], doc_ops: %{"live" => [["replace", live]]}}},
-        submissions: [],
-        effects: base_effects ++ [{:spawn_tool, cid, next_pending.id}],
-        reply_from: nil,
-        receipt: nil
-      }
+    cond do
+      next_spawn_effects != [] ->
+        writes = [
+          {:append_entry, entry},
+          {:put_task, done_tool_task},
+          {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}
+        ]
 
-      {:batch, staged, state}
-    else
-      {round_writes, state, round_effects} = finish_tool_round_stage(gen_task, state, now)
-      next_live = state.docs[cid]["live"]
+        staged = %{
+          raw_item: {:worker_done, done_tool_task.id, :none, :settled},
+          writes: writes,
+          conv_events: %{cid => %{entries: [entry], doc_ops: %{"live" => [["replace", live]]}}},
+          submissions: [],
+          effects: base_effects ++ next_spawn_effects,
+          reply_from: nil,
+          receipt: nil
+        }
 
-      appended =
-        [entry] ++
+        {:batch, staged, state}
+
+      not all_terminal? ->
+        writes = [
+          {:append_entry, entry},
+          {:put_task, done_tool_task},
+          {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}
+        ]
+
+        staged = %{
+          raw_item: {:worker_done, done_tool_task.id, :none, :settled},
+          writes: writes,
+          conv_events: %{cid => %{entries: [entry], doc_ops: %{"live" => [["replace", live]]}}},
+          submissions: [],
+          effects: base_effects,
+          reply_from: nil,
+          receipt: nil
+        }
+
+        {:batch, staged, state}
+
+      true ->
+        {round_writes, state, round_effects} = finish_tool_round_stage(gen_task, state, now)
+        next_live = state.docs[cid]["live"]
+
+        appended =
+          [entry] ++
+            Enum.flat_map(round_writes, fn
+              {:append_entry, e} -> [e]
+              _ -> []
+            end)
+
+        inbox_ops =
           Enum.flat_map(round_writes, fn
-            {:append_entry, e} -> [e]
-            _ -> []
+            {:put_doc, {:conversation, ^cid, "inbox"}, _} ->
+              [["replace", state.docs[cid]["inbox"]]]
+
+            _ ->
+              []
           end)
 
-      inbox_ops =
-        Enum.flat_map(round_writes, fn
-          {:put_doc, {:conversation, ^cid, "inbox"}, _} -> [["replace", state.docs[cid]["inbox"]]]
-          _ -> []
-        end)
+        doc_ops =
+          %{"live" => [["replace", next_live]]}
+          |> then(fn m -> if inbox_ops == [], do: m, else: Map.put(m, "inbox", inbox_ops) end)
 
-      doc_ops =
-        %{"live" => [["replace", next_live]]}
-        |> then(fn m -> if inbox_ops == [], do: m, else: Map.put(m, "inbox", inbox_ops) end)
+        writes = [{:append_entry, entry}, {:put_task, done_tool_task}] ++ round_writes
 
-      writes = [{:append_entry, entry}, {:put_task, done_tool_task}] ++ round_writes
+        staged = %{
+          raw_item: {:worker_done, done_tool_task.id, :none, :settled},
+          writes: writes,
+          conv_events: %{cid => %{entries: appended, doc_ops: doc_ops}},
+          submissions: [],
+          effects: base_effects ++ round_effects,
+          reply_from: nil,
+          receipt: nil
+        }
 
-      staged = %{
-        raw_item: {:worker_done, done_tool_task.id, :none, :settled},
-        writes: writes,
-        conv_events: %{cid => %{entries: appended, doc_ops: doc_ops}},
-        submissions: [],
-        effects: base_effects ++ round_effects,
-        reply_from: nil,
-        receipt: nil
-      }
-
-      {:batch, staged, state}
+        {:batch, staged, state}
     end
   end
 
@@ -430,7 +504,33 @@ defmodule H.Session.Server.Tools do
           aborted_tool = Task.abort(tool_task, reason, now)
           acc_s = State.put_task(acc_s, aborted_tool)
 
-          kill_eff = State.worker_kill_effects(acc_s, tid) ++ [{:release_lease, cid}]
+          {acc_s, subagent_effects} =
+            case tool_task.memos do
+              %{"child_session_id" => child_sid, "mode" => mode} = memos
+              when is_binary(child_sid) and mode in ["wait", "await"] ->
+                child_cid = memos["child_conversation_id"] || 1
+                child_req_id = memos["child_request_id"]
+
+                acc_s =
+                  if is_binary(child_req_id),
+                    do: Subagents.remove_watch(acc_s, child_sid, child_req_id, tid),
+                    else: acc_s
+
+                unwatch_eff =
+                  if is_binary(child_req_id),
+                    do: [{:unwatch_subagent, child_sid, child_req_id}],
+                    else: []
+
+                {acc_s,
+                 unwatch_eff ++ [{:abort_subagent, child_sid, child_cid, "parent_aborted"}]}
+
+              _ ->
+                {acc_s, []}
+            end
+
+          kill_eff =
+            State.worker_kill_effects(acc_s, tid) ++
+              [{:release_lease, cid}] ++ subagent_effects
 
           {acc_w ++ [{:append_entry, entry}, {:put_task, aborted_tool}], acc_s, acc_k ++ kill_eff}
       end

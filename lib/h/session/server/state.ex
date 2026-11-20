@@ -225,7 +225,7 @@ defmodule H.Session.Server.State do
 
     tool_task =
       Enum.find(sorted, fn t ->
-        t.kind == "tool_call" and t.status in ["running", "pending"]
+        t.kind == "tool_call" and t.status in ["running", "pending", "waiting"]
       end)
 
     user_shell_task = Enum.find(sorted, &(&1.kind == "user_shell"))

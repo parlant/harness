@@ -26,6 +26,7 @@ defmodule H.Daemon do
   @default_catalog H.Catalog
   @default_catalog_table :h_catalog
   @default_workspace_lease H.WorkspaceLease
+  @default_max_subagent_depth 1
   @default_max_subagent_depth_hard 8
   @terminal_submission_statuses ["done", "unanswered", "withdrawn"]
 
@@ -367,7 +368,12 @@ defmodule H.Daemon do
          candidate_sid = Map.get(params, :session_id) || mint_session_id(ws.cwd, table),
          {:ok, resolved_parent, resolved_role} <-
            resolve_parent_lineage(candidate_sid, params, table, opts),
-         {:ok, bootstrapped} <- bootstrap_agent(harness, ws.env, agent_opts, opts) do
+         session_depth = get_in(resolved_parent, [:depth]) || 0,
+         bootstrap_opts =
+           opts
+           |> Keyword.put(:session_depth, session_depth)
+           |> Keyword.put_new(:max_subagent_depth, @default_max_subagent_depth),
+         {:ok, bootstrapped} <- bootstrap_agent(harness, ws.env, agent_opts, bootstrap_opts) do
       attrs =
         %{
           session_id: candidate_sid,
@@ -442,43 +448,50 @@ defmodule H.Daemon do
   end
 
   defp resolve_parent_step(parent_entry, parent_cid, requested_at_entry_id, opts) do
-    case Validation.ensure_not_quarantined(parent_entry) do
-      {:error, _} ->
-        {:ok, requested_at_entry_id}
+    if Keyword.get(opts, :parent_verified, false) == true do
+      {:ok, requested_at_entry_id}
+    else
+      case Validation.ensure_not_quarantined(parent_entry) do
+        {:error, _} ->
+          {:ok, requested_at_entry_id}
 
-      :ok ->
-        case ensure_session_started(parent_entry, opts, nil) do
-          {:ok, server} ->
-            if is_nil(requested_at_entry_id) do
-              case Server.scan_entries(server, parent_cid, %{order: :desc, limit: 1}) do
-                {:ok, %{items: [latest | _]}} ->
-                  {:ok, latest.id}
+        :ok ->
+          case ensure_session_started(parent_entry, opts, nil) do
+            {:ok, server} when server == self() ->
+              {:ok, requested_at_entry_id}
 
-                {:ok, %{items: []}} ->
-                  {:ok, nil}
+            {:ok, server} ->
+              if is_nil(requested_at_entry_id) do
+                case Server.scan_entries(server, parent_cid, %{order: :desc, limit: 1}) do
+                  {:ok, %{items: [latest | _]}} ->
+                    {:ok, latest.id}
 
-                {:error, :not_found} ->
-                  {:error, {:bad_request, "parent conversation not found: #{parent_cid}"}}
+                  {:ok, %{items: []}} ->
+                    {:ok, nil}
 
-                {:error, _} ->
-                  {:ok, nil}
+                  {:error, :not_found} ->
+                    {:error, {:bad_request, "parent conversation not found: #{parent_cid}"}}
+
+                  {:error, _} ->
+                    {:ok, nil}
+                end
+              else
+                case Server.verify_visible_entry(server, parent_cid, requested_at_entry_id) do
+                  {:ok, _entry} ->
+                    {:ok, requested_at_entry_id}
+
+                  {:error, :not_found} ->
+                    {:error, {:bad_request, "parent conversation not found: #{parent_cid}"}}
+
+                  {:error, :entry_not_visible} ->
+                    {:error, {:bad_request, "parent at_entry_id not visible"}}
+                end
               end
-            else
-              case Server.verify_visible_entry(server, parent_cid, requested_at_entry_id) do
-                {:ok, _entry} ->
-                  {:ok, requested_at_entry_id}
 
-                {:error, :not_found} ->
-                  {:error, {:bad_request, "parent conversation not found: #{parent_cid}"}}
-
-                {:error, :entry_not_visible} ->
-                  {:error, {:bad_request, "parent at_entry_id not visible"}}
-              end
-            end
-
-          {:error, _} ->
-            {:ok, requested_at_entry_id}
-        end
+            {:error, _} ->
+              {:ok, requested_at_entry_id}
+          end
+      end
     end
   end
 
@@ -895,12 +908,16 @@ defmodule H.Daemon do
     registry = Keyword.get(opts, :registry, @default_registry)
     pubsub = Keyword.get(opts, :pubsub, @default_pubsub)
     catalog = Keyword.get(opts, :catalog, @default_catalog)
+    catalog_table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+    runtime_sup = Keyword.get(opts, :runtime_sup, @default_runtime_sup)
     workspace_lease = Keyword.get(opts, :workspace_lease, @default_workspace_lease)
     storage_mod = Keyword.get(opts, :storage_mod, H.Storage.File)
     storage_opts = Keyword.get(opts, :storage_opts, [])
     data_dir = Keyword.get(opts, :data_dir) || Application.get_env(:harness, :data_dir)
     env_id = Map.get(entry, :env_id) || "host"
     harness_id = Map.get(entry, :harness_id) || "coding"
+    session_depth = get_in(entry, [:parent, :depth]) || 0
+    max_subagent_depth = Keyword.get(opts, :max_subagent_depth, @default_max_subagent_depth)
 
     workspace =
       case Keyword.fetch(opts, :execution_env) do
@@ -910,7 +927,13 @@ defmodule H.Daemon do
 
     with {:ok, %{env: execution_env, cwd: cwd}} when cwd == entry.cwd <- workspace,
          {:ok, harness} <- Harness.resolve(harness_id, opts) do
-      tools = Keyword.get_lazy(opts, :tools, fn -> harness.tools(opts) end)
+      harness_opts =
+        opts
+        |> Keyword.put(:session_depth, session_depth)
+        |> Keyword.put(:max_subagent_depth, max_subagent_depth)
+
+      tools = Keyword.get_lazy(opts, :tools, fn -> harness.tools(harness_opts) end)
+      explicit_tools = Keyword.get(opts, :tools)
 
       sup_opts =
         [
@@ -923,14 +946,21 @@ defmodule H.Daemon do
           registry: registry,
           pubsub: pubsub,
           catalog: catalog,
+          catalog_table: catalog_table,
+          runtime_sup: runtime_sup,
           workspace_lease: workspace_lease,
           storage_mod: storage_mod,
           storage_opts: storage_opts,
           data_dir: data_dir,
           execution_env: execution_env,
-          tools: tools
+          tools: tools,
+          max_subagent_depth: max_subagent_depth
         ]
+        |> maybe_put_kw(:explicit_tools, explicit_tools)
         |> maybe_put_kw(:initial_agent, initial_agent)
+        |> maybe_copy_kw(opts, :environments)
+        |> maybe_copy_kw(opts, :harnesses)
+        |> maybe_copy_kw(opts, :max_subagent_depth_hard)
         |> maybe_copy_kw(opts, :maintenance_table)
         |> maybe_copy_kw(opts, :provider)
         |> Keyword.put(:provider_config, provider_config(opts))

@@ -660,6 +660,7 @@ defmodule H.Session.Server.Generation do
               status: "pending",
               checkpoint: %{
                 "conversation_id" => cid,
+                "assistant_entry_id" => entry_id,
                 "call_id" => call_id,
                 "name" => name,
                 "arguments" => tc["arguments"] || %{},
@@ -694,7 +695,7 @@ defmodule H.Session.Server.Generation do
         |> State.put_task(waiting_gen)
         |> State.put_doc(cid, "live", next_live)
 
-      first_tool = hd(tool_tasks)
+      spawn_effects = Tools.next_tool_spawn_effects(cid, tool_task_ids, state)
 
       writes =
         [{:append_entry, entry}] ++
@@ -712,7 +713,7 @@ defmodule H.Session.Server.Generation do
         writes: writes,
         conv_events: %{cid => %{entries: [entry], doc_ops: doc_ops}},
         submissions: [],
-        effects: [{:spawn_tool, cid, first_tool.id}],
+        effects: spawn_effects,
         reply_from: nil,
         receipt: nil
       }

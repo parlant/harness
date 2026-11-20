@@ -23,6 +23,8 @@ defmodule H.Session.Server.Recovery do
     H.Tools.SearchHistory
   ]
 
+  @default_max_subagent_depth 1
+
   def build_storage_opts(opts, session_id) do
     storage_mod = Keyword.get(opts, :storage_mod, H.Storage.File)
     base_opts = Keyword.get(opts, :storage_opts, [])
@@ -84,9 +86,52 @@ defmodule H.Session.Server.Recovery do
       incarnation = prev_inc + 1
       now = System.system_time(:millisecond)
 
-      tools = State.resolve_tools(Keyword.get(opts, :tools, @default_tools))
+      depth = get_in(parent, [:depth]) || get_in(parent, ["depth"]) || 0
+      max_subagent_depth = Keyword.get(opts, :max_subagent_depth, @default_max_subagent_depth)
+
+      default_tools =
+        if depth < max_subagent_depth do
+          @default_tools ++ [H.Tools.Subagent]
+        else
+          @default_tools
+        end
+
+      tools = State.resolve_tools(Keyword.get(opts, :tools, default_tools))
       provider_mod = Keyword.get(opts, :provider, H.Provider.ReqLLM)
       provider_config = Keyword.get(opts, :provider_config, %{})
+
+      daemon_opts =
+        opts
+        |> Keyword.take([
+          :registry,
+          :pubsub,
+          :catalog,
+          :catalog_table,
+          :workspace_lease,
+          :runtime_sup,
+          :storage_mod,
+          :storage_opts,
+          :data_dir,
+          :maintenance_table,
+          :provider,
+          :provider_config,
+          :default_model,
+          :environments,
+          :harnesses,
+          :max_subagent_depth,
+          :max_subagent_depth_hard,
+          :explicit_tools,
+          :persist_within_ms,
+          :ephemeral_interval_ms,
+          :retry_limit,
+          :retry_backoff_ms,
+          :restart_limit,
+          :auto_compaction,
+          :compaction_keep_recent_chars,
+          :compaction_max_tokens,
+          :max_restarts,
+          :max_seconds
+        ])
 
       default_model =
         resolve_default_model(Keyword.get(opts, :default_model), provider_mod, provider_config)
@@ -141,6 +186,7 @@ defmodule H.Session.Server.Recovery do
         docs: docs,
         recent_submissions: recent_subs,
         workers: %{},
+        subagent_watches: %{},
         ephemeral: %{},
         held_leases: MapSet.new(),
         replay_rings: %{},
@@ -150,12 +196,16 @@ defmodule H.Session.Server.Recovery do
         registry: Keyword.get(opts, :registry, H.Registry),
         pubsub: Keyword.get(opts, :pubsub, H.PubSub),
         catalog: Keyword.get(opts, :catalog, H.Catalog),
+        catalog_table: Keyword.get(opts, :catalog_table, :h_catalog),
+        runtime_sup: Keyword.get(opts, :runtime_sup, H.Session.RuntimeSupervisor),
         task_sup: Keyword.fetch!(opts, :task_sup),
         workspace_lease: Keyword.get(opts, :workspace_lease, H.WorkspaceLease),
         provider_mod: provider_mod,
         provider_config: provider_config,
         execution_env: execution_env,
         tools: tools,
+        max_subagent_depth: max_subagent_depth,
+        daemon_opts: daemon_opts,
         default_model: default_model,
         persist_within_ms: Keyword.get(opts, :persist_within_ms, @default_persist_within_ms),
         ephemeral_interval_ms:
@@ -348,12 +398,15 @@ defmodule H.Session.Server.Recovery do
         cid = gen_task.checkpoint["conversation_id"]
         child_ids = gen_task.checkpoint["tool_task_ids"] || []
 
-        next_pending =
+        waiting_subagent_effects =
           child_ids
           |> Enum.map(&Map.get(state.tasks, &1))
-          |> Enum.find(&(&1 != nil and &1.status == "pending"))
+          |> Enum.filter(fn t ->
+            t != nil and t.status == "waiting" and t.checkpoint["name"] == "subagent"
+          end)
+          |> Enum.map(&{:resume_subagent, cid, &1.id})
 
-        if next_pending, do: [{:spawn_tool, cid, next_pending.id}], else: []
+        waiting_subagent_effects ++ Tools.next_tool_spawn_effects(cid, child_ids, state)
       end)
 
     inference_effects ++ tool_effects

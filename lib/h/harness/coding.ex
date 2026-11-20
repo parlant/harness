@@ -10,8 +10,10 @@ defmodule H.Harness.Coding do
   @behaviour H.Harness
 
   alias H.ExecutionEnv
-  alias H.Tools.{Bash, Edit, Read, SearchHistory, Write}
+  alias H.Tools.{Bash, Edit, Read, SearchHistory, Subagent, Write}
 
+  @base_tools [Read, Write, Edit, Bash, SearchHistory]
+  @default_max_subagent_depth 1
   @max_parent_hops 25
   @max_agents_bytes 65_536
 
@@ -30,7 +32,20 @@ defmodule H.Harness.Coding do
 
   @impl true
   def tools(opts \\ []) do
-    Keyword.get(opts, :tools, [Read, Write, Edit, Bash, SearchHistory])
+    case Keyword.fetch(opts, :tools) do
+      {:ok, explicit} ->
+        explicit
+
+      :error ->
+        depth = Keyword.get(opts, :session_depth, 0) || 0
+        max_depth = Keyword.get(opts, :max_subagent_depth, @default_max_subagent_depth)
+
+        if depth < max_depth do
+          @base_tools ++ [Subagent]
+        else
+          @base_tools
+        end
+    end
   end
 
   @impl true

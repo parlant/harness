@@ -13,7 +13,7 @@ defmodule H.Session.Server do
   require Logger
 
   alias H.Storage
-  alias H.Session.UserShell
+  alias H.Session.{Subagents, UserShell}
   alias H.Session.Server.{Commands, Generation, Recovery, State, Stream, Submissions, Tools}
 
   @max_drain 31
@@ -221,6 +221,14 @@ defmodule H.Session.Server do
     process_with_drain({:wake_task, tid}, state)
   end
 
+  def handle_info({:submission_settled, outcome}, state) do
+    process_with_drain({:submission_settled, outcome}, state)
+  end
+
+  def handle_info({:subagent_failed, tid, reason}, state) do
+    process_with_drain({:subagent_failed, tid, reason}, state)
+  end
+
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case State.find_worker_by_monitor(state.workers, ref) do
       nil ->
@@ -276,6 +284,12 @@ defmodule H.Session.Server do
 
       {:wake_task, tid} ->
         drain_mailbox(remaining - 1, [{:wake_task, tid} | acc])
+
+      {:submission_settled, outcome} ->
+        drain_mailbox(remaining - 1, [{:submission_settled, outcome} | acc])
+
+      {:subagent_failed, tid, reason} ->
+        drain_mailbox(remaining - 1, [{:subagent_failed, tid, reason} | acc])
     after
       0 ->
         Enum.reverse(acc)
@@ -450,6 +464,14 @@ defmodule H.Session.Server do
     Generation.stage_wake(tid, state)
   end
 
+  defp stage_single_item({:submission_settled, outcome}, state, _staged_rev) do
+    Subagents.stage_settled(outcome, state)
+  end
+
+  defp stage_single_item({:subagent_failed, tid, reason}, state, _staged_rev) do
+    Subagents.stage_failed(tid, reason, state)
+  end
+
   # Effect execution (runs AFTER commit succeeds!)
 
   defp apply_effects_list([], state), do: state
@@ -488,5 +510,17 @@ defmodule H.Session.Server do
 
   defp apply_effect({:release_lease, cid}, state) do
     State.release_lease(cid, state)
+  end
+
+  defp apply_effect({:resume_subagent, cid, tid}, state) do
+    Subagents.resume_waiting(cid, tid, state)
+  end
+
+  defp apply_effect({:unwatch_subagent, child_sid, child_req_id}, state) do
+    Subagents.unwatch(child_sid, child_req_id, state)
+  end
+
+  defp apply_effect({:abort_subagent, child_sid, child_cid, reason}, state) do
+    Subagents.abort_child(child_sid, child_cid, reason, state)
   end
 end
