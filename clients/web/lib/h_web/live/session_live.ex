@@ -2,10 +2,9 @@ defmodule HWeb.SessionLive do
   @moduledoc """
   LiveView for a running/resumed `H` session and conversation branch.
 
-  Uses `Phoenix.LiveView.stream/4` for committed entries, stores only compact
-  doc/cursor state, subscribes to `H.PubSub` on connected mount, reduces frames
-  through `H.Transcript` (via `HWeb.Transcript`), resnapshots on sequence gaps,
-  and updates only the live region on ephemeral streaming updates.
+  Uses `Phoenix.LiveView.stream/4` for committed messages and activity groups,
+  and retains compact boundary, doc and cursor state. Subscribes to `H.PubSub`
+  on connected mount and resnapshots on sequence gaps.
   """
   use HWeb, :live_view
 
@@ -48,6 +47,7 @@ defmodule HWeb.SessionLive do
         cursor_seq: nil,
         committed_docs: %{},
         ephemeral_live: %{},
+        tail_activity: nil,
         inbox: [],
         agent: %{},
         usage: %{},
@@ -147,14 +147,10 @@ defmodule HWeb.SessionLive do
 
   def handle_info({:commit_frame, _seq, json}, socket) do
     case Transcript.apply_commit(socket.assigns.transcript, json) do
-      {:ok, appended, next_t} ->
-        socket =
-          Enum.reduce(appended, socket, fn entry, acc ->
-            stream_insert(acc, :entries, entry)
-          end)
-
+      {:ok, rows, next_t} ->
         {:noreply,
          socket
+         |> stream(:entries, rows)
          |> apply_transcript(next_t)}
 
       {:stale, _t} ->
@@ -461,21 +457,13 @@ defmodule HWeb.SessionLive do
 
       case Backend.scan_entries(sid, cid, %{"order" => "desc", "cursor" => cursor, "limit" => 50}) do
         {:ok, %{items: items, next_cursor: next_cursor}} ->
-          ascending = Enum.reverse(items)
+          {rows, next_t} =
+            Transcript.prepend_older_page(socket.assigns.transcript, items, next_cursor)
 
-          {older_entries, next_t} =
-            Transcript.prepend_older_page(socket.assigns.transcript, ascending, next_cursor)
-
-          socket =
-            socket
-            |> stream(:entries, Enum.reverse(older_entries), at: 0)
-            |> assign(:transcript, next_t)
-            |> assign(
-              before_entry_id: next_t.reducer.before_entry_id,
-              has_more: next_t.reducer.has_more
-            )
-
-          {:noreply, socket}
+          {:noreply,
+           socket
+           |> stream(:entries, Enum.reverse(rows), at: 0)
+           |> apply_transcript(next_t)}
 
         {:error, reason} ->
           {:noreply, assign(socket, :error_banner, format_error(reason))}
@@ -667,14 +655,16 @@ defmodule HWeb.SessionLive do
   defp load_disconnected_entries(socket, session_id, cid) do
     case Backend.scan_entries(session_id, cid, %{"order" => "desc", "limit" => 50}) do
       {:ok, %{items: items, next_cursor: next_cursor}} ->
-        entries = items |> Enum.reverse() |> Enum.map(&Transcript.normalize_entry/1)
+        {rows, next_t} =
+          Transcript.prepend_older_page(
+            Transcript.new(session_id: session_id, conversation_id: cid),
+            items,
+            next_cursor
+          )
 
         socket
-        |> assign(
-          before_entry_id: next_cursor,
-          has_more: not is_nil(next_cursor)
-        )
-        |> stream(:entries, entries, reset: true)
+        |> apply_transcript(next_t)
+        |> stream(:entries, rows, reset: true)
 
       {:error, reason} ->
         socket

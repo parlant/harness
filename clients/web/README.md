@@ -66,6 +66,20 @@ The slotted navigation, bounded transcript and jump-to-latest interaction
 were informed by `diy-chat`; there is no dependency on that project. This
 workbench supports two resizable regions, not arbitrary drag-to-dock tabs.
 
+## Conversation display
+
+The session transcript shows user messages and assistant replies. Assistant
+replies render Markdown while streaming and after commit; fenced `console`
+and shell blocks use a scrollable terminal style and are never executed.
+User text stays plain, and existing screenshot attachments still display.
+Markdown does not render raw HTML or load images from URLs.
+
+Consecutive tool and system activity appears in one line between messages,
+including across **Load earlier** pages. A tool call and its result count once.
+The line shows a spinner while work is underway, or a status such as **Waiting**,
+**Complete**, **Paused**, or **Failed**. This is a web display change; the daemon
+and `hi` still have the original transcript and tool output.
+
 ## Check a change
 
 Run `mix format`, `mix compile --warnings-as-errors`, and `mix test` here.

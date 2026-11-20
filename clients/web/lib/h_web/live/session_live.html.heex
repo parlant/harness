@@ -208,45 +208,39 @@
       </div>
 
       <div id="entries-stream" phx-update="stream" class="entries-list">
-        <article
-          :for={{dom_id, entry} <- @streams.entries}
-          id={dom_id}
-          class={["entry-card", "entry-#{entry["kind"]}"]}
-        >
-          <header class="entry-header">
-            <div class="entry-header-left">
-              <span class="role-label">{entry["kind"]}</span>
-              <span class="badge mono">#{entry["id"]}</span>
-              <span :if={entry["data"]["aborted"]} class="badge badge-warn">aborted</span>
-              <span :if={entry["kind"] == "tool_result"} class="badge mono">
-                {entry["data"]["tool_name"] || entry["data"]["name"] || "tool"}
-              </span>
-              <span
-                :if={
-                  entry["kind"] == "tool_result" and
-                    (entry["data"]["is_error"] || entry["data"]["error"])
-                }
-                class="badge badge-danger"
-              >
-                error
-              </span>
-            </div>
+        <%= for {dom_id, entry} <- @streams.entries do %>
+          <%= if activity = entry["activity"] do %>
+            <ConversationComponents.activity_line
+              id={dom_id}
+              count={activity.count}
+              status={activity.status}
+            />
+          <% else %>
+            <article id={dom_id} class={["entry-card", "entry-#{entry["kind"]}"]}>
+              <header class="entry-header">
+                <div class="entry-header-left">
+                  <span class="role-label">{entry["kind"]}</span>
+                  <span class="badge mono">#{entry["id"]}</span>
+                  <span :if={entry["data"]["aborted"]} class="badge badge-warn">aborted</span>
+                </div>
 
-            <button
-              :if={@session && @session.status != "archived"}
-              type="button"
-              class="btn btn-sm btn-ghost"
-              phx-click="fork_entry"
-              phx-value-entry_id={entry["id"]}
-            >
-              Fork here
-            </button>
-          </header>
+                <button
+                  :if={@session && @session.status != "archived"}
+                  type="button"
+                  class="btn btn-sm btn-ghost"
+                  phx-click="fork_entry"
+                  phx-value-entry_id={entry["id"]}
+                >
+                  Fork here
+                </button>
+              </header>
 
-          <div class="entry-body">
-            <ConversationComponents.entry_body entry={entry} />
-          </div>
-        </article>
+              <div class="entry-body">
+                <ConversationComponents.entry_body entry={entry} />
+              </div>
+            </article>
+          <% end %>
+        <% end %>
       </div>
 
       <div
@@ -283,7 +277,11 @@
           Stop holder and acquire
         </button>
       </div>
-      <ConversationComponents.live_region live={@ephemeral_live} inbox={@inbox} />
+      <ConversationComponents.live_region
+        live={@ephemeral_live}
+        inbox={@inbox}
+        tail_activity={@tail_activity}
+      />
     </div>
 
     <button type="button" id="jump-latest" class="btn btn-sm jump-latest" hidden>Latest ↓</button>
