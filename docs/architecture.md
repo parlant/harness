@@ -1,6 +1,6 @@
 # Architecture
 
-For startup path extensions, managed accounts, and proposed hooks, see [Extensions](extensions.md).
+For startup path extensions, managed accounts, and proposed hooks, see [Extensions](extensions.md). For multi-session work delegation and proposed subagent primitives, see [Subagents](architecture/subagents.md).
 
 The engine is the root Mix application (`:harness`, `H.*`). It owns session state and runs work even when no client is attached. Phoenix is a separate Mix application; the terminal client is a separate Rust binary. Neither is required to run the engine.
 
@@ -63,8 +63,8 @@ effects.
 
 ## Client boundary
 
-- **Phoenix** (`clients/web/`): `:harness_web` depends on `:harness` by path. `HWeb.Backend.InVM` calls the daemon in the same VM; there is no HTTP backend. `WorkspaceLive` browses folders. `SessionLive` streams entry rows and retains document and cursor state rather than every rendered entry body.
-- **Terminal (`clients/tui/`, `hi`)**: `hi` discovers an existing daemon via `api.sock` or literal loopback HTTP, sends the owner bearer token, and consumes the [JSON/SSE API](protocol.md). It supports fullscreen and regular scrollback modes as well as headless `-p` print mode, sharing the same sessions as Phoenix. A single terminal loop renders the editor, transcript and focused picker; cancellable SSE subscriptions and background command workers do not own stdout. Explicit queue withdrawal is a shared daemon mutation returning a durable receipt, not a local inbox edit. See [build status](hi/build.md) for implemented scope versus the [pi parity target](hi.md), and [client extension surfaces](extensions/clients.md) for device login and daemon management.
+- **Phoenix** (`clients/web/`): `:harness_web` depends on `:harness` by path. `HWeb.Backend.InVM` calls the daemon in the same VM; there is no HTTP backend. `WorkspaceLive` browses folders, `InboxLive` (`/inbox`) provides a live workspace-grouped attention overview across sessions via `:catalog` PubSub without waking unloaded sessions, and `SessionLive` streams entry rows and retains document and cursor state rather than every rendered entry body.
+- **Terminal (`clients/tui/`, `hi`)**: `hi` discovers an existing daemon via `api.sock` or literal loopback HTTP, sends the owner bearer token, and consumes the [JSON/SSE API](protocol.md). It supports fullscreen and regular scrollback modes, `hi inbox` / `/inbox` multi-session browsing over `GET /api/v1/sessions/events`, and headless `-p` print mode, sharing the same sessions as Phoenix. A single terminal loop renders the editor, styled transcript and focused picker; cancellable SSE subscriptions and background command workers do not own stdout. Explicit queue withdrawal is a shared daemon mutation returning a durable receipt, not a local inbox edit. See [build status](hi/build.md) for implemented scope versus the [pi parity target](hi.md), and [client extension surfaces](extensions/clients.md) for device login and daemon management.
 
 The web workbench is a slotted function component, not a process tree. A separate,
 owner-authenticated sticky `InspectorLive` follows recent entries in the dedicated

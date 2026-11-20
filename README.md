@@ -75,6 +75,7 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 ## Documentation
 
 - [Architecture](docs/architecture.md) — ownership, commits, recovery and client boundaries
+- [Subagents and work delegation](docs/architecture/subagents.md) — multi-session orchestration reflection and proposed delegation primitives
 - [Local HTTP/JSON and SSE protocol](docs/protocol.md)
 - [Roadmap](docs/roadmap.md) — implemented milestones and remaining work
 - [hi build and cutover status](docs/hi/build.md) — shipped workflows, verification and ordered remaining batches
