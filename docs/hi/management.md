@@ -81,6 +81,10 @@ configuration, then stops the old daemon via its guarded endpoint, switches
 installed. The task prints the previous release ID for explicit rollback:
 `mix h.install --activate <id>`. A readiness failure is reported, not forcibly
 rolled back; inspect the daemon log before deciding whether to switch back.
+If launchd does not confirm that the old process exited, `current` stays on
+the old bundle, which may already be stopped. The error shows the last observed
+job state and the staged release ID. Once the job is stopped, retry with
+`mix h.install --activate <staged-id>` without rebuilding or copying again.
 Do not roll back across incompatible storage changes without a migration plan.
 An already-open `hi` can reconnect to the new daemon and switch its own
 binary with `/restart-ui /absolute/path/to/.bin/hi`. The slash command

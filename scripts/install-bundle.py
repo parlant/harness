@@ -95,15 +95,27 @@ def service_file(home, data, launcher):
 
 def wait_until_stopped(service, env):
     target = f"gui/{os.getuid()}/{service.stem}"
-    deadline = time.monotonic() + 12
-    while time.monotonic() < deadline:
-        status = run(["/bin/launchctl", "print", target], env, timeout=5)
-        if status.returncode:
-            raise RuntimeError(f"Cannot establish LaunchAgent shutdown: {status.stderr.strip()}")
-        if re.search(r"^\s*state = not running\s*$", status.stdout, re.MULTILINE):
-            return
+    deadline = time.monotonic() + 30
+    last = "no launchd status received"
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            status = run(["/bin/launchctl", "print", target], env, timeout=min(5, remaining))
+        except subprocess.TimeoutExpired:
+            last = "launchctl print timed out"
+        else:
+            if status.returncode:
+                raise RuntimeError(f"Cannot establish LaunchAgent shutdown for {target}; current bundle was not changed: {status.stderr.strip()}")
+            # `print` is not a stable API. Demand an explicit inactive state,
+            # zero active instances, and no PID; don't infer exit from a failed
+            # query or from the missing daemon listener. Never log its full
+            # output (it also includes the service environment).
+            fields = dict(re.findall(r"^[ \t]*(state|active count|pid|last exit code) = ([\w ()-]+)$", status.stdout, re.MULTILINE))
+            last = ", ".join(f"{key}={fields.get(key, 'unreported')}" for key in ("state", "active count", "pid", "last exit code"))
+            pid_reported = re.search(r"^[ \t]*pid[ \t]*=", status.stdout, re.MULTILINE)
+            if fields.get("state") in ("not running", "exited") and fields.get("active count") == "0" and not pid_reported:
+                return
         time.sleep(0.2)
-    raise RuntimeError("LaunchAgent shutdown did not finish; current bundle was not changed")
+    raise RuntimeError(f"LaunchAgent shutdown did not finish for {target} ({last}); current bundle was not changed")
 
 
 def wait_until_serving(hi, env):
@@ -191,9 +203,16 @@ def install(args):
             # the old release while the link is being switched.
             checked([release / "bin/hi", "daemon", "check-service"], env)
             checked([hi, "daemon", "stop"], env, timeout=50)
-            # The API and store lock disappear before the VM exits. A kickstart
-            # while launchd still tracks that process succeeds without restarting it.
-            wait_until_stopped(existing_service, env)
+            # The API and store lock can disappear before the VM exits. A kickstart
+            # while launchd still tracks that process may not start a replacement.
+            print("Waiting for launchd to finish stopping the old release...")
+            try:
+                wait_until_stopped(existing_service, env)
+            except RuntimeError as err:
+                raise RuntimeError(
+                    f"{err}\nCheck launchctl and {data / 'h-daemon.log'}. "
+                    f"Once the service is stopped, retry with mix h.install --activate {release.name}."
+                ) from err
 
         switch(current, release)
         if not os.path.lexists(hi_link):

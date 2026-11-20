@@ -103,6 +103,9 @@ def smoke(bundle):
         commands = []
         busy = True
         launchd_error = False
+        running = "job = {\n\tactive count = 1\n\tstate = running\n\tpid = 321\n\tlast exit code = 0\n}\n"
+        stopped = "job = {\n\tactive count = 0\n\tstate = not running\n\tlast exit code = 0\n}\n"
+        states = iter([running])
 
         def fake_run(argv, _env, timeout=20):
             if argv[0] == "/bin/launchctl":
@@ -121,12 +124,13 @@ def smoke(bundle):
                 assert current.resolve(strict=True) == second
                 if launchd_error:
                     return subprocess.CompletedProcess(argv, 113, "", "Could not find service")
-                # API and lock are already gone, but launchd still tracks the VM.
-                state = "running" if commands.count("print") == 1 else "not running"
-                return subprocess.CompletedProcess(argv, 0, f"job = {{\n\tstate = {state}\n}}\n", "")
+                state = next(states)
+                if isinstance(state, Exception):
+                    raise state
+                return subprocess.CompletedProcess(argv, 0, state, "")
             if action == "start-service":
                 assert current.resolve(strict=True) == initial
-                assert commands[-3:] == ["print", "print", "start-service"]
+                assert commands[-2:] == ["print", "start-service"]
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         with (
@@ -140,8 +144,18 @@ def smoke(bundle):
             assert commands == ["--check-config", "status", "check-service", "stop"]
             commands.clear()
             busy = False
-            with patch.object(module.time, "monotonic", side_effect=[0, 0, 13]):
+            with (
+                patch.object(module.time, "monotonic", side_effect=[0, 0, 31]),
+                patch.object(module.time, "sleep"),
+                patch("sys.stderr") as stderr,
+            ):
                 assert module.main() == 1
+                stderr.write.assert_any_call(
+                    f"Installation refused or incomplete: LaunchAgent shutdown did not finish for gui/{os.getuid()}/fake "
+                    f"(state=running, active count=1, pid=321, last exit code=0); current bundle was not changed\n"
+                    f"Check launchctl and {data / 'h-daemon.log'}. "
+                    f"Once the service is stopped, retry with mix h.install --activate {initial.name}."
+                )
             assert current.resolve(strict=True) == second
             assert commands == ["--check-config", "status", "check-service", "stop", "print"]
             commands.clear()
@@ -151,9 +165,29 @@ def smoke(bundle):
             assert commands == ["--check-config", "status", "check-service", "stop", "print"]
             commands.clear()
             launchd_error = False
-            assert module.main() == 0
+            # The API and lock can be gone while launchd still tracks a PID.
+            # A PID-less spawn in progress is also not safe to switch through.
+            stale_pid = stopped.replace("\tlast exit code", "\tpid = 321\n\tlast exit code")
+            scheduled = stopped.replace("not running", "spawn scheduled")
+            unrecognized = stopped.replace("not running", "unknown")
+            states = iter([
+                subprocess.TimeoutExpired("launchctl", 5),
+                stale_pid,
+                scheduled,
+                unrecognized,
+                stopped.replace("not running", "exited"),
+            ])
+            # Clean exit can take longer than the previous 12-second budget.
+            with patch.object(module.time, "monotonic", side_effect=[0, 0, 6, 11, 13, 15, 15, 15]), patch.object(module.time, "sleep"):
+                assert module.main() == 0
             assert current.resolve(strict=True) == initial
-            assert commands == ["--check-config", "status", "check-service", "stop", "print", "print", "start-service", "status"]
+            assert commands == ["--check-config", "status", "check-service", "stop"] + ["print"] * 5 + ["start-service", "status"]
+
+            commands.clear()
+            module.switch(current, second)
+            states = iter([stopped])
+            module.wait_until_stopped(home / "fake.plist", env)
+            assert commands == ["print"]
 
         # No installer runs launchctl unless service registration was explicit.
         assert not (home / "Library/LaunchAgents").exists()
