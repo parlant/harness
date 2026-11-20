@@ -84,4 +84,6 @@ Each JSON frame identifies the session and conversation. Sequence numbers are se
 
 `doc_ops` maps document names to ordered operations such as `["replace", value]` or `["set", path, value]`. Reconnect with `Last-Event-ID` (or `last_event_id` query parameter) for replay from the recent commit ring; otherwise expect a snapshot if replay is unavailable. A slow connection can receive a replacement snapshot instead of queued deltas. Disconnecting does not abort a run.
 
+Live tool and user-shell output previews stop after the first 50 KiB per attempt and include `[Live output capped]` if more was produced. This also bounds the partial shell output saved in live checkpoints for recovery. The final result and any full-output spill file use the execution environment's normal output policy.
+
 Sources: [router](../lib/h/http/router.ex), [security plug](../lib/h/http/security_plug.ex), [daemon validation](../lib/h/daemon.ex), [SSE transport](../lib/h/http/sse.ex), [transcript reducer](../lib/h/transcript.ex).

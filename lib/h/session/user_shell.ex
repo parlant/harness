@@ -12,6 +12,7 @@ defmodule H.Session.UserShell do
   require Logger
 
   alias H.{Document, ExecutionEnv, Schema, Storage, Submission, Task, WorkspaceLease}
+  alias H.Session.LiveOutput
 
   @default_timeout_ms 120_000
   @max_replay_ring 64
@@ -254,12 +255,13 @@ defmodule H.Session.UserShell do
                         incarnation: inc,
                         task_id: task_id,
                         attempt_id: attempt_id,
-                        on_output: fn chunk ->
-                          send(
-                            server_pid,
-                            {:user_shell_output, inc, task_id, attempt_id, cid, chunk}
-                          )
-                        end
+                        on_output:
+                          LiveOutput.limit(fn chunk ->
+                            send(
+                              server_pid,
+                              {:user_shell_output, inc, task_id, attempt_id, cid, chunk}
+                            )
+                          end)
                       ]
                       |> maybe_put_kw(
                         :lease_ms,

@@ -2,10 +2,13 @@ use crate::protocol::TranscriptEntry;
 use crate::render::{sanitize_single_line, sanitize_terminal_text};
 use crate::transcript::TranscriptState;
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 const PREVIEW_LINES: usize = 5;
 const ERROR_PREVIEW_LINES: usize = 8;
+const EXPANDED_OUTPUT_LINES: usize = 200;
+const OUTPUT_LINE_BYTES: usize = 1024;
 const COMPACT_CHARS: usize = 100;
 
 /// Renders committed transcript entries, live streaming generation/tools, queued
@@ -100,25 +103,25 @@ fn push_lines(out: &mut Vec<String>, raw: &str, prefix: &str) {
 }
 
 fn push_preview(out: &mut Vec<String>, raw: &str, max_lines: usize, tail: bool, label: &str) {
-    let safe = sanitize_terminal_text(raw.trim_end()).replace('\t', "   ");
-    if safe.is_empty() {
-        return;
+    // Pick the rows before sanitizing, and clip before wrapping. A single
+    // newline-free stdout line can otherwise dominate the entire redraw.
+    let lines = raw.trim_end().lines();
+    let omitted = lines.clone().count().saturating_sub(max_lines);
+    if tail && omitted > 0 {
+        out.push(format!("  ... ({omitted} earlier lines)"));
     }
-    let lines: Vec<&str> = safe.split('\n').collect();
-    if lines.len() <= max_lines {
-        for line in lines {
-            out.push(format!("  {line}"));
-        }
-    } else if tail {
-        out.push(format!("  ... ({} earlier lines)", lines.len() - max_lines));
-        for line in &lines[lines.len() - max_lines..] {
-            out.push(format!("  {line}"));
-        }
-    } else {
-        for line in &lines[..max_lines] {
-            out.push(format!("  {line}"));
-        }
-        out.push(format!("  ... ({} more {label})", lines.len() - max_lines));
+    for line in lines.skip(if tail { omitted } else { 0 }).take(max_lines) {
+        let end = line.floor_char_boundary(OUTPUT_LINE_BYTES);
+        let safe = sanitize_terminal_text(&line[..end]).replace('\t', "   ");
+        let clipped = if end < line.len() {
+            " ... [line clipped]"
+        } else {
+            ""
+        };
+        out.push(format!("  {safe}{clipped}"));
+    }
+    if !tail && omitted > 0 {
+        out.push(format!("  ... ({omitted} more {label})"));
     }
 }
 
@@ -418,10 +421,14 @@ fn render_tool_result(
         }
     }
 
-    let text = text_lines.join("\n");
+    let text = match text_lines.as_slice() {
+        [] => Cow::Borrowed(""),
+        [text] => Cow::Borrowed(*text),
+        _ => Cow::Owned(text_lines.join("\n")),
+    };
     if !text.trim().is_empty() {
         if tools_expanded {
-            push_lines(out, text.trim_end(), "  ");
+            push_preview(out, &text, EXPANDED_OUTPUT_LINES, false, "lines");
         } else if is_error {
             push_preview(out, &text, ERROR_PREVIEW_LINES, false, "error lines");
         } else {
@@ -510,7 +517,7 @@ fn render_user_shell(out: &mut Vec<String>, id: &str, data: &Value, tools_expand
     let output = str_at(data, "output").unwrap_or("");
     if !output.trim_end().is_empty() {
         if tools_expanded {
-            push_lines(out, output.trim_end(), "  ");
+            push_preview(out, output, EXPANDED_OUTPUT_LINES, false, "lines");
         } else {
             push_preview(out, output, PREVIEW_LINES, true, "lines");
         }
@@ -768,7 +775,7 @@ fn render_live(
         let partial = slot.get("output").and_then(Value::as_str).unwrap_or("");
         if !partial.trim_end().is_empty() {
             if tools_expanded {
-                push_lines(out, partial.trim_end(), "  ");
+                push_preview(out, partial, EXPANDED_OUTPUT_LINES, false, "lines");
             } else {
                 push_preview(out, partial, PREVIEW_LINES, true, "lines");
             }
@@ -794,7 +801,7 @@ fn render_live(
         let partial = shell.get("output").and_then(Value::as_str).unwrap_or("");
         if !partial.trim_end().is_empty() {
             if tools_expanded {
-                push_lines(out, partial.trim_end(), "  ");
+                push_preview(out, partial, EXPANDED_OUTPUT_LINES, false, "lines");
             } else {
                 push_preview(out, partial, PREVIEW_LINES, true, "lines");
             }
@@ -1284,6 +1291,24 @@ mod tests {
         let final_view = rows(&state, false, false).join("\n");
         assert!(!final_view.contains("(live"));
         assert!(final_view.contains("[assistant #2]\nHello!"));
+    }
+
+    #[test]
+    fn long_shell_output_lines_are_clipped_even_when_expanded() {
+        let mut state = TranscriptState::default();
+        let output = format!("start\n{}\r\nend", "é\x1b".repeat(50_000));
+        state.docs.insert(
+            "live".into(),
+            json!({"user_shell": {"command": "example", "output": output}}),
+        );
+
+        for expanded in [false, true] {
+            let rendered = rows(&state, expanded, false);
+            assert_clean_rows(&rendered);
+            assert!(rendered.iter().any(|r| r == "  end"));
+            assert!(rendered.iter().any(|r| r.ends_with("[line clipped]")));
+            assert!(rendered.iter().all(|r| r.len() < 4096));
+        }
     }
 
     #[test]

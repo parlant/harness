@@ -11,7 +11,7 @@ A 10,000-entry alternating user/Markdown assistant trace starts with a 50-entry 
 | 20 | fullscreen | 1.19 ms | — | 1.27 ms | 19.0 MiB |
 | 20 | regular | 0.96 ms | — | 1.24 ms | 19.3 MiB |
 
-Both modes beat the 50 ms key-to-paint target on this trace. This is observed RSS, **not** a hard byte ceiling. `hi` replaces the historical page, retains at most 256 live entries, and separately bounds the SSE delivery queue (256 items / 16 MiB). Entry count is not a byte limit: large entries, expanded output, and an ever-growing live message may cost more. In particular, do not infer a memory guarantee for an unbounded provider stream from these figures.
+Both modes beat the 50 ms key-to-paint target on this trace. This is observed RSS, **not** a hard byte ceiling. `hi` replaces the historical page, retains at most 256 live entries, and separately bounds the SSE delivery queue (256 items / 16 MiB). Entry count is not a byte limit: large entries and an ever-growing live message may cost more. Tool and shell text output is clipped before terminal wrapping (1 KiB of source text per line, up to 200 lines when expanded). These display limits do not change stored results. In particular, do not infer a memory guarantee for an unbounded provider stream from these figures.
 
 Reproduce from the repo root using the release binary and the same workload:
 

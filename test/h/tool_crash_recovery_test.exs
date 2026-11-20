@@ -99,7 +99,13 @@ defmodule H.ToolCrashRecoveryTest do
       count = Agent.get_and_update(counter, fn n -> {n + 1, n + 1} end)
 
       if is_function(context[:on_output], 2) do
-        context.on_output.("partial-out-#{action}", 10)
+        if action == "flood" do
+          chunk = String.duplicate("x", 1024 * 1024)
+          context.on_output.(chunk, byte_size(chunk))
+          context.on_output.("NOT-IN-PREVIEW", byte_size(chunk) + 14)
+        else
+          context.on_output.("partial-out-#{action}", 10)
+        end
       end
 
       if is_pid(notify) do
@@ -280,6 +286,74 @@ defmodule H.ToolCrashRecoveryTest do
     @tag close_reason: :shutdown
     test "unsafe tool is interrupted on clean shutdown", context do
       assert_unsafe_tool_interruption(context.close_reason)
+    end
+
+    test "caps live tool output before broadcast and persistence without changing the result" do
+      sid = "s-flood-#{System.unique_integer([:positive])}"
+      counter = start_supervised!({Agent, fn -> 0 end})
+      :ets.insert(@test_ets, {{:gate_pid, sid}, self()})
+      :ets.insert(@test_ets, {{:counter, sid}, counter})
+
+      on_exit(fn ->
+        :ets.delete(@test_ets, {:gate_pid, sid})
+        :ets.delete(@test_ets, {:counter, sid})
+      end)
+
+      %{opts: opts, cwd: cwd} =
+        start_env(
+          [
+            {:reply, [],
+             %{
+               content: [],
+               tool_calls: [%{id: "cu1", name: "gated_unsafe", arguments: %{"action" => "flood"}}],
+               finish_reason: "tool_calls"
+             }},
+            {:reply, [], %{content: [%{type: "text", text: "Done"}]}}
+          ],
+          ephemeral_interval_ms: 5,
+          persist_within_ms: 25
+        )
+
+      assert {:ok, _} =
+               Daemon.create_session(
+                 %{"session_id" => sid, "cwd" => cwd, "agent" => %{"tools" => ["gated_unsafe"]}},
+                 opts
+               )
+
+      assert {:ok, _} = Daemon.subscribe_conversation(sid, "1", self(), nil, opts)
+
+      assert {:ok, _} =
+               Daemon.execute_command(
+                 sid,
+                 cmd("u1", "submit", "1", %{"type" => "input", "content" => "Run flood"}),
+                 opts
+               )
+
+      assert_receive {:unsafe_tool_entered, worker_pid, 1}, 1_000
+      assert_receive {:ephemeral_frame, bin}, 1_000
+      assert byte_size(bin) < 52_000
+
+      wait_until(fn ->
+        {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation(sid, "1", self(), nil, opts)
+
+        if output = JSON.decode!(bin)["docs"]["live"]["tools"]["cu1"]["output"] do
+          if output != "" do
+            assert output == String.duplicate("x", 51_200) <> "\n[Live output capped]\n"
+            true
+          end
+        end
+      end)
+
+      send(worker_pid, :proceed)
+
+      wait_until(fn ->
+        {:ok, %{items: items}} = Daemon.scan_entries(sid, "1", %{"order" => "asc"}, opts)
+
+        if result = Enum.find(items, &(&1.kind == "tool_result")) do
+          assert result.data["content"] == [%{"type" => "text", "text" => "ran:flood:count=1"}]
+          true
+        end
+      end)
     end
 
     defp assert_unsafe_tool_interruption(close_reason) do

@@ -13,7 +13,7 @@ defmodule H.Session.Server do
   require Logger
 
   alias H.{Context, Document, Storage, Submission, Task, WorkspaceLease}
-  alias H.Session.{Compaction, UserShell}
+  alias H.Session.{Compaction, LiveOutput, UserShell}
 
   @max_drain 31
   @max_replay_ring 64
@@ -3483,18 +3483,21 @@ defmodule H.Session.Server do
                         env = state.execution_env
                         sid = state.session_id
 
+                        output_preview =
+                          LiveOutput.limit(fn chunk ->
+                            send(
+                              server_pid,
+                              {:tool_output, inc, tool_task_id, attempt_id, cid, call_id, chunk}
+                            )
+                          end)
+
                         tool_ctx = %{
                           env: env,
                           session_id: sid,
                           conversation_id: cid,
                           task_id: tool_task_id,
                           scan_entries: fn q -> scan_entries(server_pid, cid, q) end,
-                          on_output: fn chunk, _total ->
-                            send(
-                              server_pid,
-                              {:tool_output, inc, tool_task_id, attempt_id, cid, call_id, chunk}
-                            )
-                          end
+                          on_output: fn chunk, _total -> output_preview.(chunk) end
                         }
 
                         {:ok, worker_pid} =
