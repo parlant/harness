@@ -42,13 +42,15 @@ From the checkout, install a **tested** bundle once (stop any manually started
 or embedded daemon first, after its work finishes):
 
 ```sh
-mix h.install dist/local --service
+mix h.bundle
+mix h.install --service
 hi daemon status
 ```
 
-`dist/local` is an example path: build it first with `mix h.bundle dist/local`
-or use an existing compatible bundle. Make sure `~/.bin` is already on `PATH`,
-or pass `--bin-dir` to use a different directory on `PATH`. `--service` installs a macOS per-user
+`mix h.install` uses the tested bundle at `dist/harness` by default. It does
+not build the checkout. Pass a bundle directory explicitly to install from
+another path. Make sure `~/.bin` is already on `PATH`, or pass `--bin-dir`
+to use a different directory on `PATH`. `--service` installs a macOS per-user
 LaunchAgent that starts at login and restarts on abnormal exit. An explicit
 idle `hi daemon stop` exits successfully and stays stopped until the next
 login or `hi daemon start-service`. No `sudo` or auto-build on attach. Run
@@ -56,12 +58,19 @@ login or `hi daemon start-service`. No `sudo` or auto-build on attach. Run
 and start manually. A custom `--data-dir` selects the service's store; use the
 matching `H_DATA_DIR` or `--data-dir` in other terminals.
 
-To upgrade, build a fresh directory and activate it:
+To upgrade from the checkout without picking a new path:
 
 ```sh
-mix h.bundle dist/next
-mix h.install dist/next
+mix h.bundle && mix h.install
 ```
+
+`mix h.bundle` builds and tests a candidate, then atomically updates the
+`dist/harness` symlink. A failed build or smoke test leaves the previous
+candidate selected. If an older build left a real directory at `dist/harness`,
+move it aside once it is no longer in use. Older candidates remain under
+`dist/.harness-builds/` and may be deleted when nothing is using them.
+For an explicit artifact directory, `mix h.bundle dist/NAME` still requires
+that the target not exist and does not change `dist/harness`.
 
 Activation refuses if the existing service is busy. It validates startup
 configuration, then stops the old daemon via its guarded endpoint, switches
@@ -83,9 +92,9 @@ pinned service or take over an already-running standalone/embedded process.
 From the root checkout:
 
 ```sh
-mix h.build                         # compile daemon, Phoenix dev and h/hi; start nothing
-mix h.bundle dist/next              # separate release, including a smoke test; path must be new
-mix h.restart --bundle dist/next    # in a separate operator pane, after the current turn finishes
+mix h.build    # compile daemon, Phoenix dev and h/hi; start nothing
+mix h.bundle   # build, smoke-test, and refresh dist/harness
+mix h.restart  # restart from dist/harness in a separate pane after the turn finishes
 ```
 
 `mix h.build --release` puts the terminal binaries in `target/release` rather
@@ -99,7 +108,7 @@ and will block the guard (and a long-lived foreground process belongs in a
 terminal or service). Let the turn finish, then run the restart in another pane.
 `hi` can stay attached and reconnect across a standalone daemon restart using
 the same data directory and socket. When ready to switch the client too, type
-`/restart-ui /absolute/path/to/dist/next/bin/hi`. With no path it reexecs the
+`/restart-ui /absolute/path/to/dist/harness/bin/hi`. With no path it reexecs the
 current binary. This preserves the exact session and conversation, not scroll
 position or unsaved local drafts; it refuses to restart while a draft,
 attachment, ambiguous submission, or client command still needs attention.
@@ -128,11 +137,11 @@ checkout, run this once with the pinned build tools installed (Elixir 1.20,
 OTP 29, Rust, and Python 3 on macOS):
 
 ```sh
-mix h.bundle dist/harness
+mix h.bundle dist/export
 ```
 
-Then move the **entire** output directory to a stable location. Run
-`path/to/harness/bin/hi daemon start` without a launcher override. The sibling
+Then move the **entire** output directory (`dist/export` in this example) to
+a stable location. Run `path/to/harness/bin/hi daemon start` without a launcher override. The sibling
 `h-daemon` uses the bundled Erlang VM, Elixir, and dependency BEAMs, not Mix or
 Elixir on PATH. The bundle is built for the host OS and architecture; on macOS
 it includes the linked OpenSSL crypto library when using Homebrew OTP. Linux

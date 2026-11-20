@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.H.Install do
   use Mix.Task
 
-  @shortdoc "Installs and activates a prebuilt bundle for the current user"
+  @shortdoc "Installs and activates a prebuilt bundle (default: dist/harness)"
 
   @impl true
   def run(args) do

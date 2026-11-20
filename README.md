@@ -49,12 +49,14 @@ hi daemon start --launcher "$PWD/bin/h-daemon"    # foreground, from a built che
 For a standalone bundle with the runtime included:
 
 ```sh
-mix h.bundle dist/harness
+mix h.bundle                   # refreshes the tested bundle at dist/harness
 dist/harness/bin/hi daemon start
 ```
 
-For daily use from any project, run `mix h.install dist/harness --service`
-after stopping any manually started daemon. The installer puts `hi` in
+For daily use from any project, run `mix h.install --service` after building
+with `mix h.bundle` and stopping any manually started daemon. For later
+updates, run `mix h.bundle && mix h.install`; no bundle path is needed.
+The installer puts `hi` in
 `~/.bin` by default; use `--bin-dir` to choose another directory on `PATH`.
 This installs a versioned bundle and a per-user macOS service. `hi` resolves
 its sibling `h-daemon`; `H_DAEMON_BIN` or `--launcher` can override

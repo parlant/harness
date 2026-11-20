@@ -123,6 +123,16 @@ def install(args):
     if args.service and sys.platform != "darwin":
         raise RuntimeError("--service requires a macOS desktop login")
 
+    if not args.activate:
+        path = Path(args.path) if args.path is not None else Path("dist/harness")
+        try:
+            bundle = path.resolve(strict=True)
+        except FileNotFoundError as err:
+            if args.path is not None:
+                raise
+            raise RuntimeError("No bundle at dist/harness; run mix h.bundle first or pass a bundle directory.") from err
+        valid_bundle(bundle)
+
     prefix.mkdir(parents=True, exist_ok=True, mode=0o700)
     with installation_lock(prefix):
         releases.mkdir(exist_ok=True)
@@ -140,8 +150,6 @@ def install(args):
                 raise RuntimeError(f"No installed release: {release}")
             valid_bundle(release)
         else:
-            bundle = Path(args.path).resolve(strict=True)
-            valid_bundle(bundle)
             name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
             release = releases / name
             with tempfile.TemporaryDirectory(prefix=".stage-", dir=releases) as temp:
@@ -187,13 +195,16 @@ def install(args):
 
 def main():
     parser = argparse.ArgumentParser(prog="mix h.install", description=__doc__)
-    parser.add_argument("path", help="prebuilt bundle directory (or installed release ID with --activate)")
+    parser.add_argument("path", nargs="?", help="prebuilt bundle directory (default: dist/harness), or installed release ID with --activate")
     parser.add_argument("--activate", action="store_true", help="activate an existing release instead of copying")
     parser.add_argument("--service", action="store_true", help="register and start a macOS per-user LaunchAgent on first install")
     parser.add_argument("--bin-dir", default="~/.bin", help="directory for the hi symlink (default: ~/.bin)")
     parser.add_argument("--data-dir", default=os.environ.get("H_DATA_DIR") or "~/.local/share/h")
+    args = parser.parse_args()
+    if args.activate and args.path is None:
+        parser.error("--activate requires an installed release ID")
     try:
-        install(parser.parse_args())
+        install(args)
     except (OSError, ValueError, RuntimeError, plistlib.InvalidFileException, subprocess.TimeoutExpired) as err:
         print(f"Installation refused or incomplete: {err}", file=sys.stderr)
         return 1

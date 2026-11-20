@@ -5,6 +5,7 @@ defmodule H.FullStackIntegrationTest do
   alias H.Provider.Fake
 
   test "end-to-end Bandit + Plug + SSE + Daemon + Session.Server + File storage + coding tools + fork" do
+    {:ok, _} = Application.ensure_all_started(:req)
     id = System.unique_integer([:positive])
     tmp_root = Path.join(System.tmp_dir!(), "h-fullstack-#{id}")
     data_dir = Path.join(tmp_root, "data")

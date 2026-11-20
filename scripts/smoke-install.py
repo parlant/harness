@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,12 +29,25 @@ def smoke(bundle):
         def run(*args, check=True):
             return subprocess.run(args, env=env, cwd=tmp, capture_output=True, text=True, timeout=20, check=check)
 
+        missing = run(*installer, check=False)
+        assert missing.returncode != 0 and "No bundle at dist/harness" in missing.stderr
+        assert not current.parent.exists()
+        missing = run(*installer, "--activate", check=False)
+        assert missing.returncode == 2 and "requires an installed release ID" in missing.stderr
+
+        # A default build is a link to a tested candidate, not the installed release.
+        dist = home / "dist"
+        candidate = dist / ".harness-builds/fixture/bundle"
+        candidate.parent.mkdir(parents=True)
+        (dist / "harness").symlink_to(candidate.relative_to(dist), target_is_directory=True)
+        shutil.copytree(bundle, candidate, symlinks=True)
+
         # Existing unrelated path must not be overwritten.
         hi.write_text("existing")
         refused = run(*installer, bundle, check=False)
         assert refused.returncode != 0 and hi.read_text() == "existing"
         hi.unlink()
-        installed = run(*installer, bundle)
+        installed = run(*installer)
         assert "to PATH" not in installed.stdout and (backing_bin / "hi").is_symlink()
         initial = current.resolve(strict=True)
         assert hi.resolve(strict=True) == initial / "bin/hi"
@@ -41,6 +55,8 @@ def smoke(bundle):
         run(*installer, bundle)
         second = current.resolve(strict=True)
         assert second != initial and initial.is_dir()
+        # The installed copies still work if the checkout build goes away.
+        shutil.rmtree(candidate)
         run(*installer, "--activate", initial.name)
         assert current.resolve(strict=True) == initial
 
@@ -115,7 +131,7 @@ def smoke(bundle):
 
         # No installer runs launchctl unless service registration was explicit.
         assert not (home / "Library/LaunchAgents").exists()
-    print("Install passed PATH resolution, copy/activation/rollback, conflict and live-daemon refusal, and simulated guarded service handoff.")
+    print("Install passed default and explicit bundle paths, PATH resolution, copy/activation/rollback, conflict and live-daemon refusal, and simulated guarded service handoff.")
 
 
 if __name__ == "__main__":
