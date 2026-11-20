@@ -278,6 +278,85 @@ defmodule H.Provider.ReqLLMTest do
                )
     end
 
+    test "builds Codex GPT-6.2 Responses Lite requests with OAuth and function tools" do
+      for {provider, id} <- [
+            {"openai_codex", "gpt-6.2-sol"},
+            {"openai-codex", "gpt-6.2-astra"}
+          ] do
+        owner = self()
+
+        request =
+          Context.build_request(
+            [%{id: 1, kind: "user", data: %{text: "Read a file"}}],
+            %{model: "#{provider}:#{id}", system_prompt: "Be brief", thinking: "high"},
+            [
+              %{
+                name: "read",
+                description: "Read a file",
+                parameters_schema: %{"type" => "object"}
+              }
+            ]
+          )
+
+        config = %{
+          credentials: %{access_token: "fixture-oauth", account_id: "fixture-account"},
+          stream_fn: fn model, ctx, opts ->
+            send(owner, {:codex_request, model, ctx, opts})
+            {:ok, [%StreamEvent{type: :text_delta, data: "Done"}]}
+          end
+        }
+
+        assert {:ok, %{content: [%{text: "Done"}]}} =
+                 Adapter.stream_turn(config, request, fn _ -> :ok end)
+
+        assert_receive {:codex_request, %LLMDB.Model{provider: :openai_codex, id: ^id} = model,
+                        ctx, opts}
+
+        codex = ReqLLM.Providers.OpenAICodex
+        assert {:ok, sse} = codex.attach_stream(model, ctx, opts, nil)
+        assert sse.host == "chatgpt.com"
+        assert sse.path == "/backend-api/codex/responses"
+        assert {:ok, websocket} = codex.attach_websocket_stream(model, ctx, opts)
+        assert websocket.url == "wss://chatgpt.com/backend-api/codex/responses"
+
+        for headers <- [sse.headers, websocket.headers] do
+          assert {"authorization", "Bearer fixture-oauth"} in headers
+          assert {"chatgpt-account-id", "fixture-account"} in headers
+          assert {"x-openai-internal-codex-responses-lite", "true"} in headers
+        end
+
+        sse_body = JSON.decode!(IO.iodata_to_binary(sse.body))
+        assert [websocket_message] = websocket.initial_messages
+        assert JSON.decode!(websocket_message) == Map.put(sse_body, "type", "response.create")
+
+        assert sse_body["model"] == id
+        assert sse_body["store"] == false
+        assert sse_body["stream"] == true
+        assert sse_body["parallel_tool_calls"] == false
+        assert sse_body["reasoning"] == %{"effort" => "high", "context" => "all_turns"}
+
+        assert [
+                 %{
+                   "type" => "additional_tools",
+                   "role" => "developer",
+                   "tools" => [%{"type" => "function", "name" => "read"}]
+                 },
+                 %{
+                   "type" => "message",
+                   "role" => "developer",
+                   "content" => [%{"type" => "input_text", "text" => "Be brief"}]
+                 },
+                 %{
+                   "role" => "user",
+                   "content" => [%{"type" => "input_text", "text" => "Read a file"}]
+                 }
+               ] = sse_body["input"]
+
+        refute Map.has_key?(sse_body, "tools")
+        refute Map.has_key?(sse_body, "instructions")
+      end
+    end
+
     test "builds Gemini 4 requests against both Vertex endpoints, never AI Studio" do
       for id <- ~w(gemini-4-hydrogen gemini-4-argon gemini-4-carbon), mode <- [:adc, :key] do
         request =
@@ -515,17 +594,27 @@ defmodule H.Provider.ReqLLMTest do
       assert is_binary(JSON.encode!(models))
     end
 
-    test "lists bundled Codex models without a runtime catalog" do
+    test "lists bundled GPT-6.2 Codex models with Codex limits and capabilities" do
       assert [
+               %{id: "openai_codex:gpt-6.1-sol"},
                %{
-                 id: "openai_codex:gpt-6.1-sol",
+                 id: "openai_codex:gpt-6.2-sol",
+                 provider: "openai_codex",
                  context_window: 500_000,
                  max_output_tokens: 128_000,
-                 supports_tools: true
+                 supports_tools: true,
+                 supports_reasoning: true
+               },
+               %{
+                 id: "openai_codex:gpt-6.2-astra",
+                 provider: "openai_codex",
+                 context_window: 272_000,
+                 max_output_tokens: 128_000,
+                 supports_tools: true,
+                 supports_reasoning: true
                }
                | _
-             ] =
-               Adapter.list_models(%{provider: "openai-codex"})
+             ] = Adapter.list_models(%{provider: "openai-codex", credentials_opts: [env: %{}]})
     end
 
     test "lists all three Gemini 4 Vertex models" do

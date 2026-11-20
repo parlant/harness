@@ -91,7 +91,14 @@ def smoke(source):
                 ready(replacement)
                 assert old.wait(timeout=5) == 0
                 assert not accounts.exists()
-                assert any(model.get("unavailable_reason") == "Codex sign-in required (/login)" for model in api("models")["models"])
+                codex_models = {
+                    model["id"]: model for model in api("models")["models"]
+                    if model["provider"] == "openai_codex"
+                }
+                for model, context in [("gpt-6.2-sol", 500_000), ("gpt-6.2-astra", 272_000)]:
+                    spec = codex_models[f"openai_codex:{model}"]
+                    assert spec["context_window"] == context
+                    assert spec["unavailable_reason"] == "Codex sign-in required (/login)"
                 for alias in ("personal", "work"):
                     run(hi, "account", "add", alias)
 

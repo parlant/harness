@@ -67,6 +67,13 @@ Codex uses ChatGPT OAuth, not `OPENAI_API_KEY` or the OpenAI API credit
 balance. Use managed device login on a local daemon, or provision a current
 access token manually.
 
+H lists `openai_codex:gpt-6.2-sol` and `openai_codex:gpt-6.2-astra` in the
+model picker. These use the Codex Responses Lite protocol and the default
+Codex context windows (500,000 and 272,000 tokens, respectively), not the
+limits of the `openai:` API models. The entries are bundled locally until
+upstream provides the Codex-specific metadata. Listing a model does not
+verify access for a specific ChatGPT account or workspace.
+
 ### Managed device login
 
 With a running daemon, use `hi login` without a session, `/login` in a session,
