@@ -87,4 +87,4 @@ Ready · /help · online · [seq 42 · idle · openai:gpt-5.2-codex (medium)] ·
 
 From left to right: the latest local message and help hint; a shell preview if a user shell command is active; the connection; then the committed sequence, run activity, model and thinking level. The bracket also shows the queue count when nonzero and input/output token totals and cost when available. `pending`, `attachment`, and `fork-edit #entry@predecessor` are local indicators that appear only when relevant. The final fields are the session/conversation IDs and the session's working directory. At narrow widths, fields on the right can disappear; they aren't dropped from the state. The built-in template is in [`status.rs`](../clients/tui/src/hi/status.rs).
 
-For possible executable configuration, see [Dynamic configuration in `hi`](hi-dynamic-config.md). No executable configuration is enabled today.
+For proposed data from optional daemon packages, see [one opt-in status projection](extensions/clients.md#proposed-one-opt-in-status-projection). For possible local executable configuration, see [Dynamic configuration in `hi`](hi-dynamic-config.md). Neither is enabled today.

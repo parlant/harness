@@ -6,8 +6,11 @@ pub mod editor;
 pub mod export;
 pub mod external;
 pub mod files;
+pub(crate) mod login;
 pub mod picker;
 pub mod preferences;
 pub mod screen;
 mod status;
 pub mod stream;
+
+mod secret;

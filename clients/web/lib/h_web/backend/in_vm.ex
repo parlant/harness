@@ -8,11 +8,11 @@ defmodule HWeb.Backend.InVM do
 
   @default_pubsub H.PubSub
 
-  @doc "Returns effective `H.Daemon` options from `:harness_web, :daemon_opts` merged with `opts`."
+  @doc "Uses the booted daemon options, with a fixture fallback when no instance is running."
   @spec daemon_opts(keyword()) :: keyword()
   def daemon_opts(opts \\ []) when is_list(opts) do
-    base = Application.get_env(:harness_web, :daemon_opts, [])
-    Keyword.merge(base, opts)
+    H.Daemon.instance_options() ||
+      Keyword.merge(Application.get_env(:harness_web, :daemon_opts, []), opts)
   end
 
   @impl HWeb.Backend

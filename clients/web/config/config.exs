@@ -15,6 +15,10 @@ config :harness_web, HWeb.Endpoint,
   check_origin: ["//127.0.0.1", "//localhost", "//[::1]"],
   live_view: [signing_salt: "hweb_lv_salt_9f2a4c"]
 
+# Write-only provider settings are submitted in a CSRF-protected POST, never
+# a LiveView event. Keep the key out of Phoenix's request diagnostics.
+config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key"]
+
 config :phoenix, :json_library, Jason
 
 config :logger, :default_formatter,

@@ -1,10 +1,12 @@
 //! Terminal-side state only. All durable mutations go through an effect worker.
+use super::secret::SecretInput;
 use super::{
     actions::{self, Effect, Reply, Target},
     cards,
     completion::{self, Completion, Token},
     editor::Editor,
     external,
+    login::{self, Login},
     picker::{Choice, Picker},
     preferences::UserConfig,
     screen::{EditorOverlay, Screen},
@@ -41,6 +43,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/earlier", "Page older entries"),
     ("/latest", "Return to live transcript"),
     ("/model", "Choose a model"),
+    ("/login", "Sign in to a daemon provider account"),
+    ("/key", "Manage named provider API keys"),
+    ("/account", "Select the stock Codex account"),
     ("/thinking", "Choose thinking level"),
     ("/file", "Read a session workspace file"),
     ("/attach", "Attach a client-local file"),
@@ -64,6 +69,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "/export",
         "Export history to a new local .html or .jsonl file",
     ),
+    (
+        "/restart-ui",
+        "Reload hi in this conversation (does not stop the daemon)",
+    ),
     ("/quit", "Detach (does not abort)"),
     ("/retry", "Retry a pending submission"),
     ("/discard-retry", "Forget a pending submission retry"),
@@ -78,6 +87,8 @@ const COMMANDS: &[(&str, &str)] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PickerKind {
     Models,
+    LoginSources,
+    AccountSources,
     Thinking,
     Sessions,
     Branches,
@@ -139,6 +150,8 @@ struct Ui {
     draft: Draft,
     saved: HashMap<(String, String), Draft>,
     picker: Option<PickerState>,
+    login: Option<Login>,
+    secret: Option<SecretInput>,
     completion: Option<Completion>,
     path_lookup: Option<PathLookup>,
     pending_root_fork: Option<PendingRootFork>,
@@ -151,11 +164,16 @@ struct Ui {
     cached_rows: Vec<String>,
     rows_dirty: bool,
     quit: bool,
+    restart_ui: Option<PathBuf>,
     last_clear: Option<Instant>,
 }
 
 fn local<T>(r: io::Result<T>) -> Result<T, String> {
     r.map_err(|e| e.to_string())
+}
+
+pub struct RestartOrigin {
+    pub daemon_url: Option<String>,
 }
 
 pub fn run(
@@ -165,6 +183,7 @@ pub fn run(
     resume: bool,
     initial: &str,
     regular: bool,
+    origin: RestartOrigin,
 ) -> Result<(), String> {
     let open_screen = if regular {
         Screen::open_regular
@@ -184,6 +203,8 @@ pub fn run(
         draft: Draft::default(),
         saved: HashMap::new(),
         picker: None,
+        login: None,
+        secret: None,
         completion: None,
         path_lookup: None,
         pending_root_fork: None,
@@ -196,6 +217,7 @@ pub fn run(
         cached_rows: Vec::new(),
         rows_dirty: true,
         quit: false,
+        restart_ui: None,
         last_clear: None,
     };
     ui.config.status.validate(&ui.status_fields())?;
@@ -217,6 +239,7 @@ pub fn run(
         }
         repaint |= ui.complete(&mut screen);
         repaint |= ui.complete_path_lookup();
+        repaint |= ui.login.as_mut().is_some_and(|flow| flow.tick(&ui.client));
         if ui.online && ui.state.seq.is_some() && ui.job.is_none() {
             if let Some(text) = initial.take() {
                 ui.dismiss_completion();
@@ -232,7 +255,15 @@ pub fn run(
         if local(event::poll(Duration::from_millis(16)))? {
             match local(event::read())? {
                 Event::Key(k) if k.kind != KeyEventKind::Release => {
-                    if ui.draft.editor.is_searching_history() && ui.picker.is_none() {
+                    if ui.secret.is_some() {
+                        ui.secret_key(k);
+                    } else if let Some(flow) = &mut ui.login {
+                        if (k.code == KeyCode::Esc || (k.code == KeyCode::Enter && flow.is_done()))
+                            && flow.cancel()
+                        {
+                            ui.login = None;
+                        }
+                    } else if ui.draft.editor.is_searching_history() && ui.picker.is_none() {
                         ui.draft.editor.key(k);
                     } else if ui.picker.is_some() {
                         ui.pick_key(k, &mut screen);
@@ -260,7 +291,12 @@ pub fn run(
                         ui.key(k, &mut screen);
                     }
                 }
-                Event::Paste(s) if ui.picker.is_none() => {
+                Event::Paste(s) if ui.secret.is_some() => {
+                    if let Some(secret) = &mut ui.secret {
+                        secret.paste(&s);
+                    }
+                }
+                Event::Paste(s) if ui.picker.is_none() && ui.login.is_none() => {
                     ui.dismiss_completion();
                     if s.len() > super::files::MAX_TEXT_BYTES {
                         ui.note = "Paste exceeds 1 MiB; use a smaller excerpt".into();
@@ -277,6 +313,26 @@ pub fn run(
             }
             repaint = true;
         }
+    }
+    if let Some(executable) = ui.restart_ui.take() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new(executable);
+        command
+            .arg("--data-dir")
+            .arg(&ui.data_dir)
+            .arg("--session")
+            .arg(&ui.target.sid)
+            .arg("--conversation")
+            .arg(&ui.target.cid)
+            .arg("--tui-mode")
+            .arg(if regular { "regular" } else { "fullscreen" });
+        if let Some(url) = origin.daemon_url {
+            command.arg("--daemon-url").arg(url);
+        }
+        // Restore terminal modes and cancel the old subscription before exec.
+        drop(screen);
+        drop(ui);
+        return Err(format!("Could not restart hi: {}", command.exec()));
     }
     Ok(())
 }
@@ -296,7 +352,13 @@ impl Ui {
         }
         let status = self.config.status.render(&self.status_fields());
         let lines;
-        let overlay = if let Some(picker) = &self.picker {
+        let overlay = if let Some(secret) = &self.secret {
+            lines = secret.lines();
+            EditorOverlay::Picker(&lines)
+        } else if let Some(flow) = &self.login {
+            lines = flow.lines();
+            EditorOverlay::Picker(&lines)
+        } else if let Some(picker) = &self.picker {
             lines = picker.picker.lines();
             EditorOverlay::Picker(&lines)
         } else if let Some(completion) = &self.completion {
@@ -448,6 +510,8 @@ impl Ui {
             Ok(Reply::Menu(title, items)) => {
                 let kind = match title.as_str() {
                     "models" => PickerKind::Models,
+                    "Codex sources" => PickerKind::LoginSources,
+                    "Select stock Codex account" => PickerKind::AccountSources,
                     "thinking" => PickerKind::Thinking,
                     "branches" => PickerKind::Branches,
                     "sessions" => PickerKind::Sessions,
@@ -899,6 +963,37 @@ impl Ui {
             );
         }
     }
+    fn secret_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc
+            || (key.code == KeyCode::Char('c') && key.modifiers.contains(Mod::CONTROL))
+        {
+            self.secret = None;
+            self.note = "API-key entry cancelled".into();
+        } else if self.secret.as_mut().is_some_and(|secret| secret.key(key)) {
+            let mut input = self.secret.take().expect("secret input is open");
+            let key = input.take();
+            let c = self.client.clone();
+            let (tx, result) = mpsc::sync_channel(1);
+            thread::spawn(move || {
+                let saved = c
+                    .set_api_key(&input.provider, &input.source, &key)
+                    .map(|_| {
+                        Reply::Message(format!(
+                            "Saved {} key {} · use /key use to switch aliases",
+                            input.provider, input.source
+                        ))
+                    })
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(saved);
+            });
+            self.job = Some(Job {
+                result,
+                submitted: None,
+                source_target: (self.target.sid.clone(), self.target.cid.clone()),
+            });
+            self.note = "Saving API key…".into();
+        }
+    }
     fn key(&mut self, k: KeyEvent, screen: &mut Screen) {
         let action = self.config.keys.action(k);
         if action != Some("clear") {
@@ -1103,6 +1198,43 @@ impl Ui {
             .unwrap_or((text, ""));
         match cmd {
             "/" | "/help" => self.palette(),
+            "/restart-ui" => {
+                let pending = |draft: &Draft| {
+                    !draft.editor.text().is_empty()
+                        || !draft.attachments.is_empty()
+                        || draft.retry.is_some()
+                        || draft.fork_edit.is_some()
+                };
+                if self.job.is_some()
+                    || self.login.is_some()
+                    || pending(&self.draft)
+                    || self.saved.values().any(pending)
+                {
+                    self.note =
+                        "Save or clear drafts and finish pending commands before restarting hi"
+                            .into();
+                } else if !self.online || self.state.seq.is_none() {
+                    self.note = "Reconnect before restarting hi".into();
+                } else {
+                    use std::os::unix::fs::PermissionsExt;
+                    let candidate = if arg.is_empty() {
+                        std::env::current_exe()
+                    } else {
+                        Path::new(arg).canonicalize()
+                    };
+                    match candidate {
+                        Ok(path)
+                            if path.metadata().is_ok_and(|m| {
+                                m.is_file() && m.permissions().mode() & 0o111 != 0
+                            }) =>
+                        {
+                            self.restart_ui = Some(path);
+                            self.quit = true;
+                        }
+                        _ => self.note = "No executable hi candidate at that path".into(),
+                    }
+                }
+            }
             "/quit" | "/exit" => self.quit = true,
             "/hotkeys" => self.menu(
                 PickerKind::Info,
@@ -1114,6 +1246,40 @@ impl Ui {
                     .map(|s| (String::new(), s))
                     .collect(),
             ),
+            "/account" if arg.is_empty() => self.start(Effect::AccountSources, None),
+            "/account" if arg.starts_with("add ") && login::source_id(arg[4..].trim()) => {
+                self.start(Effect::AddAccount(arg[4..].trim().into()), None)
+            }
+            "/account" if login::source_id(arg) => {
+                self.start(Effect::ActivateAccount(arg.into()), None)
+            }
+            "/account" => self.note = "Usage: /account [source] or /account add <source>".into(),
+            "/key" => {
+                let parts: Vec<_> = arg.split_whitespace().take(4).collect();
+                match parts.as_slice() {
+                    [] | ["list"] => self.start(Effect::KeyProfiles, None),
+                    ["set", provider, source] if login::source_id(provider) && login::source_id(source) => {
+                        if self.job.is_some() { self.note = "Wait for pending command".into(); }
+                        else { self.secret = Some(SecretInput::new(provider, source)); }
+                    }
+                    ["use", provider, source] if login::source_id(provider) && login::source_id(source) => {
+                        self.start(Effect::UseKey((*provider).into(), (*source).into()), None);
+                    }
+                    _ => self.note = "Usage: /key list | /key set <provider> <alias> | /key use <provider> <alias> (never include the key here)".into(),
+                }
+            }
+            "/login" => {
+                let parts: Vec<_> = arg.split_whitespace().take(3).collect();
+                match parts.as_slice() {
+                    [] | ["openai_codex" | "openai-codex"] => {
+                        self.start(Effect::LoginSources, None)
+                    }
+                    ["openai_codex" | "openai-codex", source] if login::source_id(source) => {
+                        self.login = Some(Login::start(self.client.clone(), (*source).into()));
+                    }
+                    _ => self.note = "Usage: /login [openai_codex [source]]".into(),
+                }
+            }
             "/reload" => {
                 let candidate = UserConfig::load(&self.data_dir).and_then(|config| {
                     config.status.validate(&self.status_fields())?;
@@ -1472,6 +1638,10 @@ impl Ui {
                             );
                         }
                     }
+                    PickerKind::AccountSources => self.start(Effect::ActivateAccount(id), None),
+                    PickerKind::LoginSources => {
+                        self.login = Some(Login::start(self.client.clone(), id));
+                    }
                     PickerKind::Info => {}
                 }
             }
@@ -1695,6 +1865,8 @@ mod tests {
             draft: Draft::default(),
             saved: HashMap::new(),
             picker: None,
+            login: None,
+            secret: None,
             completion: None,
             path_lookup: None,
             pending_root_fork: None,
@@ -1707,6 +1879,7 @@ mod tests {
             cached_rows: Vec::new(),
             rows_dirty: true,
             quit: false,
+            restart_ui: None,
             last_clear: None,
         };
         let screen = Screen::with_test_backend(80, 24).unwrap();

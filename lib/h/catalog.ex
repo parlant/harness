@@ -128,6 +128,11 @@ defmodule H.Catalog do
     GenServer.call(server, {:put_session, attrs})
   end
 
+  @doc "Creates an identity without overwriting a concurrently created session."
+  def insert_session(server, attrs) when is_map(attrs) do
+    GenServer.call(server, {:insert_session, attrs})
+  end
+
   @doc """
   Applies worker-owned runtime updates (`title`, `active`, `next_wake_at`,
   `updated_at`, `applied_edit_rev`) without overwriting server-owned fields
@@ -181,18 +186,23 @@ defmodule H.Catalog do
   end
 
   @impl true
-  def handle_call({:put_session, attrs}, _from, state) do
+  def handle_call({operation, attrs}, _from, state)
+      when operation in [:put_session, :insert_session] do
     with {:ok, validated} <- validate_put_attrs(attrs) do
       now = System.system_time(:millisecond)
       session_id = validated.session_id
       existing = Map.get(state.entries, session_id)
 
-      entry = build_entry(existing, validated, now)
-      entries = Map.put(state.entries, session_id, entry)
-      persist_entries!(state.file_path, entries)
-      :ets.insert(state.table, {session_id, entry})
+      if operation == :insert_session and existing do
+        {:reply, {:existing, existing}, state}
+      else
+        entry = build_entry(existing, validated, now)
+        entries = Map.put(state.entries, session_id, entry)
+        persist_entries!(state.file_path, entries)
+        :ets.insert(state.table, {session_id, entry})
 
-      {:reply, {:ok, entry}, %{state | entries: entries}}
+        {:reply, {:ok, entry}, %{state | entries: entries}}
+      end
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end

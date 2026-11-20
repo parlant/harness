@@ -76,16 +76,251 @@ defmodule H.Provider.ReqLLM do
       when is_map(config) and is_map(request) and is_function(emit, 1) do
     model_spec = Map.get(request, :model) || Map.get(request, "model") || Map.get(config, :model)
 
-    settings = Settings.read(config)
+    config = if Map.has_key?(config, :accounts_mode), do: config, else: attempt_config(config)
 
-    with {:ok, %LLMDB.Model{} = model} <- resolve_model(model_spec),
-         {req_context, req_tools} <- build_req_llm_inputs(request),
-         {:ok, stream_opts} <- build_stream_opts(config, request, model, req_tools, settings),
-         {:ok, stream_or_resp} <- start_stream(config, model, req_context, stream_opts) do
-      consume_stream(stream_or_resp, model, config, emit)
-    else
-      {:error, reason} -> {:error, normalize_error(reason)}
+    case resolve_model(model_spec) do
+      {:ok, %LLMDB.Model{provider: :openai_codex} = model}
+      when config.accounts_mode == :managed ->
+        managed_codex_turn(config, request, model, emit)
+
+      {:ok, %LLMDB.Model{} = model} ->
+        settings = Settings.read(config)
+        {req_context, req_tools} = build_req_llm_inputs(request)
+
+        with {:ok, stream_opts} <- build_stream_opts(config, request, model, req_tools, settings),
+             {:ok, stream} <- start_stream(config, model, req_context, stream_opts) do
+          consume_stream(stream, model, config, emit)
+        else
+          {:error, reason} -> {:error, normalize_error(reason)}
+        end
+
+      {:error, reason} ->
+        {:error, normalize_error(reason)}
     end
+  end
+
+  @doc false
+  def attempt_config(%{accounts: accounts} = config) do
+    mode =
+      if config[:codex_account_policy] || H.Accounts.configured?(accounts),
+        do: :managed,
+        else: :manual
+
+    Map.put(config, :accounts_mode, mode)
+  end
+
+  def attempt_config(config), do: Map.put(config, :accounts_mode, :manual)
+
+  defp managed_codex?(%{accounts_mode: :managed}, model),
+    do: match?({:ok, %LLMDB.Model{provider: :openai_codex}}, resolve_model(model))
+
+  defp managed_codex?(_, _), do: false
+
+  def dispatch_limit(config, model) do
+    config = if Map.has_key?(config, :accounts_mode), do: config, else: attempt_config(config)
+
+    cond do
+      not managed_codex?(config, model) -> nil
+      config[:codex_account_policy] -> 2
+      true -> 1
+    end
+  end
+
+  defp managed_codex_turn(config, request, model, emit) do
+    {context, tools} = build_req_llm_inputs(request)
+    context = portable_codex_context(context)
+    policy = config[:codex_account_policy]
+
+    dispatch = fn credential ->
+      managed_dispatch(config, request, model, context, tools, credential, emit, policy != nil)
+    end
+
+    result =
+      if policy do
+        deadline = System.monotonic_time(:millisecond) + 15_000
+        pooled_dispatch(config, policy, model.id, dispatch, deadline, nil)
+      else
+        with {:ok, credential} <- H.Accounts.resolve_codex(config.accounts),
+             do: dispatch.(credential)
+      end
+
+    managed_result(result)
+  end
+
+  defp pooled_dispatch(config, policy, model, dispatch, deadline, rejected) do
+    with {:ok, source, credential} <- policy_credential(config, policy, model, rejected, deadline) do
+      # Dispatch owns stream cleanup. Only a typed pre-output auth rejection
+      # permits an alternate, and the rejected identity cannot be reused.
+      case dispatch.(credential) do
+        {:error, :invalid_token} = error ->
+          notified = policy_callback(policy.module, :rejected, [model, source, :invalid_token])
+
+          if is_nil(rejected) and notified == :ok do
+            pooled_dispatch(
+              config,
+              policy,
+              model,
+              dispatch,
+              deadline,
+              {source, credential.account_id}
+            )
+          else
+            error
+          end
+
+        {:error, :rate_limited} = error ->
+          policy_callback(policy.module, :rejected, [model, source, :rate_limited])
+          error
+
+        result ->
+          result
+      end
+    end
+  end
+
+  defp policy_credential(config, policy, model, rejected, deadline) do
+    {excluded, excluded_identity} = rejected || {nil, nil}
+    candidates = List.delete(policy.sources, excluded)
+
+    case policy_callback(policy.module, :order, [model, candidates]) do
+      ordered when is_list(ordered) and length(ordered) <= length(candidates) ->
+        if ordered -- candidates == [] do
+          Enum.reduce_while(ordered, {:error, :credential_unavailable}, fn source, unavailable ->
+            case H.Accounts.resolve_codex(config.accounts, source, deadline) do
+              {:ok, %{account_id: ^excluded_identity}} -> {:cont, unavailable}
+              {:ok, credential} -> {:halt, {:ok, source, credential}}
+              {:error, :credential_unavailable} -> {:cont, unavailable}
+              error -> {:halt, error}
+            end
+          end)
+        else
+          {:error, :account_policy_unavailable}
+        end
+
+      _ ->
+        {:error, :account_policy_unavailable}
+    end
+  end
+
+  defp policy_callback(module, callback, args) do
+    apply(module, callback, args)
+  rescue
+    _ -> :unavailable
+  catch
+    _, _ -> :unavailable
+  end
+
+  defp managed_dispatch(config, request, model, context, tools, credential, emit, pooled?) do
+    dispatch =
+      config
+      |> Map.take([:stream_fn, :close_fn, :receive_timeout])
+      |> Map.put(:credentials, credential)
+
+    with {:ok, opts} <- build_stream_opts(dispatch, request, model, tools, %{}),
+         opts =
+           Keyword.update!(
+             opts,
+             :provider_options,
+             &Keyword.merge(&1, openai_stream_transport: :sse, codex_originator: "h")
+           ),
+         opts = Keyword.put(opts, :base_url, "https://chatgpt.com/backend-api"),
+         {:ok, stream} <- start_stream(dispatch, model, context, opts) do
+      safe_emit = fn
+        %{type: :start} when pooled? -> :ok
+        event -> emit.(Map.delete(event, :metadata))
+      end
+
+      consume_stream(stream, model, Map.put(dispatch, :managed_codex, true), safe_emit)
+    else
+      {:error, reason} -> {:error, managed_rejection(reason)}
+    end
+  end
+
+  # A typed transport HTTP 401 with the explicit invalid_token code is an
+  # authentication rejection, not a generic 401 or a stream error string.
+  defp managed_rejection(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Request{} = request}),
+    do: managed_rejection(request)
+
+  defp managed_rejection(%ReqLLM.Error.API.Request{status: 401, provider_code: "invalid_token"}),
+    do: :invalid_token
+
+  defp managed_rejection(%ReqLLM.Error.API.Request{status: 429}), do: :rate_limited
+  defp managed_rejection(_), do: :codex_request_failed
+
+  defp managed_result({:ok, %{finish_reason: reason} = response})
+       when reason in ["stop", "tool_calls", "length", "content_filter"] do
+    {:ok,
+     response
+     |> Map.drop([:provider_meta, :reasoning_details])
+     |> Map.update!(
+       :content,
+       &Enum.map(&1, fn part -> Map.drop(part, [:metadata, :signature]) end)
+     )
+     |> Map.update!(:tool_calls, &Enum.map(&1, fn call -> Map.delete(call, :metadata) end))}
+  end
+
+  defp managed_result({:cancelled, _}), do: {:cancelled, %{}}
+
+  defp managed_result({:error, :credential_unavailable}),
+    do: managed_codex_error(:codex_accounts_unavailable)
+
+  defp managed_result({:error, :account_policy_unavailable}),
+    do: managed_codex_error(:account_policy_unavailable)
+
+  defp managed_result({:error, reason}) when reason in [:invalid_token, :rate_limited],
+    do: managed_codex_error(reason)
+
+  defp managed_result(_), do: managed_codex_error(:codex_request_failed)
+
+  defp portable_codex_context(context) do
+    messages =
+      Enum.map(context.messages, fn message ->
+        content =
+          message.content
+          |> Enum.reject(&(&1.type in [:thinking, :provider_block]))
+          |> Enum.map(&%{&1 | metadata: %{}})
+
+        tool_calls =
+          if message.tool_calls do
+            Enum.map(message.tool_calls, fn call ->
+              %{call | function: Map.drop(call.function, [:metadata, "metadata"])}
+            end)
+          end
+
+        metadata = Map.take(message.metadata || %{}, [:is_error])
+
+        %{
+          message
+          | reasoning_details: nil,
+            metadata: metadata,
+            content: content,
+            tool_calls: tool_calls
+        }
+      end)
+
+    %{context | messages: messages}
+  end
+
+  defp managed_codex_error(code) do
+    message =
+      case code do
+        :codex_accounts_unavailable ->
+          "No eligible Codex credential is available. Use /login or /account; a configured pool may be waiting for fresh usage data."
+
+        :account_policy_unavailable ->
+          "The configured Codex account policy is unavailable."
+
+        :invalid_token ->
+          "Codex rejected the credential. Sign in again or switch accounts with /account."
+
+        :rate_limited ->
+          "Codex reported a rate limit. The request was not retried on another account."
+
+        :codex_request_failed ->
+          "Managed Codex request failed. No further automatic retry was made."
+      end
+
+    {:error, %{code: to_string(code), message: message, retryable: false}}
   end
 
   @impl H.Provider
@@ -115,9 +350,9 @@ defmodule H.Provider.ReqLLM do
         model
 
       _ ->
-        case list_models(config) do
-          [%{id: id} | _] -> id
-          [] -> "openai:gpt-5.4"
+        case Enum.find(list_models(config), &(not Map.has_key?(&1, :unavailable_reason))) do
+          %{id: id} -> id
+          nil -> "openai:gpt-5.4"
         end
     end
   end
@@ -217,10 +452,34 @@ defmodule H.Provider.ReqLLM do
       true ->
         cred_opts = Keyword.put(Map.get(config, :credentials_opts, []), :settings, settings)
 
-        case Credentials.resolve(provider, cred_opts) do
-          {:ok, creds} -> {:ok, credentials_to_opts(provider, creds)}
-          {:error, reason} -> {:error, reason}
+        case resolved_credentials(config, provider, cred_opts) do
+          {:ok, creds} ->
+            {:ok, credentials_to_opts(provider, creds)}
+
+          {:error, {:missing_env, env}} ->
+            {:error,
+             %{
+               code: "missing_provider_credential",
+               message:
+                 "No #{provider} API key is configured in the daemon credential store or #{env}. Set a key with /key set #{provider} <alias> or in Phoenix Account settings, then /continue.",
+               retryable: false
+             }}
+
+          {:error, reason} ->
+            {:error, reason}
         end
+    end
+  end
+
+  defp resolved_credentials(config, provider, opts) do
+    if config[:accounts] && not Keyword.has_key?(opts, :api_key) &&
+         Credentials.api_key_provider?(Atom.to_string(provider)) do
+      case H.Accounts.resolve_api_key(config.accounts, provider) do
+        :not_configured -> Credentials.resolve(provider, opts)
+        result -> result
+      end
+    else
+      Credentials.resolve(provider, opts)
     end
   end
 
@@ -340,7 +599,7 @@ defmodule H.Provider.ReqLLM do
 
   # Stream consumption & cleanup
 
-  defp consume_stream(%StreamResponse{} = stream_resp, model, _config, emit) do
+  defp consume_stream(%StreamResponse{} = stream_resp, model, config, emit) do
     parent = self()
     watcher_ref = make_ref()
 
@@ -368,10 +627,17 @@ defmodule H.Provider.ReqLLM do
     end
 
     try do
-      result = stream_resp |> StreamResponse.events() |> run_event_loop(model, emit)
+      result =
+        run_event_loop(
+          StreamResponse.events(stream_resp),
+          model,
+          emit,
+          config[:managed_codex] == true
+        )
 
       case result do
-        {:ok, response} when model.provider == :openai_codex ->
+        {:ok, response}
+        when model.provider == :openai_codex and not is_map_key(config, :managed_codex) ->
           case MetadataHandle.await(stream_resp.metadata_handle) do
             %{reasoning_details: [_ | _] = details} ->
               {:ok, Map.put(response, :reasoning_details, Credentials.sanitize(details))}
@@ -391,7 +657,7 @@ defmodule H.Provider.ReqLLM do
 
   defp consume_stream(event_stream, model, config, emit) do
     try do
-      run_event_loop(event_stream, model, emit)
+      run_event_loop(event_stream, model, emit, config[:managed_codex] == true)
     after
       case Map.get(config, :close_fn) do
         fun when is_function(fun, 0) -> fun.()
@@ -408,7 +674,7 @@ defmodule H.Provider.ReqLLM do
     :exit, _ -> :ok
   end
 
-  defp run_event_loop(events, model, emit) do
+  defp run_event_loop(events, model, emit, require_terminal) do
     init = %{
       model: model,
       blocks: [],
@@ -418,18 +684,24 @@ defmodule H.Provider.ReqLLM do
       usage: %{},
       finish_reason: "stop",
       provider_meta: %{},
-      terminal: nil
+      terminal: nil,
+      managed_codex: require_terminal,
+      observed?: false
     }
 
     acc =
       Enum.reduce_while(events, init, fn %StreamEvent{} = event, acc ->
+        acc = if event.type in [:start, :error], do: acc, else: %{acc | observed?: true}
+
         case handle_event(event, acc, emit) do
           {:halt, final_acc} -> {:halt, final_acc}
           {:cont, next_acc} -> {:cont, next_acc}
         end
       end)
 
-    finalize_stream_acc(acc)
+    if require_terminal and is_nil(acc.terminal),
+      do: {:error, :missing_terminal_event},
+      else: finalize_stream_acc(acc)
   end
 
   defp handle_event(%StreamEvent{type: :start, data: data}, acc, emit) do
@@ -540,7 +812,14 @@ defmodule H.Provider.ReqLLM do
   end
 
   defp handle_event(%StreamEvent{type: :error, data: error}, acc, _emit) do
-    {:halt, %{acc | terminal: {:error, normalize_error(error)}}}
+    error =
+      case acc do
+        %{managed_codex: true, observed?: false} -> managed_rejection(error)
+        %{managed_codex: true} -> :codex_request_failed
+        _ -> normalize_error(error)
+      end
+
+    {:halt, %{acc | terminal: {:error, error}}}
   end
 
   defp handle_event(%StreamEvent{}, acc, _emit), do: {:cont, acc}
@@ -644,6 +923,32 @@ defmodule H.Provider.ReqLLM do
     config
     |> resolve_target_providers(settings)
     |> Enum.flat_map(&curated_models_for_provider/1)
+    |> Enum.map(fn
+      %{provider: "openai_codex"} = model ->
+        managed =
+          config[:codex_account_policy] ||
+            (config[:accounts] && H.Accounts.configured?(config.accounts))
+
+        ready =
+          if managed do
+            H.Accounts.codex_ready?(
+              config[:accounts],
+              get_in(config, [:codex_account_policy, :sources])
+            )
+          else
+            Credentials.configured?(
+              :openai_codex,
+              Keyword.put(Map.get(config, :credentials_opts, []), :settings, settings)
+            )
+          end
+
+        if ready,
+          do: model,
+          else: Map.put(model, :unavailable_reason, "Codex sign-in required (/login)")
+
+      model ->
+        model
+    end)
   end
 
   defp resolve_target_providers(config, settings) do
@@ -651,9 +956,20 @@ defmodule H.Provider.ReqLLM do
       nil ->
         cred_opts = Keyword.put(Map.get(config, :credentials_opts, []), :settings, settings)
 
-        case Credentials.configured_providers(cred_opts) do
-          [] -> @default_providers
-          configured -> configured
+        stored = if config[:accounts], do: H.Accounts.key_providers(config.accounts), else: []
+        stored = if is_list(stored), do: Enum.map(stored, &normalize_provider_name/1), else: []
+        configured = Enum.uniq(Credentials.configured_providers(cred_opts) ++ stored)
+
+        cond do
+          config[:codex_account_policy] ||
+              (config[:accounts] && H.Accounts.configured?(config.accounts)) ->
+            Enum.uniq([:openai_codex | configured])
+
+          configured == [] ->
+            @default_providers
+
+          true ->
+            configured
         end
 
       provider when is_atom(provider) ->

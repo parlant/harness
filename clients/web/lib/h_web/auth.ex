@@ -66,12 +66,12 @@ defmodule HWeb.Auth do
   def create_browser_session(_), do: {:error, :unauthorized}
 
   defp auth_server do
-    daemon_opts = Application.get_env(:harness_web, :daemon_opts, [])
+    daemon_opts = HWeb.Backend.InVM.daemon_opts()
     Keyword.get(daemon_opts, :auth_server, H.Auth)
   end
 
   defp auth_table do
-    daemon_opts = Application.get_env(:harness_web, :daemon_opts, [])
+    daemon_opts = HWeb.Backend.InVM.daemon_opts()
     Keyword.get(daemon_opts, :auth_table, :h_auth)
   end
 end

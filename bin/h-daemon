@@ -1,0 +1,10 @@
+#!/bin/sh
+# Run a built H distribution without Mix. For a checkout, build with mix compile.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+build=${H_BUILD_PATH:-"$root/_build/dev"}
+if [ ! -f "$build/lib/harness/ebin/Elixir.H.Daemon.CLI.beam" ]; then
+  printf '%s\n' 'H is not built. Run mix compile in the H checkout or set H_BUILD_PATH.' >&2
+  exit 1
+fi
+exec elixir -pa "$build/lib/*/ebin" -e 'Code.delete_path("."); H.Daemon.CLI.main(System.argv())' -- "$@"

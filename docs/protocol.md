@@ -12,13 +12,20 @@
 
 | Method and path | Request / response |
 |---|---|
+| `POST /daemon/shutdown` | Owner idle-only stop for launcher-managed standalone instances. `{}` → `202` `{"state":"stopping"}`. `409` if busy or unsupported. Mutations are fenced after acceptance. |
 | `GET /models` | `models` from the configured provider. |
+| `GET /provider-keys` | Lists supported API-key providers, alias names and active alias. Never returns a key. |
+| `POST /provider-keys/set` | Owner write-only body `{provider,source,api_key}`. Saves or replaces an alias; the first one is active. No provider call. |
+| `POST /provider-keys/use` | Body `{provider,source}` persists the active alias for the next request. |
+| `POST /provider-accounts/add` | Add a local Codex alias (idempotent, no provider I/O). |
+| `POST /provider-accounts/activate` | Persist selection of the stock Codex alias for new requests; independent of a session, no effect on a loaded pool. |
+| `GET /provider-logins`; `POST /provider-logins/{start,status,cancel}` | [Owner device login](extensions/clients.md#implemented-device-login), independent of session state. |
 | `GET /environments` | Configured `environments` and their default directories. |
 | `GET /fs` | Browse `env_id` and `path`; returns the resolved path, parent, annotated directories and sessions rooted there. |
 | `GET /fs/files` | Bounded read-only workspace file discovery. Required `env_id` and absolute `cwd` (never falls back to daemon cwd); optional `query`, `include_hidden` (default `false`), `include_dirs` (default `true`), `exclude`, `limit` 1–500 (default 200), `max_depth` 1–32 (default 32). Skips `.git` and does not traverse symlinks. |
 | `GET /fs/file` | Bounded read-only UTF-8 file reader. Required `env_id`, absolute `cwd`, and `path`; optional `offset` (default 1), `limit` 1–2000 (default 200), `max_bytes` 1–65536 (default 51200). Confined within workspace (`403` on traversal, `~`, or symlinks; `422` on dirs, non-regular files, or binary/non-UTF-8). |
 | `GET /sessions` | Catalog `sessions`; optional filters `env_id`, `cwd`, `subtree`. |
-| `POST /sessions` | Required absolute `cwd`; optional `env_id` (default `host`), `harness_id` (default `coding`), `title`, `agent`, `session_id`. Returns `session` and `seq`. Supply a stable `session_id` for create-or-attach; a different workspace conflicts. Omitting the ID can create a second session on retry. |
+| `POST /sessions` | Required absolute `cwd`; optional `env_id` and `harness_id` (default `host` and `coding` for new sessions only), `title`, `agent`, `session_id`. Returns `session` and `seq`. Supply a stable `session_id` for create-or-attach; an explicit different profile or workspace conflicts, and an omitted profile or environment uses the recorded one when attaching. An unavailable recorded profile or environment returns `503`. Omitting the ID can create a second session on retry. |
 | `GET /sessions/:sid` | `session`, `conversations` with ancestry, and `tasks`. No open-waits API. |
 | `GET /sessions/:sid/files` | Same bounded file discovery as `GET /fs/files`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |
 | `GET /sessions/:sid/file` | Same bounded UTF-8 file read as `GET /fs/file`, strictly scoped to the session's catalog `{env_id, cwd}` (returns `503` if environment unavailable). |

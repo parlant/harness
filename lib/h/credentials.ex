@@ -31,6 +31,12 @@ defmodule H.Credentials do
     "google" => "GOOGLE_API_KEY"
   }
 
+  @doc false
+  def api_key_providers, do: Enum.sort(Map.keys(@env_vars))
+
+  @doc false
+  def api_key_provider?(provider), do: Map.has_key?(@env_vars, provider)
+
   @sensitive_keys MapSet.new([
                     "access",
                     "accesstoken",

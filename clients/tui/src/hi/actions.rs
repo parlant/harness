@@ -45,6 +45,12 @@ pub enum Effect {
     ForkAndSubmit(CommandEnvelope),
     Sessions,
     Models,
+    LoginSources,
+    KeyProfiles,
+    UseKey(String, String),
+    AccountSources,
+    ActivateAccount(String),
+    AddAccount(String),
     Branches,
     Earlier(String),
     Attach(String),
@@ -196,6 +202,102 @@ pub fn execute(
             Ok(Reply::Menu("sessions".to_string(), choices))
         }
 
+        Effect::KeyProfiles => {
+            let profiles = client.key_profiles().map_err(|e| format_client_error(&e))?;
+            let rows = profiles
+                .into_iter()
+                .filter(|p| super::login::source_id(&p.provider))
+                .flat_map(|p| {
+                    if p.sources.is_empty() {
+                        vec![(String::new(), format!("{} · no stored key", p.provider))]
+                    } else {
+                        p.sources
+                            .iter()
+                            .take(8)
+                            .filter(|s| super::login::source_id(s))
+                            .map(|source| {
+                                let active = if p.active.as_ref() == Some(source) {
+                                    " · active"
+                                } else {
+                                    ""
+                                };
+                                (String::new(), format!("{} / {source}{active}", p.provider))
+                            })
+                            .collect()
+                    }
+                })
+                .collect();
+            Ok(Reply::Menu(
+                "Provider keys · /key set or /key use".into(),
+                rows,
+            ))
+        }
+        Effect::UseKey(provider, source) => {
+            client
+                .use_api_key(&provider, &source)
+                .map_err(|e| format_client_error(&e))?;
+            Ok(Reply::Message(format!("Active {provider} key: {source}")))
+        }
+        Effect::LoginSources | Effect::AccountSources => {
+            let choosing = effect == Effect::AccountSources;
+            let providers = client.login_providers().map_err(|_| {
+                "Provider login is unavailable on this daemon. See docs/providers.md.".to_string()
+            })?;
+            let choices: Vec<_> = providers
+                .into_iter()
+                .filter(|p| p.id == "openai_codex" && p.interaction == "device_code_v1")
+                .flat_map(|p| p.sources.into_iter().take(8))
+                .filter(|s| super::login::source_id(&s.id))
+                .map(|s| {
+                    let state = match s.state.as_str() {
+                        "available" => "signed in",
+                        "refreshing" => "refreshing",
+                        "refresh_needed" => "refresh needed",
+                        "reauth_required" => "sign-in required",
+                        _ => "not signed in",
+                    };
+                    let active = if s.active { " · stock active" } else { "" };
+                    (s.id.clone(), format!("{}  [{state}{active}]", s.id))
+                })
+                .collect();
+            if choices.is_empty() && !choosing {
+                Ok(Reply::Menu(
+                    "Codex sources".into(),
+                    vec![("default".into(), "Set up Codex device login".into())],
+                ))
+            } else if choices.is_empty() {
+                Ok(Reply::Message(
+                    "No accounts. Use /login or /account add <alias>.".into(),
+                ))
+            } else {
+                Ok(Reply::Menu(
+                    if choosing {
+                        "Select stock Codex account"
+                    } else {
+                        "Codex sources"
+                    }
+                    .into(),
+                    choices,
+                ))
+            }
+        }
+
+        Effect::ActivateAccount(source) => {
+            client
+                .activate_codex_account(&source)
+                .map_err(|e| format_client_error(&e))?;
+            Ok(Reply::Message(format!("Stock Codex account: {source}")))
+        }
+
+        Effect::AddAccount(source) => {
+            client
+                .add_codex_account(&source)
+                .map_err(|e| format_client_error(&e))?;
+            Ok(Reply::Message(format!(
+                "Added {source}. Sign in with /login openai_codex {source}."
+            )))
+        }
+
         Effect::Models => {
             let models = client.list_models().map_err(|e| format_client_error(&e))?;
             let choices = models
@@ -216,7 +318,12 @@ pub fn execute(
                         .filter(|p| !p.is_empty())
                         .map(|p| format!(" [{}]", sanitize_single_line(p)))
                         .unwrap_or_default();
-                    let label = format!("{id_clean}{name_part}{provider_part}");
+                    let unavailable = m
+                        .unavailable_reason
+                        .as_deref()
+                        .map(|reason| format!(" · {}", sanitize_single_line(reason)))
+                        .unwrap_or_default();
+                    let label = format!("{id_clean}{name_part}{provider_part}{unavailable}");
                     (m.id, label)
                 })
                 .collect();

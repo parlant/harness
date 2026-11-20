@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,9 @@ class TerminalFakeDaemon(FakeDaemon):
             {"id": "anthropic/claude-sonnet", "name": "Claude Sonnet", "provider": "anthropic"},
         ]
         self.force_configure_conflict = False
+        self.login_state: str | None = None
+        self.login_requests: list[tuple[str, dict[str, Any]]] = []
+        self.key_requests: list[tuple[str, dict[str, Any]]] = []
 
     def seed_entry(self, kind: str, text: str) -> None:
         with self._lock:
@@ -106,6 +110,12 @@ class TerminalFakeDaemon(FakeDaemon):
         class TerminalHandler(base_cls):
             def do_GET(self) -> None:
                 parsed = urlsplit(self.path)
+                if parsed.path == "/api/v1/provider-logins" and daemon.login_state is not None:
+                    if not self._check_auth_and_host():
+                        return
+                    self._send_json(200, {"providers": [{"id": "openai_codex",
+                        "interaction": "device_code_v1", "sources": [{"id": "work", "state": "not_signed_in"}]}]})
+                    return
                 if parsed.path == "/api/v1/fs/files":
                     if not self._check_auth_and_host():
                         return
@@ -130,6 +140,40 @@ class TerminalFakeDaemon(FakeDaemon):
                     self._send_json(200, {"models": daemon.models})
                     return
                 super().do_GET()
+
+            def do_POST(self) -> None:
+                path = urlsplit(self.path).path
+                if path == "/api/v1/provider-keys/set":
+                    if not self._check_auth_and_host():
+                        return
+                    params = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    daemon.key_requests.append((path, params))
+                    self._send_json(200, {"active": params["source"], "provider": params["provider"]})
+                    return
+                if path == "/api/v1/provider-accounts/activate":
+                    if not self._check_auth_and_host():
+                        return
+                    params = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    with daemon._lock:
+                        daemon.login_requests.append(("activate", params))
+                    self._send_json(200, {"active": params["source"]})
+                    return
+                if daemon.login_state is None or not path.startswith("/api/v1/provider-logins/"):
+                    return super().do_POST()
+                if not self._check_auth_and_host():
+                    return
+                action = path.rsplit("/", 1)[1]
+                params = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                with daemon._lock:
+                    daemon.login_requests.append((action, params))
+                    if action == "cancel":
+                        daemon.login_state = "cancelled"
+                    state = daemon.login_state
+                payload = {"source": "work", "state": state, "operation": "r" * 43}
+                if state == "pending":
+                    payload.update(verification_url="https://auth.openai.com/codex/device",
+                                   user_code="ABCD-1234", expires_in_ms=30_000, poll_after_ms=500)
+                self._send_json(200, payload)
 
         return TerminalHandler
 
@@ -175,6 +219,138 @@ class HiTerminalBothModesTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def test_device_login_uses_only_owner_api_and_never_submits_code(self) -> None:
+        for mode, outcome in (("fullscreen", "complete"), ("regular", "cancelled")):
+            with self.subTest(mode=mode), TerminalFakeDaemon(cwd=self.workdir) as daemon:
+                daemon.login_state = "pending"
+                with PtySession([self.hi_bin, "-s", "demo", "--tui-mode", mode],
+                                env=daemon.env(), cwd=self.workdir, rows=24, cols=100) as pty:
+                    daemon.wait_for_sse_connect()
+                    pty.wait_for_raw_mode()
+                    pty.send_text("/login openai-codex")
+                    pty.send_enter()
+                    pty.wait_for_output("work  [not signed in]")
+                    pty.send_enter()
+                    pty.wait_for_output(["https://auth.openai.com/codex/device", "ABCD-1234"])
+                    if outcome == "complete":
+                        with daemon._lock:
+                            daemon.login_state = "complete"
+                        screen = pty.wait_for_output("Signed in. Choose a Codex model")
+                    else:
+                        pty.send_bytes(b"\x1b")
+                        screen = pty.wait_for_output("Login cancelled.")
+                    self.assertNotIn("ABCD-1234", screen)
+                    pty.send_enter()
+                    self.assertEqual(daemon.recorded_commands, [])
+                    action, start = daemon.login_requests[0]
+                    self.assertEqual(action, "start")
+                    self.assertEqual(start["provider"], "openai_codex")
+                    self.assertEqual(start["source"], "work")
+                    self.assertTrue(start["request_id"])
+                    self.assertIn(("status" if outcome == "complete" else "cancel",
+                                   {"operation": "r" * 43}), daemon.login_requests)
+
+    def test_cli_account_and_login_do_not_open_a_session(self) -> None:
+        with TerminalFakeDaemon(cwd=self.workdir) as daemon:
+            daemon.login_state = "complete"
+            env = daemon.env()
+            for args, expected in [
+                (["account", "list"], "work"),
+                (["login", "openai_codex", "work"], "Signed in to work"),
+                (["daemon", "status"], "Running:"),
+            ]:
+                output = subprocess.run([self.hi_bin, *args], env=env, cwd=self.workdir,
+                                        capture_output=True, text=True, timeout=6, check=True)
+                self.assertIn(expected, output.stdout)
+            self.assertEqual(daemon.login_requests[0][0], "start")
+            self.assertEqual(daemon.recorded_commands, [])
+            self.assertEqual(daemon.sse_connect_count, 0)
+
+    def test_daemon_status_distinguishes_stopped_daemon_and_bad_auth(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hi-down-", dir="/tmp") as data:
+            env = dict(os.environ, H_DATA_DIR=data)
+            env.pop("H_DAEMON_URL", None)
+            def status():
+                return subprocess.run([self.hi_bin, "daemon", "status"], env=env,
+                                      capture_output=True, text=True, timeout=6)
+            result = status()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Daemon is not running", result.stderr)
+
+            # A closed listener leaves a real socket inode behind, as H can on exit.
+            path = Path(data) / "api.sock"
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                listener.listen(1)
+            token = Path(data, "auth.token")
+            token.write_text("unused-test-token\n")
+            token.chmod(0o600)
+            result = status()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Daemon is not running at unix://", result.stderr)
+            self.assertNotIn("Connection refused", result.stderr)
+            self.assertTrue(path.is_socket())
+
+        with TerminalFakeDaemon(cwd=self.workdir) as daemon:
+            env = daemon.env()
+            Path(env["H_DATA_DIR"], "auth.token").write_text("wrong-test-token\n")
+            result = status()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("HTTP 401", result.stderr)
+            self.assertNotIn("not running", result.stderr)
+
+    def test_restart_ui_resubscribes_without_resubmitting_or_aborting(self) -> None:
+        with TerminalFakeDaemon(cwd=self.workdir) as daemon:
+            gate = daemon.arm_gated_stream(chunks=["still working"])
+            with PtySession([self.hi_bin, "-s", "demo", "--conversation", "1"], env=daemon.env(),
+                            cwd=self.workdir, rows=24, cols=100) as pty:
+                daemon.wait_for_sse_connect()
+                pty.wait_for_output("Ready")
+                pty.send_text("Build")
+                pty.send_enter()
+                daemon.wait_for_stream_active()
+                pty.send_text("/restart-ui " + self.hi_bin)
+                pty.send_enter()
+                daemon.wait_for_sse_connect(min_count=2)
+                pty.wait_for_output("still working")
+                self.assertEqual([cmd["command"] for cmd in daemon.recorded_commands], ["submit"])
+                gate.set()
+
+    def test_api_key_entry_is_masked_and_does_not_submit_a_prompt(self) -> None:
+        secret = "fixture-write-only-key"
+        with TerminalFakeDaemon(cwd=self.workdir) as daemon:
+            with PtySession([self.hi_bin, "-s", "demo"], env=daemon.env(), cwd=self.workdir,
+                            rows=24, cols=100) as pty:
+                daemon.wait_for_sse_connect()
+                pty.wait_for_output("Ready")
+                pty.send_text("/key set openai work")
+                pty.send_enter()
+                pty.wait_for_output("Save openai API key as work")
+                pty.send_bytes(b"\x1b[200~" + secret.encode() + b"\x1b[201~")
+                screen = pty.wait_for_output("*" * len(secret))
+                self.assertNotIn(secret, screen)
+                pty.send_enter()
+                screen = pty.wait_for_output("Saved openai key work")
+                self.assertNotIn(secret, screen)
+                self.assertEqual(daemon.recorded_commands, [])
+                self.assertEqual(daemon.key_requests, [("/api/v1/provider-keys/set", {
+                    "provider": "openai", "source": "work", "api_key": secret})])
+
+    def test_account_switch_is_an_owner_action_not_a_conversation_command(self) -> None:
+        with TerminalFakeDaemon(cwd=self.workdir) as daemon:
+            daemon.login_state = "complete"
+            with PtySession([self.hi_bin, "-s", "demo"], env=daemon.env(), cwd=self.workdir,
+                            rows=24, cols=100) as pty:
+                daemon.wait_for_sse_connect()
+                pty.wait_for_raw_mode()
+                pty.send_text("/account")
+                pty.send_enter()
+                pty.wait_for_output("Select stock Codex account")
+                pty.send_enter()
+                pty.wait_for_output("Stock Codex account: work")
+                self.assertEqual(daemon.login_requests, [("activate", {"source": "work"})])
+                self.assertEqual(daemon.recorded_commands, [])
 
     def test_selection_and_completion_in_both_modes(self) -> None:
         for mode in self.MODES:

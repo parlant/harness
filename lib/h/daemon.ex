@@ -7,6 +7,8 @@ defmodule H.Daemon do
   full `H.HTTP` daemon share the exact same contract.
   """
 
+  require Logger
+
   alias H.{
     Catalog,
     EnvRegistry,
@@ -37,6 +39,15 @@ defmodule H.Daemon do
   @max_read_file_limit 2_000
   @default_read_file_bytes 51_200
   @max_read_file_bytes 65_536
+
+  @doc "Returns the running instance's validated daemon options, or `nil` when not booted."
+  @spec instance_options() :: keyword() | nil
+  def instance_options do
+    GenServer.call(H.Daemon.Boot, :options, :infinity)
+  catch
+    :exit, {:noproc, _} ->
+      if Process.whereis(H.Daemon.Instance), do: exit(:daemon_not_ready), else: nil
+  end
 
   @doc "Lists configured execution environments (`\"host\"` plus any custom/remote environments)."
   @spec list_environments(keyword()) :: [map()]
@@ -375,74 +386,31 @@ defmodule H.Daemon do
   def create_session(params, opts \\ [])
 
   def create_session(params, opts) when is_map(params) and is_list(opts) do
+    H.Daemon.Maintenance.admit(opts, fn -> do_create_session(params, opts) end)
+  end
+
+  def create_session(_params, _opts), do: {:error, {:bad_request, "expected a map"}}
+
+  defp do_create_session(params, opts) do
     normalized_params = drop_blank_optional(params, ["session_id", :session_id])
 
     with {:ok, validated} <-
            Schema.validate_map(normalized_params, [
              {:session_id, :session_id, required: false},
-             {:env_id, :non_empty_string, default: "host"},
-             {:harness_id, :non_empty_string, default: "coding"},
+             {:env_id, :non_empty_string, required: false},
+             {:harness_id, :non_empty_string, required: false},
              {:cwd, :abs_path, required: true},
              {:title, :string, required: false, nullable: true},
              {:agent, :map, required: false},
              {:request_id, :non_empty_string, required: false}
            ]),
          {:ok, agent_opts} <- validate_optional_agent(Map.get(validated, :agent)),
-         {:ok, validated} <- normalize_optional_title(validated),
-         {:ok, harness_mod} <- resolve_harness(validated.harness_id, opts),
-         {:ok, ws} <- resolve_session_workspace(validated.env_id, validated.cwd, opts) do
-      catalog = Keyword.get(opts, :catalog, @default_catalog)
+         {:ok, validated} <- normalize_optional_title(validated) do
       table = Keyword.get(opts, :catalog_table, @default_catalog_table)
-      session_id = Map.get(validated, :session_id) || mint_session_id(ws.cwd, table)
 
-      case Catalog.get_session(session_id, table) do
-        {:ok, existing} ->
-          existing_env = Map.get(existing, :env_id) || "host"
-
-          cond do
-            existing.status == "quarantined" ->
-              {:error, {:quarantined, existing.quarantine_reason || "quarantined"}}
-
-            existing_env != ws.env_id or existing.cwd != ws.cwd ->
-              {:error, {:conflict, "session already exists with different workspace"}}
-
-            true ->
-              with {:ok, server} <- ensure_session_started(existing, opts, nil),
-                   {:ok, seq} <- Server.get_seq(server) do
-                latest_entry =
-                  case Catalog.get_session(session_id, table) do
-                    {:ok, e} -> e
-                    _ -> existing
-                  end
-
-                {:ok, %{session: wire_session(latest_entry), seq: seq}}
-              end
-          end
-
-        {:error, :not_found} ->
-          {:ok, bootstrapped_agent} =
-            harness_mod.bootstrap_agent(ws.env, agent_opts || %{}, opts)
-
-          attrs =
-            %{
-              session_id: session_id,
-              env_id: ws.env_id,
-              harness_id: harness_mod.id(),
-              cwd: ws.cwd
-            }
-            |> maybe_put(:title, Map.get(validated, :title))
-
-          with {:ok, entry} <- Catalog.put_session(catalog, attrs),
-               {:ok, server} <- ensure_session_started(entry, opts, bootstrapped_agent),
-               {:ok, seq} <- Server.get_seq(server) do
-            latest_entry =
-              case Catalog.get_session(session_id, table) do
-                {:ok, e} -> e
-                _ -> entry
-              end
-
-            {:ok, %{session: wire_session(latest_entry), seq: seq}}
-          end
+      case Map.get(validated, :session_id) && Catalog.get_session(validated.session_id, table) do
+        {:ok, existing} -> attach_session(existing, validated, opts)
+        _ -> create_new_session(validated, agent_opts || %{}, opts)
       end
     else
       {:error, reason} when is_binary(reason) -> {:error, {:bad_request, reason}}
@@ -450,7 +418,100 @@ defmodule H.Daemon do
     end
   end
 
-  def create_session(_params, _opts), do: {:error, {:bad_request, "expected a map"}}
+  defp attach_session(entry, params, opts) do
+    harness_id = Map.get(entry, :harness_id) || "coding"
+    env_id = Map.get(entry, :env_id) || "host"
+
+    with :ok <- ensure_not_quarantined(entry),
+         {:ok, harness} <- Harness.resolve(harness_id, opts),
+         :ok <- match_harness(Map.get(params, :harness_id), harness_id, harness, opts),
+         :ok <- match_workspace(env_id, entry.cwd, params, opts) do
+      session_result(entry, opts, nil)
+    else
+      {:error, :unknown_harness} -> {:error, :harness_unavailable}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp match_harness(id, recorded, _harness, _opts) when id in [nil, recorded], do: :ok
+
+  defp match_harness(requested, recorded, harness, opts) do
+    case Harness.resolve(requested, opts) do
+      {:ok, ^harness} ->
+        if harness.id() == recorded,
+          do: :ok,
+          else: {:error, {:conflict, "session already exists with different harness"}}
+
+      _ ->
+        {:error, {:conflict, "session already exists with different harness"}}
+    end
+  end
+
+  defp match_workspace(env_id, cwd, params, opts) do
+    if Map.get(params, :env_id, env_id) == env_id do
+      case EnvRegistry.resolve_workspace(env_id, params.cwd, opts) do
+        {:ok, %{cwd: ^cwd}} -> :ok
+        {:error, :unknown_environment} -> {:error, :workspace_unavailable}
+        {:error, :workspace_unavailable} -> {:error, :workspace_unavailable}
+        _ -> {:error, {:conflict, "session already exists with different workspace"}}
+      end
+    else
+      {:error, {:conflict, "session already exists with different workspace"}}
+    end
+  end
+
+  defp create_new_session(params, agent_opts, opts) do
+    with {:ok, harness} <- resolve_harness(Map.get(params, :harness_id, "coding"), opts),
+         {:ok, ws} <-
+           resolve_session_workspace(Map.get(params, :env_id, "host"), params.cwd, opts),
+         {:ok, bootstrapped} <- bootstrap_agent(harness, ws.env, agent_opts, opts) do
+      catalog = Keyword.get(opts, :catalog, @default_catalog)
+      table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+      attrs =
+        %{
+          session_id: Map.get(params, :session_id) || mint_session_id(ws.cwd, table),
+          env_id: ws.env_id,
+          harness_id: harness.id(),
+          cwd: ws.cwd
+        }
+        |> maybe_put(:title, Map.get(params, :title))
+
+      case Catalog.insert_session(catalog, attrs) do
+        {:ok, entry} -> session_result(entry, opts, bootstrapped)
+        {:existing, entry} -> attach_session(entry, params, opts)
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  defp bootstrap_agent(harness, env, agent_opts, opts) do
+    with {:ok, agent} when is_map(agent) <- harness.bootstrap_agent(env, agent_opts, opts),
+         {:ok, validated} <- validate_optional_agent(agent) do
+      {:ok, validated}
+    else
+      _ -> {:error, :harness_unavailable}
+    end
+  rescue
+    _ -> {:error, :harness_unavailable}
+  catch
+    :exit, _ -> {:error, :harness_unavailable}
+  end
+
+  defp session_result(entry, opts, initial_agent) do
+    with {:ok, server} <- ensure_session_started(entry, opts, initial_agent),
+         {:ok, seq} <- Server.get_seq(server) do
+      table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+      latest_entry =
+        case Catalog.get_session(entry.session_id, table) do
+          {:ok, latest} -> latest
+          _ -> entry
+        end
+
+      {:ok, %{session: wire_session(latest_entry), seq: seq}}
+    end
+  end
 
   @doc "Returns session detail, conversation ancestry forest, and live tasks."
   @spec get_session_detail(String.t(), keyword()) ::
@@ -564,6 +625,14 @@ defmodule H.Daemon do
 
   def execute_command(session_id, raw_envelope, opts)
       when is_binary(session_id) and is_map(raw_envelope) and is_list(opts) do
+    H.Daemon.Maintenance.admit(opts, fn -> dispatch_command(session_id, raw_envelope, opts) end)
+  end
+
+  def execute_command(_session_id, _raw_envelope, _opts) do
+    {:error, {:bad_request, "command envelope must be a map"}}
+  end
+
+  defp dispatch_command(session_id, raw_envelope, opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
 
     with {:ok, _sid} <- validate_sid_or_not_found(session_id),
@@ -573,10 +642,6 @@ defmodule H.Daemon do
          {:ok, server} <- ensure_session_started(entry, opts, nil) do
       Server.execute_command(server, envelope)
     end
-  end
-
-  def execute_command(_session_id, _raw_envelope, _opts) do
-    {:error, {:bad_request, "command envelope must be a map"}}
   end
 
   @doc """
@@ -592,7 +657,18 @@ defmodule H.Daemon do
     |> Catalog.list_sessions()
     |> Enum.each(fn entry ->
       if entry.active and entry.status == "ok" do
-        _ = ensure_session_started(entry, opts, nil)
+        case ensure_session_started(entry, opts, nil) do
+          {:ok, _pid} ->
+            :ok
+
+          {:error, reason} ->
+            kind =
+              if reason in [:harness_unavailable, :workspace_unavailable],
+                do: reason,
+                else: :session_start_failed
+
+            Logger.warning("Session #{entry.session_id}: boot recovery unavailable (#{kind})")
+        end
       end
     end)
 
@@ -606,7 +682,12 @@ defmodule H.Daemon do
 
     if Keyword.get(opts, :provider, H.Provider.ReqLLM) == H.Provider.ReqLLM do
       data_dir = Keyword.get(opts, :data_dir) || Application.get_env(:harness, :data_dir)
-      Map.put(config, :data_dir, data_dir)
+
+      opts
+      |> Keyword.take([:accounts, :codex_account_policy])
+      |> Map.new()
+      |> then(&Map.merge(config, &1))
+      |> Map.put(:data_dir, data_dir)
     else
       config
     end
@@ -694,6 +775,7 @@ defmodule H.Daemon do
           tools: tools
         ]
         |> maybe_put_kw(:initial_agent, initial_agent)
+        |> maybe_copy_kw(opts, :maintenance_table)
         |> maybe_copy_kw(opts, :provider)
         |> Keyword.put(:provider_config, provider_config(opts))
         |> maybe_copy_kw(opts, :default_model)

@@ -32,6 +32,8 @@ defmodule H do
     * `:provider_config` - map forwarded to provider (default `%{}`)
     * `:auto_compaction` - scoped input token thresholds (see `docs/protocol.md`)
     * `:environments` - optional map/list of `H.EnvRegistry` specs
+    * `:harnesses` - optional trusted `H.Harness` registrations
+    * `:no_extensions` - bypass `<data_dir>/extensions.json` and all path packages
   """
   @spec serve(keyword()) ::
           {:ok,
@@ -41,68 +43,47 @@ defmodule H do
              api_socket: nil | String.t(),
              data_dir: String.t()
            }}
+          | {:error, term()}
   def serve(opts \\ []) when is_list(opts) do
-    limits = H.Session.Compaction.validate_limits!(Keyword.get(opts, :auto_compaction, %{}))
-    {:ok, _} = Application.ensure_all_started(:harness)
-
     data_dir =
       opts
-      |> Keyword.get(:data_dir, Path.expand("~/.local/share/h"))
+      |> Keyword.get(:data_dir, System.get_env("H_DATA_DIR") || "~/.local/share/h")
       |> Path.expand()
 
-    port = Keyword.get(opts, :port, 4100)
-    bind_socket? = Keyword.get(opts, :api_socket, true)
-    provider = Keyword.get(opts, :provider, H.Provider.ReqLLM)
-    provider_config = Keyword.get(opts, :provider_config, %{})
+    instance_opts =
+      opts
+      |> Keyword.put(:data_dir, data_dir)
+      |> Keyword.put(:http_port, Keyword.get(opts, :port, 4100))
+      |> Keyword.put_new(:api_socket, true)
 
-    {:ok, _} = ensure_started({H.StoreLock, data_dir: data_dir, name: H.StoreLock})
-    {:ok, _} = ensure_started({H.Auth, data_dir: data_dir, name: H.Auth, table: :h_auth})
-    {:ok, _} = ensure_started({H.Catalog, data_dir: data_dir, name: H.Catalog, table: :h_catalog})
+    with :ok <- ensure_standalone_application(),
+         {:ok, _pid} <- start_instance(instance_opts) do
+      {:ok, {_ip, port}} = ThousandIsland.listener_info(H.Daemon.HTTP)
+      socket = if instance_opts[:api_socket], do: api_socket_path(data_dir)
+      url = "http://127.0.0.1:#{port}"
+      IO.puts("H daemon API listening at #{url}/api/v1")
+      {:ok, %{url: url, port: port, api_socket: socket, data_dir: data_dir}}
+    end
+  end
 
-    daemon_opts =
-      [
-        data_dir: data_dir,
-        provider: provider,
-        provider_config: provider_config,
-        auto_compaction: limits
-      ]
-      |> maybe_put_kw(:environments, Keyword.get(opts, :environments))
+  defp start_instance(opts) do
+    case Supervisor.start_child(H.Supervisor, {H.Daemon.Instance, opts}) do
+      {:error, {{:shutdown, {:failed_to_start_child, _, reason}}, _}} -> {:error, reason}
+      result -> result
+    end
+  end
 
-    :ok = H.Daemon.recover_active_sessions(daemon_opts)
+  defp ensure_standalone_application do
+    cond do
+      Process.whereis(H.Supervisor) ->
+        :ok
 
-    router_opts = [
-      port: port,
-      auth_server: H.Auth,
-      auth_table: :h_auth,
-      daemon: H.Daemon,
-      daemon_opts: daemon_opts
-    ]
+      H.Application.children() != [] ->
+        {:error, :embedded_daemon_configured}
 
-    {:ok, bandit_pid} =
-      ensure_started(
-        Supervisor.child_spec(
-          {Bandit, plug: {H.HTTP.Router, router_opts}, ip: {127, 0, 0, 1}, port: port},
-          id: :h_http_tcp
-        )
-      )
-
-    {:ok, {_ip, bound_port}} = ThousandIsland.listener_info(bandit_pid)
-
-    sock_path =
-      if bind_socket? do
-        path = api_socket_path(data_dir)
-        {:ok, _unix_pid} = ensure_started({H.HTTP.UnixListener, {path, router_opts}})
-        path
-      else
-        nil
-      end
-
-    write_daemon_manifest!(data_dir, bound_port, sock_path)
-
-    url = "http://127.0.0.1:#{bound_port}"
-    IO.puts("H daemon API listening at #{url}/api/v1")
-
-    {:ok, %{url: url, port: bound_port, api_socket: sock_path, data_dir: data_dir}}
+      true ->
+        with {:ok, _} <- Application.ensure_all_started(:harness), do: :ok
+    end
   end
 
   @doc false
@@ -126,15 +107,4 @@ defmodule H do
     File.chmod!(tmp_path, 0o600)
     File.rename!(tmp_path, manifest_path)
   end
-
-  defp ensure_started(child_spec) do
-    case Supervisor.start_child(H.Supervisor, child_spec) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      other -> other
-    end
-  end
-
-  defp maybe_put_kw(opts, _key, nil), do: opts
-  defp maybe_put_kw(opts, key, val), do: Keyword.put(opts, key, val)
 end

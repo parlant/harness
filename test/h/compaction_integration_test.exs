@@ -286,6 +286,130 @@ defmodule H.CompactionIntegrationTest do
     )
   end
 
+  describe "managed attempt recovery" do
+    test "worker loss leaves generation interrupted rather than dispatching again" do
+      test = self()
+      %{opts: opts, cwd: cwd} = start_daemon_env([], default_model: "openai_codex:gpt-6.1-sol")
+      opts = managed_opts(opts, test, 0)
+      {:ok, _} = Daemon.create_session(%{"session_id" => "managed-gen", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "managed-gen",
+          cmd("managed", "submit", "1", %{"type" => "input", "content" => "Start"}),
+          opts
+        )
+
+      assert_receive {:managed_dispatch, worker}, 3000
+      Process.exit(worker, :kill)
+      assert interrupted?("managed-gen", "generation", opts)
+      refute_receive {:managed_dispatch, _}, 70
+    end
+
+    test "clean reopen honors the recorded compaction policy after disabling managed accounts" do
+      test = self()
+
+      %{opts: opts, cwd: cwd, data_dir: dir} =
+        start_daemon_env([],
+          default_model: "openai_codex:gpt-6.1-sol",
+          storage_opts: [sync: :datasync]
+        )
+
+      opts = managed_opts(opts, test, 2)
+      sid = "managed-compaction"
+      {:ok, _} = Daemon.create_session(%{"session_id" => sid, "cwd" => cwd}, opts)
+      seq = seed_two_turns(sid, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          sid,
+          cmd("managed-compact", "compact", "1", %{"expected_seq" => seq}),
+          opts
+        )
+
+      assert_receive {:managed_dispatch, _}, 3000
+      [{_, child, _, _}] = DynamicSupervisor.which_children(opts[:runtime_sup])
+      :ok = DynamicSupervisor.terminate_child(opts[:runtime_sup], child)
+
+      %{opts: stock, fake: fake} =
+        restart_daemon_env(dir, [], default_model: "fake:coder", retry_backoff_ms: 1)
+
+      assert :ok = Daemon.recover_active_sessions(stock)
+      assert interrupted?(sid, "compaction", stock)
+
+      assert {:ok,
+              %{
+                items: [
+                  %{kind: "user"},
+                  %{kind: "assistant"},
+                  %{kind: "user"},
+                  %{kind: "assistant"}
+                ]
+              }} =
+               Daemon.scan_entries(sid, "1", %{"order" => "asc"}, stock)
+
+      assert H.Provider.Fake.requests(fake) == []
+    end
+  end
+
+  defp managed_opts(opts, test, initial_replies) do
+    alias H.Accounts.Vault
+    dir = opts[:data_dir]
+    File.chmod!(dir, 0o700)
+    {:ok, vault, _} = Vault.open(dir, [])
+
+    :ok =
+      Vault.write(vault, "fixture", %{
+        "access_token" => "test-only-codex-access",
+        "refresh_token" => "test-only-codex-refresh",
+        "account_id" => "test-account",
+        "subject" => "test-subject",
+        "expires_at_ms" => System.system_time(:millisecond) + 120_000
+      })
+
+    server =
+      start_supervised!(
+        {H.Accounts,
+         data_dir: dir, sources: ["fixture"], http: fn _ -> flunk("unexpected auth request") end}
+      )
+
+    count = :atomics.new(1, [])
+
+    stream = fn _, _, _ ->
+      if :atomics.add_get(count, 1, 1) <= initial_replies do
+        {:ok,
+         [
+           %ReqLLM.StreamEvent{type: :text_delta, data: "Test answer"},
+           %ReqLLM.StreamEvent{type: :finish, data: %{finish_reason: :stop}}
+         ]}
+      else
+        send(test, {:managed_dispatch, self()})
+
+        receive do
+          :unreached -> {:error, "unexpected"}
+        end
+      end
+    end
+
+    Keyword.merge(opts,
+      provider: H.Provider.ReqLLM,
+      accounts: server,
+      provider_config: %{stream_fn: stream},
+      retry_backoff_ms: 1
+    )
+  end
+
+  defp interrupted?(sid, kind, opts) do
+    wait_until(fn ->
+      {:ok, detail} = Daemon.get_session_detail(sid, opts)
+
+      Enum.any?(detail.tasks, fn task ->
+        task.kind == kind and task.status == "terminal" and
+          task.outcome["reason"] == "interrupted"
+      end)
+    end)
+  end
+
   describe "HTTP contract, idempotency, and conflict guards" do
     test "validates compact args, enforces expected_seq and idle/compactable guards, and deduplicates request_id" do
       %{opts: opts, cwd: cwd, data_dir: data_dir} =

@@ -116,6 +116,8 @@ defmodule H.Session.Server do
     {:reply, {:ok, detail}, state}
   end
 
+  def handle_call(:idle, _from, state), do: {:reply, not session_active?(state), state}
+
   def handle_call(:get_seq, _from, state) do
     {:reply, {:ok, state.seq}, state}
   end
@@ -366,6 +368,7 @@ defmodule H.Session.Server do
         persist_within_ms: Keyword.get(opts, :persist_within_ms, @default_persist_within_ms),
         ephemeral_interval_ms:
           Keyword.get(opts, :ephemeral_interval_ms, @default_ephemeral_interval_ms),
+        maintenance_table: opts[:maintenance_table],
         retry_limit: Keyword.get(opts, :retry_limit, @default_retry_limit),
         retry_backoff_ms: Keyword.get(opts, :retry_backoff_ms, @default_retry_backoff_ms),
         restart_limit: Keyword.get(opts, :restart_limit, @default_restart_limit),
@@ -603,6 +606,31 @@ defmodule H.Session.Server do
     {writes, state}
   end
 
+  defp inference_config(%{provider_mod: H.Provider.ReqLLM, provider_config: config}),
+    do: H.Provider.ReqLLM.attempt_config(config)
+
+  defp inference_config(state), do: state.provider_config
+
+  defp dispatch_policy(H.Provider.ReqLLM, config, model) do
+    case H.Provider.ReqLLM.dispatch_limit(config, model || config[:model]) do
+      nil ->
+        %{}
+
+      limit ->
+        %{
+          "dispatch_policy" => %{
+            "version" => 1,
+            "max_dispatches" => limit,
+            "on_loss" => "interrupt"
+          }
+        }
+    end
+  end
+
+  defp dispatch_policy(_, _, _), do: %{}
+
+  defp replay_inference?(task), do: is_nil(task.checkpoint["dispatch_policy"])
+
   defp retry_delay_ms(state, attempt) do
     min(state.retry_backoff_ms * Integer.pow(2, min(attempt - 1, 16)), @max_retry_backoff_ms)
   end
@@ -615,7 +643,7 @@ defmodule H.Session.Server do
 
     retry_count = (gen_task.checkpoint["retry_count"] || 0) + 1
 
-    if retry_count <= state.retry_limit do
+    if replay_inference?(gen_task) and retry_count <= state.retry_limit do
       until_ms = now + retry_delay_ms(state, retry_count)
 
       sleeping_task =
@@ -676,7 +704,7 @@ defmodule H.Session.Server do
     live = state.docs[cid]["live"] || %{}
     retry_count = (comp_task.checkpoint["retry_count"] || 0) + 1
 
-    if retry_count <= state.retry_limit do
+    if replay_inference?(comp_task) and retry_count <= state.retry_limit do
       until_ms = now + retry_delay_ms(state, retry_count)
 
       sleeping_task =
@@ -739,9 +767,8 @@ defmodule H.Session.Server do
     cid = cp["conversation_id"]
     call_id = cp["call_id"]
     name = cp["name"]
-    replay_str = cp["replay"] || tool_replay_string(state.tools, name)
 
-    if replay_str == "safe" do
+    if cp["replay"] == "safe" and tool_replay_string(state.tools, name) == "safe" do
       pending_task = %{tool_task | status: "pending", updated_at: now}
       live = put_in_tool_status(state.docs[cid]["live"], call_id, "pending")
 
@@ -1026,7 +1053,12 @@ defmodule H.Session.Server do
   end
 
   defp stage_single_item({:command, from, cmd}, state, staged_rev) do
-    stage_command(from, cmd, state, staged_rev)
+    if state.maintenance_table &&
+         not :ets.lookup_element(state.maintenance_table, :open, 2, false) do
+      {:immediate, from, {:error, :daemon_draining}, [], state}
+    else
+      stage_command(from, cmd, state, staged_rev)
+    end
   end
 
   defp stage_single_item({:worker_done, tid, attempt_id, result}, state, _staged_rev) do
@@ -2599,7 +2631,7 @@ defmodule H.Session.Server do
     retryable = Map.get(err, :retryable, false) == true
     retry_count = (gen_task.checkpoint["retry_count"] || 0) + 1
 
-    if retryable and retry_count <= state.retry_limit do
+    if retryable and replay_inference?(gen_task) and retry_count <= state.retry_limit do
       delay_ms = retry_delay_ms(state, retry_count)
       until_ms = now + delay_ms
 
@@ -2832,7 +2864,7 @@ defmodule H.Session.Server do
     retry_count = (comp_task.checkpoint["retry_count"] || 0) + 1
     live = state.docs[cid]["live"] || %{}
 
-    if retryable and retry_count <= state.retry_limit do
+    if retryable and replay_inference?(comp_task) and retry_count <= state.retry_limit do
       delay_ms = retry_delay_ms(state, retry_count)
       until_ms = now + delay_ms
 
@@ -3175,7 +3207,10 @@ defmodule H.Session.Server do
     {:ok, attempt_id, store} = Storage.mint_id(state.store)
     state = %{state | store: store}
 
-    running_task = Task.start_running(gen_task, attempt_id, now)
+    config = inference_config(state)
+    policy = dispatch_policy(state.provider_mod, config, request[:model])
+    running_task = Task.start_running(gen_task, attempt_id, now, policy)
+
     state = put_task_in_state(state, running_task)
 
     # Persist running intent before spawning worker!
@@ -3191,7 +3226,6 @@ defmodule H.Session.Server do
         server_pid = self()
         inc = state.incarnation
         provider_mod = state.provider_mod
-        provider_config = state.provider_config
 
         {:ok, worker_pid} =
           Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
@@ -3199,7 +3233,7 @@ defmodule H.Session.Server do
               send(server_pid, {:gen_chunk, inc, gen_task_id, attempt_id, cid, ev})
             end
 
-            res = provider_mod.stream_turn(provider_config, request, emit)
+            res = provider_mod.stream_turn(config, request, emit)
 
             send(
               server_pid,
@@ -3248,7 +3282,12 @@ defmodule H.Session.Server do
             {:ok, attempt_id, store} = Storage.mint_id(state.store)
             state = %{state | store: store}
 
-            running_task = Task.start_running(comp_task, attempt_id, now)
+            config = inference_config(state)
+
+            policy =
+              dispatch_policy(state.provider_mod, config, state.docs[cid]["agent"]["model"])
+
+            running_task = Task.start_running(comp_task, attempt_id, now, policy)
             live = state.docs[cid]["live"] || %{}
 
             comp_live =
@@ -3293,12 +3332,11 @@ defmodule H.Session.Server do
                 inc = state.incarnation
                 agent = state.docs[cid]["agent"]
                 provider_mod = state.provider_mod
-                provider_config = state.provider_config
 
                 {:ok, worker_pid} =
                   Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
                     res =
-                      Compaction.summarize(prep, agent, provider_mod, provider_config,
+                      Compaction.summarize(prep, agent, provider_mod, config,
                         instructions: instructions
                       )
 
@@ -3375,14 +3413,16 @@ defmodule H.Session.Server do
         name = cp["name"]
         args = cp["arguments"] || %{}
 
-        case Map.get(state.tools, name) do
+        tool = if H.Tool.selected?(name, state.docs[cid]["agent"]["tools"]), do: state.tools[name]
+
+        case tool do
           nil ->
             commit_immediate_tool_error(
               cid,
               tool_task,
               call_id,
               name,
-              "Unknown tool: #{name}",
+              "Tool not available: #{name}",
               "unknown_tool",
               state,
               now
@@ -4167,7 +4207,7 @@ defmodule H.Session.Server do
       state.tasks
       |> Map.values()
       |> Enum.filter(
-        &(&1.status == "running" and not unsafe_running_tool?(&1) and
+        &(&1.status == "running" and replay_inference?(&1) and not unsafe_running_tool?(&1) and
             not UserShell.unsafe_task?(&1))
       )
       |> Enum.map(&{:put_task, Task.reset_clean(&1, now)})

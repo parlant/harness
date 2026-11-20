@@ -12,10 +12,8 @@ if config_env() != :test do
   config :harness,
     data_dir: data_dir,
     start_daemon: true,
-    api_socket: true
-
-  config :harness_web,
-    daemon_opts: [data_dir: data_dir]
+    api_socket: true,
+    no_extensions: System.get_env("H_NO_EXTENSIONS") == "1"
 end
 
 if config_env() == :dev do

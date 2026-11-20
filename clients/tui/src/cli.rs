@@ -50,6 +50,10 @@ struct Cli {
     #[arg(short = 's', long = "session", value_name = "ID")]
     session: Option<String>,
 
+    /// Attach to this conversation in the named session (hi only)
+    #[arg(long, requires = "session")]
+    conversation: Option<u64>,
+
     /// Continue the most recent session for the current working directory
     #[arg(short = 'c', long = "continue")]
     continue_latest: bool,
@@ -110,15 +114,33 @@ pub fn hi_main() -> ExitCode {
 }
 
 fn entry(hi: bool) -> ExitCode {
+    let args: Vec<_> = std::env::args_os().collect();
+    // Reserve these first words for hi management. `--` and -p keep literal
+    // prompts possible, and `h` keeps its existing argument grammar.
+    if hi
+        && args
+            .get(1)
+            .and_then(|arg| arg.to_str())
+            .is_some_and(|arg| matches!(arg, "login" | "account" | "daemon"))
+    {
+        return report(
+            crate::manage::run(crate::manage::Manage::parse_from(args)).map_err(AppError::Message),
+        );
+    }
     let cmd = if hi {
         Cli::command()
             .name("hi")
             .about("Interactive terminal for the durable H daemon")
+            .after_help("Management: hi login, hi account, hi daemon (each accepts --help)")
     } else {
         Cli::command()
     };
-    let cli = Cli::from_arg_matches(&cmd.get_matches()).unwrap_or_else(|err| err.exit());
-    match run(cli, hi) {
+    let cli = Cli::from_arg_matches(&cmd.get_matches_from(args)).unwrap_or_else(|err| err.exit());
+    report(run(cli, hi))
+}
+
+fn report(result: Result<(), AppError>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             let _ = writeln!(io::stderr(), "error: {err}");
@@ -138,13 +160,27 @@ fn run(cli: Cli, hi: bool) -> Result<(), AppError> {
         && io::stdout().is_terminal()
         && std::env::var("TERM").as_deref() != Ok("dumb");
     if fullscreen {
-        let target = resolve_session_for_run(
-            &client,
-            &cli.env_id,
-            &cwd,
-            cli.session.as_deref(),
-            cli.continue_latest || cli.resume,
-        )?;
+        let target = if let (Some(sid), Some(cid)) = (cli.session.as_deref(), cli.conversation) {
+            let detail = client.get_session_detail(sid)?;
+            let cid = cid.to_string();
+            if !detail.conversations.iter().any(|c| c.id == cid) {
+                return Err(AppError::Message(
+                    "Conversation is not in that session".into(),
+                ));
+            }
+            target_from_detail(detail, cid)
+        } else {
+            resolve_session_for_run(
+                &client,
+                &cli.env_id,
+                &cwd,
+                cli.session.as_deref(),
+                cli.continue_latest || cli.resume,
+            )?
+        };
+        let reexec = crate::hi::app::RestartOrigin {
+            daemon_url: cli.daemon_url.clone(),
+        };
         return crate::hi::app::run(
             client,
             crate::hi::actions::Target {
@@ -158,8 +194,14 @@ fn run(cli: Cli, hi: bool) -> Result<(), AppError> {
             cli.resume,
             &cli.prompt.join(" "),
             cli.tui_mode == "regular",
+            reexec,
         )
         .map_err(AppError::Message);
+    }
+    if cli.conversation.is_some() {
+        return Err(AppError::Message(
+            "--conversation is supported in interactive hi only".into(),
+        ));
     }
     let headless_prompt = resolve_prompt(&cli);
 
@@ -286,13 +328,17 @@ fn attach_named_session(client: &DaemonClient, sid: &str) -> Result<AttachedTarg
         .clone()
         .or_else(|| detail.conversations.first().map(|c| c.id.clone()))
         .unwrap_or_else(|| "1".to_string());
-    Ok(AttachedTarget {
+    Ok(target_from_detail(detail, cid))
+}
+
+fn target_from_detail(detail: protocol::SessionDetailResponse, cid: String) -> AttachedTarget {
+    AttachedTarget {
         labels: (&detail.session).into(),
         session_id: detail.session.session_id,
         conversation_id: cid,
         cwd: detail.session.cwd,
         env_id: detail.session.env_id.unwrap_or_else(|| "host".to_string()),
-    })
+    }
 }
 
 fn continue_or_create_session(

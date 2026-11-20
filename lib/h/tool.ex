@@ -27,6 +27,13 @@ defmodule H.Tool do
   @callback mutating?() :: boolean()
   @callback execute(args :: map(), context()) :: {:ok, tool_output()} | {:error, tool_output()}
 
+  @doc false
+  def selected?(name, selected) do
+    if is_list(selected) and Enum.all?(selected, &is_binary/1),
+      do: name in selected,
+      else: true
+  end
+
   @doc "Validates decoded JSON tool arguments against `tool_mod.parameters_schema/0` via cached `JSV` root."
   @spec validate_args(module(), term()) :: {:ok, map()} | {:error, String.t()}
   def validate_args(tool_mod, args) when is_atom(tool_mod) do

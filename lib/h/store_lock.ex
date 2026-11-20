@@ -46,6 +46,7 @@ defmodule H.StoreLock do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     data_dir = Keyword.fetch!(opts, :data_dir) |> Path.expand()
     File.mkdir_p!(data_dir)
     File.chmod!(data_dir, 0o700)
@@ -77,6 +78,12 @@ defmodule H.StoreLock do
     File.rm(state.lock_path)
     :ok
   end
+
+  @impl true
+  def handle_info({:EXIT, pid, reason}, %{acceptor: pid} = state),
+    do: {:stop, {:lock_acceptor_stopped, reason}, state}
+
+  def handle_info(_, state), do: {:noreply, state}
 
   defp probe_and_bind(sock_path, lock_path, data_dir, parent) do
     case :gen_tcp.connect({:local, sock_path}, 0, [:binary, active: false], @connect_timeout_ms) do

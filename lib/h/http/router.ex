@@ -23,6 +23,25 @@ defmodule H.HTTP.Router do
   plug(:match)
   plug(:dispatch)
 
+  post "/api/v1/daemon/shutdown" do
+    {_daemon, opts} = daemon_config(conn)
+
+    case H.Daemon.Maintenance.stop_if_idle(opts) do
+      {:ok, payload} ->
+        try do
+          send_json(conn, 202, payload)
+        after
+          send(opts[:shutdown_owner], :shutdown_when_idle)
+        end
+
+      {:error, reason} when reason in [:daemon_busy, :shutdown_not_supported] ->
+        send_json(conn, 409, %{"error" => Atom.to_string(reason)})
+
+      {:error, _} ->
+        send_json(conn, 503, %{"error" => "daemon unavailable"})
+    end
+  end
+
   get "/api/v1/environments" do
     {daemon, daemon_opts} = daemon_config(conn)
     envs = apply(daemon, :list_environments, [daemon_opts])
@@ -63,6 +82,79 @@ defmodule H.HTTP.Router do
     {daemon, daemon_opts} = daemon_config(conn)
     models = apply(daemon, :list_models, [daemon_opts])
     send_json(conn, 200, %{"models" => models})
+  end
+
+  get "/api/v1/provider-keys" do
+    {_daemon, opts} = daemon_config(conn)
+    send_login(conn, H.Accounts.api_keys(opts[:accounts]))
+  end
+
+  post "/api/v1/provider-keys/set" do
+    {_daemon, opts} = daemon_config(conn)
+
+    result =
+      H.Daemon.Maintenance.admit(opts, fn ->
+        H.Accounts.put_api_key(opts[:accounts], conn.body_params)
+      end)
+
+    send_login(conn, result)
+  end
+
+  post "/api/v1/provider-keys/use" do
+    {_daemon, opts} = daemon_config(conn)
+
+    result =
+      H.Daemon.Maintenance.admit(opts, fn ->
+        H.Accounts.use_api_key(opts[:accounts], conn.body_params)
+      end)
+
+    send_login(conn, result)
+  end
+
+  get "/api/v1/provider-logins" do
+    {_daemon, opts} = daemon_config(conn)
+    send_login(conn, H.Accounts.discover(opts[:accounts]))
+  end
+
+  post "/api/v1/provider-logins/start" do
+    {_daemon, opts} = daemon_config(conn)
+
+    result =
+      H.Daemon.Maintenance.admit(opts, fn ->
+        H.Accounts.start(opts[:accounts], conn.body_params)
+      end)
+
+    send_login(conn, result)
+  end
+
+  post "/api/v1/provider-logins/status" do
+    {_daemon, opts} = daemon_config(conn)
+    send_login(conn, H.Accounts.operation(opts[:accounts], :status, conn.body_params))
+  end
+
+  post "/api/v1/provider-logins/cancel" do
+    {_daemon, opts} = daemon_config(conn)
+    send_login(conn, H.Accounts.operation(opts[:accounts], :cancel, conn.body_params))
+  end
+
+  post "/api/v1/provider-accounts/add" do
+    {_daemon, opts} = daemon_config(conn)
+
+    result =
+      H.Daemon.Maintenance.admit(opts, fn -> H.Accounts.add(opts[:accounts], conn.body_params) end)
+
+    send_login(conn, result)
+  end
+
+  post "/api/v1/provider-accounts/activate" do
+    {_daemon, opts} = daemon_config(conn)
+
+    result =
+      H.Daemon.Maintenance.admit(opts, fn ->
+        H.Accounts.activate(opts[:accounts], conn.body_params)
+      end)
+
+    send_login(conn, result)
   end
 
   get "/api/v1/sessions" do
@@ -188,6 +280,37 @@ defmodule H.HTTP.Router do
     send_json(conn, 404, %{"error" => "not found"})
   end
 
+  defp send_login(conn, result) do
+    conn = put_resp_header(conn, "cache-control", "no-store")
+
+    case result do
+      {:ok, payload} ->
+        send_json(conn, 200, payload)
+
+      {:error, reason} ->
+        status =
+          case reason do
+            reason when reason in [:login_unavailable, :login_not_found] ->
+              404
+
+            reason when reason in [:login_busy, :login_request_conflict] ->
+              409
+
+            :login_rate_limited ->
+              429
+
+            reason
+            when reason in [:accounts_unavailable, :account_config_unavailable, :daemon_draining] ->
+              503
+
+            _ ->
+              422
+          end
+
+        send_json(conn, status, %{"error" => Atom.to_string(reason)})
+    end
+  end
+
   defp security_plug(conn, _opts) do
     H.HTTP.SecurityPlug.call(conn, router_opts(conn))
   end
@@ -215,6 +338,9 @@ defmodule H.HTTP.Router do
 
   defp send_fs_error(conn, reason),
     do: send_session_error(conn, reason)
+
+  defp send_session_error(conn, :daemon_draining),
+    do: send_json(conn, 503, %{"error" => "daemon is shutting down; retry after restart"})
 
   defp send_session_error(conn, {:quarantined, reason}),
     do: send_json(conn, 503, %{"error" => "session quarantined", "reason" => reason})

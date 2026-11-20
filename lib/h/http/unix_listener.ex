@@ -17,10 +17,6 @@ defmodule H.HTTP.UnixListener do
            ) do
       case File.chmod(path, 0o600) do
         :ok ->
-          if data_dir = get_in(router_opts, [:daemon_opts, :data_dir]) do
-            H.write_daemon_manifest!(data_dir, router_opts[:port], path)
-          end
-
           {:ok, pid}
 
         {:error, reason} ->

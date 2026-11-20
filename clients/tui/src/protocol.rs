@@ -70,6 +70,8 @@ pub struct ModelInfo {
     pub name: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

@@ -61,10 +61,56 @@ pub struct WorkspaceFileReadResponse {
     pub truncated_by_bytes: bool,
 }
 
+#[derive(Deserialize)]
+pub struct KeyProfile {
+    pub provider: String,
+    pub active: Option<String>,
+    pub sources: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LoginProvider {
+    pub id: String,
+    pub interaction: String,
+    pub sources: Vec<LoginSource>,
+}
+
+#[derive(Deserialize)]
+pub struct LoginSource {
+    pub id: String,
+    pub state: String,
+    #[serde(default)]
+    pub active: bool,
+}
+
+// Deliberately not Debug: the code and operation are transient.
+#[derive(Deserialize)]
+pub struct LoginOperation {
+    pub operation: String,
+    pub source: String,
+    pub state: LoginState,
+    pub verification_url: Option<String>,
+    pub user_code: Option<String>,
+    pub expires_in_ms: Option<u64>,
+    pub poll_after_ms: Option<u64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginState {
+    Starting,
+    Pending,
+    Complete,
+    Cancelled,
+    Expired,
+    Failed,
+}
+
 #[derive(Debug)]
 pub enum ClientError {
     InvalidInput(String),
-    ConnectionFailed { endpoint: String, message: String },
+    ConnectionFailed { endpoint: String, error: io::Error },
     RedirectDisabled { status: u16 },
     HttpStatus { status: u16, message: String },
     InvalidResponse(String),
@@ -75,8 +121,8 @@ impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ClientError::InvalidInput(msg) => write!(f, "invalid request input: {msg}"),
-            ClientError::ConnectionFailed { endpoint, message } => {
-                write!(f, "failed to connect to daemon at {endpoint}: {message}")
+            ClientError::ConnectionFailed { endpoint, error } => {
+                write!(f, "failed to connect to daemon at {endpoint}: {error}")
             }
             ClientError::RedirectDisabled { status } => write!(
                 f,
@@ -252,9 +298,122 @@ impl DaemonClient {
         &self.target
     }
 
+    pub(crate) fn probe_connection(&self) -> Result<(), ClientError> {
+        self.connect(Some(Duration::from_secs(2))).map(drop)
+    }
+
+    pub(crate) fn shutdown_if_idle(&self) -> Result<(), ClientError> {
+        let reply: serde_json::Value =
+            self.post_json("/api/v1/daemon/shutdown", &serde_json::json!({}))?;
+        if reply["state"] == "stopping" {
+            Ok(())
+        } else {
+            Err(ClientError::InvalidResponse(
+                "shutdown was not acknowledged".into(),
+            ))
+        }
+    }
+
     pub fn get_environments(&self) -> Result<Vec<EnvironmentInfo>, ClientError> {
         let resp: EnvironmentsResponse = self.get_json("/api/v1/environments")?;
         Ok(resp.environments)
+    }
+
+    pub fn key_profiles(&self) -> Result<Vec<KeyProfile>, ClientError> {
+        #[derive(Deserialize)]
+        struct Discovery {
+            providers: Vec<KeyProfile>,
+        }
+        let response: Discovery = self.get_json("/api/v1/provider-keys")?;
+        Ok(response.providers)
+    }
+
+    pub fn set_api_key(&self, provider: &str, source: &str, key: &str) -> Result<(), ClientError> {
+        // Do not mirror a server's error body on this write-only path.
+        let result: Result<serde_json::Value, _> = self.post_json(
+            "/api/v1/provider-keys/set",
+            &serde_json::json!({"provider": provider, "source": source, "api_key": key}),
+        );
+        match result {
+            Ok(_) => Ok(()),
+            Err(ClientError::HttpStatus { status, .. }) => Err(ClientError::HttpStatus {
+                status,
+                message: "Could not save API key".into(),
+            }),
+            Err(_) => Err(ClientError::Io(
+                "Could not confirm API-key save; check /key list".into(),
+            )),
+        }
+    }
+
+    pub fn use_api_key(&self, provider: &str, source: &str) -> Result<(), ClientError> {
+        let _: serde_json::Value = self.post_json(
+            "/api/v1/provider-keys/use",
+            &serde_json::json!({"provider": provider, "source": source}),
+        )?;
+        Ok(())
+    }
+
+    pub fn login_providers(&self) -> Result<Vec<LoginProvider>, ClientError> {
+        #[derive(Deserialize)]
+        struct Discovery {
+            providers: Vec<LoginProvider>,
+        }
+        let response: Discovery = self.get_json("/api/v1/provider-logins")?;
+        Ok(response.providers)
+    }
+
+    pub fn start_login(
+        &self,
+        provider: &str,
+        source: &str,
+        request_id: &str,
+    ) -> Result<LoginOperation, ClientError> {
+        self.start_login_for(provider, Some(source), request_id)
+    }
+
+    pub(crate) fn start_login_for(
+        &self,
+        provider: &str,
+        source: Option<&str>,
+        request_id: &str,
+    ) -> Result<LoginOperation, ClientError> {
+        self.post_json(
+            "/api/v1/provider-logins/start",
+            &serde_json::json!({
+                "provider": provider, "source": source, "request_id": request_id
+            }),
+        )
+    }
+
+    pub fn add_codex_account(&self, source: &str) -> Result<(), ClientError> {
+        let _: serde_json::Value = self.post_json(
+            "/api/v1/provider-accounts/add",
+            &serde_json::json!({"source": source}),
+        )?;
+        Ok(())
+    }
+
+    pub fn activate_codex_account(&self, source: &str) -> Result<(), ClientError> {
+        let _: serde_json::Value = self.post_json(
+            "/api/v1/provider-accounts/activate",
+            &serde_json::json!({"source": source}),
+        )?;
+        Ok(())
+    }
+
+    pub fn login_status(&self, operation: &str) -> Result<LoginOperation, ClientError> {
+        self.post_json(
+            "/api/v1/provider-logins/status",
+            &serde_json::json!({"operation": operation}),
+        )
+    }
+
+    pub fn cancel_login(&self, operation: &str) -> Result<LoginOperation, ClientError> {
+        self.post_json(
+            "/api/v1/provider-logins/cancel",
+            &serde_json::json!({"operation": operation}),
+        )
     }
 
     pub fn list_models(&self) -> Result<Vec<ModelInfo>, ClientError> {
@@ -604,11 +763,8 @@ impl DaemonClient {
         let endpoint = self.target.display_endpoint();
         match &self.target {
             DaemonTarget::UnixSocket(path) => {
-                let stream =
-                    UnixStream::connect(path).map_err(|e| ClientError::ConnectionFailed {
-                        endpoint,
-                        message: e.to_string(),
-                    })?;
+                let stream = UnixStream::connect(path)
+                    .map_err(|error| ClientError::ConnectionFailed { endpoint, error })?;
                 stream
                     .set_read_timeout(read_timeout)
                     .map_err(|e| ClientError::Io(e.to_string()))?;
@@ -622,12 +778,8 @@ impl DaemonClient {
                     LoopbackHost::Ipv4 => SocketAddr::from(([127, 0, 0, 1], *port)),
                     LoopbackHost::Ipv6 => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], *port)),
                 };
-                let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|e| {
-                    ClientError::ConnectionFailed {
-                        endpoint,
-                        message: e.to_string(),
-                    }
-                })?;
+                let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+                    .map_err(|error| ClientError::ConnectionFailed { endpoint, error })?;
                 stream
                     .set_read_timeout(read_timeout)
                     .map_err(|e| ClientError::Io(e.to_string()))?;

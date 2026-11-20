@@ -1,5 +1,7 @@
 # Architecture
 
+For startup path extensions, managed accounts, and proposed hooks, see [Extensions](extensions.md).
+
 The engine is the root Mix application (`:harness`, `H.*`). It owns session state and runs work even when no client is attached. Phoenix is a separate Mix application; the terminal client is a separate Rust binary. Neither is required to run the engine.
 
 ## Four structures with different lifetimes
@@ -26,6 +28,33 @@ The engine is the root Mix application (`:harness`, `H.*`). It owns session stat
 
 Supervision alone cannot recover an effect. On startup the daemon consults the catalog for active sessions; the coordinator reconciles stored checkpoints. Interrupted model calls have retry accounting. Interrupted safe tools (`read`, `search_history`) can run again; unsafe tools (`write`, `edit`, `bash`) return an interrupted result with any persisted partial output instead. This is **not** exactly-once external execution. See the [file storage](../test/h/storage_file_test.exs), [tool recovery](../test/h/tool_crash_recovery_test.exs) and [VM restart](../test/h/vm_restart_test.exs) tests.
 
+## Account boundary
+
+`H.Accounts` starts under the daemon's store lock. An owner can create the
+first alias through login or settings; H writes `accounts.json` before making
+provider calls. A worker's managed/manual mode is selected before committing
+its attempt policy and does not change mid-attempt. Login and refresh are
+bounded external operations owned by this context, not by a session
+coordinator, HTTP request, or client SSE subscription. The private vault is
+separate from catalog and session stores. ReqLLM resolves an access credential
+just before dispatch. The owner API reads only login instructions and
+sanitized state, and performs typed account configuration operations. Managed
+inference commits a bounded dispatch/no-resume policy before the worker starts. Stock resolves just
+one active alias; the optional path-loaded [MultiCodex](extensions/providers.md)
+package owns quota polling and account preferences. The adapter alone
+authorizes a second dispatch.
+
+## Planned shutdown
+
+The standalone launcher accepts an owner-authenticated, idle-only shutdown.
+The boot process tracks command admission; closing the gate fences new writes
+at both the daemon and session coordinator. Shutdown is refused during an
+admitted mutation or any known unfinished session work. The launcher stops its
+own instance in supervision order; the caller does not signal an OS PID.
+Client reexec restores terminal modes and attaches with the same session and
+conversation IDs. Neither mechanism changes how crash recovery treats external
+effects.
+
 ## Workspace boundary
 
 `H.EnvRegistry` resolves an environment for browsing or binds it to a session's working directory. The catalog and mutating-tool leases distinguish workspaces by `{env_id, cwd}`. `H.Harness.Coding` supplies `read`, `write`, `edit`, `bash` and `search_history` and discovers ancestor `AGENTS.md` files through `H.ExecutionEnv` unless instructions are overridden. `H.ExecutionEnv.Host` operates with the host user's access; a lease coordinates writers, **not** filesystem confinement. `Local` is a compatibility wrapper.
@@ -37,7 +66,7 @@ Supervision alone cannot recover an effect. On startup the daemon consults the c
 - **Phoenix** (`clients/web/`): `:harness_web` depends on `:harness` by path. `HWeb.Backend.InVM` calls the daemon in the same VM; there is no HTTP backend. `WorkspaceLive` browses folders. `SessionLive` streams entry rows and retains document and cursor state rather than every rendered entry body.
 - **Terminal** (`clients/tui/`): `h` discovers an existing daemon via `api.sock` or literal loopback HTTP. It sends the owner bearer token, consumes the [JSON/SSE API](protocol.md) and renders line-oriented output. Interactive and print modes share the same sessions as Phoenix.
 
-- **Interactive terminal** (`clients/tui/src/hi`): `hi` uses the same client library as `h`. A single terminal loop renders the editor, transcript and focused picker; cancellable SSE subscriptions and background command workers do not own stdout. Explicit queue withdrawal is a shared daemon mutation returning a durable receipt, not a local inbox edit. See [build status](hi-build.md) for implemented scope versus the [pi parity target](hi.md). [Profiles and tool hosts](hi-extensions.md) remain a future design.
+- **Interactive terminal** (`clients/tui/src/hi`): `hi` uses the same client library as `h`. A single terminal loop renders the editor, transcript and focused picker; cancellable SSE subscriptions and background command workers do not own stdout. Explicit queue withdrawal is a shared daemon mutation returning a durable receipt, not a local inbox edit. See [build status](hi-build.md) for implemented scope versus the [pi parity target](hi.md). See [client extension surfaces](extensions/clients.md) for device login and proposed package status.
 
 The web workbench is a slotted function component, not a process tree. A separate,
 owner-authenticated sticky `InspectorLive` follows recent entries in the dedicated

@@ -461,13 +461,8 @@ defmodule H.Context do
 
     raw_tools =
       cond do
-        tool_specs != [] and is_list(selected) and selected != [] and
-            Enum.all?(selected, &is_binary/1) ->
-          allowed = MapSet.new(selected)
-          Enum.filter(tool_specs, fn spec -> MapSet.member?(allowed, fetch(spec, :name)) end)
-
         tool_specs != [] ->
-          tool_specs
+          Enum.filter(tool_specs, &H.Tool.selected?(fetch(&1, :name), selected))
 
         is_list(selected) and Enum.all?(selected, &is_map/1) ->
           selected
