@@ -304,6 +304,33 @@ impl TranscriptState {
             .and_then(Value::as_str)
     }
 
+    pub fn context_tokens(&self) -> Option<u64> {
+        for entry in self.entries.iter().rev() {
+            match entry.kind.as_str() {
+                "compaction" => return None,
+                "reset" => return Some(0),
+                "assistant" if entry.data.get("aborted").and_then(Value::as_bool) != Some(true) => {
+                    let usage = entry.data.get("usage")?;
+                    let input = usage
+                        .get("input_tokens")
+                        .or_else(|| usage.get("input"))
+                        .and_then(Value::as_u64);
+                    let output = usage
+                        .get("output_tokens")
+                        .or_else(|| usage.get("output"))
+                        .and_then(Value::as_u64);
+                    return usage
+                        .get("total_tokens")
+                        .and_then(Value::as_u64)
+                        .or_else(|| input.map(|n| n.saturating_add(output.unwrap_or(0))));
+                }
+                _ => {}
+            }
+        }
+        // An empty or prompt-only history needs no reported context yet.
+        (!self.has_more).then_some(0)
+    }
+
     pub fn usage_summary(&self) -> Option<(u64, u64, f64)> {
         let usage = self.docs.get("usage").and_then(Value::as_object)?;
         let input = usage

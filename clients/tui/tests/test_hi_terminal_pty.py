@@ -51,7 +51,7 @@ class TerminalFakeDaemon(FakeDaemon):
 
     def __init__(self, *, cwd: str, session_id: str = "demo", transport: str = "uds") -> None:
         super().__init__(transport=transport, cwd=cwd, session_id=session_id)
-        self.models: list[dict[str, str]] = [
+        self.models: list[dict[str, Any]] = [
             {"id": "fake/test-model", "name": "Test Model", "provider": "fake"},
             {"id": "openai/gpt-5.2-codex", "name": "GPT-5.2 Codex", "provider": "openai"},
             {"id": "anthropic/claude-sonnet", "name": "Claude Sonnet", "provider": "anthropic"},
@@ -517,6 +517,48 @@ class HiTerminalBothModesTests(unittest.TestCase):
                         pty.send_enter()
                         self.assertEqual(pty.wait(), 0)
                         self.assertTrue(pty.is_cooked_mode())
+
+    def test_context_footer_aligns_and_updates_branch_and_latest_turn_in_both_modes(self) -> None:
+        layout = [
+            "{{ cwd_short }}{% if git_branch %} ({{ git_branch }}){% endif %}",
+            "{% set meter %}{% if context_window %}{{ '%.0f' | format(context_percent) if context_percent is not none else '—' }}%/{{ context_window | compact }}{% else %}—{% endif %}{% endset %}{{ align(meter, model ~ ':' ~ thinking) }}",
+        ]
+        project = Path(self.workdir) / "sub"
+        git = Path(self.workdir) / ".git"
+        git.mkdir()
+        head = git / "HEAD"
+        model = "openai_codex:gpt-6.2-sol"
+        right = f"{model}:high"
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                head.write_text("ref: refs/heads/main\n")
+                with TerminalFakeDaemon(cwd=str(project)) as daemon:
+                    daemon._docs["agent"] = {"model": model, "thinking": "high"}
+                    daemon.models = [{"id": model, "provider": "openai_codex", "context_window": 500_000}]
+                    (Path(daemon.data_dir) / "hi.json").write_text(json.dumps({"status_lines": layout}))
+                    cmd = [self.hi_bin, "-s", "demo", "--tui-mode", mode]
+                    with PtySession(cmd, env={**daemon.env(), "HOME": self.workdir}, cwd=self.workdir, rows=16, cols=100) as pty:
+                        daemon.wait_for_sse_connect()
+                        pty.wait_for_output("~/sub (main)")
+                        pty.wait_for_output("0%/500k".ljust(100 - len(right)) + right)
+
+                        with daemon._lock:
+                            entry = daemon._next_entry_locked("assistant", {
+                                "content": "Fixture answer", "usage": {"input_tokens": 124_000, "output_tokens": 1_000},
+                            })
+                            daemon._docs["usage"]["total_tokens"] = 900_000
+                            daemon._commit_locked(appended_entries=[entry], doc_ops={"usage": [["replace", daemon._docs["usage"]]]})
+
+                        left = "25%/500k"
+                        pty.wait_for_output(left.ljust(100 - len(right)) + right)
+                        pty.resize(16, 72)
+                        pty.wait_for_output(left.ljust(72 - len(right)) + right)
+                        head.unlink()
+                        deadline = time.monotonic() + 5
+                        while "~/sub (main)" in pty.screen_text() and time.monotonic() < deadline:
+                            time.sleep(0.03)
+                        self.assertIn("~/sub", pty.screen_text())
+                        self.assertNotIn("~/sub (main)", pty.screen_text())
 
     def test_status_templates_reload_atomically_and_follow_live_model_in_both_modes(self) -> None:
         for mode in self.MODES:

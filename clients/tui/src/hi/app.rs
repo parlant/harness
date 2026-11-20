@@ -10,7 +10,7 @@ use super::{
     picker::{Choice, Picker},
     preferences::UserConfig,
     screen::{EditorOverlay, Screen},
-    status::StatusFields,
+    status::{StatusFields, StatusMetadata},
     stream::{Subscription, Update},
 };
 use crate::{
@@ -156,6 +156,7 @@ struct Ui {
     path_lookup: Option<PathLookup>,
     pending_root_fork: Option<PendingRootFork>,
     config: UserConfig,
+    status_metadata: StatusMetadata,
     data_dir: PathBuf,
     job: Option<Job>,
     note: String,
@@ -209,6 +210,7 @@ pub fn run(
         path_lookup: None,
         pending_root_fork: None,
         config,
+        status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
         job: None,
         note: "Connecting · /help".into(),
@@ -239,6 +241,9 @@ pub fn run(
         }
         repaint |= ui.complete(&mut screen);
         repaint |= ui.complete_path_lookup();
+        repaint |= ui
+            .status_metadata
+            .tick(&ui.target, &ui.client, &ui.config.status, ui.online);
         repaint |= ui.login.as_mut().is_some_and(|flow| flow.tick(&ui.client));
         if ui.online && ui.state.seq.is_some() && ui.job.is_none() {
             if let Some(text) = initial.take() {
@@ -339,8 +344,9 @@ pub fn run(
 
 impl Ui {
     fn draw(&mut self, screen: &mut Screen) -> Result<(), String> {
-        if let Ok((width, _)) = crossterm::terminal::size() {
-            self.draft.editor.set_width(usize::from(width).max(1));
+        let width = crossterm::terminal::size().map_or(0, |(width, _)| width);
+        if width > 0 {
+            self.draft.editor.set_width(usize::from(width));
         }
         if self.rows_dirty {
             self.cached_rows = cards::rows(
@@ -350,7 +356,9 @@ impl Ui {
             );
             self.rows_dirty = false;
         }
-        let status = self.config.status.render(&self.status_fields());
+        let mut fields = self.status_fields();
+        fields.width = width;
+        let status = self.config.status.render(&fields);
         let lines;
         let overlay = if let Some(secret) = &self.secret {
             lines = secret.lines();
@@ -389,6 +397,7 @@ impl Ui {
         fields.retry_pending = self.draft.retry.is_some();
         fields.historical = self.historical.is_some();
         fields.show_tools = self.tools;
+        self.status_metadata.apply(&mut fields, &self.state);
         fields.show_thinking = self.thinking;
         fields
     }
@@ -1871,6 +1880,7 @@ mod tests {
             path_lookup: None,
             pending_root_fork: None,
             config: UserConfig::default(),
+            status_metadata: StatusMetadata::default(),
             data_dir: PathBuf::from("/private/tmp/hi-app-nonexistent-config"),
             job: None,
             note: "Ready".into(),

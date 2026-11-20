@@ -1,9 +1,18 @@
 //! Read-only footer fields and compiled, one-row templates. No daemon calls on redraw.
 use super::actions::Target;
-use crate::{render::sanitize_single_line, transcript::TranscriptState};
+use crate::{client::DaemonClient, render::sanitize_single_line, transcript::TranscriptState};
 use minijinja::{escape_formatter, Environment, UndefinedBehavior, Value};
 use serde::Serialize;
-use std::io;
+use std::{
+    collections::HashMap,
+    env, fs,
+    io::{self, Read},
+    path::Path,
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
+    time::{Duration, Instant},
+};
+use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_LINE: &str = concat!(
     "{{ note }}{% if shell_active %} · shell {{ shell_prefix }}{{ shell_preview }} ({{ shell_status }}){% endif %}",
@@ -31,6 +40,8 @@ pub(super) struct StatusFields<'a> {
     session_id: &'a str,
     conversation_id: &'a str,
     cwd: &'a str,
+    cwd_short: &'a str,
+    git_branch: Option<&'a str>,
     env_id: &'a str,
     session_title: Option<&'a str>,
     session_status: Option<&'a str>,
@@ -44,9 +55,12 @@ pub(super) struct StatusFields<'a> {
     compaction_status: Option<&'a str>,
     run_turns: Option<u64>,
     model: &'a str,
+    pub width: u16,
     model_name: &'a str,
     provider: Option<&'a str>,
     thinking: &'a str,
+    context_window: Option<u64>,
+    context_percent: Option<f64>,
     queued: usize,
     has_usage: bool,
     input_tokens: u64,
@@ -84,6 +98,7 @@ impl<'a> StatusFields<'a> {
             session_id: &target.sid,
             conversation_id: &target.cid,
             cwd: &target.cwd,
+            cwd_short: &target.cwd,
             env_id: &target.env_id,
             session_title: target.labels.title.as_deref(),
             session_status: target.labels.status.as_deref(),
@@ -130,9 +145,182 @@ impl<'a> StatusFields<'a> {
     }
 }
 
+#[derive(Default)]
+pub(super) struct StatusMetadata {
+    workspace: (String, String),
+    cwd_short: String,
+    branch: Option<String>,
+    next_branch_check: Option<Instant>,
+    branch_job: Option<Receiver<Option<String>>>,
+    catalog: HashMap<String, u64>,
+    next_catalog_check: Option<Instant>,
+    catalog_job: Option<Receiver<Option<HashMap<String, u64>>>>,
+}
+
+impl StatusMetadata {
+    pub(super) fn tick(
+        &mut self,
+        target: &Target,
+        client: &DaemonClient,
+        status: &StatusLines,
+        online: bool,
+    ) -> bool {
+        let mut changed = false;
+        if self.workspace.0 != target.env_id || self.workspace.1 != target.cwd {
+            self.workspace = (target.env_id.clone(), target.cwd.clone());
+            self.cwd_short = if target.env_id == "host" {
+                short_cwd(&target.cwd, env::var_os("HOME").as_deref().map(Path::new))
+            } else {
+                target.cwd.clone()
+            };
+            self.branch = None;
+            self.branch_job = None;
+            self.next_branch_check = None;
+            changed = true;
+        }
+
+        let now = Instant::now();
+        if let Some(branch) = take_ready(&mut self.branch_job) {
+            changed |= branch != self.branch;
+            self.branch = branch;
+        }
+        if status.needs_branch
+            && target.env_id == "host"
+            && Path::new(&target.cwd).is_absolute()
+            && self.branch_job.is_none()
+            && self.next_branch_check.is_none_or(|due| now >= due)
+        {
+            let cwd = target.cwd.clone();
+            self.branch_job = Some(background(move || git_branch(Path::new(&cwd))));
+            self.next_branch_check = Some(now + Duration::from_secs(2));
+        }
+
+        if let Some(catalog) = take_ready(&mut self.catalog_job).flatten() {
+            changed |= catalog != self.catalog;
+            self.catalog = catalog;
+        }
+        if status.needs_context
+            && online
+            && self.catalog_job.is_none()
+            && self.next_catalog_check.is_none_or(|due| now >= due)
+        {
+            let client = client.clone();
+            self.catalog_job = Some(background(move || {
+                Some(
+                    client
+                        .list_models()
+                        .ok()?
+                        .into_iter()
+                        .filter_map(|m| {
+                            Some((model_key(&m.id), m.context_window.filter(|n| *n > 0)?))
+                        })
+                        .collect(),
+                )
+            }));
+            self.next_catalog_check = Some(now + Duration::from_secs(30));
+        }
+        changed
+    }
+
+    pub(super) fn apply<'a>(&'a self, fields: &mut StatusFields<'a>, state: &TranscriptState) {
+        if self.workspace.0 == fields.env_id && self.workspace.1 == fields.cwd {
+            fields.cwd_short = &self.cwd_short;
+            fields.git_branch = self.branch.as_deref();
+        }
+        if self.catalog.is_empty() {
+            return;
+        }
+        fields.context_window = self.catalog.get(&model_key(fields.model)).copied();
+        fields.context_percent = fields.context_window.and_then(|window| {
+            state
+                .context_tokens()
+                .map(|tokens| 100.0 * tokens as f64 / window as f64)
+        });
+    }
+}
+
+fn background<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx
+}
+
+fn take_ready<T>(job: &mut Option<Receiver<T>>) -> Option<T> {
+    let value = match job.as_ref()?.try_recv() {
+        Ok(value) => Some(value),
+        Err(TryRecvError::Empty) => return None,
+        Err(TryRecvError::Disconnected) => None,
+    };
+    *job = None;
+    value
+}
+
+fn model_key(model: &str) -> String {
+    match model.split_once([':', '/']) {
+        Some((provider, id)) => format!(
+            "{}:{id}",
+            match provider {
+                "openai-codex" => "openai_codex",
+                "google-vertex" => "google_vertex",
+                _ => provider,
+            }
+        ),
+        None => model.to_owned(),
+    }
+}
+
+fn short_cwd(cwd: &str, home: Option<&Path>) -> String {
+    if let Some(rest) = home.and_then(|home| Path::new(cwd).strip_prefix(home).ok()) {
+        if rest.as_os_str().is_empty() {
+            "~".into()
+        } else {
+            format!("~/{}", rest.display())
+        }
+    } else {
+        cwd.into()
+    }
+}
+
+fn git_branch(cwd: &Path) -> Option<String> {
+    for dir in cwd.ancestors() {
+        let dot_git = dir.join(".git");
+        let git_dir = match fs::metadata(&dot_git) {
+            Ok(meta) if meta.is_dir() => dot_git,
+            Ok(meta) if meta.is_file() => {
+                let pointer = read_git_file(&dot_git)?;
+                dir.join(pointer.trim_end().strip_prefix("gitdir: ")?)
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            _ => return None,
+        };
+        let head = read_git_file(&git_dir.join("HEAD"))?;
+        let branch = head.trim_end().strip_prefix("ref: refs/heads/")?;
+        return (!branch.is_empty() && !branch.chars().any(char::is_control))
+            .then(|| branch.to_owned());
+    }
+    None
+}
+
+fn read_git_file(path: &Path) -> Option<String> {
+    if !fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(4097)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() <= 4096).then_some(text)
+}
+
 pub(super) struct StatusLines {
     env: Environment<'static>,
     names: Vec<String>,
+    needs_branch: bool,
+    needs_context: bool,
 }
 
 impl Default for StatusLines {
@@ -147,6 +335,7 @@ impl StatusLines {
         env.set_fuel(Some(10_000));
         env.set_undefined_behavior(UndefinedBehavior::Strict);
         env.add_filter("compact", compact_number);
+        env.add_function("align", align);
         env.set_formatter(|out, state, value| {
             // An unavailable field prints nothing, but is still `none` in conditions.
             if value.is_none() {
@@ -158,6 +347,8 @@ impl StatusLines {
         let fields = Value::from_serialize(StatusFields::default());
         let base = base.unwrap_or_else(|| vec![DEFAULT_LINE.into()]);
         let mut names = Vec::with_capacity(base.len() + append.len());
+        let mut needs_branch = false;
+        let mut needs_context = false;
         for (section, lines) in [("status_lines", base), ("status_lines_append", append)] {
             for (i, line) in lines.into_iter().enumerate() {
                 let name = format!("{section}[{}]", i + 1);
@@ -167,10 +358,15 @@ impl StatusLines {
                 env.add_template_owned(name.clone(), line)
                     .map_err(|e| format!("{name}: {e}"))?;
                 let template = env.get_template(&name).expect("compiled above");
-                let mut unknown: Vec<_> = template
-                    .undeclared_variables(false)
+                let variables = template.undeclared_variables(false);
+                needs_branch |= variables.contains("git_branch");
+                needs_context |=
+                    variables.contains("context_window") || variables.contains("context_percent");
+                let mut unknown: Vec<_> = variables
                     .into_iter()
-                    .filter(|key| fields.get_attr(key).is_ok_and(|v| v.is_undefined()))
+                    .filter(|key| {
+                        fields.get_attr(key).is_ok_and(|v| v.is_undefined()) && key != "align"
+                    })
                     .collect();
                 if !unknown.is_empty() {
                     unknown.sort();
@@ -182,7 +378,12 @@ impl StatusLines {
                 names.push(name);
             }
         }
-        Ok(Self { env, names })
+        Ok(Self {
+            env,
+            names,
+            needs_branch,
+            needs_context,
+        })
     }
 
     fn lines<'a>(
@@ -220,6 +421,19 @@ impl StatusLines {
             })
             .collect()
     }
+}
+
+fn align(state: &minijinja::State<'_, '_>, left: String, right: String) -> String {
+    let width = state
+        .lookup("width")
+        .and_then(|v| u16::try_from(v).ok())
+        .unwrap_or(0);
+    let left = sanitize_single_line(&left);
+    let right = sanitize_single_line(&right);
+    let gap = usize::from(width)
+        .saturating_sub(left.width().saturating_add(right.width()))
+        .clamp(1, 16_384);
+    format!("{left}{:gap$}{right}", "")
 }
 
 /// Abbreviate integer counts without rounding across a unit boundary.
@@ -292,6 +506,29 @@ mod tests {
         ] {
             assert_eq!(compact_number(Some(number)), expected);
         }
+    }
+
+    #[test]
+    fn alignment_counts_terminal_columns_and_escapes_control_characters() {
+        let status =
+            StatusLines::compile(Some(vec!["{{ align(note, cwd) }}".into()]), vec![]).unwrap();
+        let mut fields = StatusFields {
+            note: "界",
+            cwd: "a\tb",
+            width: 10,
+            ..StatusFields::default()
+        };
+        assert_eq!(status.render(&fields), ["界    a\\tb"]);
+        fields.width = 3;
+        assert_eq!(status.render(&fields), ["界 a\\tb"]);
+    }
+
+    #[test]
+    fn home_shortening_is_based_on_path_components() {
+        let home = Some(Path::new("/Users/al"));
+        assert_eq!(short_cwd("/Users/al", home), "~");
+        assert_eq!(short_cwd("/Users/al/work", home), "~/work");
+        assert_eq!(short_cwd("/Users/alex/work", home), "/Users/alex/work");
     }
 
     #[test]
