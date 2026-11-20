@@ -16,7 +16,7 @@ if TESTS_DIR not in sys.path:
     sys.path.insert(0, TESTS_DIR)
 
 from fake_daemon import FakeDaemon, extract_content_text  # noqa: E402
-from pty_harness import PtySession, find_h_binary, find_hi_binary, strip_ansi  # noqa: E402
+from pty_harness import PtySession, find_hi_binary, strip_ansi  # noqa: E402
 
 
 class _UdsHttpConnection(http.client.HTTPConnection):
@@ -188,27 +188,24 @@ class PtyHarnessTests(unittest.TestCase):
             self.assertNotEqual(rc, None)
 
 
-class BaselineHCompatibilityTests(unittest.TestCase):
-    def test_existing_h_binary_works_against_fake_daemon_if_built(self) -> None:
-        h_bin = find_h_binary(REPO_ROOT)
-        if not h_bin:
-            self.skipTest("baseline `h` binary not built; skipping baseline compatibility check")
+class BaselineHiPrintCompatibilityTests(unittest.TestCase):
+    def test_hi_print_mode_works_against_fake_daemon_over_uds_and_tcp(self) -> None:
+        hi_bin = find_hi_binary(REPO_ROOT)
+        if not hi_bin:
+            if os.environ.get("HI_PTY_REQUIRE_BIN") == "1":
+                self.fail("hi binary not built; set HI_BIN=/path/to/hi")
+            self.skipTest("hi binary not built; skipping print compatibility check")
 
-        with tempfile.TemporaryDirectory(prefix="hi-hbase-", dir="/tmp") as cwd:
-            with FakeDaemon(transport="uds", cwd=cwd, session_id="demo") as daemon:
-                daemon.arm_auto_stream(chunks=["Hello from fake daemon"])
-                with PtySession([h_bin, "-s", "demo", "-p", "ping"], env=daemon.env(), cwd=cwd) as pty:
-                    self.assertEqual(pty.wait(timeout=5.0), 0)
-                    self.assertIn("Hello from fake daemon", pty.clean_text())
-                self.assertEqual(daemon.abort_commands(), [])
-
-            with FakeDaemon(transport="tcp", cwd=cwd, session_id="demo") as daemon:
-                with PtySession([h_bin, "-s", "demo"], env=daemon.env(), cwd=cwd) as pty:
-                    daemon.wait_for_sse_connect()
-                    pty.wait_for_output("H session demo")
-                    pty.send_text("/quit\n")
-                    self.assertEqual(pty.wait(timeout=5.0), 0)
-                self.assertEqual(daemon.abort_commands(), [])
+        with tempfile.TemporaryDirectory(prefix="hi-pbase-", dir="/tmp") as cwd:
+            for transport in ("uds", "tcp"):
+                with self.subTest(transport=transport):
+                    with FakeDaemon(transport=transport, cwd=cwd, session_id="demo") as daemon:
+                        daemon.arm_auto_stream(chunks=["Hello from fake daemon"])
+                        with PtySession([hi_bin, "-s", "demo", "-p", "ping"], env=daemon.env(), cwd=cwd) as pty:
+                            self.assertEqual(pty.wait(timeout=5.0), 0)
+                            self.assertIn("Hello from fake daemon", pty.clean_text())
+                            self.assertNotIn("\x1b[?1049h", pty.raw_text())
+                        self.assertEqual(daemon.abort_commands(), [])
 
 
 if __name__ == "__main__":

@@ -16,8 +16,8 @@ Verified at branch `hi-trial/migration` (base `e9da729`) against read-only `pi` 
 |---|---|---|
 | Rust unit suite | `CARGO_TARGET_DIR=/tmp/h-cargo cargo test --locked` (in `clients/tui`) | **127 passed**, 0 failed (`1.09s`) |
 | Root Elixir engine suite | `MIX_BUILD_PATH=/private/tmp/h-mix MIX_DEPS_PATH=/tmp/h-deps mix test` | **301 passed, 1 excluded** (`:live_llm`, `4.5s`) |
-| Phoenix ↔ native sync (`regular` mode) | `MIX_BUILD_PATH=/private/tmp/h-web-mix MIX_DEPS_PATH=/tmp/h-web-deps H_NATIVE_TEST_BIN="$INST/bin/h" H_INTERACTIVE_TEST_BIN="$INST/bin/hi" HI_TEST_MODE=regular mix test --include native_client` (in `clients/web`) | **12 passed** (`0.8s`), including `MultiSurfaceSyncTest` |
-| Existing Unix PTY acceptance suite | `HI_PTY_REQUIRE_BIN=1 HI_BIN="$INST/bin/hi" H_BIN="$INST/bin/h" python3 -m unittest discover -s clients/tui/tests -p 'test_*.py' -v` | **16 passed** (`7.261s`): raw/cooked restore, mid-stream editing, Enter `steer`, Alt-Enter `follow_up`, non-aborting `/quit`/`Ctrl-D`/hangup detach, `SIGWINCH` resize, TCP loopback |
+| Phoenix ↔ native sync (`regular` mode) | `MIX_BUILD_PATH=/private/tmp/h-web-mix MIX_DEPS_PATH=/tmp/h-web-deps HI_BIN="$INST/bin/hi" HI_TEST_MODE=regular mix test --include native_client` (in `clients/web`) | **12 passed** (`0.8s`), including `MultiSurfaceSyncTest` (verified against `hi` headless and PTY) |
+| Existing Unix PTY acceptance suite | `HI_PTY_REQUIRE_BIN=1 HI_BIN="$INST/bin/hi" python3 -m unittest discover -s clients/tui/tests -p 'test_*.py' -v` | **16 passed** (`7.261s`): raw/cooked restore, mid-stream editing, Enter `steer`, Alt-Enter `follow_up`, non-aborting `/quit`/`Ctrl-D`/hangup detach, `SIGWINCH` resize, TCP loopback |
 | Release smoke (cold target) | `PI_CLI_JS=~/Projects/JavaScript/pi/packages/coding-agent/dist/bundle/cli.js python3 scripts/hi-release-smoke.py --fresh-target` | **Passed**: cold `cargo install --locked` `10.217s`; `h` `2,655,904` B, `hi` `2,655,904` B; `pi_store_unmodified: true` |
 | Release smoke (warm + real Elixir `H.serve`) | `MIX_BUILD_PATH=/private/tmp/h-mix MIX_DEPS_PATH=/tmp/h-deps CARGO_TARGET_DIR=/tmp/h-cargo PI_CLI_JS=~/Projects/JavaScript/pi/packages/coding-agent/dist/bundle/cli.js python3 scripts/hi-release-smoke.py --with-elixir` | **Passed**: warm install `1.297s`; real `H.serve` + `H.Provider.Fake` + `H.Storage.File` persisted `2` sessions via `api.sock`; sentinel `.pi` SHA-256 tree identical (`pi_store_unmodified: true`) |
 
@@ -118,13 +118,13 @@ Verified at branch `hi-trial/migration` (base `e9da729`) against read-only `pi` 
 
 ## 4. Exact Commands: Install, Start, Resume, Detach, Print, Smoke & Rollback
 
-### Clean Isolated Install (`h` and `hi`)
+### Clean Isolated Install (`hi`)
 
 ```sh
 SMOKE_ROOT="$(mktemp -d /tmp/hi-install.XXXXXX)"
 CARGO_TARGET_DIR=/tmp/hi-cargo cargo install --locked --path clients/tui --root "$SMOKE_ROOT"
 export PATH="$SMOKE_ROOT/bin:$PATH"
-h --version && hi --version
+hi --version
 ```
 
 ### Start a Disposable Daemon (Fake Provider, Isolated Store)
@@ -150,7 +150,6 @@ MIX_BUILD_PATH=/private/tmp/h-smoke-mix mix run --no-halt -e '
 
 ```sh
 # Print compatibility (does not enter raw mode, exits after final reply)
-(cd "$WORKDIR" && H_DATA_DIR="$H_DATA_DIR" h -p "Check print mode")
 (cd "$WORKDIR" && H_DATA_DIR="$H_DATA_DIR" hi -p "Check hi print mode")
 
 # Interactive start (auto-creates workspace session in $WORKDIR)
@@ -186,7 +185,7 @@ python3 scripts/hi-release-smoke.py --with-elixir
 H session history lives in `H_DATA_DIR` (default `~/.local/share/h`), not in pi's session store. To roll back from `hi`:
 
 1. Detach from `hi` (`/quit` or `Ctrl-D`) and stop any running `H.serve` / Phoenix process if no longer needed.
-2. Remove the installed `hi`/`h` binary directory or leave it off `PATH` (do **not** alias `pi` to `hi` during the trial).
+2. Remove the installed `hi` binary directory or leave it off `PATH` (do **not** alias `pi` to `hi` during the trial).
 3. Launch `pi` directly as before against its untouched `~/.pi/agent` store. **Never** pass `H_DATA_DIR` to `pi` or point `hi` at `~/.pi/agent`.
 
 ---

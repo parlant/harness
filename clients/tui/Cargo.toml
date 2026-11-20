@@ -2,11 +2,11 @@
 name = "h-tui"
 version = "0.1.0"
 edition = "2021"
-description = "Cooperative native terminal client for the H harness daemon"
+description = "Interactive terminal client for the H harness daemon"
 
 [[bin]]
-name = "h"
-path = "src/main.rs"
+name = "hi"
+path = "src/bin/hi.rs"
 
 [dependencies]
 base64 = "0.22"

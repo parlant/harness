@@ -14,14 +14,14 @@ Python stdlib-only PTY test suite and disposable fake H daemon for verifying `hi
   5. Detaching (`/quit`, `Ctrl-D`, or PTY hangup) during an active stream never sends `abort`; daemon turn completes and persists for re-attach.
   6. Window resize (`SIGWINCH`) during stream and loopback HTTP (`H_DAEMON_URL`) parity.
 - `test_hi_terminal_pty.py` — Covers command cycling, inline workspace paths, local attachments, live/reloadable status templates, and terminal encoding and resize behavior in both fullscreen and regular modes.
-- `test_fake_daemon_and_pty.py` — Self-tests for `FakeDaemon`, `PtySession`, and baseline `h` binary wire compatibility.
+- `test_fake_daemon_and_pty.py` — Self-tests for `FakeDaemon`, `PtySession`, and `hi -p` print wire compatibility.
 
 ## How the coordinator runs it
 
-1. Build `hi` (and `h`) in `clients/tui` after wiring `[[bin]] name = "hi"` in `clients/tui/Cargo.toml`:
+1. Build `hi` in `clients/tui`:
 
 ```sh
-CARGO_TARGET_DIR="$(pwd)/clients/tui/target" cargo build --manifest-path clients/tui/Cargo.toml --bins
+CARGO_TARGET_DIR="$(pwd)/clients/tui/target" cargo build --manifest-path clients/tui/Cargo.toml --bin hi
 ```
 
 2. Run the full PTY acceptance suite requiring the `hi` binary (fail if missing):
@@ -29,7 +29,6 @@ CARGO_TARGET_DIR="$(pwd)/clients/tui/target" cargo build --manifest-path clients
 ```sh
 HI_PTY_REQUIRE_BIN=1 \
 HI_BIN="$(pwd)/clients/tui/target/debug/hi" \
-H_BIN="$(pwd)/clients/tui/target/debug/h" \
 python3 -m unittest discover -s clients/tui/tests -p 'test_*.py' -v
 ```
 

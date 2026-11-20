@@ -32,9 +32,8 @@ cd "$root"
 mix deps.get --only prod --check-locked
 mix compile --warnings-as-errors
 mix release harness --path "$stage/otp"
-cargo build --locked --release --manifest-path clients/tui/Cargo.toml --bins
+cargo build --locked --release --manifest-path clients/tui/Cargo.toml --bin hi
 install -m 755 "$CARGO_TARGET_DIR/release/hi" "$stage/otp/bin/hi"
-install -m 755 "$CARGO_TARGET_DIR/release/h" "$stage/otp/bin/h"
 install -m 755 rel/h-daemon "$stage/otp/bin/h-daemon"
 cp rel/README.md "$stage/otp/README.md"
 # Ship the matching optional artifact without enabling it or copying any config.

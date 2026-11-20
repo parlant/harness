@@ -1,6 +1,6 @@
 # hi: replacing pi at the terminal
 
-**Design target, not a release checklist.** For what now runs and what still blocks cutover, see [implementation status](hi/build.md); for shipped commands see [protocol v1](protocol.md). Build `hi` in `clients/tui`, on the same authenticated daemon as Phoenix. The product test is “can I use this in place of pi for my actual coding sessions?”, not “can Ratatui display a chat?” Keep `h` working during the transition. No second agent loop, local session log, Node requirement or rewrite of the daemon.
+**Design target, not a release checklist.** For what now runs and what still blocks cutover, see [implementation status](hi/build.md); for shipped commands see [protocol v1](protocol.md). Build `hi` in `clients/tui`, on the same authenticated daemon as Phoenix. The product test is “can I use this in place of pi for my actual coding sessions?”, not “can Ratatui display a chat?” No second agent loop, local session log, Node requirement or rewrite of the daemon.
 
 ## Reference and starting point
 
@@ -10,7 +10,7 @@ Baseline: `~/Projects/JavaScript/pi`, [d15b2cf43](https://github.com/Overbryd/pi
 - [Action/default binding table](https://github.com/Overbryd/pi/blob/d15b2cf43367f757832e8257ee5ebac76fce5d69/packages/coding-agent/docs/keybindings.md) and [slash command table](https://github.com/Overbryd/pi/blob/d15b2cf43367f757832e8257ee5ebac76fce5d69/packages/coding-agent/docs/slash-commands.md). Use actions as fixtures, not literal terminal bytes as an API.
 - [pi-tui](https://github.com/Overbryd/pi/tree/d15b2cf43367f757832e8257ee5ebac76fce5d69/packages/tui/src) separates main/alt screens, editor, kill ring, undo stack, keyboard decoder and width calculations. Its [tests](https://github.com/Overbryd/pi/tree/d15b2cf43367f757832e8257ee5ebac76fce5d69/packages/tui/test) are a better quality bar than a screenshot: see `editor-history-keybindings`, `regression-overlay-cjk-boundary`, `wheel-scroll`, `tui-shrink` and `alt-screen-large-transcript-bench`.
 
-H baseline: [cli.rs](../clients/tui/src/cli.rs) already selects/creates sessions, accepts `-s/-r/-c/-p`, implements branch/model/steer/abort commands, and can print a final reply without a TTY. [client.rs](../clients/tui/src/client.rs) handles UDS, literal loopback HTTP, no redirects, SSE and unary requests. Keep the [wire types](../clients/tui/src/protocol.rs), [committed vs ephemeral reducer](../clients/tui/src/transcript.rs), and [terminal sanitization](../clients/tui/src/render.rs). Today stdin is a `read_line` thread; interactive commands can block the loop; output interleaves with typing; interactive SSE errors are reported, not generally reconnected. A generation number ignores obsolete listeners but doesn't cancel a blocked read. There is no terminal editor, bounded viewport, or selectable harness in the Rust create request.
+H baseline: [cli.rs](../clients/tui/src/cli.rs) selects/creates sessions, accepts `-s/-r/-c/-p/--conversation`, dispatches `hi` interactive modes on a TTY, and runs headless `-p` print mode without a TTY or under `TERM=dumb`. [client.rs](../clients/tui/src/client.rs) handles UDS, literal loopback HTTP, no redirects, SSE and unary requests, paired with the [wire types](../clients/tui/src/protocol.rs), [committed vs ephemeral reducer](../clients/tui/src/transcript.rs), and [terminal sanitization](../clients/tui/src/render.rs).
 
 ## The durable differences are part of the interface
 
@@ -27,7 +27,7 @@ See [protocol v1](protocol.md) for implemented semantics. Give a create retry th
 
 ## Parity ledger
 
-**A** = achievable on the existing API (not necessarily in `h`); **B** = needs a specific daemon/profile capability; **C** = optional integration or intentional incompatibility, not a silent omission. Where mixed, ship A first. Use the gates in the [roadmap](roadmap.md); do not call a preview a replacement while required B items are open.
+**A** = achievable on the existing API; **B** = needs a specific daemon/profile capability; **C** = optional integration or intentional incompatibility, not a silent omission. Where mixed, ship A first. Use the gates in the [roadmap](roadmap.md); do not call a preview a replacement while required B items are open.
 
 | Workflow from the pinned pi | hi implementation / boundary | Acceptance example |
 |---|---|---|
@@ -67,7 +67,7 @@ network frames ──────┼→ AppEvent → update ─┤
 receipts / timers ───┘                     └─ effects → cancellable I/O → AppEvent
 ```
 
-1. Extract an internal `lib` in `clients/tui`: `config/client/protocol/transcript` stay UI-free. `h` keeps line/print compatibility; new `hi` binary selects interactive or plain output. A fake backend feeds the same events. Publish a Rust client crate only when there is an independent consumer; the stable interop contract is the wire, not Rust traits over a dynamic library.
+1. Extract an internal `lib` in `clients/tui`: `config/client/protocol/transcript` stay UI-free; the `hi` binary selects interactive or headless print output. A fake backend feeds the same events. Publish a Rust client crate only when there is an independent consumer; the stable interop contract is the wire, not Rust traits over a dynamic library.
 2. `AppState` contains target + attach generation, transcript reducer, pending envelopes, editor/drafts, overlays, viewport anchor `(entry_id, row_offset)` and preferences. Reducer returns effects (`Subscribe`, `Page`, `Command`, `Complete`, `Draw`); workers own sockets, not stdout or state. Cancel/unblock old reads and join workers on switch/exit. Fence every asynchronous response by target/generation, completion by edit revision. Reconnect on EOF/error with bounded backoff and visible offline status. Disable unsafe-to-repeat actions while reconciling.
 3. Keep input responsive: bounded channels, process commits in order; coalesce **draws**, not arbitrary `append_text` operations. On overflow abandon the stream and resnapshot. Page immutable history; cap cached rows/bytes around anchor and live tail, refetch evicted pages. Cache rendered blocks by entry/version, width, theme and expansion. Reflow only dirty blocks; redraw on frame ticks, not per token. Keep user input ahead of background highlighting.
 4. Terminal guard owns all mode changes and unwinds partial initialization. Restore mouse, keyboard protocol, paste, cursor, alt screen and raw mode on exit/error; handle suspend/resume and resize. No worker `println!`; stderr logs redirected while interactive. Non-TTY/`TERM=dumb` path never enters raw mode. Keep safe text path for unknown entry kinds, no-color and print.

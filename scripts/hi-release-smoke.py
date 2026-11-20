@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Concise isolated release smoke test for h and hi against disposable daemons.
+"""Concise isolated release smoke test for hi against disposable daemons.
 
 Complements (does not duplicate) `clients/tui/tests/test_hi_pty.py`:
-  1. Isolated `cargo install --locked --path clients/tui --root <tmp>` (`h` + `hi`).
-  2. Print compatibility (`h -p`, `hi -p`, piped `hi <prompt>`, `TERM=dumb hi <prompt>`).
+  1. Isolated `cargo install --locked --path clients/tui --root <tmp>` (`hi`).
+  2. Print compatibility (`hi -p`, piped `hi <prompt>`, `TERM=dumb hi <prompt>`).
   3. Start (auto-create), resume (`-c`, `-r`, `--tui-mode regular`), non-aborting detach.
   4. Sentinel `pi` store non-modification and rollback isolation.
   5. Optional (`--with-elixir`) check against disposable `H.serve` + `H.Provider.Fake`.
@@ -166,53 +166,39 @@ def test_install(
     if rc != 0:
         raise RuntimeError(f"cargo install failed (rc={rc}):\n{out}\n{err}")
 
-    h_bin = install_root / "bin" / "h"
     hi_bin = install_root / "bin" / "hi"
-    for b in (h_bin, hi_bin):
-        if not b.is_file() or not os.access(b, os.X_OK):
-            raise RuntimeError(f"missing executable binary after install: {b}")
+    if not hi_bin.is_file() or not os.access(hi_bin, os.X_OK):
+        raise RuntimeError(f"missing executable binary after install: {hi_bin}")
 
     results: dict[str, Any] = {
         "install_seconds": round(install_s, 3),
-        "h_bytes": h_bin.stat().st_size,
         "hi_bytes": hi_bin.stat().st_size,
     }
 
-    for name, b in (("h", h_bin), ("hi", hi_bin)):
-        rc_v, out_v, _, ver_s = run_cmd([str(b), "--version"], cwd=REPO_ROOT, env=env, timeout=10.0)
-        if rc_v != 0:
-            raise RuntimeError(f"{name} --version failed: rc={rc_v}")
-        rc_h, out_h, _, _ = run_cmd([str(b), "--help"], cwd=REPO_ROOT, env=env, timeout=10.0)
-        if rc_h != 0 or "--print" not in out_h:
-            raise RuntimeError(f"{name} --help failed: rc={rc_h}")
-        rc_short_v, _, _, _ = run_cmd([str(b), "-v"], cwd=REPO_ROOT, env=env, timeout=10.0)
-        if rc_short_v == 0:
-            raise RuntimeError(f"{name} -v unexpectedly succeeded; expected -V only")
-        results[f"{name}_version"] = out_v.strip()
-        results[f"{name}_version_seconds"] = round(ver_s, 4)
+    rc_v, out_v, _, ver_s = run_cmd([str(hi_bin), "--version"], cwd=REPO_ROOT, env=env, timeout=10.0)
+    if rc_v != 0:
+        raise RuntimeError(f"hi --version failed: rc={rc_v}")
+    rc_h, out_h, _, _ = run_cmd([str(hi_bin), "--help"], cwd=REPO_ROOT, env=env, timeout=10.0)
+    if rc_h != 0 or "--print" not in out_h:
+        raise RuntimeError(f"hi --help failed: rc={rc_h}")
+    rc_short_v, _, _, _ = run_cmd([str(hi_bin), "-v"], cwd=REPO_ROOT, env=env, timeout=10.0)
+    if rc_short_v == 0:
+        raise RuntimeError("hi -v unexpectedly succeeded; expected -V only")
+    results["hi_version"] = out_v.strip()
+    results["hi_version_seconds"] = round(ver_s, 4)
 
     return results
 
 
 def test_smoke_lifecycle(
-    h_bin: Path,
     hi_bin: Path,
     iso_home: Path,
     pi_agent_dir: Path,
     workdir: Path,
 ) -> dict[str, Any]:
-    # 1. Print compatibility: h -p, hi -p, hi piped, TERM=dumb hi
+    # 1. Print compatibility: hi -p, hi piped, TERM=dumb hi
     with SmokeDaemon(transport="uds", cwd=str(workdir), session_id="print-smoke") as daemon:
         env = isolated_env(daemon.env(), iso_home, pi_agent_dir)
-
-        daemon.arm_auto_stream(chunks=["PrintReplyH"])
-        rc, out, err, _ = run_cmd(
-            [str(h_bin), "-s", "print-smoke", "-p", "hello via h -p"],
-            cwd=workdir,
-            env=env,
-            timeout=15.0,
-        )
-        assert rc == 0 and "PrintReplyH" in out, f"h -p failed: rc={rc} out={out!r} err={err!r}"
 
         daemon.arm_auto_stream(chunks=["PrintReplyHiFlag"])
         with PtySession(
@@ -320,7 +306,6 @@ def test_smoke_lifecycle(
 
 
 def test_real_elixir_daemon(
-    h_bin: Path,
     hi_bin: Path,
     iso_home: Path,
     pi_agent_dir: Path,
@@ -393,9 +378,9 @@ end
         cli_env.pop("H_DAEMON_URL", None)
 
         rc, out, err, _ = run_cmd(
-            [str(h_bin), "-p", "elixir print"], cwd=workdir, env=cli_env, timeout=15.0
+            [str(hi_bin), "-p", "elixir print"], cwd=workdir, env=cli_env, timeout=15.0
         )
-        assert rc == 0 and "ElixirPrintOK" in out, f"elixir h -p failed: rc={rc} out={out!r} err={err!r}"
+        assert rc == 0 and "ElixirPrintOK" in out, f"elixir hi -p failed: rc={rc} out={out!r} err={err!r}"
 
         with PtySession([str(hi_bin)], env=cli_env, cwd=str(workdir)) as pty:
             pty.wait_for_raw_mode(timeout=10.0)
@@ -457,7 +442,7 @@ def test_rollback_probe(iso_home: Path, pi_agent_dir: Path) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Concise isolated release smoke test for h and hi")
+    parser = argparse.ArgumentParser(description="Concise isolated release smoke test for hi")
     parser.add_argument(
         "--fresh-target",
         action="store_true",
@@ -499,14 +484,13 @@ def main() -> int:
         report: dict[str, Any] = {"sandbox": str(tmpdir)}
         report["install"] = test_install(install_root, target_dir, dict(os.environ))
 
-        h_bin = install_root / "bin" / "h"
         hi_bin = install_root / "bin" / "hi"
 
-        report["smoke"] = test_smoke_lifecycle(h_bin, hi_bin, iso_home, pi_agent_dir, workdir)
+        report["smoke"] = test_smoke_lifecycle(hi_bin, iso_home, pi_agent_dir, workdir)
 
         if args.with_elixir:
             report["elixir"] = test_real_elixir_daemon(
-                h_bin, hi_bin, iso_home, pi_agent_dir, tmpdir
+                hi_bin, iso_home, pi_agent_dir, tmpdir
             )
 
         report["rollback"] = test_rollback_probe(iso_home, pi_agent_dir)

@@ -227,10 +227,6 @@ def find_hi_binary(repo_root: str | None = None) -> str | None:
     return _find_repo_binary("hi", "HI_BIN", repo_root)
 
 
-def find_h_binary(repo_root: str | None = None) -> str | None:
-    return _find_repo_binary("h", "H_BIN", repo_root)
-
-
 class PtySession:
     """Spawns a child command as session leader attached to a fresh controlling Unix PTY."""
 

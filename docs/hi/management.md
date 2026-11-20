@@ -1,8 +1,7 @@
 # Local daemon management with `hi`
 
 `hi` has two entry points in the same binary: open or resume a conversation, or
-run a management command without creating a conversation. `h` retains its
-existing CLI. In `hi`, use `-p` or `--` for a literal prompt beginning with a
+run a management command without creating a conversation. Use `-p` or `--` for a literal prompt beginning with a
 reserved management word. A management command can take `--data-dir` after its
 first word, e.g. `hi account list --data-dir /path/to/store`.
 
@@ -92,12 +91,12 @@ pinned service or take over an already-running standalone/embedded process.
 From the root checkout:
 
 ```sh
-mix h.build    # compile daemon, Phoenix dev and h/hi; start nothing
+mix h.build    # compile daemon, Phoenix dev and hi; start nothing
 mix h.bundle   # build, smoke-test, and refresh dist/harness
 mix h.restart  # restart from dist/harness in a separate pane after the turn finishes
 ```
 
-`mix h.build --release` puts the terminal binaries in `target/release` rather
+`mix h.build --release` puts the terminal binary in `target/release` rather
 than `target/debug`. It prints the output paths and the Phoenix dev command.
 Phoenix embeds its daemon; stop the standalone daemon first or give Phoenix a
 separate `H_DATA_DIR`. The standalone bundle does not include Phoenix.
@@ -156,7 +155,7 @@ The release also ships the optional `extensions/multicodex` artifact. It is
 **not auto-enabled**; point your existing extension entry at that directory
 if you want to use the bundled copy. No accounts, credentials, session files,
 or local configuration travel with the bundle. Phoenix is still a separate
-application; this bundle provides the standalone daemon and terminal clients.
+application; this bundle provides the standalone daemon and `hi` terminal client.
 
 For a source checkout without the bundle, use `hi daemon start --launcher
 "$PWD/bin/h-daemon"` after `mix compile`.

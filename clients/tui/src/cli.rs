@@ -7,27 +7,23 @@ use protocol::{
     CommandEnvelope, CommandReceipt, CreateSessionRequest, ServerFrame, SessionSummary,
     TranscriptEntry, WhenBusy, WhenIdle,
 };
-use render::{
-    extract_entry_text, format_branches_list, format_sessions_list, format_status_line,
-    sanitize_single_line, sanitize_terminal_text, InlineRenderer,
-};
+use render::{extract_entry_text, sanitize_terminal_text};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufRead, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, IsTerminal, Read, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
 use std::thread;
-use transcript::{CommitOutcome, EphemeralOutcome, TranscriptState};
+use transcript::{CommitOutcome, TranscriptState};
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "h",
+    name = "hi",
     version,
-    about = "Cooperative terminal client for the H harness daemon"
+    about = "Interactive terminal for the durable H daemon"
 )]
 struct Cli {
     /// Override H data directory (default: $H_DATA_DIR or ~/.local/share/h)
@@ -50,7 +46,7 @@ struct Cli {
     #[arg(short = 's', long = "session", value_name = "ID")]
     session: Option<String>,
 
-    /// Attach to this conversation in the named session (hi only)
+    /// Attach to this conversation in the named session
     #[arg(long, requires = "session")]
     conversation: Option<u64>,
 
@@ -71,7 +67,7 @@ struct Cli {
     )]
     print_prompt: Option<String>,
 
-    /// Initial prompt (runs headless print mode and exits)
+    /// Initial prompt (opens interactive TUI and submits on a TTY, or runs headless print mode when piped or TERM=dumb)
     #[arg(value_name = "PROMPT")]
     prompt: Vec<String>,
 }
@@ -105,38 +101,23 @@ impl From<ClientError> for AppError {
     }
 }
 
-pub fn main() -> ExitCode {
-    entry(false)
-}
-
 pub fn hi_main() -> ExitCode {
-    entry(true)
-}
-
-fn entry(hi: bool) -> ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
     // Reserve these first words for hi management. `--` and -p keep literal
-    // prompts possible, and `h` keeps its existing argument grammar.
-    if hi
-        && args
-            .get(1)
-            .and_then(|arg| arg.to_str())
-            .is_some_and(|arg| matches!(arg, "login" | "account" | "daemon"))
+    // prompts possible.
+    if args
+        .get(1)
+        .and_then(|arg| arg.to_str())
+        .is_some_and(|arg| matches!(arg, "login" | "account" | "daemon"))
     {
         return report(
             crate::manage::run(crate::manage::Manage::parse_from(args)).map_err(AppError::Message),
         );
     }
-    let cmd = if hi {
-        Cli::command()
-            .name("hi")
-            .about("Interactive terminal for the durable H daemon")
-            .after_help("Management: hi login, hi account, hi daemon (each accepts --help)")
-    } else {
-        Cli::command()
-    };
+    let cmd = Cli::command()
+        .after_help("Management: hi login, hi account, hi daemon (each accepts --help)");
     let cli = Cli::from_arg_matches(&cmd.get_matches_from(args)).unwrap_or_else(|err| err.exit());
-    report(run(cli, hi))
+    report(run(cli))
 }
 
 fn report(result: Result<(), AppError>) -> ExitCode {
@@ -149,17 +130,16 @@ fn report(result: Result<(), AppError>) -> ExitCode {
     }
 }
 
-fn run(cli: Cli, hi: bool) -> Result<(), AppError> {
+fn run(cli: Cli) -> Result<(), AppError> {
     let cfg = resolve_config(cli.data_dir.as_deref(), cli.daemon_url.as_deref())?;
     let client = DaemonClient::new(cfg.target, cfg.token);
     let cwd = current_cwd_string()?;
 
-    let fullscreen = hi
-        && cli.print_prompt.is_none()
+    let interactive = cli.print_prompt.is_none()
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
         && std::env::var("TERM").as_deref() != Ok("dumb");
-    if fullscreen {
+    if interactive {
         let target = if let (Some(sid), Some(cid)) = (cli.session.as_deref(), cli.conversation) {
             let detail = client.get_session_detail(sid)?;
             let cid = cid.to_string();
@@ -200,7 +180,7 @@ fn run(cli: Cli, hi: bool) -> Result<(), AppError> {
     }
     if cli.conversation.is_some() {
         return Err(AppError::Message(
-            "--conversation is supported in interactive hi only".into(),
+            "--conversation is supported in interactive mode only".into(),
         ));
     }
     let headless_prompt = resolve_prompt(&cli);
@@ -227,28 +207,9 @@ fn run(cli: Cli, hi: bool) -> Result<(), AppError> {
         );
     }
 
-    if cli.resume {
-        let target = run_resume_picker(&client, &cli.env_id, &cwd, cli.session.as_deref())?;
-        return run_interactive(&client, &cfg.data_dir, &cli.env_id, &cwd, target, &[]);
-    }
-
-    let folder_sessions = list_cwd_sessions_sorted(&client, &cli.env_id, &cwd)?;
-    let target = if let Some(sid) = cli.session.as_deref() {
-        attach_named_session(&client, sid)?
-    } else if cli.continue_latest {
-        continue_or_create_session(&client, &cli.env_id, &cwd, &folder_sessions)?
-    } else {
-        create_auto_session(&client, &cli.env_id, &cwd)?
-    };
-
-    run_interactive(
-        &client,
-        &cfg.data_dir,
-        &cli.env_id,
-        &cwd,
-        target,
-        &folder_sessions,
-    )
+    Err(AppError::Message(
+        "interactive mode requires a TTY (pass -p <PROMPT> for headless print mode)".into(),
+    ))
 }
 
 fn resolve_prompt(cli: &Cli) -> Option<String> {
@@ -390,78 +351,6 @@ fn create_auto_session(
         cwd: created.session.cwd,
         env_id: created.session.env_id.unwrap_or_else(|| env_id.to_string()),
     })
-}
-
-fn run_resume_picker(
-    client: &DaemonClient,
-    env_id: &str,
-    cwd: &str,
-    explicit_sid: Option<&str>,
-) -> Result<AttachedTarget, AppError> {
-    let sessions = list_cwd_sessions_sorted(client, env_id, cwd)?;
-    let mut stdout = io::stdout();
-    write!(stdout, "{}", format_sessions_list(&sessions, cwd))
-        .map_err(|e| AppError::Message(e.to_string()))?;
-    stdout
-        .flush()
-        .map_err(|e| AppError::Message(e.to_string()))?;
-
-    if let Some(sid) = explicit_sid {
-        return attach_named_session(client, sid);
-    }
-
-    if sessions.is_empty() {
-        return Err(AppError::Message(format!(
-            "no sessions found for {}",
-            sanitize_single_line(cwd)
-        )));
-    }
-
-    if !io::stdin().is_terminal() {
-        return Err(AppError::Message(
-            "session choice unavailable in non-interactive mode; pass -s <session_id> or -c/--continue"
-                .to_string(),
-        ));
-    }
-
-    write!(
-        stdout,
-        "Select session [1-{}] (or 'q' to quit): ",
-        sessions.len()
-    )
-    .map_err(|e| AppError::Message(e.to_string()))?;
-    stdout
-        .flush()
-        .map_err(|e| AppError::Message(e.to_string()))?;
-
-    let mut line = String::new();
-    let n = io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| AppError::Message(format!("failed to read selection: {e}")))?;
-    if n == 0 {
-        return Err(AppError::Message("no session selected (EOF)".to_string()));
-    }
-
-    let trimmed = line.trim();
-    if trimmed.eq_ignore_ascii_case("q") || trimmed.eq_ignore_ascii_case("quit") {
-        return Err(AppError::Message("cancelled".to_string()));
-    }
-
-    let idx: usize = trimmed.parse().map_err(|_| {
-        AppError::Message(format!(
-            "invalid session selection '{}'",
-            sanitize_single_line(trimmed)
-        ))
-    })?;
-    if idx == 0 || idx > sessions.len() {
-        return Err(AppError::Message(format!(
-            "selection {idx} out of range (1..={})",
-            sessions.len()
-        )));
-    }
-
-    let chosen = &sessions[idx - 1];
-    attach_named_session(client, &chosen.session_id)
 }
 
 fn run_headless_prompt(
@@ -640,454 +529,6 @@ fn write_final_assistant_stdout(entry: &TranscriptEntry) -> Result<(), AppError>
     Ok(())
 }
 
-enum LoopEvent {
-    Sse { generation: u64, frame: ServerFrame },
-    SseError { generation: u64, message: String },
-    InputLine(String),
-    InputEof,
-}
-
-fn run_interactive(
-    client: &DaemonClient,
-    data_dir: &Path,
-    env_id: &str,
-    cwd: &str,
-    mut target: AttachedTarget,
-    initial_folder_sessions: &[SessionSummary],
-) -> Result<(), AppError> {
-    let mut renderer = InlineRenderer::new(io::stdout());
-    let mut state = TranscriptState::new(
-        Some(target.session_id.clone()),
-        Some(target.conversation_id.clone()),
-    );
-
-    print_banner(client, data_dir, &target, initial_folder_sessions);
-
-    let (tx, rx) = mpsc::channel::<LoopEvent>();
-    let mut sse_gen: u64 = 1;
-    spawn_sse_listener(
-        client.clone(),
-        target.session_id.clone(),
-        target.conversation_id.clone(),
-        None,
-        sse_gen,
-        tx.clone(),
-    );
-
-    let stdin_tx = tx.clone();
-    thread::spawn(move || {
-        let stdin = io::stdin();
-        let mut reader = stdin.lock();
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            match reader.read_line(&mut buf) {
-                Ok(0) => {
-                    let _ = stdin_tx.send(LoopEvent::InputEof);
-                    break;
-                }
-                Ok(_) => {
-                    if stdin_tx.send(LoopEvent::InputLine(buf.clone())).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    let _ = stdin_tx.send(LoopEvent::InputEof);
-                    break;
-                }
-            }
-        }
-    });
-
-    for event in rx {
-        match event {
-            LoopEvent::Sse { generation, frame } => {
-                if generation != sse_gen {
-                    continue;
-                }
-                match frame {
-                    ServerFrame::Snapshot(snap) => {
-                        state.apply_snapshot(snap);
-                        renderer
-                            .render_snapshot(&state)
-                            .map_err(|e| AppError::Message(e.to_string()))?;
-                    }
-                    ServerFrame::Commit(commit) => match state.apply_commit(commit) {
-                        CommitOutcome::Applied { appended_entries } => {
-                            renderer
-                                .render_commit(&state, &appended_entries)
-                                .map_err(|e| AppError::Message(e.to_string()))?;
-                        }
-                        CommitOutcome::Gap => {
-                            sse_gen += 1;
-                            spawn_sse_listener(
-                                client.clone(),
-                                target.session_id.clone(),
-                                target.conversation_id.clone(),
-                                None,
-                                sse_gen,
-                                tx.clone(),
-                            );
-                        }
-                        CommitOutcome::Stale => {}
-                    },
-                    ServerFrame::Ephemeral(eph) => {
-                        if state.apply_ephemeral(eph) == EphemeralOutcome::Applied {
-                            renderer
-                                .render_ephemeral(&state)
-                                .map_err(|e| AppError::Message(e.to_string()))?;
-                        }
-                    }
-                    ServerFrame::Unknown { .. } => {}
-                }
-            }
-            LoopEvent::SseError {
-                generation,
-                message,
-            } => {
-                if generation != sse_gen {
-                    continue;
-                }
-                let _ = writeln!(
-                    io::stderr(),
-                    "[sse disconnected: {}]",
-                    sanitize_single_line(&message)
-                );
-            }
-            LoopEvent::InputEof => {
-                break;
-            }
-            LoopEvent::InputLine(line) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if trimmed == "/quit" || trimmed == "/exit" {
-                    break;
-                }
-                match handle_interactive_line(
-                    client,
-                    data_dir,
-                    env_id,
-                    cwd,
-                    &mut target,
-                    &mut state,
-                    &mut renderer,
-                    trimmed,
-                ) {
-                    Ok(Some(new_cid)) => {
-                        target.conversation_id = new_cid.clone();
-                        state = TranscriptState::new(
-                            Some(target.session_id.clone()),
-                            Some(new_cid.clone()),
-                        );
-                        renderer
-                            .reset_for_conversation()
-                            .map_err(|e| AppError::Message(e.to_string()))?;
-                        sse_gen += 1;
-                        spawn_sse_listener(
-                            client.clone(),
-                            target.session_id.clone(),
-                            new_cid,
-                            None,
-                            sse_gen,
-                            tx.clone(),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        let _ = writeln!(io::stderr(), "error: {err}");
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn spawn_sse_listener(
-    client: DaemonClient,
-    session_id: String,
-    conversation_id: String,
-    last_event_id: Option<u64>,
-    generation: u64,
-    tx: Sender<LoopEvent>,
-) {
-    thread::spawn(move || {
-        let mut sse = match client.subscribe_events(&session_id, &conversation_id, last_event_id) {
-            Ok(s) => s,
-            Err(err) => {
-                let _ = tx.send(LoopEvent::SseError {
-                    generation,
-                    message: err.to_string(),
-                });
-                return;
-            }
-        };
-
-        loop {
-            match sse.next_event() {
-                Ok(Some(ev)) => match ev.decode_frame() {
-                    Ok(frame) => {
-                        if tx.send(LoopEvent::Sse { generation, frame }).is_err() {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        let _ = tx.send(LoopEvent::SseError {
-                            generation,
-                            message: err.to_string(),
-                        });
-                    }
-                },
-                Ok(None) => {
-                    let _ = tx.send(LoopEvent::SseError {
-                        generation,
-                        message: "stream closed".to_string(),
-                    });
-                    break;
-                }
-                Err(err) => {
-                    let _ = tx.send(LoopEvent::SseError {
-                        generation,
-                        message: err.to_string(),
-                    });
-                    break;
-                }
-            }
-        }
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn handle_interactive_line<W: Write>(
-    client: &DaemonClient,
-    data_dir: &Path,
-    env_id: &str,
-    cwd: &str,
-    target: &mut AttachedTarget,
-    state: &mut TranscriptState,
-    _renderer: &mut InlineRenderer<W>,
-    line: &str,
-) -> Result<Option<String>, AppError> {
-    let cid_num: u64 = target.conversation_id.parse().map_err(|_| {
-        AppError::Message(format!(
-            "invalid conversation_id: {}",
-            target.conversation_id
-        ))
-    })?;
-
-    if line == "/help" {
-        print_help();
-        return Ok(None);
-    }
-    if line == "/status" {
-        println!(
-            "Session: {} · env={} · conv #{} · cwd={} · daemon={} · data_dir={}",
-            sanitize_single_line(&target.session_id),
-            sanitize_single_line(&target.env_id),
-            sanitize_single_line(&target.conversation_id),
-            sanitize_single_line(&target.cwd),
-            sanitize_single_line(&client.target().display_endpoint()),
-            sanitize_single_line(&data_dir.display().to_string()),
-        );
-        println!("{}", format_status_line(state));
-        return Ok(None);
-    }
-    if line == "/envs" {
-        let envs = client.get_environments()?;
-        println!("Environments:");
-        for env in envs {
-            let label = env
-                .label
-                .as_deref()
-                .map(|l| format!(" ({})", sanitize_single_line(l)))
-                .unwrap_or_default();
-            let kind = env
-                .kind
-                .as_deref()
-                .map(|k| format!(" [{}]", sanitize_single_line(k)))
-                .unwrap_or_default();
-            let default_cwd = env
-                .default_cwd
-                .as_deref()
-                .map(|c| format!(" cwd={}", sanitize_single_line(c)))
-                .unwrap_or_default();
-            println!(
-                "  {}{}{}{}",
-                sanitize_single_line(&env.id),
-                label,
-                kind,
-                default_cwd
-            );
-        }
-        return Ok(None);
-    }
-    if line == "/earlier" {
-        let Some(cursor) = state.before_entry_id.clone() else {
-            println!("No earlier entries.");
-            return Ok(None);
-        };
-        let page = client.get_entries(
-            &target.session_id,
-            &target.conversation_id,
-            Some("desc"),
-            Some(&cursor),
-            Some(50),
-        )?;
-        let added = state.prepend_older_page(page.items, page.next_cursor);
-        println!(
-            "Loaded {added} earlier entr{} (has_more={}).",
-            if added == 1 { "y" } else { "ies" },
-            state.has_more
-        );
-        return Ok(None);
-    }
-    if line == "/sessions" {
-        let sessions = list_cwd_sessions_sorted(client, env_id, cwd)?;
-        print!("{}", format_sessions_list(&sessions, cwd));
-        return Ok(None);
-    }
-    if line == "/branches" {
-        let detail = client.get_session_detail(&target.session_id)?;
-        print!(
-            "{}",
-            format_branches_list(&detail.conversations, &target.conversation_id)
-        );
-        return Ok(None);
-    }
-    if let Some(arg) = line.strip_prefix("/conv ") {
-        let new_cid = arg.trim();
-        let _: u64 = new_cid
-            .parse()
-            .map_err(|_| AppError::Message("usage: /conv <conversation_id>".to_string()))?;
-        return Ok(Some(new_cid.to_string()));
-    }
-    if let Some(arg) = line.strip_prefix("/fork ") {
-        let entry_id: u64 = arg
-            .trim()
-            .parse()
-            .map_err(|_| AppError::Message("usage: /fork <entry_id>".to_string()))?;
-        let env = CommandEnvelope::fork(generate_request_id(), cid_num, entry_id);
-        let receipt = post_command_with_retry(client, &target.session_id, &env)?;
-        if let Some(new_cid) = receipt.conversation_id {
-            println!("Forked to conversation #{}", sanitize_single_line(&new_cid));
-            return Ok(Some(new_cid));
-        }
-        return Ok(None);
-    }
-    if line == "/model" {
-        let models = client.list_models()?;
-        println!("Available models:");
-        for m in models {
-            let name = m
-                .name
-                .as_deref()
-                .map(|n| format!(" ({})", sanitize_single_line(n)))
-                .unwrap_or_default();
-            println!("  {}{}", sanitize_single_line(&m.id), name);
-        }
-        return Ok(None);
-    }
-    if let Some(arg) = line.strip_prefix("/model ") {
-        let model = arg.trim();
-        if model.is_empty() {
-            return Err(AppError::Message("usage: /model <model_id>".to_string()));
-        }
-        let env = CommandEnvelope::configure(generate_request_id(), cid_num, Some(model), None);
-        let _ = post_command_with_retry(client, &target.session_id, &env)?;
-        return Ok(None);
-    }
-    if let Some(arg) = line.strip_prefix("/thinking ") {
-        let level = arg.trim();
-        if level.is_empty() {
-            return Err(AppError::Message(
-                "usage: /thinking <off|minimal|low|medium|high>".to_string(),
-            ));
-        }
-        let env = CommandEnvelope::configure(generate_request_id(), cid_num, None, Some(level));
-        let _ = post_command_with_retry(client, &target.session_id, &env)?;
-        return Ok(None);
-    }
-    if line == "/abort" {
-        let env = CommandEnvelope::abort(generate_request_id(), cid_num, Some("user_abort"));
-        let _ = client.post_command(&target.session_id, &env)?;
-        return Ok(None);
-    }
-    if line == "/continue" {
-        let env = CommandEnvelope::submit_continue(generate_request_id(), cid_num);
-        let _ = post_command_with_retry(client, &target.session_id, &env)?;
-        return Ok(None);
-    }
-    if let Some(steer_text) = line.strip_prefix("/steer ") {
-        let text = steer_text.trim();
-        if text.is_empty() {
-            return Err(AppError::Message("usage: /steer <message>".to_string()));
-        }
-        let env = CommandEnvelope::submit_input(
-            generate_request_id(),
-            cid_num,
-            text,
-            WhenBusy::Steer,
-            WhenIdle::Reject,
-        );
-        let _ = post_command_with_retry(client, &target.session_id, &env)?;
-        return Ok(None);
-    }
-    if line.starts_with('/') {
-        return Err(AppError::Message(format!(
-            "unknown command '{}'; type /help for commands",
-            sanitize_single_line(line)
-        )));
-    }
-
-    let env = CommandEnvelope::submit_input(
-        generate_request_id(),
-        cid_num,
-        line,
-        WhenBusy::FollowUp,
-        WhenIdle::Start,
-    );
-    let _ = post_command_with_retry(client, &target.session_id, &env)?;
-    Ok(None)
-}
-
-fn print_banner(
-    client: &DaemonClient,
-    data_dir: &Path,
-    target: &AttachedTarget,
-    folder_sessions: &[SessionSummary],
-) {
-    println!(
-        "H session {} (env={}, conv #{}, cwd={}, daemon={}, data_dir={})",
-        sanitize_single_line(&target.session_id),
-        sanitize_single_line(&target.env_id),
-        sanitize_single_line(&target.conversation_id),
-        sanitize_single_line(&target.cwd),
-        sanitize_single_line(&client.target().display_endpoint()),
-        sanitize_single_line(&data_dir.display().to_string())
-    );
-    let others: Vec<_> = folder_sessions
-        .iter()
-        .filter(|s| s.session_id != target.session_id)
-        .collect();
-    if !others.is_empty() {
-        println!(
-            "Found {} existing session(s) in this folder (use /sessions, `h -c`, or `h -r`).",
-            others.len()
-        );
-    }
-    print_help();
-}
-
-fn print_help() {
-    println!(
-        "Commands: /help, /status, /envs, /sessions, /branches, /earlier, /conv <id>, /fork <entry_id>, /model [id], /thinking <lvl>, /steer <msg>, /abort, /continue, /quit"
-    );
-    println!("Type any prompt and press Enter to submit.");
-}
-
 fn post_command_with_retry(
     client: &DaemonClient,
     session_id: &str,
@@ -1174,7 +615,7 @@ mod tests {
     #[test]
     fn cli_parses_all_required_flags() {
         let cli = Cli::try_parse_from([
-            "h",
+            "hi",
             "--data-dir",
             "/tmp/h-data",
             "--daemon-url",
@@ -1196,10 +637,10 @@ mod tests {
         assert!(cli.continue_latest);
         assert_eq!(cli.print_prompt.as_deref(), Some("hello"));
 
-        let cli_pos = Cli::try_parse_from(["h", "summarize", "diff"]).unwrap();
+        let cli_pos = Cli::try_parse_from(["hi", "summarize", "diff"]).unwrap();
         assert_eq!(resolve_prompt(&cli_pos).as_deref(), Some("summarize diff"));
 
-        let cli_resume = Cli::try_parse_from(["h", "-r"]).unwrap();
+        let cli_resume = Cli::try_parse_from(["hi", "-r"]).unwrap();
         assert!(cli_resume.resume);
     }
 

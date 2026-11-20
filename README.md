@@ -28,11 +28,10 @@ cd /path/to/project
 hi                         # fullscreen editor; Enter steers, Alt-Enter follows up
 hi --tui-mode regular      # terminal-owned scrollback
 hi -r                      # workspace session picker
-h -r                       # original line-oriented client
-h -s SESSION_ID            # attach by ID, including when using a symlink to the workspace
+hi -s SESSION_ID           # attach by ID, including when using a symlink to the workspace
 ```
 
-The standalone daemon prints its API address. Its default data directory is `~/.local/share/h`; override it with `--data-dir DIR` or `H_DATA_DIR`. Phoenix and `h` also honor `H_DATA_DIR`. Use `h-daemon -ne` (or `--no-extensions`) to bypass [configured extensions](docs/extensions/daemon.md). [Managed Codex device login](docs/providers.md#managed-device-login) is built in and opt-in; it needs no Codex executable. [MultiCodex](extensions/multicodex/README.md) is a separate path-loaded extension. Host tools run with your user's filesystem and shell access, not in a sandbox.
+The standalone daemon prints its API address. Its default data directory is `~/.local/share/h`; override it with `--data-dir DIR` or `H_DATA_DIR`. Phoenix and `hi` also honor `H_DATA_DIR`. Use `h-daemon -ne` (or `--no-extensions`) to bypass [configured extensions](docs/extensions/daemon.md). [Managed Codex device login](docs/providers.md#managed-device-login) is built in and opt-in; it needs no Codex executable. [MultiCodex](extensions/multicodex/README.md) is a separate path-loaded extension. Host tools run with your user's filesystem and shell access, not in a sandbox.
 
 ## Manage H with `hi`
 
@@ -70,7 +69,7 @@ profiles, Codex device login, and Gemini on Vertex AI.
 
 ## Test
 
-Run `mix test` at the root and in `clients/web/`; both projects default to `--no-start`. Run `cargo test --locked` in `clients/tui/`. The root suite excludes live LLM calls. To include the Phoenix/Rust sync test, build `h` first and run `H_NATIVE_TEST_BIN=/absolute/path/to/h mix test --include native_client` in `clients/web/`.
+Run `mix test` at the root and in `clients/web/`; both projects default to `--no-start`. Run `cargo test --locked` in `clients/tui/`. The root suite excludes live LLM calls. To include the Phoenix/Rust sync test, build `hi` first and run `HI_BIN=/absolute/path/to/hi mix test --include native_client` in `clients/web/`.
 
 ## Documentation
 

@@ -5,7 +5,7 @@ defmodule HWeb.MultiSurfaceSyncTest do
   alias H.Provider.Fake
 
   @tag :native_client
-  test "Phoenix LiveView (HWeb) and cooperative Rust h client synchronize live over api.sock on the same folder session",
+  test "Phoenix LiveView (HWeb) and cooperative Rust hi client synchronize live over api.sock on the same folder session",
        %{
          conn: conn,
          data_dir: data_dir,
@@ -26,6 +26,19 @@ defmodule HWeb.MultiSurfaceSyncTest do
        ],
        %{
          content: [%{type: "text", text: "Synced reply to both TUI and Phoenix!"}],
+         finish_reason: "stop"
+       }}
+    )
+
+    Fake.push_step(
+      fake,
+      {:reply,
+       [
+         %{type: :thinking_delta, text: "Syncing interactively...", metadata: %{}},
+         %{type: :text_delta, text: "Synced reply from interactive hi!", metadata: %{}}
+       ],
+       %{
+         content: [%{type: "text", text: "Synced reply from interactive hi!"}],
          finish_reason: "stop"
        }}
     )
@@ -51,35 +64,42 @@ defmodule HWeb.MultiSurfaceSyncTest do
     {:ok, view, initial_html} = live(conn, "/sessions/#{sid}")
     refute initial_html =~ "Synced reply to both TUI and Phoenix!"
 
-    h_bin = System.fetch_env!("H_NATIVE_TEST_BIN") |> Path.expand()
+    hi_bin =
+      (System.get_env("HI_BIN") || System.fetch_env!("H_INTERACTIVE_TEST_BIN"))
+      |> Path.expand()
 
-    if interactive_bin = System.get_env("H_INTERACTIVE_TEST_BIN") do
-      driver = Path.expand("../../../../tui/tests/live_session.py", __DIR__)
+    {tui_out, 0} =
+      System.cmd(
+        hi_bin,
+        ["--data-dir", data_dir, "--session", sid, "--print", "Hello from headless hi"],
+        cd: repo_dir,
+        env: [{"H_DAEMON_URL", nil}]
+      )
 
-      assert {_, 0} =
-               System.cmd(
-                 "python3",
-                 [driver, Path.expand(interactive_bin), data_dir, sid, repo_dir],
-                 env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
-               )
-    else
-      {tui_out, 0} =
-        System.cmd(
-          h_bin,
-          ["--data-dir", data_dir, "--session", sid, "--print", "Hello from Rust TUI"],
-          cd: repo_dir,
-          env: [{"H_DAEMON_URL", nil}]
-        )
+    assert tui_out =~ "Synced reply to both TUI and Phoenix!"
 
-      assert tui_out =~ "Synced reply to both TUI and Phoenix!"
-    end
+    wait_until(fn ->
+      html = render(view)
 
-    # 3. Verify Phoenix LiveView automatically received the TUI's prompt & streamed assistant reply!
+      html =~ "Hello from headless hi" and
+        html =~ "Synced reply to both TUI and Phoenix!"
+    end)
+
+    driver = Path.expand("../../../../tui/tests/live_session.py", __DIR__)
+
+    assert {_, 0} =
+             System.cmd(
+               "python3",
+               [driver, hi_bin, data_dir, sid, repo_dir],
+               env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
+             )
+
+    # 3. Verify Phoenix LiveView automatically received the interactive TUI's prompt & streamed assistant reply!
     wait_until(fn ->
       html = render(view)
 
       html =~ "Hello from Rust TUI" and
-        html =~ "Synced reply to both TUI and Phoenix!"
+        html =~ "Synced reply from interactive hi!"
     end)
   end
 
