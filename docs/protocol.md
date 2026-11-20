@@ -74,6 +74,9 @@ For parallel subagent edits, prepare separate Git worktrees first, then pass eac
 
 While queued, `live.workspace_wait` contains `env_id`, `cwd` (the effective lease target), `task_id`, `holder_session_id`, `holder_conversation_id`, and an opaque `lease_id`. Tool or user-shell live status is `"waiting"`; no execution attempt has started. Holder changes update the wait document. It disappears when execution starts or the wait is cancelled. Pending persisted workspace waits can rejoin the queue for the recorded directory after restart; interrupted **running** unsafe commands are still never replayed.
 
+A short web file save reports `holder_conversation_id: "file_review"` instead of a conversation ID; it releases its lease normally and is not interrupted by `stop_holder`.
+
+
 Both clients offer **Cancel wait** and **Stop holder and acquire**. hi opens an action picker on entering a wait; `/workspace` reopens it. Dismissing the picker keeps waiting. Cancelling does not stop the holder. Stop-holder targets that specific lease, not an arbitrary session or a later command; it never clears a live lock underneath a worker. The owner commits cancellation and stops its work before releasing. The receipt acknowledges the request, not completion of cleanup or acquisition.
 
 ## Automatic compaction and continuation

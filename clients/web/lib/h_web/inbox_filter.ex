@@ -63,6 +63,13 @@ defmodule HWeb.InboxFilter do
     end
   end
 
+  def review_path(sid, filter, from_inbox?, cid \\ nil) do
+    query = params(filter)
+    query = if from_inbox?, do: Map.put(query, :from, "inbox"), else: query
+    query = if cid, do: Map.put(query, :conversation, cid), else: query
+    ~p"/sessions/#{sid}/review?#{query}"
+  end
+
   def scope(filter, sessions) do
     by_id = Map.new(sessions, &{&1.session_id, &1})
 

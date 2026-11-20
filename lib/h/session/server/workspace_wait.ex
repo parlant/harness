@@ -78,6 +78,9 @@ defmodule H.Session.Server.WorkspaceWait do
     state
   end
 
+  defp persist(cid, task, {sid, :file_review, _ref}, lease_id, state),
+    do: persist(cid, task, {sid, :file_review}, lease_id, state)
+
   defp persist(cid, task, {sid, owner_cid}, lease_id, state) do
     now = System.system_time(:millisecond)
 

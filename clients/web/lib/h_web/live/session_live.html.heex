@@ -188,6 +188,16 @@
 
       <div class="header-right">
         <.link
+          :if={@session && !@cwd_missing? && @session.status != "archived"}
+          id="session-review-link"
+          navigate={
+            InboxFilter.review_path(@session_id, @inbox_filter, @from_inbox?, @conversation_id)
+          }
+          class="btn btn-sm"
+        >
+          Review files
+        </.link>
+        <.link
           :if={@next_attention_session}
           id="next-attention-btn"
           navigate={InboxFilter.session_path(@next_attention_session.session_id, @inbox_filter)}
@@ -347,7 +357,10 @@
         role="status"
       >
         <p>
-          Waiting for workspace held by <.link
+          Waiting for workspace held by
+          <span :if={wait["holder_conversation_id"] == "file_review"}>a file review save</span>
+          <.link
+            :if={wait["holder_conversation_id"] != "file_review"}
             id="workspace-holder-link"
             navigate={
               InboxFilter.session_path(
@@ -374,6 +387,7 @@
           Cancel wait
         </button>
         <button
+          :if={wait["holder_conversation_id"] != "file_review"}
           id="stop-holder-btn"
           type="button"
           class="btn btn-sm btn-danger"

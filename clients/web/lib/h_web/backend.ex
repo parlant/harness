@@ -9,6 +9,13 @@ defmodule HWeb.Backend do
   @callback list_sessions(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
   @callback create_session(map(), keyword()) ::
               {:ok, %{session: map(), seq: non_neg_integer()}} | {:error, term()}
+  @callback open_workspace_review(map(), keyword()) ::
+              {:ok, %{session: map(), seq: non_neg_integer()}} | {:error, term()}
+  @callback review_workspace(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  @callback read_review_file(String.t(), String.t(), :working | :head, keyword()) ::
+              {:ok, map()} | {:error, term()}
+  @callback save_review_file(String.t(), String.t(), String.t(), String.t(), keyword()) ::
+              {:ok, String.t()} | {:error, term()}
   @callback get_session_detail(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback scan_entries(String.t(), term(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback list_models(keyword()) :: [map()]
@@ -44,6 +51,16 @@ defmodule HWeb.Backend do
   def list_sessions(params \\ %{}, opts \\ []), do: impl().list_sessions(params, opts)
 
   def create_session(params, opts \\ []), do: impl().create_session(params, opts)
+
+  def open_workspace_review(params, opts \\ []), do: impl().open_workspace_review(params, opts)
+
+  def review_workspace(sid, params, opts \\ []), do: impl().review_workspace(sid, params, opts)
+
+  def read_review_file(sid, path, source, opts \\ []),
+    do: impl().read_review_file(sid, path, source, opts)
+
+  def save_review_file(sid, path, revision, text, opts \\ []),
+    do: impl().save_review_file(sid, path, revision, text, opts)
 
   def get_session_detail(session_id, opts \\ []), do: impl().get_session_detail(session_id, opts)
 

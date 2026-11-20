@@ -130,6 +130,18 @@ defmodule HWeb.WorkspaceLive do
     end
   end
 
+  def handle_event("review_workspace", params, socket) do
+    with {:ok, %{session: session}} <-
+           Backend.open_workspace_review(%{
+             "env_id" => params["env_id"] || socket.assigns.env_id,
+             "cwd" => non_empty(params["cwd"]) || socket.assigns.selected_dir
+           }) do
+      {:noreply, push_navigate(socket, to: ~p"/sessions/#{session.session_id}/review")}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, format_error(reason))}
+    end
+  end
+
   defp load_sessions(socket) do
     if connected?(socket) do
       case Backend.subscribe_sessions(self()) do

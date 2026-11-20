@@ -35,6 +35,7 @@ mix compile --warnings-as-errors
 (cd clients/web
   export MIX_BUILD_PATH="$work/web" MIX_DEPS_PATH="$root/clients/web/deps"
   mix deps.get --only prod --check-locked
+  (cd assets; npm ci --no-audit --no-fund; npm run build)
   mix compile --warnings-as-errors
   mix release harness --path "$stage/otp"
 )

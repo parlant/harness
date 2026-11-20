@@ -1,0 +1,197 @@
+<div class="review-shell">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">H</span>
+      <span class="brand-title">File review</span>
+      <span class="review-cwd mono muted" title={@session.cwd}>{@session.cwd}</span>
+    </div>
+    <nav class="topbar-actions" aria-label="Review navigation">
+      <.link
+        :if={@from_inbox?}
+        navigate={InboxFilter.inbox_path(@inbox_filter)}
+        class="btn btn-sm"
+      >Inbox</.link>
+      <.link
+        navigate={
+          InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, @conversation_id)
+        }
+        id="review-session-link"
+        class="btn btn-sm"
+        title={@session_id}
+      >
+        ← Session <span class="mono">· {@conversation_id}</span>
+      </.link>
+      <.link
+        navigate={~p"/workspaces?#{%{env_id: @session.env_id, path: @session.cwd}}"}
+        class="btn btn-sm"
+      >Workspaces</.link>
+    </nav>
+  </header>
+
+  <Workbench.split
+    id="review"
+    class="review-grid"
+    sidebar_label="Workspace files"
+    main_label="File editor"
+  >
+    <:sidebar>
+      <div class="review-toolbar">
+        <button
+          :if={@git_available?}
+          type="button"
+          class="btn btn-sm"
+          phx-click="review_tab"
+          phx-value-tab="changes"
+          aria-pressed={to_string(@tab == "changes")}
+        >Changes</button>
+        <button
+          type="button"
+          class="btn btn-sm"
+          phx-click="review_tab"
+          phx-value-tab="files"
+          aria-pressed={to_string(@tab == "files")}
+        >All files</button>
+      </div>
+      <p :if={@browser_error} class="review-hint muted">{@browser_error}</p>
+      <div :if={@tab == "changes" && @browser} id="review-changes">
+        <%= if is_map(@browser.git) do %>
+          <p
+            :if={@browser.git.entries == [] && !@browser.git.truncated?}
+            class="review-hint muted"
+          >
+            No git changes.
+          </p>
+          <p :if={@browser.git.truncated?} class="review-hint muted">
+            Change list capped. Use All files for the full tree.
+          </p>
+          <ul class="review-list">
+            <li :for={entry <- @browser.git.entries}>
+              <button
+                type="button"
+                class="review-file mono"
+                phx-click="review_open"
+                phx-value-path={entry.path}
+                phx-value-deleted={
+                  to_string(
+                    entry[:working] == "D" || (entry[:staged] == "D" && !entry[:untracked])
+                  )
+                }
+                aria-current={if @file && @file.path == entry.path, do: "true"}
+              >
+                <span class="badge" title="Staged / working tree">{entry[:staged] || "·"}{entry[
+                  :working
+                ] || entry[:untracked] || "·"}</span>
+                {entry.path}
+              </button>
+            </li>
+          </ul>
+        <% else %>
+          <p class="review-hint muted">Git changes unavailable. Browse All files instead.</p>
+        <% end %>
+      </div>
+      <div :if={@tab == "files"} id="review-files">
+        <div class="review-toolbar">
+          <button
+            :if={@dir != ""}
+            type="button"
+            class="btn btn-sm"
+            phx-click="review_dir"
+            phx-value-dir={if Path.dirname(@dir) == ".", do: "", else: Path.dirname(@dir)}
+          >↑ Up</button>
+          <span class="mono muted">/{@dir}</span>
+        </div>
+        <ul :if={@browser} class="review-list">
+          <li :for={entry <- @browser.entries}>
+            <button
+              :if={entry.type == "dir"}
+              type="button"
+              class="review-file mono"
+              phx-click="review_dir"
+              phx-value-dir={entry.path}
+            >{entry.name}/</button>
+            <button
+              :if={entry.type == "file"}
+              type="button"
+              class="review-file mono"
+              phx-click="review_open"
+              phx-value-path={entry.path}
+              aria-current={if @file && @file.path == entry.path, do: "true"}
+            >{entry.name}</button>
+          </li>
+        </ul>
+        <div :if={@page > 0 || (@browser && @browser.next?)} class="review-toolbar">
+          <button
+            type="button"
+            class="btn btn-sm"
+            phx-click="review_page"
+            phx-value-direction="prev"
+            disabled={@page == 0}
+          >Previous</button>
+          <span>Page {@page + 1}</span>
+          <button
+            type="button"
+            class="btn btn-sm"
+            phx-click="review_page"
+            phx-value-direction="next"
+            disabled={!@browser || !@browser.next?}
+          >Next</button>
+        </div>
+      </div>
+    </:sidebar>
+    <:main>
+      <p :if={!@file} class="review-hint muted">
+        Open a file to view it, compare it with HEAD, or select text and leave a comment in this session.
+      </p>
+      <div
+        :if={@file}
+        id="review-editor"
+        phx-hook="ReviewEditor"
+        phx-update="ignore"
+        class="review-editor"
+        data-path={@file.path}
+        data-url={~p"/sessions/#{@session_id}/review/file?#{%{path: @file.path}}"}
+        data-deleted={to_string(@file.deleted?)}
+        data-readonly={to_string(@session.archived)}
+        data-git={to_string(@git_available?)}
+      >
+        <div class="review-toolbar">
+          <strong class="mono" data-review-path></strong>
+          <button type="button" class="btn btn-sm" data-review="working">Working file</button>
+          <button type="button" class="btn btn-sm" data-review="head">HEAD</button>
+          <button type="button" class="btn btn-sm" data-review="diff">Diff</button>
+          <button type="button" class="btn btn-sm" data-review="preview" hidden>Preview</button>
+          <button type="button" class="btn btn-sm" data-review="reload" hidden>Discard draft &amp; reload</button>
+          <button type="button" class="btn btn-sm btn-primary" data-review="save" disabled>Save file</button>
+        </div>
+        <p class="review-hint muted" role="status" data-review-status>Loading file…</p>
+        <div class="review-document">
+          <textarea data-review-text spellcheck="false" aria-label="File text" hidden></textarea>
+          <div data-review-monaco hidden></div>
+          <div data-review-media hidden></div>
+        </div>
+        <form class="review-comment" data-review-comment hidden>
+          <button type="button" class="btn btn-sm" data-review="select">Use selected text</button>
+          <span class="mono muted" data-review-range></span>
+          <textarea
+            class="input"
+            name="note"
+            maxlength="8000"
+            placeholder="Comment for this session…"
+            aria-label="Review comment"
+            required
+          ></textarea>
+          <div class="review-toolbar">
+            <button type="submit" value="save" class="btn btn-sm btn-primary" disabled>Save comment</button>
+            <button
+              type="submit"
+              value="ask"
+              class="btn btn-sm"
+              disabled
+              title="Send this comment as agent input; may start or queue a run"
+            >Ask agent</button>
+          </div>
+        </form>
+      </div>
+    </:main>
+  </Workbench.split>
+</div>

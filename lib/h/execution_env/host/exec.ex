@@ -29,6 +29,8 @@ defmodule H.ExecutionEnv.Host.Exec do
       on_output = Keyword.get(opts, :on_output)
       env = build_sanitized_env(state.env_overrides, Keyword.get(opts, :env, %{}))
 
+      output_opts = Keyword.take(opts, [:raw_output, :spill_output])
+
       run_port(
         exe_path,
         args,
@@ -38,7 +40,8 @@ defmodule H.ExecutionEnv.Host.Exec do
         window_bytes,
         window_lines,
         abort_ref,
-        on_output
+        on_output,
+        output_opts
       )
     end
   end
@@ -110,7 +113,8 @@ defmodule H.ExecutionEnv.Host.Exec do
          window_bytes,
          window_lines,
          abort_ref,
-         on_output
+         on_output,
+         output_opts
        ) do
     caller = self()
     reaper_pid = spawn(fn -> reaper_loop(caller, nil) end)
@@ -138,7 +142,7 @@ defmodule H.ExecutionEnv.Host.Exec do
             nil
         end
 
-      buf = new_window_buf(window_bytes, window_lines)
+      buf = new_window_buf(window_bytes, window_lines, output_opts)
       deadline = System.monotonic_time(:millisecond) + timeout_ms
 
       try do
@@ -282,7 +286,7 @@ defmodule H.ExecutionEnv.Host.Exec do
 
   # --- Rolling tail window & spill buffer ---
 
-  defp new_window_buf(window_bytes, window_lines) do
+  defp new_window_buf(window_bytes, window_lines, output_opts) do
     %{
       chunks: :queue.new(),
       tail_bytes: 0,
@@ -291,6 +295,8 @@ defmodule H.ExecutionEnv.Host.Exec do
       total_newlines: 0,
       window_bytes: window_bytes,
       window_lines: window_lines,
+      raw_output?: Keyword.get(output_opts, :raw_output, false),
+      spill_output?: Keyword.get(output_opts, :spill_output, true),
       spill_path: nil,
       spill_fd: nil
     }
@@ -358,6 +364,7 @@ defmodule H.ExecutionEnv.Host.Exec do
     end
   end
 
+  defp ensure_spill_file(%{spill_output?: false} = buf), do: buf
   defp ensure_spill_file(%{spill_fd: fd} = buf) when not is_nil(fd), do: buf
 
   defp ensure_spill_file(buf) do
@@ -404,7 +411,7 @@ defmodule H.ExecutionEnv.Host.Exec do
     skipped = max(0, buf.total_bytes - byte_size(byte_trimmed))
     truncated = skipped > 0
     buf = if truncated and is_nil(buf.spill_path), do: ensure_spill_file(buf), else: buf
-    output = String.replace_invalid(byte_trimmed)
+    output = if buf.raw_output?, do: byte_trimmed, else: String.replace_invalid(byte_trimmed)
 
     {buf,
      %{

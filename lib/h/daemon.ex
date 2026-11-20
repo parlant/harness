@@ -162,6 +162,112 @@ defmodule H.Daemon do
   def read_session_file(_session_id, _query_params, _opts),
     do: {:error, {:bad_request, "expected a map"}}
 
+  @doc "Lists one directory page and git changes in the session's execution environment."
+  def review_workspace(session_id, params, opts \\ []) do
+    with {:ok, workspace} <- review_workspace_binding(session_id, opts),
+         {:ok, browser} <- H.Daemon.Review.browse(workspace, params) do
+      {:ok, Map.put(browser, :archived, workspace.archived)}
+    end
+  end
+
+  @doc "Reads a bounded review file or its HEAD version in the session's workspace."
+  def read_review_file(session_id, path, source, opts \\ []) do
+    with {:ok, workspace} <- review_workspace_binding(session_id, opts),
+         {:ok, file} <- H.Daemon.Review.read(workspace, path, source) do
+      {:ok, Map.put(file, :archived, workspace.archived)}
+    end
+  end
+
+  @doc "Saves an existing text file if its revision still matches, under the workspace lease."
+  def save_review_file(session_id, path, revision, text, opts \\ []) do
+    H.Daemon.Maintenance.admit(opts, fn ->
+      with {:ok, %{archived: false} = workspace} <- review_workspace_binding(session_id, opts) do
+        H.Daemon.Review.save(
+          workspace,
+          path,
+          revision,
+          text,
+          {Keyword.get(opts, :workspace_lease, @default_workspace_lease),
+           {session_id, :file_review, make_ref()}}
+        )
+      else
+        {:ok, _} -> {:error, :read_only}
+        {:error, _} = error -> error
+      end
+    end)
+  end
+
+  defp review_workspace_binding(session_id, opts) do
+    with {:ok, entry} <- lookup_active_session_entry(session_id, opts),
+         {:ok, workspace} <-
+           EnvRegistry.resolve_workspace(entry.env_id || "host", entry.cwd, opts),
+         {:ok, env} <- ExecutionEnv.bind_canonical_cwd(workspace.env, workspace.cwd) do
+      {:ok,
+       %{workspace | env: env, cwd: ExecutionEnv.cwd(env)}
+       |> Map.put(:archived, entry.status == "archived" or entry.archived == true)}
+    end
+  end
+
+  @doc "Opens a dedicated review session, reusing the last one for this workspace while empty."
+  def open_workspace_review(params, opts \\ []) when is_map(params) do
+    H.Daemon.Maintenance.admit(opts, fn ->
+      with {:ok, validated, agent} <- Validation.validate_create_session_params(params),
+           {:ok, workspace} <-
+             resolve_session_workspace(Map.get(validated, :env_id, "host"), validated.cwd, opts) do
+        table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+        key = {workspace.env_id, workspace.cwd}
+        digest = H.Daemon.Review.revision(:erlang.term_to_binary(key))
+        prefix = "review-" <> binary_part(digest, 0, 24) <> "-"
+
+        # Serialize only the open/reuse decision for this workspace in this VM.
+        :global.trans(
+          {{__MODULE__, table, key}, self()},
+          fn ->
+            latest =
+              workspace.env_id
+              |> Catalog.list_sessions_for_cwd(workspace.cwd,
+                table: table,
+                include_subsessions: false
+              )
+              |> Enum.reduce(0, fn entry, latest ->
+                with true <- String.starts_with?(entry.session_id, prefix),
+                     {n, ""} <- Integer.parse(String.replace_prefix(entry.session_id, prefix, "")) do
+                  max(n, latest)
+                else
+                  _ -> latest
+                end
+              end)
+
+            sid = prefix <> Integer.to_string(latest)
+
+            with {:ok, %{archived: false, status: "ok", active: false} = entry} <-
+                   Catalog.get_session(sid, table),
+                 {:ok, %{items: []}} <-
+                   scan_entries(sid, entry.root_conversation_id, %{limit: 1}, opts) do
+              session_result(entry, opts, nil)
+            else
+              {:error, error} when error != :not_found ->
+                {:error, error}
+
+              _ ->
+                do_create_session(
+                  %{
+                    "session_id" => prefix <> Integer.to_string(latest + 1),
+                    "title" => "File review",
+                    "env_id" => workspace.env_id,
+                    "cwd" => workspace.cwd
+                  }
+                  |> maybe_put("agent", agent),
+                  opts
+                )
+            end
+          end,
+          [node()]
+        )
+      end
+    end)
+  end
+
   @doc "Lists models from the configured `H.Provider`."
   @spec list_models(keyword()) :: [map()]
   def list_models(opts \\ []) when is_list(opts) do

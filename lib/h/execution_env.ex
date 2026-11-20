@@ -22,7 +22,7 @@ defmodule H.ExecutionEnv do
 
   @type exec_result :: %{
           exit_code: integer(),
-          output: String.t(),
+          output: binary(),
           truncated: boolean(),
           skipped_bytes: non_neg_integer(),
           full_output_path: nil | String.t()
@@ -151,6 +151,11 @@ defmodule H.ExecutionEnv do
     end
   end
 
+  @doc """
+  Runs a command in the bound environment. Host and Remote accept
+  `raw_output: true` to preserve bytes and `spill_output: false` to retain
+  only the bounded output window without persisting an overflow file.
+  """
   @spec exec(t(), command(), keyword()) :: {:ok, exec_result()} | {:error, term()}
   def exec({mod, state}, command, opts \\ []), do: mod.exec(state, command, opts)
 end

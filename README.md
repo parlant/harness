@@ -4,10 +4,11 @@ H is a local Elixir/OTP daemon for coding-agent sessions. A session can branch w
 
 ## Start here
 
-Development target: Elixir 1.20 / OTP 29 (plus Rust for `clients/tui`).
+Development target: Elixir 1.20 / OTP 29, plus Rust for `clients/tui` and Node/npm to build the Monaco editor assets.
 
 ```sh
-# Web UI: start Phoenix and the daemon together from the repo root
+# Web UI: build the optional Monaco assets, then start Phoenix and the daemon
+(cd clients/web/assets && npm ci && npm run build)
 (cd clients/web && mix deps.get && PHX_SERVER=true mix run --no-halt)
 
 # Alternatively, for API and terminal clients only (no browser UI):
@@ -18,7 +19,7 @@ bin/h-daemon
 
 Run only one server per data directory. For Phoenix, open `http://127.0.0.1:4000` and sign in with the owner token in `${H_DATA_DIR:-$HOME/.local/share/h}/auth.token`.
 
-For live reloading, pane composition and the visual feedback inspector, see [Working on the web UI](clients/web/README.md).
+For file review, live reloading, pane composition, and the visual feedback inspector, see [Working on the web UI](clients/web/README.md).
 
 Build the terminal client from the repository, then run it from your project directory. It attaches to either server; it does not start one:
 

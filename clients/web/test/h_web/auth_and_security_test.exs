@@ -8,6 +8,7 @@ defmodule HWeb.AuthAndSecurityTest do
             "/workspaces",
             "/inbox",
             "/sessions/demo",
+            "/sessions/demo/review",
             "/sessions/demo/conversations/1"
           ] do
         resp_conn = get(conn, path)

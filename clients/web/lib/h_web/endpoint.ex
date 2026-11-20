@@ -17,7 +17,8 @@ defmodule HWeb.Endpoint do
     same_site: "Strict"
   ]
 
-  @csp "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self'; script-src 'self'"
+  # Monaco positions lines with style attributes; stylesheet elements still require the nonce.
+  @csp "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; script-src 'self'; worker-src 'self'; style-src-attr 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'"
 
   socket("/live", Phoenix.LiveView.Socket,
     websocket: [connect_info: [session: @session_options]],
@@ -28,7 +29,7 @@ defmodule HWeb.Endpoint do
     at: "/assets",
     from: :harness_web,
     gzip: false,
-    only: ~w(app.css app.js inspector.js workbench.js favicon.ico)
+    only: ~w(app.css app.js inspector.js workbench.js review.js monaco favicon.ico)
   )
 
   plug(Plug.Static,
@@ -66,10 +67,17 @@ defmodule HWeb.Endpoint do
   plug(HWeb.Router)
 
   defp security_headers(conn, _opts) do
+    nonce = Base.encode64(:crypto.strong_rand_bytes(18))
+
     conn
+    |> Plug.Conn.assign(:style_nonce, nonce)
     |> Plug.Conn.put_resp_header("x-content-type-options", "nosniff")
     |> Plug.Conn.put_resp_header("x-frame-options", "DENY")
     |> Plug.Conn.put_resp_header("referrer-policy", "same-origin")
-    |> Plug.Conn.put_resp_header("content-security-policy", @csp)
+    |> Plug.Conn.put_resp_header(
+      "content-security-policy",
+      # Monaco positions lines with style attributes; stylesheet elements still require the nonce.
+      @csp <> "; style-src 'self' 'nonce-#{nonce}'"
+    )
   end
 end

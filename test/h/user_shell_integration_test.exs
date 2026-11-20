@@ -660,6 +660,61 @@ defmodule H.UserShellIntegrationTest do
       end)
     end
 
+    test "review saves have distinct holders and a waiting run sees a safe review marker" do
+      %{opts: opts, cwd: cwd, lease: lease} = start_daemon_env()
+      key = host_lease_key(cwd)
+      save = {"review-session", :file_review, make_ref()}
+      other = {"review-session", :file_review, make_ref()}
+      assert :ok = WorkspaceLease.acquire(lease, key, save, self())
+
+      assert {:error, {:workspace_busy, ^save}} =
+               WorkspaceLease.acquire(lease, key, other, self())
+
+      {:ok, %{seq: seq}} = Daemon.create_session(%{"session_id" => "waiter", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "waiter",
+          cmd("wait-review-save", "user_shell", "1", %{
+            "command" => "printf after-save",
+            "include_in_context" => true,
+            "expected_seq" => seq
+          }),
+          opts
+        )
+
+      wait =
+        wait_until(fn ->
+          {:ok, {:snapshot, _, bin}} =
+            Daemon.subscribe_conversation("waiter", "1", self(), nil, opts)
+
+          JSON.decode!(bin)["docs"]["live"]["workspace_wait"]
+        end)
+
+      assert %{"holder_session_id" => "review-session", "holder_conversation_id" => "file_review"} =
+               wait
+
+      assert {:ok, _} =
+               Daemon.execute_command(
+                 "waiter",
+                 cmd("take-after-save", "workspace_wait", "1", %{
+                   "action" => "stop_holder",
+                   "task_id" => wait["task_id"],
+                   "lease_id" => wait["lease_id"]
+                 }),
+                 opts
+               )
+
+      refute_receive {:stop_workspace_holder, _, _, _}, 50
+      assert :ok = WorkspaceLease.release(lease, key, save)
+
+      assert [%{data: %{"output" => "after-save"}}] =
+               wait_until(fn ->
+                 {:ok, %{items: items}} = Daemon.scan_entries("waiter", "1", %{}, opts)
+                 if items != [], do: items
+               end)
+    end
+
     test "cancel wait removes queued work without stopping the holder" do
       %{opts: opts, cwd: cwd, lease: lease} = start_daemon_env()
       :ok = WorkspaceLease.acquire(lease, host_lease_key(cwd), {"holder", 1}, self())

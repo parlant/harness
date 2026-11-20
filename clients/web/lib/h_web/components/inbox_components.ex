@@ -178,6 +178,7 @@ defmodule HWeb.InboxComponents do
   attr :inbox_filter, InboxFilter, default: %InboxFilter{}
   attr :compact, :boolean, default: false
   attr :new_session_event, :string, default: nil
+  attr :review_event, :string, default: nil
   attr :empty_message, :string, default: "No sessions match the current filter."
 
   def workspace_tree(assigns) do
@@ -213,6 +214,16 @@ defmodule HWeb.InboxComponents do
             </span>
           </div>
 
+          <button
+            :if={@review_event}
+            type="button"
+            class="btn btn-sm btn-ghost"
+            phx-click={@review_event}
+            phx-value-cwd={group.cwd}
+            phx-value-env_id={group.env_id}
+          >
+            Files
+          </button>
           <button
             :if={@new_session_event}
             type="button"
@@ -430,6 +441,14 @@ defmodule HWeb.InboxComponents do
       </.link>
 
       <div :if={not @compact and not @imported_archive?} class="inbox-row-actions">
+        <.link
+          :if={not @missing_cwd? and @session.status != "quarantined"}
+          navigate={InboxFilter.review_path(@session.session_id, @inbox_filter, @from_inbox)}
+          class="btn btn-sm btn-ghost inbox-action-btn"
+          aria-label={"Review files for #{@session.session_id}"}
+        >
+          Files
+        </.link>
         <button
           :if={not @subsession? and not @processing? and not @session.archived}
           type="button"

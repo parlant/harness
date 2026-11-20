@@ -1,0 +1,6 @@
+{
+  "name": "harness-web-assets",
+  "private": true,
+  "scripts": {"build": "node build.mjs"},
+  "devDependencies": {"esbuild": "0.28.2", "monaco-editor": "0.57.0"}
+}

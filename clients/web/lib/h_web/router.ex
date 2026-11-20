@@ -17,6 +17,11 @@ defmodule HWeb.Router do
   end
 
   scope "/", HWeb do
+    pipe_through([:fetch_session, :owner_auth])
+    get("/sessions/:session_id/review/file", ReviewFileController, :show)
+  end
+
+  scope "/", HWeb do
     pipe_through(:browser)
 
     get("/login", AuthController, :new)
@@ -38,6 +43,7 @@ defmodule HWeb.Router do
       live("/inbox", InboxLive, :index)
       live("/settings/providers", ProvidersLive, :index)
       live("/settings/accounts", AccountsLive, :index)
+      live("/sessions/:session_id/review", ReviewLive, :show)
       live("/sessions/:session_id", SessionLive, :show)
       live("/sessions/:session_id/conversations/:conversation_id", SessionLive, :show)
     end

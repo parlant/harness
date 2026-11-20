@@ -9,6 +9,8 @@ defmodule H.WorkspaceLease do
 
   @type server :: GenServer.server()
   @type workspace_key :: {env_id :: String.t(), cwd :: String.t()} | String.t()
+  # Normal holders are {session_id, conversation_id}. A review save briefly
+  # holds {session_id, :file_review, ref} and cannot be stopped as a conversation.
   @type holder_key :: term()
 
   defguardp is_valid_workspace_key(key)
@@ -128,7 +130,9 @@ defmodule H.WorkspaceLease do
 
     case {Map.get(state.leases, cwd), waiter} do
       {%{id: ^lease_id, holder_key: owner, pid: pid}, %{} = waiter} ->
-        send(pid, {:stop_workspace_holder, cwd, owner, lease_id})
+        unless match?({_, :file_review, _}, owner) do
+          send(pid, {:stop_workspace_holder, cwd, owner, lease_id})
+        end
 
         {:reply, :ok,
          %{state | waiters: Map.put(state.waiters, cwd, [waiter | List.delete(waiters, waiter)])}}

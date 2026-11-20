@@ -13,3 +13,5 @@ erl_crash.dump
 .DS_Store
 __pycache__/
 *.pyc
+/clients/web/assets/node_modules/
+/clients/web/priv/static/monaco/

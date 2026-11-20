@@ -1,4 +1,4 @@
-# Opt in on a native shell runner with Elixir 1.20 / OTP 29, Rust, Hex, and
+# Opt in on a native shell runner with Elixir 1.20 / OTP 29, Rust, Hex, Node/npm, and
 # Python 3 (plus Xcode command-line tools for macOS native library packaging).
 # Select the runner's OS/arch with its tags, not with cross-compilation here.
 bundle:

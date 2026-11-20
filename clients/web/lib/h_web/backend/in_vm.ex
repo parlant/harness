@@ -36,6 +36,22 @@ defmodule HWeb.Backend.InVM do
   end
 
   @impl HWeb.Backend
+  def open_workspace_review(params, opts \\ []),
+    do: H.Daemon.open_workspace_review(params, daemon_opts(opts))
+
+  @impl HWeb.Backend
+  def review_workspace(sid, params, opts \\ []),
+    do: H.Daemon.review_workspace(sid, params, daemon_opts(opts))
+
+  @impl HWeb.Backend
+  def read_review_file(sid, path, source, opts \\ []),
+    do: H.Daemon.read_review_file(sid, path, source, daemon_opts(opts))
+
+  @impl HWeb.Backend
+  def save_review_file(sid, path, revision, text, opts \\ []),
+    do: H.Daemon.save_review_file(sid, path, revision, text, daemon_opts(opts))
+
+  @impl HWeb.Backend
   def get_session_detail(session_id, opts \\ []) do
     H.Daemon.get_session_detail(session_id, daemon_opts(opts))
   end

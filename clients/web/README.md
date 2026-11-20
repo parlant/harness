@@ -10,7 +10,11 @@ use a fresh `H_DATA_DIR`, a different `PORT`, and a separate browser profile
 
 Phoenix watches this client's `lib/` and `priv/static/`. CSS swaps in place;
 JS, HEEx and web Elixir changes refresh the page and recompile web code as
-needed. No Node build step. Restart for configuration, dependency, supervision
+needed. To enable Monaco for file review, run
+`(cd assets && npm ci && npm run build)` once in `clients/web` (and when the
+asset lockfile changes). Without the assets, plain-text review still works.
+Native bundle builds package Monaco; there is no CDN or runtime Node dependency.
+Restart for configuration, dependency, supervision
 or engine changes. The reloader and inspector are development tools: keep the
 server on loopback, not behind a public proxy. Neither is enabled in prod.
 
@@ -97,3 +101,33 @@ session, verify the image, and return to workspaces. Change a CSS rule, then
 a HEEx label: the first should update without navigation and the second
 should refresh the page and restore the inspector mode. None of these steps
 requires a provider call.
+
+## Review working files
+
+- **Workspaces → Review files** opens a dedicated **File review** session for
+  that environment and directory. Reopening the workspace reuses its latest
+  empty review session; after it has a transcript entry, the next open creates
+  a fresh one. It does not reuse or alter unrelated sessions. Opening files
+  does not start an agent run.
+- **Inbox → Files** uses the row's session. **Session → Review files** uses the
+  displayed conversation, including when it is a fork. Return to the session
+  to see the comments in its transcript.
+- In a git worktree, **Changes** shows staged, unstaged and untracked files
+  under the session directory. **HEAD** and **Diff** compare with the last
+  commit, not the index. Deleted text files can be read from HEAD. **All files**
+  browses the directory tree and is the default outside git. Git discovery is
+  read-only and skips configured filters and hooks; a touched-but-unchanged
+  tracked file can appear as modified until git refreshes its index.
+- Select text in **Working file** or **HEAD**, choose **Use selected text**, and
+  enter a comment. **Save comment** writes the verified path, revision, range,
+  and excerpt to the active conversation without a provider call. **Ask agent**
+  sends it as normal input and can start or queue a run. Highlights mark the
+  draft selection; they are not persistent inline threads.
+- The open file and directory/change list refresh every few seconds. Unsaved
+  text is kept when a file changes on disk; discard the draft to reload. Saving
+  checks the source revision and uses the workspace's writer lease to avoid
+  overwriting agent edits. It does not stage changes. Save before leaving the
+  view. Review skips symlinks and `.git`; it is not a sandbox for agent tools.
+- Review supports UTF-8 text up to 512 KiB. Compatible image, audio, and video
+  formats preview up to 16 MiB (codec support depends on the browser). HTML
+  previews are static and sandboxed: no scripts or external assets.

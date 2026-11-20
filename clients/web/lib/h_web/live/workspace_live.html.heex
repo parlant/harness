@@ -66,6 +66,7 @@
           from_inbox={false}
           compact={true}
           new_session_event="start_session"
+          review_event="review_workspace"
           empty_message="No sessions yet. Select a folder and start one."
         />
       </div>
@@ -167,6 +168,16 @@
         </div>
 
         <div class="new-session-actions">
+          <button
+            id="review-selected-workspace-btn"
+            type="button"
+            class="btn"
+            phx-click="review_workspace"
+            phx-value-cwd={@selected_dir}
+            disabled={@browse_error != nil}
+          >
+            Review files
+          </button>
           <button id="start-selected-session-btn" type="submit" class="btn btn-primary">
             Start New Session
           </button>
@@ -217,6 +228,14 @@
                 phx-value-path={dir.path}
               >
                 Select
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                phx-click="review_workspace"
+                phx-value-cwd={dir.path}
+              >
+                Review files
               </button>
               <button
                 type="button"
