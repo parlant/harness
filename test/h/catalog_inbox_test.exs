@@ -277,7 +277,8 @@ defmodule H.CatalogInboxTest do
                attention: "idle",
                activity_kind: nil,
                activity_label: nil,
-               queued_count: 0
+               queued_count: 0,
+               next_wake_at: nil
              } == State.derive_catalog_runtime(base)
 
       # Running tool_call takes precedence over waiting generation
@@ -332,7 +333,7 @@ defmodule H.CatalogInboxTest do
 
       assert %{
                active: true,
-               attention: "sleeping",
+               attention: "retrying",
                activity_kind: "retry",
                activity_label: "retrying"
              } = State.derive_catalog_runtime(sleep_state)
@@ -660,7 +661,7 @@ defmodule H.CatalogInboxTest do
 
       assert ev_ren.data["session"]["title"] == "Alpha Renamed"
 
-      # 5. Create Session B in workspace B and trigger model_error -> attention: "error", activity_label: "model_error"
+      # 5. Provider failures expose their specific code in the catalog label.
       assert {:ok, _} =
                Daemon.create_session(
                  %{"session_id" => "sess-b", "cwd" => ctx.cwd_b},
@@ -684,7 +685,7 @@ defmodule H.CatalogInboxTest do
       assert ev_err.data["session"]["cwd"] == Path.expand(ctx.cwd_b)
       assert ev_err.data["session"]["active"] == false
       assert ev_err.data["session"]["activity_kind"] == nil
-      assert ev_err.data["session"]["activity_label"] == "model_error"
+      assert ev_err.data["session"]["activity_label"] == "bad_request"
 
       # 6. Quarantine dormant session -> attention: "quarantined"
       assert {:ok, _} = Catalog.quarantine(ctx.catalog, "unloaded-dormant", :corrupt_wal)
@@ -718,7 +719,7 @@ defmodule H.CatalogInboxTest do
       assert sessions["sess-a"]["attention"] == "idle"
       assert sessions["sess-a"]["title"] == "Alpha Renamed"
       assert sessions["sess-b"]["attention"] == "error"
-      assert sessions["sess-b"]["activity_label"] == "model_error"
+      assert sessions["sess-b"]["activity_label"] == "bad_request"
       refute Map.has_key?(sessions, "unloaded-dormant")
 
       Req.cancel_async_response(sse)

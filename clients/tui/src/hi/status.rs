@@ -118,6 +118,8 @@ impl<'a> StatusFields<'a> {
                 "archived"
             } else if state.workspace_wait().is_some() {
                 "waiting"
+            } else if state.inference_retry().is_some() {
+                "retrying"
             } else if state.is_run_active() {
                 "busy"
             } else if failure.is_some() {
@@ -504,6 +506,21 @@ mod tests {
                 needs_attention: true,
             },
         }
+    }
+
+    #[test]
+    fn activity_distinguishes_retrying_from_busy_or_paused() {
+        let state = TranscriptState {
+            docs: json!({"live": {"generation": {"retry": {"status": "waiting"}}}})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            StatusFields::from_session(&target(), &state).activity,
+            "retrying"
+        );
     }
 
     #[test]

@@ -726,19 +726,18 @@ defmodule H.Provider.ReqLLM do
   end
 
   defp normalize_error(%ReqLLM.Error.API.Request{status: status, provider_code: pcode} = err) do
-    %{
-      code: to_string(pcode || (status && "http_#{status}") || "api_request_error"),
-      message: Credentials.sanitize(Exception.message(err)),
-      retryable: if(is_boolean(err.retryable), do: err.retryable, else: retryable_status?(status))
-    }
+    http_error(
+      status,
+      pcode,
+      if(status == 429, do: err.reason || Exception.message(err), else: Exception.message(err)),
+      if(is_boolean(err.retryable), do: err.retryable, else: retryable_status?(status)),
+      err.headers
+    )
   end
 
   defp normalize_error(%ReqLLM.Error.API.Response{status: status} = err) do
-    %{
-      code: to_string((status && "http_#{status}") || "api_response_error"),
-      message: Credentials.sanitize(Exception.message(err)),
-      retryable: retryable_status?(status)
-    }
+    code = if status, do: "http_#{status}", else: "api_response_error"
+    http_error(status, code, Exception.message(err), retryable_status?(status), [])
   end
 
   defp normalize_error(%ReqLLM.Error.API.Stream{cause: cause})
@@ -791,6 +790,42 @@ defmodule H.Provider.ReqLLM do
       message: reason |> inspect() |> Credentials.sanitize(),
       retryable: false
     }
+  end
+
+  defp http_error(status, provider_code, message, retryable, headers) do
+    message = Credentials.sanitize(to_string(message))
+
+    message =
+      if status == 429 do
+        "HTTP 429: provider rate limit or quota restriction. " <>
+          message <>
+          " Automatic retries use increasing waits. If a spending cap or quota is exhausted, raise the applicable limit, wait for its reset, or switch provider/project; retries cannot remove the restriction."
+      else
+        message
+      end
+
+    error = %{
+      code: to_string(provider_code || (status && "http_#{status}") || "api_request_error"),
+      message: message,
+      retryable: status == 429 or retryable
+    }
+
+    case retry_after_ms(headers) do
+      nil -> error
+      delay -> Map.put(error, :retry_after_ms, delay)
+    end
+  end
+
+  defp retry_after_ms(headers) do
+    case Req.Response.get_retry_after(Req.Response.new(headers: headers || [])) do
+      milliseconds when is_integer(milliseconds) and milliseconds >= 0 ->
+        min(milliseconds, 86_400_000)
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp retryable_status?(status) when status in [408, 429, 500, 502, 503, 504], do: true

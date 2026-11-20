@@ -147,6 +147,43 @@ defmodule HWeb.SessionLiveTest do
     assert has_element?(new_view, ~s(#model-select option[value="#{id}"][selected]))
   end
 
+  test "shows provider backoff as active retrying work and clears it on success", %{
+    conn: conn,
+    projects_dir: cwd,
+    owner_token: token,
+    daemon_opts: opts,
+    fake: fake
+  } do
+    gate = make_ref()
+
+    Fake.push_step(
+      fake,
+      {:error, %{code: "http_429", message: "Monthly spending cap reached", retryable: true}}
+    )
+
+    Fake.push_step(
+      fake,
+      {:gate, [], self(), gate, %{content: [%{type: "text", text: "Recovered after rate limit"}]}}
+    )
+
+    {:ok, %{session: session}} =
+      Daemon.create_session(%{"cwd" => cwd}, Keyword.put(opts, :retry_backoff_ms, 300))
+
+    {:ok, view, _} = live(log_in_owner(conn, token), "/sessions/#{session.session_id}")
+    view |> form("#composer-form", %{content: "Retry this work"}) |> render_submit()
+    wait_until(fn -> has_element?(view, "#retry-banner", "Monthly spending cap reached") end)
+    assert has_element?(view, "#retry-banner", "Waiting 1s")
+    assert has_element?(view, "#stop-btn")
+    refute has_element?(view, "#continue-run-btn")
+    refute has_element?(view, "#run-failure-banner")
+    assert_receive {:gate_entered, ^gate, pid}, 2_000
+    wait_until(fn -> has_element?(view, "#retry-banner", "Retry request in progress") end)
+    send(pid, {:release, gate})
+    wait_until(fn -> has_element?(view, "#entries-stream", "Recovered after rate limit") end)
+    refute has_element?(view, "#retry-banner")
+    assert length(Fake.requests(fake)) == 2
+  end
+
   test "supports configure, steer, abort, fork, and resnapshot on sequence gap", %{
     conn: conn,
     projects_dir: projects_dir,

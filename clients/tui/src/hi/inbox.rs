@@ -431,7 +431,7 @@ impl InboxState {
                         || session.effective_needs_attention()
                         || matches!(
                             session.effective_attention(),
-                            "running" | "sleeping" | "quarantined"
+                            "running" | "sleeping" | "retrying" | "quarantined"
                         ))
             }
         }
@@ -716,6 +716,10 @@ impl InboxState {
                 theme.inbox_idle_new,
             ),
             2 => match attention {
+                "retrying" => (
+                    if theme.is_plain { "~" } else { "↻" }.to_string(),
+                    theme.inbox_processing,
+                ),
                 "sleeping" => (
                     if theme.is_plain { "~" } else { "◷" }.to_string(),
                     theme.inbox_processing,
@@ -906,7 +910,7 @@ pub fn session_needs_user_attention(session: &SessionSummary) -> bool {
 }
 
 pub fn is_processing_attention(attention: &str) -> bool {
-    matches!(attention, "running" | "sleeping")
+    matches!(attention, "running" | "sleeping" | "retrying")
 }
 
 fn format_attention_detail(session: &SessionSummary, attention: &str) -> String {
@@ -943,7 +947,7 @@ fn format_attention_detail(session: &SessionSummary, attention: &str) -> String 
             },
             (None, None) => "running".to_string(),
         },
-        "sleeping" => label.unwrap_or_else(|| "retrying".to_string()),
+        "sleeping" | "retrying" => label.unwrap_or_else(|| "retrying".to_string()),
         "archived" => "archived".to_string(),
         _ => "idle".to_string(),
     }
@@ -996,7 +1000,7 @@ mod tests {
             root_conversation_id: Some("1".to_string()),
             created_at: Some(created_at),
             updated_at: Some(created_at),
-            active: matches!(attention, "running" | "sleeping"),
+            active: matches!(attention, "running" | "sleeping" | "retrying"),
             attention: Some(attention.to_string()),
             activity_kind: activity_kind.map(str::to_string),
             activity_label: activity_label.map(str::to_string),
@@ -1127,6 +1131,24 @@ mod tests {
         assert!(run_row.spans.iter().any(
             |s| s.text.contains("Running Task") && s.style.add_modifier.contains(Modifier::DIM)
         ));
+    }
+
+    #[test]
+    fn retrying_is_processing_not_operator_attention() {
+        let session = make_session(
+            "retry",
+            "/tmp/a",
+            "host",
+            None,
+            "retrying",
+            Some("retry"),
+            Some("Retry 1/3 · http_429 · waiting 2s"),
+            1,
+        );
+        assert_eq!(session.effective_attention(), "retrying");
+        assert!(is_processing_attention(session.effective_attention()));
+        assert!(!session.effective_needs_attention());
+        assert!(format_attention_detail(&session, "retrying").contains("http_429"));
     }
 
     #[test]

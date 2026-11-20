@@ -90,16 +90,26 @@ Exact cwd + qualified model wins, then cwd, model, provider, `:default`, and fin
 
 There is no built-in tool-round cap. An optional future extension could enforce a round, cost, or elapsed-time budget to bound unattended work or catch a looping model. That is separate from context management. Without that policy a model that keeps calling tools may keep spending until you abort it.
 
+## Provider retries
+
+Retryable generation and compaction failures keep the run active. The coordinator commits the retry deadline before arming its timer. Defaults are three retries, waiting 2, 4, then 8 seconds; exponential backoff is capped at 60 seconds. Startup options `retry_limit` and `retry_backoff_ms` override the budget and base delay. A provider's `Retry-After` header (seconds or HTTP date) can lengthen a wait, up to 24 hours.
+
+During backoff and the retry request, session summaries report `attention: "retrying"`, `active: true`, and `activity_kind: "retry"`. This is processing work, not an operator-attention error. `activity_label` identifies the attempt and error code. `next_wake_at` is the Unix-millisecond deadline while waiting, otherwise `null`. Other running work in the same session can take display priority.
+
+Conversation snapshots and commits carry `live.generation.retry` or `live.compaction.retry`: `attempt` (one-based retry number), `max_attempts`, `delay_ms`, `until` (Unix milliseconds), `status` (`"waiting"` or `"running"`), `code`, and a sanitized provider `message`. Clients show the reason and scheduled wait rather than implying that output is streaming. Success clears the retry display. Reopening a sleeping task preserves its deadline and retry count. Abort cancels the work; a late timer cannot restart it.
+
+HTTP 429 messages explain rate limits versus quota or spending-cap restrictions and retain the provider's explanation. Waiting cannot lift a spending cap: raise the applicable limit, wait for its reset, or change provider/project. Once the retry budget is exhausted, the run becomes an error with the explanation and retry count intact. Resolve the restriction before using Continue, or retry `/compact` for a failed manual compaction. Managed-account dispatch/no-resume policies still take precedence; this does not authorize replay of tools or unsafe external effects.
+
 ## SessionSummary attention and lifecycle fields
 
 Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST /sessions`, `GET /sessions/:sid`, `POST /sessions/:sid/{triage,stop,archive,fork}`, and `GET /fs` (`sessions` and `directories[*].latest_session`) includes attention and lifecycle metadata:
 
-- `attention`: `"idle"` | `"running"` | `"sleeping"` | `"error"` | `"quarantined"` (always `"quarantined"` when `status == "quarantined"`).
+- `attention`: `"idle"` | `"running"` | `"sleeping"` | `"retrying"` | `"error"` | `"quarantined"` (always `"quarantined"` when `status == "quarantined"`).
 - Imported sessions have `status` and `attention` set to `"archived"`, with `active: false`.
 - `activity_kind`: `null` | `"generation"` | `"tool"` | `"user_shell"` | `"compaction"` | `"retry"`.
 - `activity_label`: `null` or a sanitized short string (max 120 chars, no control characters), e.g. active tool name (`"bash"`), `"shell"`, `"compact"`, `"retrying"`, or failure reason/code when `attention == "error"`.
 - `queued_count`: non-negative integer count of queued inbox items across conversations in the session.
-- `needs_attention`: boolean triage flag persisted in `H.Catalog` (`true` on creation and when a run settles to `"idle"`, `"error"`, or `"quarantined"`; `false` while `"running"`/`"sleeping"`, when `archived == true`, or when manually dismissed via `POST /sessions/:sid/triage`).
+- `needs_attention`: boolean triage flag persisted in `H.Catalog` (`true` on creation and when a run settles to `"idle"`, `"error"`, or `"quarantined"`; `false` while `"running"`/`"sleeping"`/`"retrying"`, when `archived == true`, or when manually dismissed via `POST /sessions/:sid/triage`).
 - `archived`: boolean persisted in `H.Catalog` (`false` by default).
 - `loaded`: live boolean indicating whether the session's `H.Session.Server` coordinator is currently running in OTP RAM (never persisted to disk).
 - `cwd_exists`: live boolean indicating whether the session's working directory currently exists (`false` when a host `cwd` was deleted).

@@ -92,18 +92,21 @@ defmodule HWeb.ConversationComponents do
           {failure, "Compaction failed"}
       end
 
+    retry = get_in(live, ["generation", "retry"]) || get_in(live, ["compaction", "retry"])
+
     assigns =
       assign(assigns,
         activity: activity,
         streaming_text?: streaming_text?,
         text: text,
         failure: failure,
-        failure_label: failure_label
+        failure_label: failure_label,
+        retry: retry
       )
 
     ~H"""
     <section
-      :if={@streaming_text? || @activity || @inbox != [] || @failure}
+      :if={@streaming_text? || @activity || @inbox != [] || @failure || @retry}
       id="live-region"
       class="live-region"
       aria-live="polite"
@@ -114,6 +117,22 @@ defmodule HWeb.ConversationComponents do
         count={@activity.count}
         status={@activity.status}
       />
+      <div :if={@retry} id="retry-banner" class="retry-banner" role="status">
+        <strong>Retrying after provider error · {@retry["attempt"]}/{@retry["max_attempts"]}</strong>
+        <p>{@retry["code"]}: {@retry["message"]}</p>
+        <p :if={@retry["status"] == "waiting"}>
+          Waiting {ceil((@retry["delay_ms"] || 0) / 1_000)}s before retry.
+          <time
+            :if={@retry["until"]}
+            datetime={DateTime.from_unix!(@retry["until"], :millisecond) |> DateTime.to_iso8601()}
+          >
+            Next attempt: {DateTime.from_unix!(@retry["until"], :millisecond)
+            |> Calendar.strftime("%H:%M:%S UTC")}
+          </time>
+          Stop remains available.
+        </p>
+        <p :if={@retry["status"] != "waiting"}>Retry request in progress.</p>
+      </div>
       <article :if={@streaming_text?} id="live-generation" class="entry-card entry-live">
         <header class="entry-header">
           <span class="role-label">assistant (live)</span>

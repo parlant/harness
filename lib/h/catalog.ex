@@ -39,7 +39,7 @@ defmodule H.Catalog do
     :applied_edit_rev
   ]
 
-  @valid_attentions ["idle", "running", "sleeping", "error", "quarantined"]
+  @valid_attentions ["idle", "running", "sleeping", "retrying", "error", "quarantined"]
   @valid_activity_kinds ["generation", "tool", "user_shell", "compaction", "retry"]
   @max_activity_label_length 120
 
@@ -84,7 +84,7 @@ defmodule H.Catalog do
       else
         case Map.fetch(entry, :needs_attention) do
           {:ok, val} when is_boolean(val) -> val
-          _ -> attention not in ["running", "sleeping"]
+          _ -> attention not in ["running", "sleeping", "retrying"]
         end
       end
 
@@ -562,7 +562,7 @@ defmodule H.Catalog do
         updated =
           if archived? do
             {next_attention, next_kind, next_label} =
-              if existing.attention in ["running", "sleeping"] do
+              if existing.attention in ["running", "sleeping", "retrying"] do
                 {"idle", nil, nil}
               else
                 {existing.attention, existing.activity_kind, existing.activity_label}
@@ -769,7 +769,7 @@ defmodule H.Catalog do
   defp validate_runtime_field(:attention, _val, "quarantined"), do: {:ok, "quarantined"}
 
   defp validate_runtime_field(:attention, val, _status)
-       when val in ["idle", "running", "sleeping", "error"],
+       when val in ["idle", "running", "sleeping", "retrying", "error"],
        do: {:ok, val}
 
   defp validate_runtime_field(:activity_kind, nil, _status), do: {:ok, nil}
@@ -811,10 +811,10 @@ defmodule H.Catalog do
 
   defp apply_runtime_triage_transitions(candidate, existing) do
     cond do
-      candidate.attention in ["running", "sleeping"] ->
+      candidate.attention in ["running", "sleeping", "retrying"] ->
         %{candidate | needs_attention: false, archived: false}
 
-      existing.attention in ["running", "sleeping"] and
+      existing.attention in ["running", "sleeping", "retrying"] and
           candidate.attention in ["idle", "error", "quarantined"] ->
         %{candidate | needs_attention: true, archived: false}
 
@@ -953,7 +953,7 @@ defmodule H.Catalog do
       else
         case Map.fetch(raw, "needs_attention") do
           {:ok, val} when is_boolean(val) -> val
-          _ -> attention not in ["running", "sleeping"]
+          _ -> attention not in ["running", "sleeping", "retrying"]
         end
       end
 

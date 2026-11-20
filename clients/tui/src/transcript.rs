@@ -213,6 +213,14 @@ impl TranscriptState {
         Some((cmd, status, include))
     }
 
+    pub fn inference_retry(&self) -> Option<&Value> {
+        let live = self.live_doc()?;
+        live.get("generation")
+            .and_then(|v| v.get("retry"))
+            .or_else(|| live.get("compaction").and_then(|v| v.get("retry")))
+            .filter(|v| v.is_object())
+    }
+
     pub fn is_run_active(&self) -> bool {
         let Some(live) = self.live_doc() else {
             return false;
@@ -221,6 +229,9 @@ impl TranscriptState {
             return true;
         }
         if live.get("generation").is_some_and(|v| !v.is_null()) {
+            return true;
+        }
+        if live.get("compaction").is_some_and(|v| !v.is_null()) {
             return true;
         }
         if live.get("user_shell").is_some_and(|v| !v.is_null()) {

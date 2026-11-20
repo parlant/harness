@@ -36,7 +36,7 @@ defmodule HWeb.CatalogState do
           sessions: [session()]
         }
 
-  @valid_attentions ~w(idle running sleeping error quarantined)
+  @valid_attentions ~w(idle running sleeping retrying error quarantined)
   @valid_activity_kinds ~w(generation tool user_shell compaction retry)
 
   @doc "Creates an empty catalog state."
@@ -126,7 +126,7 @@ defmodule HWeb.CatalogState do
         if is_boolean(raw_na) do
           raw_na
         else
-          attention not in ["running", "sleeping", "archived"]
+          attention not in ["running", "sleeping", "retrying", "archived"]
         end
       end
 
@@ -168,9 +168,9 @@ defmodule HWeb.CatalogState do
 
   def needs_attention?(_), do: false
 
-  @doc "Returns true if a session is currently processing (`running` or `sleeping`)."
+  @doc "Returns true if a session is running, sleeping, or retrying a provider error."
   @spec processing?(session()) :: boolean()
-  def processing?(%{attention: att}) when att in ["running", "sleeping"], do: true
+  def processing?(%{attention: att}) when att in ["running", "sleeping", "retrying"], do: true
   def processing?(_), do: false
 
   @doc "Returns true if a session belongs in the active `/inbox` view."
@@ -200,7 +200,8 @@ defmodule HWeb.CatalogState do
           running: non_neg_integer(),
           sleeping: non_neg_integer(),
           archived: non_neg_integer(),
-          all: non_neg_integer()
+          all: non_neg_integer(),
+          retrying: non_neg_integer()
         }
   def counts(sessions) when is_list(sessions) do
     Enum.reduce(
@@ -214,7 +215,8 @@ defmodule HWeb.CatalogState do
         running: 0,
         sleeping: 0,
         archived: 0,
-        all: 0
+        all: 0,
+        retrying: 0
       },
       fn s, acc ->
         acc = %{acc | all: acc.all + 1}
@@ -233,6 +235,9 @@ defmodule HWeb.CatalogState do
 
           s.attention == "sleeping" and not s.archived ->
             %{acc | processing: acc.processing + 1, sleeping: acc.sleeping + 1}
+
+          s.attention == "retrying" and not s.archived ->
+            %{acc | processing: acc.processing + 1, retrying: acc.retrying + 1}
 
           true ->
             acc
@@ -348,11 +353,13 @@ defmodule HWeb.CatalogState do
   def status_detail(%{attention: "running", activity_kind: kind}) when is_binary(kind), do: kind
   def status_detail(%{attention: "running"}), do: "generation"
 
-  def status_detail(%{attention: "sleeping", activity_label: label})
-      when is_binary(label) and label != "",
+  def status_detail(%{attention: attention, activity_label: label})
+      when attention in ["sleeping", "retrying"] and is_binary(label) and label != "",
       do: label
 
-  def status_detail(%{attention: "sleeping"}), do: "retrying"
+  def status_detail(%{attention: attention}) when attention in ["sleeping", "retrying"],
+    do: "retrying"
+
   def status_detail(_), do: nil
 
   defp shorten_home(cwd, home) when is_binary(home) and home != "" do

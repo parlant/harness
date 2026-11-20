@@ -455,7 +455,7 @@ defmodule H.Daemon do
           {:ok, _} = Server.abort_all(pid, reason)
 
         :not_running ->
-          if entry.active or entry.attention in ["running", "sleeping"] do
+          if entry.active or entry.attention in ["running", "sleeping", "retrying"] do
             Catalog.report_runtime(catalog, session_id, %{
               active: false,
               attention: "idle",

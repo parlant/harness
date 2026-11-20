@@ -133,7 +133,7 @@ impl SessionSummary {
             _ => (),
         }
         match self.attention.as_deref() {
-            Some("idle" | "running" | "sleeping" | "error" | "quarantined") => {
+            Some("idle" | "running" | "sleeping" | "retrying" | "error" | "quarantined") => {
                 self.attention.as_deref().unwrap()
             }
             _ if self.active => "running",
@@ -153,7 +153,7 @@ impl SessionSummary {
         } else {
             !matches!(
                 self.effective_attention(),
-                "running" | "sleeping" | "archived"
+                "running" | "sleeping" | "retrying" | "archived"
             )
         }
     }

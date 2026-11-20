@@ -985,7 +985,38 @@ fn render_live(
         .map(|t| format!(" · turn {t}"))
         .unwrap_or_default();
 
-    if let Some(gen) = live.get("generation").and_then(Value::as_object) {
+    let retry = state.inference_retry();
+    let waiting = retry.and_then(|r| str_at(r, "status")) == Some("waiting");
+    if let Some(retry) = retry {
+        separate(out);
+        let attempt = u64_at(retry, "attempt").unwrap_or(0);
+        let limit = u64_at(retry, "max_attempts").unwrap_or(0);
+        let code = str_at(retry, "code").unwrap_or("provider_error");
+        let message = str_at(retry, "message").unwrap_or("Provider request failed");
+        out.push(StyledRow::plain(
+            sanitize_single_line(&format!(
+                "[Retrying after provider error {attempt}/{limit} · {code}]"
+            )),
+            theme.tool_running,
+        ));
+        out.push(StyledRow::plain(
+            format!("  {}", sanitize_single_line(message)),
+            theme.tool_meta,
+        ));
+        let phase = if waiting {
+            let seconds = u64_at(retry, "delay_ms").unwrap_or(0).div_ceil(1000);
+            format!("  Waiting {seconds}s before retry · Esc to abort")
+        } else {
+            "  Retry request in progress · Esc to abort".into()
+        };
+        out.push(StyledRow::plain(phase, theme.tool_meta));
+    }
+
+    if let Some(gen) = live
+        .get("generation")
+        .and_then(Value::as_object)
+        .filter(|_| !waiting)
+    {
         separate(out);
         out.push(StyledRow::from_spans(vec![
             StyledSpan::new("[assistant ", theme.assistant_header),
@@ -1529,6 +1560,31 @@ mod tests {
             text.contains("[! Run paused during automatic compaction: codex_pool_alias_mismatch]")
         );
         assert!(text.contains("Update the pool sources in extensions.json"));
+    }
+
+    #[test]
+    fn retries_explain_backoff_without_implying_streaming_or_failure() {
+        for kind in ["generation", "compaction"] {
+            let mut state = TranscriptState {
+                docs: json!({"live": {kind: {"retry": {
+                    "attempt": 1, "max_attempts": 3, "code": "http_429",
+                    "message": "Monthly spending cap reached\x1b[31m", "delay_ms": 2000, "status": "waiting"
+                }}}}).as_object().unwrap().clone(),
+                ..Default::default()
+            };
+            let text = rows(&state, false, false).join("\n");
+            assert!(text.contains("Retrying after provider error 1/3"));
+            assert!(text.contains("http_429"));
+            assert!(text.contains("Monthly spending cap reached"));
+            assert!(text.contains("Waiting 2s before retry"));
+            assert!(!text.contains("... streaming"));
+            assert!(!text.contains('\x1b'));
+            assert!(state.is_run_active());
+            state.docs["live"][kind]["retry"]["status"] = json!("running");
+            assert!(rows(&state, false, false)
+                .join("\n")
+                .contains("Retry request in progress"));
+        }
     }
 
     #[test]

@@ -402,7 +402,7 @@ defmodule H.SessionLifecycleTest do
 
       assert ev_settled.data["session"]["needs_attention"] == true
 
-      # Dismiss needs_attention manually -> false, then run failing turn -> sleeping (false) -> error (true)
+      # Dismiss attention, then retrying work stays cleared until it fails.
       assert {:ok, %{session: %{needs_attention: false}}} =
                Daemon.triage_session("live-1", %{"needs_attention" => false}, ctx.daemon_opts)
 
@@ -413,14 +413,14 @@ defmodule H.SessionLifecycleTest do
                  ctx.daemon_opts
                )
 
-      {ev_sleeping, buf} =
+      {ev_retrying, buf} =
         wait_for_catalog_event(sse, buf, fn ev ->
           ev.event == "catalog" and ev.data["type"] == "upsert" and
             ev.data["session"]["session_id"] == "live-1" and
-            ev.data["session"]["attention"] == "sleeping"
+            ev.data["session"]["attention"] == "retrying"
         end)
 
-      assert ev_sleeping.data["session"]["needs_attention"] == false
+      assert ev_retrying.data["session"]["needs_attention"] == false
 
       {ev_error, _buf} =
         wait_for_catalog_event(sse, buf, fn ev ->

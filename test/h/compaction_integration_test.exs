@@ -1067,16 +1067,20 @@ defmodule H.CompactionIntegrationTest do
 
   describe "worker crash recovery and real OS process SIGKILL restart" do
     test "retries after retryable provider error and commits single marker" do
+      gate = make_ref()
+
       %{opts: opts, cwd: cwd} =
         start_daemon_env(
           [
             {:reply, [], %{content: [%{type: "text", text: "Reply 1"}]}},
             {:reply, [], %{content: [%{type: "text", text: String.duplicate("Reply 2 ", 15)}]}},
-            {:error, %{code: "rate_limited", message: "slow down", retryable: true}},
-            {:reply, [], %{content: [%{type: "text", text: "Recovered after retry"}]}}
+            {:error,
+             %{code: "http_429", message: "Monthly spending cap reached", retryable: true}},
+            {:gate, [], self(), gate,
+             %{content: [%{type: "text", text: "Recovered after retry"}]}}
           ],
           retry_limit: 2,
-          retry_backoff_ms: 20
+          retry_backoff_ms: 200
         )
 
       {:ok, _} = Daemon.create_session(%{"session_id" => "s-retry", "cwd" => cwd}, opts)
@@ -1088,6 +1092,24 @@ defmodule H.CompactionIntegrationTest do
           cmd("cmp-retry", "compact", "1", %{"expected_seq" => seq}),
           opts
         )
+
+      retry =
+        wait_until(fn ->
+          {:ok, {:snapshot, _, bin}} =
+            Daemon.subscribe_conversation("s-retry", "1", self(), nil, opts)
+
+          get_in(JSON.decode!(bin), ["docs", "live", "compaction", "retry"])
+        end)
+
+      assert retry["status"] == "waiting"
+      assert retry["code"] == "http_429"
+      assert retry["message"] == "Monthly spending cap reached"
+
+      assert {:ok, %{session: %{active: true, attention: "retrying"}}} =
+               Daemon.get_session_detail("s-retry", opts)
+
+      assert_receive {:gate_entered, ^gate, pid}, 2_000
+      send(pid, {:release, gate})
 
       items =
         wait_until(fn ->

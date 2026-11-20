@@ -1,6 +1,7 @@
 # H (`:harness`)
 
 - Namespace is `H.*` (`app: :harness`), targeting Elixir 1.20 / Erlang/OTP 29 with dependency-free local file storage (`H.Storage.File`) and the agreed Slice 2 web/LLM stack (`bandit`, `plug`, `req`, `req_llm`) on the path to web-based self-hosting (`docs/roadmap.md`).
+- Provider retry policy lives in `H.Session.Server.Generation`: persist sleeping tasks/deadlines, then arm timers. ReqLLM transport retries are disabled (`max_retries: 0`). Catalog `retrying` is active work, not an operator-attention error; internal task status remains `sleeping` during backoff.
 - Keep the core small: immutable domain data, explicit transitions, short atomic commits, effects outside commits. No generic plugin/workflow framework before concrete uses require it.
 - Read `docs/architecture.md` before changing domain or process boundaries. Keep implemented behavior distinct from proposals in documentation.
 - History ancestry, work ownership, supervision, and client navigation are separate structures. A zipper is a view cursor, not stored process state.

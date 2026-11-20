@@ -203,7 +203,8 @@ defmodule H.Session.Server.State do
           derive_active_activity(active_tasks)
 
         sleeping_tasks != [] ->
-          {"sleeping", "retry", "retrying"}
+          task = Enum.min_by(sleeping_tasks, & &1.id)
+          {"retrying", "retry", retry_label(task, true)}
 
         true ->
           case find_conversation_failure(docs) do
@@ -226,7 +227,12 @@ defmodule H.Session.Server.State do
       attention: attention,
       activity_kind: activity_kind,
       activity_label: Catalog.sanitize_activity_label(activity_label),
-      queued_count: queued_count
+      queued_count: queued_count,
+      next_wake_at:
+        sleeping_tasks
+        |> Enum.map(&get_in(&1, [Access.key(:wake, %{}), "until"]))
+        |> Enum.reject(&is_nil/1)
+        |> Enum.min(fn -> nil end)
     }
   end
 
@@ -266,6 +272,12 @@ defmodule H.Session.Server.State do
         t.kind == "compaction" and t.status in ["running", "pending"]
       end)
 
+    retry_task =
+      Enum.find(sorted, fn task ->
+        task.kind in ["generation", "compaction"] and task.status in ["pending", "running"] and
+          (task.checkpoint["retry_count"] || 0) > 0
+      end)
+
     cond do
       tool_task != nil ->
         label =
@@ -279,11 +291,25 @@ defmodule H.Session.Server.State do
       user_shell_task != nil ->
         {"running", "user_shell", "shell"}
 
+      retry_task != nil ->
+        {"retrying", "retry", retry_label(retry_task, false)}
+
       compaction_task != nil ->
         {"running", "compaction", "compact"}
 
       true ->
         {"running", "generation", nil}
+    end
+  end
+
+  defp retry_label(task, waiting?) do
+    case task.checkpoint["retry"] do
+      %{"attempt" => attempt, "max_attempts" => limit, "code" => code, "delay_ms" => delay} ->
+        phase = if waiting?, do: "waiting #{ceil(delay / 1_000)}s", else: "requesting"
+        "Retry #{attempt}/#{limit} · #{code} · #{phase}"
+
+      _ ->
+        "retrying"
     end
   end
 
@@ -301,8 +327,8 @@ defmodule H.Session.Server.State do
       case Map.get(live, "run_failure") || Map.get(live, "compaction_failure") do
         failure when is_map(failure) ->
           raw =
-            Map.get(failure, "reason") ||
-              Map.get(failure, "code") ||
+            Map.get(failure, "code") ||
+              Map.get(failure, "reason") ||
               "error"
 
           {:ok, Catalog.sanitize_activity_label(to_string(raw)) || "error"}

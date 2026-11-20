@@ -402,6 +402,16 @@ defmodule HWeb.InboxComponents do
     """
   end
 
+  def status_indicator(%{attention: "retrying"} = assigns) do
+    ~H"""
+    <span
+      class="inbox-status inbox-status-retrying"
+      title="Retrying after provider error"
+      aria-label="retrying"
+    >↻</span>
+    """
+  end
+
   def status_indicator(%{attention: "sleeping"} = assigns) do
     ~H"""
     <span class="inbox-status inbox-status-sleeping" title="Retrying / sleeping" aria-label="sleeping">◷</span>
