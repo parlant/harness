@@ -132,9 +132,41 @@
           <span>
             {if @next_attention_session.attention in ["error", "quarantined"],
               do: "Next error →",
-              else: "Next idle →"}
+              else: "Next →"}
           </span>
         </.link>
+        <button
+          :if={@session && @session.status != "archived" && !@run_active?}
+          id="session-attention-toggle"
+          type="button"
+          class={[
+            "btn btn-sm",
+            if(Map.get(@session, :needs_attention, true),
+              do: "btn-inbox-return",
+              else: "btn-ghost"
+            )
+          ]}
+          phx-click="toggle_session_attention"
+          title={
+            if Map.get(@session, :needs_attention, true),
+              do: "Mark as not needing attention",
+              else: "Mark as needing attention"
+          }
+        >
+          {if Map.get(@session, :needs_attention, true),
+            do: "Needs attention",
+            else: "Mark attention"}
+        </button>
+        <button
+          :if={@session && @session.status != "archived"}
+          id="archive-session-btn"
+          type="button"
+          class="btn btn-sm btn-ghost"
+          phx-click="archive_current_session"
+          title="Archive and unload this session"
+        >
+          Archive
+        </button>
         <button
           :if={@run_active?}
           id="stop-btn"
@@ -222,10 +254,177 @@
 
     <button type="button" id="jump-latest" class="btn btn-sm jump-latest" hidden>Latest ↓</button>
 
-    <div :if={@session && @session.status == "archived"} class="composer-shell muted">
-      Archived {@session.harness_id} session · read only
+    <div :if={@session && @session.status == "archived"} class="composer-shell">
+      <div class="archive-readonly-bar">
+        <span class="muted">Archived {@session.harness_id} session · read only</span>
+        <button
+          :if={!@show_fork_picker?}
+          id="open-archive-fork-picker-btn"
+          type="button"
+          class="btn btn-sm"
+          phx-click="open_fork_picker"
+        >
+          Fork into workspace…
+        </button>
+        <button
+          :if={@show_fork_picker?}
+          type="button"
+          class="btn btn-sm btn-ghost"
+          phx-click="close_fork_picker"
+        >
+          Close picker
+        </button>
+      </div>
+
+      <div :if={@show_fork_picker?} id="missing-cwd-picker" class="missing-cwd-picker">
+        <div class="missing-cwd-header">
+          <h3 class="missing-cwd-title">Fork archived session into a workspace</h3>
+          <p class="muted missing-cwd-desc">
+            Select an existing directory to fork this conversation into a new live session.
+          </p>
+        </div>
+
+        <div class="missing-cwd-toolbar">
+          <button
+            id="picker-parent-btn"
+            type="button"
+            class="btn btn-sm"
+            phx-click="picker_parent"
+            disabled={is_nil(@picker_parent_path)}
+          >
+            ↑ Up
+          </button>
+          <form id="picker-go-form" phx-submit="picker_go" class="path-form">
+            <input
+              id="picker-path-input"
+              type="text"
+              name="path"
+              value={@picker_path}
+              aria-label="Target directory path"
+              class="input mono"
+            />
+            <button type="submit" class="btn btn-sm">Go</button>
+          </form>
+        </div>
+
+        <div :if={@picker_error} id="picker-error" class="flash-banner flash-error">
+          <span>{@picker_error}</span>
+        </div>
+
+        <ul :if={@picker_dirs != []} id="picker-dir-list" class="missing-cwd-dirs">
+          <li :for={dir <- @picker_dirs}>
+            <button
+              type="button"
+              class="missing-cwd-dir-btn mono"
+              phx-click="picker_browse"
+              phx-value-path={dir.path}
+            >
+              {dir.name}/
+            </button>
+          </li>
+        </ul>
+
+        <div class="missing-cwd-actions">
+          <button
+            id="fork-to-cwd-btn"
+            type="button"
+            class="btn btn-primary"
+            phx-click="fork_to_directory"
+            phx-value-cwd={@picker_path}
+            disabled={@picker_path == ""}
+          >
+            Continue in <span class="mono">{@picker_path}</span> →
+          </button>
+        </div>
+      </div>
     </div>
-    <div :if={@session && @session.status != "archived"} class="composer-shell">
+
+    <div
+      :if={
+        @session && @session.status != "archived" &&
+          (@cwd_missing? || !Map.get(@session, :cwd_exists, true))
+      }
+      class="composer-shell"
+    >
+      <div id="missing-cwd-picker" class="missing-cwd-picker">
+        <div class="missing-cwd-header">
+          <h3 class="missing-cwd-title">Working directory no longer exists</h3>
+          <p class="muted missing-cwd-desc">
+            Working directory <span class="mono">{@session.cwd}</span>
+            no longer exists. New work is paused in this session. Select an existing directory to fork and continue this conversation, or archive this session.
+          </p>
+        </div>
+
+        <div class="missing-cwd-toolbar">
+          <button
+            id="picker-parent-btn"
+            type="button"
+            class="btn btn-sm"
+            phx-click="picker_parent"
+            disabled={is_nil(@picker_parent_path)}
+          >
+            ↑ Up
+          </button>
+          <form id="picker-go-form" phx-submit="picker_go" class="path-form">
+            <input
+              id="picker-path-input"
+              type="text"
+              name="path"
+              value={@picker_path}
+              aria-label="Target directory path"
+              class="input mono"
+            />
+            <button type="submit" class="btn btn-sm">Go</button>
+          </form>
+        </div>
+
+        <div :if={@picker_error} id="picker-error" class="flash-banner flash-error">
+          <span>{@picker_error}</span>
+        </div>
+
+        <ul :if={@picker_dirs != []} id="picker-dir-list" class="missing-cwd-dirs">
+          <li :for={dir <- @picker_dirs}>
+            <button
+              type="button"
+              class="missing-cwd-dir-btn mono"
+              phx-click="picker_browse"
+              phx-value-path={dir.path}
+            >
+              {dir.name}/
+            </button>
+          </li>
+        </ul>
+
+        <div class="missing-cwd-actions">
+          <button
+            id="fork-to-cwd-btn"
+            type="button"
+            class="btn btn-primary"
+            phx-click="fork_to_directory"
+            phx-value-cwd={@picker_path}
+            disabled={@picker_path == ""}
+          >
+            Continue in <span class="mono">{@picker_path}</span> →
+          </button>
+          <button
+            id="missing-cwd-archive-btn"
+            type="button"
+            class="btn btn-ghost"
+            phx-click="archive_current_session"
+          >
+            Archive session
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      :if={
+        @session && @session.status != "archived" && !@cwd_missing? &&
+          Map.get(@session, :cwd_exists, true)
+      }
+      class="composer-shell"
+    >
       <form id="agent-config-form" phx-change="configure" class="composer-config">
         <label class="composer-select-group">
           <span class="field-label">Model</span>

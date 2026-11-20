@@ -118,6 +118,7 @@ export const InboxBrowser = {
           cycleAttention(event.shiftKey ? -1 : 1);
         }
       } else if (event.key === "Enter") {
+        if (event.target?.closest?.("button, a")) return;
         const rows = getRows();
         const selected = this.applySelection(rows, false);
         if (selected && event.target !== selected) {

@@ -55,6 +55,13 @@ defmodule HWeb.SessionLive do
         run_active?: false,
         drawer_open?: false,
         composer_text: "",
+        cwd_missing?: false,
+        show_fork_picker?: false,
+        picker_env_id: "host",
+        picker_path: "",
+        picker_parent_path: nil,
+        picker_dirs: [],
+        picker_error: nil,
         error_banner: nil
       )
       |> stream_configure(:entries, dom_id: &"entry-#{&1["id"]}")
@@ -82,7 +89,14 @@ defmodule HWeb.SessionLive do
         {:noreply,
          socket
          |> unsubscribe_current()
-         |> assign(session_id: sid, conversation_id: cid, drawer_open?: false)
+         |> assign(
+           session_id: sid,
+           conversation_id: cid,
+           drawer_open?: false,
+           cwd_missing?: false,
+           show_fork_picker?: false,
+           picker_error: nil
+         )
          |> recompute_catalog_assigns()
          |> load_initial(sid, cid)}
 
@@ -113,10 +127,13 @@ defmodule HWeb.SessionLive do
   def handle_info({:catalog_frame, seq, json_bin}, socket) do
     case CatalogState.apply_frame(socket.assigns.catalog, seq, json_bin) do
       {:ok, next_catalog} ->
-        {:noreply,
-         socket
-         |> assign(:catalog, next_catalog)
-         |> recompute_catalog_assigns()}
+        socket =
+          socket
+          |> assign(:catalog, next_catalog)
+          |> sync_current_session_from_catalog()
+          |> recompute_catalog_assigns()
+
+        {:noreply, socket}
 
       :stale ->
         {:noreply, socket}
@@ -177,6 +194,103 @@ defmodule HWeb.SessionLive do
 
   def handle_event("dismiss_error", _params, socket) do
     {:noreply, assign(socket, :error_banner, nil)}
+  end
+
+  def handle_event("toggle_session_attention", _params, socket) do
+    session = socket.assigns.session
+
+    if is_nil(session) or session.status == "archived" do
+      {:noreply, socket}
+    else
+      target = not (Map.get(session, :needs_attention, true) == true)
+
+      case Backend.triage_session(socket.assigns.session_id, %{"needs_attention" => target}) do
+        {:ok, %{session: updated}} ->
+          {:noreply,
+           socket
+           |> assign(session: updated, error_banner: nil)
+           |> apply_session_to_catalog(updated)}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    end
+  end
+
+  def handle_event("archive_current_session", _params, socket) do
+    stop? = socket.assigns.run_active?
+
+    case Backend.archive_session(socket.assigns.session_id, %{
+           "archived" => true,
+           "stop" => stop?
+         }) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> unsubscribe_current()
+         |> push_navigate(to: ~p"/inbox")}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("open_fork_picker", _params, socket) do
+    socket =
+      socket
+      |> assign(:show_fork_picker?, true)
+      |> init_directory_picker(socket.assigns.session)
+
+    {:noreply, socket}
+  end
+
+  def handle_event("close_fork_picker", _params, socket) do
+    {:noreply, assign(socket, :show_fork_picker?, false)}
+  end
+
+  def handle_event("picker_browse", %{"path" => path}, socket) when is_binary(path) do
+    {:noreply, browse_picker(socket, socket.assigns.picker_env_id, path)}
+  end
+
+  def handle_event("picker_parent", _params, socket) do
+    case socket.assigns.picker_parent_path do
+      nil -> {:noreply, socket}
+      parent -> {:noreply, browse_picker(socket, socket.assigns.picker_env_id, parent)}
+    end
+  end
+
+  def handle_event("picker_go", %{"path" => path}, socket) when is_binary(path) do
+    {:noreply, browse_picker(socket, socket.assigns.picker_env_id, String.trim(path))}
+  end
+
+  def handle_event("picker_go", _params, socket), do: {:noreply, socket}
+
+  def handle_event("fork_to_directory", params, socket) do
+    cwd = non_empty(params["cwd"]) || non_empty(socket.assigns.picker_path)
+
+    if is_nil(cwd) do
+      {:noreply, assign(socket, :picker_error, "Select an existing directory first.")}
+    else
+      fork_params =
+        %{
+          "cwd" => cwd,
+          "env_id" => socket.assigns.picker_env_id,
+          "conversation_id" => socket.assigns.conversation_id
+        }
+
+      case Backend.fork_session(socket.assigns.session_id, fork_params) do
+        {:ok, %{session: new_session}} ->
+          new_sid = new_session[:session_id] || new_session["session_id"]
+
+          {:noreply,
+           socket
+           |> unsubscribe_current()
+           |> push_navigate(to: ~p"/sessions/#{new_sid}?from=inbox")}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :picker_error, format_error(reason))}
+      end
+    end
   end
 
   def handle_event("composer_change", %{"content" => content}, socket) do
@@ -395,24 +509,51 @@ defmodule HWeb.SessionLive do
   defp load_initial(socket, session_id, cid) do
     case Backend.get_session_detail(session_id) do
       {:ok, detail} ->
-        socket
-        |> assign(
-          session: detail.session,
-          conversations: detail.conversations,
-          tasks: detail.tasks
-        )
-        |> load_conversation(session_id, cid)
+        session = detail.session
+
+        cwd_missing? =
+          session.status != "archived" and Map.get(session, :cwd_exists, true) == false
+
+        socket =
+          socket
+          |> assign(
+            session: session,
+            conversations: detail.conversations,
+            tasks: detail.tasks,
+            cwd_missing?: cwd_missing?,
+            show_fork_picker?: false
+          )
+          |> load_conversation(session_id, cid)
+
+        if cwd_missing? do
+          init_directory_picker(socket, session)
+        else
+          socket
+        end
 
       {:error, :not_found} ->
-        socket
-        |> put_flash(:error, "Session not found")
-        |> push_navigate(to: ~p"/")
+        redirect_with_error(socket, "Session not found.")
 
       {:error, {:quarantined, reason}} ->
-        socket
-        |> put_flash(:error, "Session quarantined: #{inspect(reason)}")
-        |> push_navigate(to: ~p"/")
+        redirect_with_error(socket, "Session quarantined: #{inspect(reason)}")
+
+      {:error, :workspace_unavailable} ->
+        redirect_with_error(socket, "Session workspace environment is currently unavailable.")
+
+      {:error, :harness_unavailable} ->
+        redirect_with_error(socket, "Session harness profile is currently unavailable.")
+
+      {:error, reason} ->
+        redirect_with_error(socket, "Unable to open session: #{format_error(reason)}")
     end
+  end
+
+  defp redirect_with_error(socket, message) do
+    dest = if socket.assigns.from_inbox?, do: ~p"/inbox", else: ~p"/"
+
+    socket
+    |> put_flash(:error, message)
+    |> push_navigate(to: dest)
   end
 
   defp load_conversation(socket, session_id, cid) do
@@ -517,9 +658,136 @@ defmodule HWeb.SessionLive do
 
         {:noreply, socket}
 
+      {:error, {:conflict, "cwd_missing"}} ->
+        socket =
+          socket
+          |> refresh_detail()
+          |> assign(
+            cwd_missing?: true,
+            error_banner:
+              "Working directory no longer exists. Select a directory below to fork and continue."
+          )
+          |> then(fn s -> init_directory_picker(s, s.assigns.session) end)
+
+        {:noreply, socket}
+
       {:error, reason} ->
         {:noreply, assign(socket, :error_banner, format_error(reason))}
     end
+  end
+
+  defp init_directory_picker(socket, nil), do: socket
+
+  defp init_directory_picker(socket, session) do
+    env_id = Map.get(session, :env_id) || "host"
+    cwd = Map.get(session, :cwd) || ""
+
+    case browse_nearest_existing(env_id, cwd) do
+      {:ok, view} ->
+        assign(socket,
+          picker_env_id: view.env_id,
+          picker_path: view.path,
+          picker_parent_path: view.parent_path,
+          picker_dirs: view.directories,
+          picker_error: nil
+        )
+
+      {:error, reason} ->
+        assign(socket,
+          picker_env_id: env_id,
+          picker_path: "",
+          picker_parent_path: nil,
+          picker_dirs: [],
+          picker_error: format_error(reason)
+        )
+    end
+  end
+
+  defp browse_nearest_existing(env_id, cwd) when is_binary(cwd) and cwd != "" do
+    cwd
+    |> ancestor_paths()
+    |> Enum.reduce_while({:error, :not_found}, fn candidate, _acc ->
+      case Backend.browse_workspace(%{"env_id" => env_id, "path" => candidate}) do
+        {:ok, view} -> {:halt, {:ok, view}}
+        {:error, _} -> {:cont, {:error, :not_found}}
+      end
+    end)
+    |> case do
+      {:ok, view} -> {:ok, view}
+      {:error, _} -> Backend.browse_workspace(%{"env_id" => env_id})
+    end
+  end
+
+  defp browse_nearest_existing(env_id, _cwd) do
+    Backend.browse_workspace(%{"env_id" => env_id})
+  end
+
+  defp ancestor_paths(path) do
+    expanded = Path.expand(path)
+    collect_ancestors(expanded, [])
+  end
+
+  defp collect_ancestors(path, acc) do
+    parent = Path.dirname(path)
+
+    if parent == path do
+      Enum.reverse([path | acc])
+    else
+      collect_ancestors(parent, [path | acc])
+    end
+  end
+
+  defp browse_picker(socket, env_id, path) do
+    query = %{"env_id" => env_id} |> maybe_put("path", non_empty(path))
+
+    case Backend.browse_workspace(query) do
+      {:ok, view} ->
+        assign(socket,
+          picker_env_id: view.env_id,
+          picker_path: view.path,
+          picker_parent_path: view.parent_path,
+          picker_dirs: view.directories,
+          picker_error: nil
+        )
+
+      {:error, reason} ->
+        assign(socket, :picker_error, format_error(reason))
+    end
+  end
+
+  defp sync_current_session_from_catalog(socket) do
+    case {socket.assigns.session,
+          Map.get(socket.assigns.catalog.by_id, socket.assigns.session_id)} do
+      {%{status: status} = current, %{session_id: _} = from_cat} when status != "archived" ->
+        updated =
+          current
+          |> Map.put(:needs_attention, from_cat.needs_attention)
+          |> Map.put(:archived, from_cat.archived)
+          |> Map.put(:attention, from_cat.attention)
+          |> Map.put(:cwd_exists, from_cat.cwd_exists)
+          |> Map.put(:loaded, from_cat.loaded)
+
+        assign(socket, :session, updated)
+
+      _ ->
+        socket
+    end
+  end
+
+  defp apply_session_to_catalog(socket, raw_session) do
+    normalized = CatalogState.normalize_session(raw_session)
+    catalog = socket.assigns.catalog
+    by_id = Map.put(catalog.by_id, normalized.session_id, normalized)
+
+    next_catalog = %{
+      catalog
+      | by_id: by_id,
+        sessions: Enum.sort_by(Map.values(by_id), &{&1.updated_at || 0, &1.session_id}, :desc)
+    }
+
+    socket
+    |> assign(:catalog, next_catalog)
+    |> recompute_catalog_assigns()
   end
 
   defp build_envelope(socket, command, args, request_id) do
@@ -575,5 +843,7 @@ defmodule HWeb.SessionLive do
   defp format_error({:bad_request, msg}), do: msg
   defp format_error({:conflict, msg}), do: msg
   defp format_error(:not_found), do: "Not found"
+  defp format_error(:workspace_unavailable), do: "Workspace environment is unavailable."
+  defp format_error(:harness_unavailable), do: "Harness profile is unavailable."
   defp format_error(other), do: inspect(other)
 end

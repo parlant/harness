@@ -22,6 +22,10 @@ defmodule HWeb.CatalogState do
           activity_kind: String.t() | nil,
           activity_label: String.t() | nil,
           queued_count: non_neg_integer(),
+          needs_attention: boolean(),
+          archived: boolean(),
+          loaded: boolean(),
+          cwd_exists: boolean(),
           next_wake_at: integer() | nil,
           status: String.t()
         }
@@ -110,6 +114,28 @@ defmodule HWeb.CatalogState do
     raw_queued = field(raw, :queued_count, "queued_count")
     queued_count = if is_integer(raw_queued) and raw_queued >= 0, do: raw_queued, else: 0
 
+    raw_archived = field(raw, :archived, "archived")
+    archived = status == "archived" or raw_archived == true
+
+    raw_na = field(raw, :needs_attention, "needs_attention")
+
+    needs_attention =
+      if archived do
+        false
+      else
+        if is_boolean(raw_na) do
+          raw_na
+        else
+          attention not in ["running", "sleeping", "archived"]
+        end
+      end
+
+    raw_loaded = field(raw, :loaded, "loaded")
+    loaded = if is_boolean(raw_loaded), do: raw_loaded, else: not archived
+
+    raw_cwd_exists = field(raw, :cwd_exists, "cwd_exists")
+    cwd_exists = if is_boolean(raw_cwd_exists), do: raw_cwd_exists, else: true
+
     %{
       session_id: to_string(field(raw, :session_id, "session_id") || ""),
       title: field(raw, :title, "title"),
@@ -125,14 +151,21 @@ defmodule HWeb.CatalogState do
       activity_kind: activity_kind,
       activity_label: field(raw, :activity_label, "activity_label"),
       queued_count: queued_count,
+      needs_attention: needs_attention,
+      archived: archived,
+      loaded: loaded,
+      cwd_exists: cwd_exists,
       next_wake_at: field(raw, :next_wake_at, "next_wake_at"),
       status: status
     }
   end
 
-  @doc "Returns true if a session needs human attention (`error`, `quarantined`, or `idle`)."
+  @doc "Returns true if a session needs human attention (not archived, flagged `needs_attention`, and not processing)."
   @spec needs_attention?(session()) :: boolean()
-  def needs_attention?(%{attention: att}) when att in ["error", "quarantined", "idle"], do: true
+  def needs_attention?(%{archived: false, needs_attention: true} = session) do
+    not processing?(session)
+  end
+
   def needs_attention?(_), do: false
 
   @doc "Returns true if a session is currently processing (`running` or `sleeping`)."
@@ -140,53 +173,86 @@ defmodule HWeb.CatalogState do
   def processing?(%{attention: att}) when att in ["running", "sleeping"], do: true
   def processing?(_), do: false
 
-  @doc "Computes live attention / processing / total counts for a session list."
+  @doc "Returns true if a session belongs in the active `/inbox` view."
+  @spec active_inbox?(session()) :: boolean()
+  def active_inbox?(%{archived: true}), do: false
+
+  def active_inbox?(session) when is_map(session) do
+    session.loaded or session.needs_attention or processing?(session) or
+      session.attention == "quarantined"
+  end
+
+  @doc "Returns true if a session belongs in the `archived` filter view (archived or cold unloaded)."
+  @spec archived_or_unloaded?(session()) :: boolean()
+  def archived_or_unloaded?(%{archived: true}), do: true
+
+  def archived_or_unloaded?(session) when is_map(session) do
+    not session.loaded and not session.needs_attention and not processing?(session)
+  end
+
+  @doc "Computes live inbox / attention / processing / archived / total counts for a session list."
   @spec counts([session()]) :: %{
-          all: non_neg_integer(),
+          inbox: non_neg_integer(),
           attention: non_neg_integer(),
           error: non_neg_integer(),
           idle: non_neg_integer(),
           processing: non_neg_integer(),
           running: non_neg_integer(),
-          sleeping: non_neg_integer()
+          sleeping: non_neg_integer(),
+          archived: non_neg_integer(),
+          all: non_neg_integer()
         }
   def counts(sessions) when is_list(sessions) do
     Enum.reduce(
       sessions,
-      %{all: 0, attention: 0, error: 0, idle: 0, processing: 0, running: 0, sleeping: 0},
+      %{
+        inbox: 0,
+        attention: 0,
+        error: 0,
+        idle: 0,
+        processing: 0,
+        running: 0,
+        sleeping: 0,
+        archived: 0,
+        all: 0
+      },
       fn s, acc ->
         acc = %{acc | all: acc.all + 1}
+        acc = if active_inbox?(s), do: %{acc | inbox: acc.inbox + 1}, else: acc
+        acc = if archived_or_unloaded?(s), do: %{acc | archived: acc.archived + 1}, else: acc
 
-        case s.attention do
-          att when att in ["error", "quarantined"] ->
+        cond do
+          needs_attention?(s) and s.attention in ["error", "quarantined"] ->
             %{acc | attention: acc.attention + 1, error: acc.error + 1}
 
-          "idle" ->
+          needs_attention?(s) ->
             %{acc | attention: acc.attention + 1, idle: acc.idle + 1}
 
-          "running" ->
+          s.attention == "running" and not s.archived ->
             %{acc | processing: acc.processing + 1, running: acc.running + 1}
 
-          "sleeping" ->
+          s.attention == "sleeping" and not s.archived ->
             %{acc | processing: acc.processing + 1, sleeping: acc.sleeping + 1}
 
-          _ ->
+          true ->
             acc
         end
       end
     )
   end
 
-  @doc "Filters sessions by attention mode (`\"all\"` | `\"attention\"`) and optional search query."
+  @doc "Filters sessions by mode (`\"inbox\"` | `\"attention\"` | `\"archived\"` | `\"all\"`) and optional search query."
   @spec filter_sessions([session()], String.t(), String.t()) :: [session()]
-  def filter_sessions(sessions, filter_mode \\ "all", query \\ "") do
+  def filter_sessions(sessions, filter_mode \\ "inbox", query \\ "") do
     q = query |> to_string() |> String.trim() |> String.downcase()
 
     sessions
     |> Enum.filter(fn s ->
       mode_ok =
         case filter_mode do
+          "inbox" -> active_inbox?(s)
           "attention" -> needs_attention?(s)
+          "archived" -> archived_or_unloaded?(s)
           _ -> true
         end
 
@@ -205,9 +271,10 @@ defmodule HWeb.CatalogState do
   @doc """
   Groups sessions by `{env_id, cwd}` working directory root.
 
-  Groups are ordered by urgency (groups with `error`/`quarantined` first, then
-  `idle`, then processing-only groups) and recency (`updated_at` descending).
-  Within each group, sessions follow the same urgency + recency ordering.
+  Groups are ordered by urgency tier (error/quarantined needing attention, then
+  other needs-attention, then processing, then cleared/dismissed, then archived)
+  and recency (`updated_at` descending). Within each group, sessions follow the
+  same urgency tier + recency ordering.
   """
   @spec group_by_workspace([session()], keyword()) :: [map()]
   def group_by_workspace(sessions, opts \\ []) when is_list(sessions) do
@@ -218,7 +285,7 @@ defmodule HWeb.CatalogState do
     |> Enum.map(fn {{env_id, cwd}, group_sessions} ->
       ordered = Enum.sort_by(group_sessions, &session_sort_key/1)
       group_counts = counts(ordered)
-      top_rank = ordered |> Enum.map(&attention_rank(&1.attention)) |> Enum.min(fn -> 99 end)
+      top_rank = ordered |> Enum.map(&session_tier/1) |> Enum.min(fn -> 99 end)
       latest_updated = ordered |> Enum.map(&(&1.updated_at || 0)) |> Enum.max(fn -> 0 end)
 
       %{
@@ -263,7 +330,8 @@ defmodule HWeb.CatalogState do
 
   @doc "Returns a concise secondary label for a session's current activity or failure."
   @spec status_detail(session()) :: String.t() | nil
-  def status_detail(%{attention: "archived"}), do: "archived"
+  def status_detail(%{archived: true}), do: nil
+  def status_detail(%{attention: "archived"}), do: nil
 
   def status_detail(%{attention: "quarantined", activity_label: label}),
     do: label || "quarantined"
@@ -309,15 +377,18 @@ defmodule HWeb.CatalogState do
   end
 
   defp session_sort_key(s) do
-    {attention_rank(s.attention), -(s.updated_at || 0), s.session_id}
+    {session_tier(s), -(s.updated_at || 0), s.session_id}
   end
 
-  defp attention_rank("error"), do: 0
-  defp attention_rank("quarantined"), do: 0
-  defp attention_rank("idle"), do: 1
-  defp attention_rank("sleeping"), do: 2
-  defp attention_rank("running"), do: 3
-  defp attention_rank(_), do: 4
+  defp session_tier(s) do
+    cond do
+      s.archived -> 4
+      needs_attention?(s) and s.attention in ["error", "quarantined"] -> 0
+      needs_attention?(s) -> 1
+      processing?(s) -> 2
+      true -> 3
+    end
+  end
 
   defp field(map, atom_key, string_key) do
     case Map.fetch(map, atom_key) do

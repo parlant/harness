@@ -28,7 +28,8 @@ defmodule HWeb.BackendInVMTest do
     start_supervised!({Auth, data_dir: data_dir, name: auth, table: auth_table})
 
     start_supervised!(
-      {Catalog, data_dir: data_dir, name: catalog, table: catalog_table, pubsub: pubsub}
+      {Catalog,
+       data_dir: data_dir, name: catalog, table: catalog_table, pubsub: pubsub, registry: registry}
     )
 
     start_supervised!({WorkspaceLease, name: lease})
@@ -106,5 +107,53 @@ defmodule HWeb.BackendInVMTest do
 
     assert :ok = InVM.unsubscribe_sessions()
     refute :catalog in Registry.keys(pubsub, self())
+  end
+
+  test "delegates triage_session, stop_session, archive_session, and fork_session to H.Daemon", %{
+    projects_dir: projects_dir
+  } do
+    dir_a = Path.join(projects_dir, "fork-src")
+    dir_b = Path.join(projects_dir, "fork-dst")
+    File.mkdir_p!(dir_a)
+    File.mkdir_p!(dir_b)
+
+    assert {:ok, %{session: created}} = InVM.create_session(%{"cwd" => dir_a, "title" => "Demo"})
+    sid = created.session_id
+    assert created.needs_attention == true
+    assert created.archived == false
+    assert created.loaded == true
+    assert created.cwd_exists == true
+
+    # Triage off & on
+    assert {:ok, %{session: triaged_off}} =
+             InVM.triage_session(sid, %{"needs_attention" => false})
+
+    assert triaged_off.needs_attention == false
+
+    assert {:ok, %{session: triaged_on}} = InVM.triage_session(sid, %{"needs_attention" => true})
+    assert triaged_on.needs_attention == true
+
+    # Stop (idempotent when idle)
+    assert {:ok, %{session: stopped}} = InVM.stop_session(sid, %{})
+    assert stopped.session_id == sid
+
+    # Fork into dir_b
+    assert {:ok, %{session: forked, seq: seq}} =
+             InVM.fork_session(sid, %{"cwd" => dir_b, "conversation_id" => "1"})
+
+    assert is_integer(seq)
+    assert forked.session_id != sid
+    assert forked.cwd == Path.expand(dir_b)
+    assert forked.title == "Demo"
+
+    # Archive & unload, then unarchive
+    assert {:ok, %{session: archived}} = InVM.archive_session(sid, %{"archived" => true})
+    assert archived.archived == true
+    assert archived.loaded == false
+    assert archived.needs_attention == false
+
+    assert {:ok, %{session: restored}} = InVM.archive_session(sid, %{"archived" => false})
+    assert restored.archived == false
+    assert restored.needs_attention == true
   end
 end

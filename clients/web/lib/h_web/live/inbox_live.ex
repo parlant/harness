@@ -8,9 +8,11 @@ defmodule HWeb.InboxLive do
 
   alias HWeb.{Backend, CatalogState, InboxComponents}
 
+  @valid_filters ~w(inbox attention archived all)
+
   @impl true
   def mount(params, _session, socket) do
-    initial_filter = if params["filter"] == "attention", do: "attention", else: "all"
+    initial_filter = normalize_filter(params["filter"])
     initial_search = if is_binary(params["q"]), do: params["q"], else: ""
 
     socket =
@@ -59,11 +61,9 @@ defmodule HWeb.InboxLive do
 
   @impl true
   def handle_event("set_filter", %{"mode" => mode}, socket) do
-    normalized = if mode == "attention", do: "attention", else: "all"
-
     {:noreply,
      socket
-     |> assign(:filter_mode, normalized)
+     |> assign(:filter_mode, normalize_filter(mode))
      |> recompute_view()}
   end
 
@@ -86,6 +86,63 @@ defmodule HWeb.InboxLive do
   def handle_event("dismiss_error", _params, socket) do
     {:noreply, assign(socket, :error_banner, nil)}
   end
+
+  def handle_event(
+        "toggle_attention",
+        %{"sid" => sid, "needs-attention" => raw_val},
+        socket
+      )
+      when is_binary(sid) do
+    needs_attention = raw_val == "true"
+
+    case Backend.triage_session(sid, %{"needs_attention" => needs_attention}) do
+      {:ok, %{session: session}} ->
+        {:noreply, apply_session_upsert(socket, session)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("toggle_attention", _params, socket), do: {:noreply, socket}
+
+  def handle_event("stop_session", %{"sid" => sid}, socket) when is_binary(sid) do
+    case Backend.stop_session(sid, %{}) do
+      {:ok, %{session: session}} ->
+        {:noreply, apply_session_upsert(socket, session)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("stop_session", _params, socket), do: {:noreply, socket}
+
+  def handle_event("archive_session", %{"sid" => sid} = params, socket) when is_binary(sid) do
+    stop? = params["stop"] == "true"
+
+    case Backend.archive_session(sid, %{"archived" => true, "stop" => stop?}) do
+      {:ok, %{session: session}} ->
+        {:noreply, apply_session_upsert(socket, session)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("archive_session", _params, socket), do: {:noreply, socket}
+
+  def handle_event("unarchive_session", %{"sid" => sid}, socket) when is_binary(sid) do
+    case Backend.archive_session(sid, %{"archived" => false}) do
+      {:ok, %{session: session}} ->
+        {:noreply, apply_session_upsert(socket, session)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("unarchive_session", _params, socket), do: {:noreply, socket}
 
   def handle_event("new_session", %{"cwd" => cwd} = params, socket)
       when is_binary(cwd) and cwd != "" do
@@ -158,8 +215,28 @@ defmodule HWeb.InboxLive do
     )
   end
 
+  defp apply_session_upsert(socket, raw_session) do
+    session = CatalogState.normalize_session(raw_session)
+    catalog = socket.assigns.catalog
+    by_id = Map.put(catalog.by_id, session.session_id, session)
+
+    next_catalog = %{
+      catalog
+      | by_id: by_id,
+        sessions: Enum.sort_by(Map.values(by_id), &{&1.updated_at || 0, &1.session_id}, :desc)
+    }
+
+    socket
+    |> assign(catalog: next_catalog, error_banner: nil)
+    |> recompute_view()
+  end
+
+  defp normalize_filter(mode) when mode in @valid_filters, do: mode
+  defp normalize_filter(_), do: "inbox"
+
   defp format_error({:bad_request, msg}), do: msg
   defp format_error({:conflict, msg}), do: msg
+  defp format_error(:not_found), do: "Session not found."
   defp format_error(:catalog_unavailable), do: "Session catalog is unavailable."
   defp format_error(:workspace_unavailable), do: "Workspace environment is unavailable."
   defp format_error(other), do: inspect(other)
