@@ -19,13 +19,13 @@ first word, e.g. `hi account list --data-dir /path/to/store`.
 
 For API-key profiles in the LaunchAgent, use `/key set <provider> <alias>`
 with its masked prompt or Phoenix **Account settings**. The daemon need not
-inherit provider secrets from your shell. See [API-key setup](providers.md#api-keys-for-a-background-daemon).
+inherit provider secrets from your shell. See [API-key setup](../providers.md#api-keys-for-a-background-daemon).
 
 The daemon is the only runtime writer of `accounts.json`. First login creates
 an alias and the configuration before talking to OpenAI. It can be cancelled;
 a cancelled login leaves the alias, not a credential. No client can write raw
 credential JSON or a server-side file path. `extensions.json` stays an operator
-file because it enables trusted executable code. [Account setup](providers.md#managed-device-login)
+file because it enables trusted executable code. [Account setup](../providers.md#managed-device-login)
 explains how to keep using manual credentials or enable MultiCodex.
 
 ## Install for use in any project

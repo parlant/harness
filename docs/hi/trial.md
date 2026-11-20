@@ -1,6 +1,6 @@
 # `hi` Release Trial, Compatibility & Cutover Log
 
-Status: **Automated trial gates passed at `7a4d71c`; pi remains the fallback.** See the [current build ledger](hi-build.md) for final verification. Tables in sections 1–2 record the earlier `e9da729` baseline, not the limits of the current build.
+Status: **Automated trial gates passed at `7a4d71c`; pi remains the fallback.** See the [current build ledger](build.md) for final verification. Tables in sections 1–2 record the earlier `e9da729` baseline, not the limits of the current build.
 
 This document records isolated install/smoke verification, measured differences against pinned `pi` (`~/Projects/JavaScript/pi` at `d15b2cf43`), a metadata-only inventory of local skills/templates/scripts, exact run/rollback commands, the workweek fallback log, and remaining cutover blockers.
 
@@ -215,5 +215,5 @@ Per `docs/roadmap.md` (H5), `hi` cannot be recommended as the default until requ
 3. **Resources:** `@` + Tab and `/file` use the session workspace; `/attach` is client-local. Dynamic pi `/skill:name`, templates and extension commands are not automatically ported.
 4. **History migration:** `/name`, predecessor fork-and-edit, user shell and manual compaction shipped. `/clone` and pi JSONL import did not. Start a new H session; keep old work in pi.
 5. **Auth / provider UX parity:** Missing interactive `/login` / `/logout`, `/model` capability details (context window / cost metadata), and `/scoped-models` cycling (`Shift+Tab` thinking cycle, `Ctrl+P` model cycle).
-6. **Terminal sign-off:** The [10k key-to-paint gate](hi-performance.md) passed. Run the [manual checks](hi-terminal.md) in your actual terminal and SSH path, including IME pre-edit, selection and modifier keys, before depending on them.
+6. **Terminal sign-off:** The [10k key-to-paint gate](performance.md) passed. Run the [manual checks](terminal.md) in your actual terminal and SSH path, including IME pre-edit, selection and modifier keys, before depending on them.
 7. **CLI / help / packaging polish:** Fix `hi --help` positional `[PROMPT]...` description (claims headless print mode even though TTY `hi "msg"` starts the interactive TUI), drop or gate unused `--tui-mode` from `h --help`, reconcile `-v` vs `-V` and piped-stdin `-p` expectations if scripts require them, and package locked release binaries for macOS/Linux.

@@ -62,7 +62,7 @@ This installs a versioned bundle and a per-user macOS service. `hi` resolves
 its sibling `h-daemon`; `H_DAEMON_BIN` or `--launcher` can override
 it. On macOS, `hi daemon install-service` registers a per-user LaunchAgent.
 Use `mix h.build` for a development build of all three applications. See
-[local daemon management](docs/hi-management.md) for idle-only restarts and
+[local daemon management](docs/hi/management.md) for idle-only restarts and
 resuming the same conversation with `/restart-ui`.
 
 See [model provider setup](docs/providers.md) for `/key set` and named API-key
@@ -77,8 +77,8 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 - [Architecture](docs/architecture.md) — ownership, commits, recovery and client boundaries
 - [Local HTTP/JSON and SSE protocol](docs/protocol.md)
 - [Roadmap](docs/roadmap.md) — implemented milestones and remaining work
-- [hi build and cutover status](docs/hi-build.md) — shipped workflows, verification and ordered remaining batches
-- [hi status lines](docs/hi-status.md) — user templates, available fields and `/reload`
+- [hi build and cutover status](docs/hi/build.md) — shipped workflows, verification and ordered remaining batches
+- [hi status lines](docs/hi/status.md) — user templates, available fields and `/reload`
 - [hi design and parity target](docs/hi.md) — interaction parity, Rust choices and durable differences
 - [Extensions](docs/extensions.md) — daemon packages, profiles, environments, providers and clients
 - [Design references](docs/references.md)

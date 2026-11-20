@@ -1,6 +1,6 @@
 # Clients: owner interactions and extension status
 
-[Extensions index](../extensions.md) · [Current wire protocol](../protocol.md) · [Current `hi` status templates](../hi-status.md)
+[Extensions index](../extensions.md) · [Current wire protocol](../protocol.md) · [Current `hi` status templates](../hi/status.md)
 
 ## Existing: what clients own
 
@@ -69,7 +69,7 @@ After implementation, this would be valid `hi.json` (it is not accepted by today
 }
 ```
 
-Give `extensions` an empty-map default so guarded optional namespaces work in strict MiniJinja. Typos in top-level fields remain errors. Keep local template validation, control escaping, output budgets and clipping. Missing data can produce no row; an optional package never supplies executable templates or forces a widget. No dynamically installed Rust libraries, embedded language, arbitrary slash commands or remotely supplied forms. See [dynamic configuration](../hi-dynamic-config.md) for separate, local presentation ideas.
+Give `extensions` an empty-map default so guarded optional namespaces work in strict MiniJinja. Typos in top-level fields remain errors. Keep local template validation, control escaping, output budgets and clipping. Missing data can produce no row; an optional package never supplies executable templates or forces a widget. No dynamically installed Rust libraries, embedded language, arbitrary slash commands or remotely supplied forms. See [dynamic configuration](../hi/dynamic-config.md) for separate, local presentation ideas.
 
 ## Verification
 

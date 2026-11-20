@@ -37,4 +37,4 @@ python3 -B -m unittest discover -s "${REPO_ROOT}/clients/tui/tests" -p 'test_*.p
 echo
 echo "PASS: automated PTY terminal checks passed in fullscreen and regular modes."
 echo "Next (requires a person): run the manual IME, font-width, clipboard, and real-SSH"
-echo "checks documented in docs/hi-terminal.md."
+echo "checks documented in docs/hi/terminal.md."

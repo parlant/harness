@@ -1,6 +1,6 @@
 # hi: replacing pi at the terminal
 
-**Design target, not a release checklist.** For what now runs and what still blocks cutover, see [implementation status](hi-build.md); for shipped commands see [protocol v1](protocol.md). Build `hi` in `clients/tui`, on the same authenticated daemon as Phoenix. The product test is “can I use this in place of pi for my actual coding sessions?”, not “can Ratatui display a chat?” Keep `h` working during the transition. No second agent loop, local session log, Node requirement or rewrite of the daemon.
+**Design target, not a release checklist.** For what now runs and what still blocks cutover, see [implementation status](hi/build.md); for shipped commands see [protocol v1](protocol.md). Build `hi` in `clients/tui`, on the same authenticated daemon as Phoenix. The product test is “can I use this in place of pi for my actual coding sessions?”, not “can Ratatui display a chat?” Keep `h` working during the transition. No second agent loop, local session log, Node requirement or rewrite of the daemon.
 
 ## Reference and starting point
 

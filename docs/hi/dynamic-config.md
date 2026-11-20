@@ -1,6 +1,6 @@
 # Dynamic configuration in `hi` (design discussion)
 
-[`hi` ships data-only status templates](hi-status.md). The options here are proposals, not extension hooks that exist today.
+[`hi` ships data-only status templates](status.md). The options here are proposals, not extension hooks that exist today.
 
 ## What other clients do
 
