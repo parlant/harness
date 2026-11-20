@@ -201,6 +201,7 @@
             </div>
 
             <button
+              :if={@session && @session.status != "archived"}
               type="button"
               class="btn btn-sm btn-ghost"
               phx-click="fork_entry"
@@ -221,7 +222,10 @@
 
     <button type="button" id="jump-latest" class="btn btn-sm jump-latest" hidden>Latest ↓</button>
 
-    <div class="composer-shell">
+    <div :if={@session && @session.status == "archived"} class="composer-shell muted">
+      Archived {@session.harness_id} session · read only
+    </div>
+    <div :if={@session && @session.status != "archived"} class="composer-shell">
       <form id="agent-config-form" phx-change="configure" class="composer-config">
         <label class="composer-select-group">
           <span class="field-label">Model</span>

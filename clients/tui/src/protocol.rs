@@ -117,8 +117,10 @@ impl SessionSummary {
     /// Returns the effective attention state for this session, falling back
     /// cleanly for older/minimal payloads that omit `attention`.
     pub fn effective_attention(&self) -> &str {
-        if self.status.as_deref() == Some("quarantined") {
-            return "quarantined";
+        match self.status.as_deref() {
+            Some("quarantined") => return "quarantined",
+            Some("archived") => return "archived",
+            _ => (),
         }
         match self.attention.as_deref() {
             Some("idle" | "running" | "sleeping" | "error" | "quarantined") => {

@@ -836,7 +836,7 @@ pub fn is_processing_attention(attention: &str) -> bool {
 }
 
 pub fn needs_attention(attention: &str) -> bool {
-    !is_processing_attention(attention)
+    matches!(attention, "idle" | "error" | "quarantined")
 }
 
 fn format_attention_detail(session: &SessionSummary, attention: &str) -> String {
@@ -871,6 +871,7 @@ fn format_attention_detail(session: &SessionSummary, attention: &str) -> String 
             (None, None) => "running".to_string(),
         },
         "sleeping" => label.unwrap_or_else(|| "retrying".to_string()),
+        "archived" => "archived".to_string(),
         _ => "idle".to_string(),
     }
 }

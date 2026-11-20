@@ -147,8 +147,19 @@ pub fn hi_main() -> ExitCode {
         let inbox_cli = InboxCli::parse_from(inbox_args);
         return report(run_inbox_cli(inbox_cli));
     }
-    let cmd = Cli::command()
-        .after_help("Subcommands: hi inbox, hi login, hi account, hi daemon (each accepts --help)");
+    if let Some(name) = args.get(1).and_then(|arg| arg.to_str()) {
+        if let Some(result) = exec_extension(name, &args[2..]) {
+            return report(Err(AppError::Message(result)));
+        }
+        if name == "import" {
+            return report(Err(AppError::Message(
+                "hi import requires hi-import on PATH".into(),
+            )));
+        }
+    }
+    let cmd = Cli::command().after_help(
+        "Subcommands: hi inbox, hi login, hi account, hi daemon. Extensions: hi <name> runs hi-<name> from PATH (e.g. hi import). Use -- for a literal prompt.",
+    );
     let cli = Cli::from_arg_matches(&cmd.get_matches_from(args)).unwrap_or_else(|err| err.exit());
     report(run(cli))
 }
@@ -177,6 +188,31 @@ fn run_inbox_cli(cli: InboxCli) -> Result<(), AppError> {
         reexec,
     )
     .map_err(AppError::Message)
+}
+
+fn exec_extension(name: &str, args: &[std::ffi::OsString]) -> Option<String> {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+
+    if !name.starts_with(|c: char| c.is_ascii_lowercase())
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        return None;
+    }
+    let executable = format!("hi-{name}");
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path).filter(|dir| dir.is_absolute()) {
+        let command = dir.join(&executable);
+        if command
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        {
+            let err = std::process::Command::new(command).args(args).exec();
+            return Some(format!("could not run {executable}: {err}"));
+        }
+    }
+    None
 }
 
 fn report(result: Result<(), AppError>) -> ExitCode {
@@ -319,8 +355,8 @@ fn sort_sessions_latest_first(sessions: &mut [SessionSummary]) {
 fn pick_latest_session(sessions: &[SessionSummary]) -> Option<&SessionSummary> {
     sessions
         .iter()
-        .find(|s| s.status.as_deref() != Some("quarantined"))
-        .or_else(|| sessions.first())
+        .filter(|s| s.status.as_deref() != Some("archived"))
+        .min_by_key(|s| s.status.as_deref() == Some("quarantined"))
 }
 
 fn resolve_session_for_run(

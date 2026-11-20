@@ -109,7 +109,9 @@ impl<'a> StatusFields<'a> {
             session_status: target.labels.status.as_deref(),
             harness_id: target.labels.harness_id.as_deref(),
             seq: state.seq,
-            activity: if state.is_run_active() {
+            activity: if target.labels.status.as_deref() == Some("archived") {
+                "archived"
+            } else if state.is_run_active() {
                 "busy"
             } else if failure.is_some() {
                 "paused"

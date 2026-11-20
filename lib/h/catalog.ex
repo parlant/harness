@@ -219,6 +219,11 @@ defmodule H.Catalog do
     GenServer.call(server, {:put_session, attrs})
   end
 
+  @doc false
+  def publish_archive(server, attrs, staged_path) do
+    GenServer.call(server, {:publish_archive, attrs, staged_path}, :infinity)
+  end
+
   @doc "Creates an identity without overwriting a concurrently created session."
   def insert_session(server, attrs) when is_map(attrs) do
     GenServer.call(server, {:insert_session, attrs})
@@ -285,6 +290,63 @@ defmodule H.Catalog do
       |> Enum.sort_by(&{&1.updated_at || 0, &1.session_id}, :desc)
 
     {:reply, %{seq: state.seq, sessions: sessions}, state}
+  end
+
+  def handle_call({:publish_archive, attrs, staged}, _from, state) do
+    existing = state.entries[attrs.session_id]
+    old = existing && existing.archive
+    source = attrs.archive
+    sid = attrs.session_id
+
+    outcome =
+      cond do
+        existing && is_nil(old) ->
+          {:error, {:conflict, "session ID is already in use"}}
+
+        old && {old.source, old.source_id} != {source.source, source.source_id} ->
+          {:error, {:conflict, "archive source does not match"}}
+
+        old && {source.revision, source.size} == {old.revision, old.size} ->
+          {:ok, "unchanged"}
+
+        old && {source.revision, source.size} < {old.revision, old.size} ->
+          {:ok, "stale"}
+
+        true ->
+          nil
+      end
+
+    if outcome do
+      {:reply, outcome, state}
+    else
+      gen = if old, do: old.generation + 1, else: 1
+      dir = Path.dirname(staged)
+      dest = H.Archive.path(dir, sid, gen)
+
+      with {:ok, validated} <-
+             validate_put_attrs(
+               Map.merge(attrs, %{status: "archived", harness_id: source.source})
+             ),
+           :ok <- File.rename(staged, dest) do
+        entry = build_entry(nil, validated, attrs.updated_at)
+        entry = %{entry | archive: Map.put(source, :generation, gen)}
+        entries = Map.put(state.entries, sid, entry)
+        persist_entries!(state.file_path, entries)
+        :ets.insert(state.table, {sid, entry})
+        if old, do: File.rm(H.Archive.path(dir, sid, old.generation))
+        seq = state.seq + 1
+        broadcast_upsert(state.pubsub, seq, entry)
+
+        {:reply, {:ok, if(old, do: "updated", else: "created")},
+         %{state | entries: entries, seq: seq}}
+      else
+        {:error, reason} when is_binary(reason) ->
+          {:reply, {:error, {:bad_request, reason}}, state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    end
   end
 
   def handle_call({operation, attrs}, _from, state)
@@ -409,7 +471,7 @@ defmodule H.Catalog do
              {:activity_label, :string, required: false, nullable: true},
              {:queued_count, {:int, min: 0}, required: false},
              {:next_wake_at, :int, required: false, nullable: true},
-             {:status, {:enum, ["ok", "quarantined"]}, required: false},
+             {:status, {:enum, ["ok", "quarantined", "archived"]}, required: false},
              {:quarantine_reason, :string, required: false, nullable: true},
              {:pending_edits, {:list, :any}, required: false},
              {:applied_edit_rev, :int, required: false}
@@ -458,6 +520,7 @@ defmodule H.Catalog do
       queued_count: Map.get(validated, :queued_count, 0),
       next_wake_at: Map.get(validated, :next_wake_at, nil),
       status: status,
+      archive: nil,
       quarantine_reason: Map.get(validated, :quarantine_reason, nil),
       pending_edits: Map.get(validated, :pending_edits, []),
       applied_edit_rev: Map.get(validated, :applied_edit_rev, 0)
@@ -556,11 +619,15 @@ defmodule H.Catalog do
   defp enforce_status_attention(%{status: "quarantined"} = entry),
     do: %{entry | attention: "quarantined"}
 
+  defp enforce_status_attention(%{status: "archived"} = entry),
+    do: %{entry | attention: "archived", active: false}
+
   defp enforce_status_attention(entry) do
     %{entry | attention: normalize_attention(Map.get(entry, :attention), entry.status)}
   end
 
   defp normalize_attention(_val, "quarantined"), do: "quarantined"
+  defp normalize_attention(_val, "archived"), do: "archived"
   defp normalize_attention(val, _status) when val in @valid_attentions, do: val
   defp normalize_attention(_val, _status), do: "idle"
 
@@ -649,11 +716,24 @@ defmodule H.Catalog do
       queued_count: normalize_queued_count(Map.get(raw, "queued_count")),
       next_wake_at: Map.get(raw, "next_wake_at"),
       status: status,
+      archive: decode_archive(raw["archive"]),
       quarantine_reason: Map.get(raw, "quarantine_reason"),
       pending_edits: Map.get(raw, "pending_edits", []),
       applied_edit_rev: Map.get(raw, "applied_edit_rev", 0)
     }
   end
+
+  defp decode_archive(%{
+         "source" => source,
+         "source_id" => id,
+         "revision" => revision,
+         "size" => size,
+         "generation" => gen
+       }) do
+    %{source: source, source_id: id, revision: revision, size: size, generation: gen}
+  end
+
+  defp decode_archive(nil), do: nil
 
   defp non_empty_or_default(val, _default) when is_binary(val) and val != "", do: val
   defp non_empty_or_default(_val, default), do: default

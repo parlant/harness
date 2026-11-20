@@ -113,6 +113,8 @@ def install(args):
     current = prefix / "current"
     bin_dir = Path(args.bin_dir).expanduser().absolute()
     hi_link = bin_dir / "hi"
+    import_link = bin_dir / "hi-import"
+    import_bin = current / "bin/hi-import"
     hi = current / "bin/hi"
     launcher = current / "bin/h-daemon"
     data = Path(args.data_dir).expanduser().resolve()
@@ -158,6 +160,11 @@ def install(args):
                 staged.rename(release)
             print(f"Staged {release.name}: {release}")
 
+        has_import = (release / "bin/hi-import").is_file() and os.access(release / "bin/hi-import", os.X_OK)
+        owned_import_link = import_link.is_symlink() and import_link.readlink() == import_bin
+        if has_import and os.path.lexists(import_link) and not owned_import_link:
+            raise RuntimeError(f"Refusing to replace the existing {import_link}")
+
         checked([release / "bin/h-daemon", "--data-dir", data, "--check-config"], env)
         status = run([release / "bin/hi", "daemon", "status"], env)
         if status.returncode != 0 and "Daemon is not running" not in status.stderr:
@@ -176,6 +183,10 @@ def install(args):
         if not os.path.lexists(hi_link):
             bin_dir.mkdir(parents=True, exist_ok=True)
             hi_link.symlink_to(hi)
+        if has_import and not owned_import_link:
+            import_link.symlink_to(import_bin)
+        elif not has_import and owned_import_link:
+            import_link.unlink()
         print(f"Activated {release.name}; {hi_link} points through {current}")
         if old is not None and old != release:
             print(f"Previous bundle retained: {old.name} (mix h.install --activate {old.name})")

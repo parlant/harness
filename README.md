@@ -70,6 +70,9 @@ Use `mix h.build` for a development build of all three applications. See
 [local daemon management](docs/hi/management.md) for idle-only restarts and
 resuming the same conversation with `/restart-ui`.
 
+Import pi transcripts as read-only sessions with `hi import --harness pi`.
+See [archive import](docs/hi/import.md) for overrides and repeat imports.
+
 See [model provider setup](docs/providers.md) for `/key set` and named API-key
 profiles, Codex device login, and Gemini on Vertex AI.
 

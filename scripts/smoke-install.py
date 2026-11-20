@@ -18,7 +18,7 @@ def smoke(bundle):
     with tempfile.TemporaryDirectory(prefix="h-install-smoke-", dir="/private/tmp" if sys.platform == "darwin" else "/tmp") as tmp:
         home = Path(tmp)
         data = home / ".local/share/h"
-        env = {"HOME": tmp, "PATH": f"{home}/.bin:/usr/bin:/bin", "ERL_FLAGS": "+S 2:2"}
+        env = {"HOME": tmp, "PATH": f"{home}/.bin:/usr/bin:/bin", "ERL_FLAGS": "+S 2:2", "H_WEB_PORT": "0"}
         hi = home / ".bin/hi"
         backing_bin = home / "bin backing"
         backing_bin.mkdir()
@@ -51,6 +51,8 @@ def smoke(bundle):
         assert "to PATH" not in installed.stdout and (backing_bin / "hi").is_symlink()
         initial = current.resolve(strict=True)
         assert hi.resolve(strict=True) == initial / "bin/hi"
+        assert (hi.parent / "hi-import").resolve(strict=True) == initial / "bin/hi-import"
+        assert "--harness" in run(hi, "import", "--help").stdout
         assert not data.exists()
         run(*installer, bundle)
         second = current.resolve(strict=True)

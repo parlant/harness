@@ -179,6 +179,40 @@ defmodule H.HTTP.Router do
     end
   end
 
+  get "/api/v1/archives" do
+    {_daemon, opts} = daemon_config(conn)
+
+    archives =
+      (opts[:catalog_table] || :h_catalog)
+      |> H.Catalog.list_sessions()
+      |> Enum.flat_map(fn entry ->
+        if entry.archive, do: [Map.put(entry.archive, :session_id, entry.session_id)], else: []
+      end)
+
+    send_json(conn, 200, %{archives: archives})
+  end
+
+  post "/api/v1/archives" do
+    {_daemon, opts} = daemon_config(conn)
+
+    case H.HTTP.Archive.upload(conn, opts) do
+      {:ok, receipt, conn} ->
+        send_json(conn, 200, receipt)
+
+      {:error, {:bad_request, reason}} ->
+        send_json(conn, 422, %{error: reason})
+
+      {:error, {:conflict, reason}} ->
+        send_json(conn, 409, %{error: reason})
+
+      {:error, :archive_too_large} ->
+        send_json(conn, 413, %{error: "archive upload exceeds limits"})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
   post "/api/v1/sessions" do
     {daemon, daemon_opts} = daemon_config(conn)
 

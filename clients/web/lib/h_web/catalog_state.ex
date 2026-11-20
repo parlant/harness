@@ -99,7 +99,7 @@ defmodule HWeb.CatalogState do
 
     attention =
       cond do
-        status == "quarantined" -> "quarantined"
+        status in ["quarantined", "archived"] -> status
         raw_attention in @valid_attentions -> raw_attention
         true -> "idle"
       end
@@ -263,6 +263,8 @@ defmodule HWeb.CatalogState do
 
   @doc "Returns a concise secondary label for a session's current activity or failure."
   @spec status_detail(session()) :: String.t() | nil
+  def status_detail(%{attention: "archived"}), do: "archived"
+
   def status_detail(%{attention: "quarantined", activity_label: label}),
     do: label || "quarantined"
 

@@ -10,6 +10,9 @@ is needed to run the bundle.
 ./bin/hi login              # optional Codex device login, no session needed
 ```
 
+With `bin` on `PATH`, `hi import --harness pi` runs the bundled `hi-import`
+client to copy pi history into the running daemon as read-only archives.
+
 The bundled runtime does not put its internal Erlang tools on the `PATH`
 used by host shell commands. Supply your normal development toolchain on the
 launcher's `PATH` if a workspace needs it.

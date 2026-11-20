@@ -258,6 +258,9 @@ defmodule H.Daemon do
     end
   end
 
+  defp attach_session(%{status: "archived"}, _params, _opts),
+    do: {:error, {:conflict, "session is archived"}}
+
   defp attach_session(entry, params, opts) do
     harness_id = Map.get(entry, :harness_id) || "coding"
     env_id = Map.get(entry, :env_id) || "host"
@@ -363,9 +366,19 @@ defmodule H.Daemon do
 
     with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- Validation.ensure_not_quarantined(entry),
-         {:ok, server} <- ensure_session_started(entry, opts, nil),
+         :ok <- Validation.ensure_not_quarantined(entry) do
+      case entry.status do
+        "archived" -> H.Archive.detail(entry, opts)
+        _ -> live_session_detail(entry, opts, table)
+      end
+    end
+  end
+
+  defp live_session_detail(entry, opts, table) do
+    with {:ok, server} <- ensure_session_started(entry, opts, nil),
          {:ok, detail} <- Server.get_detail(server) do
+      session_id = entry.session_id
+
       session_entry =
         case Catalog.get_session(session_id, table) do
           {:ok, latest} -> latest
@@ -400,8 +413,16 @@ defmodule H.Daemon do
          {:ok, entry} <- Catalog.get_session(session_id, table),
          :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, cid} <- Validation.parse_cid(conversation_id),
-         {:ok, query} <- Validation.parse_scan_query(query_params),
-         {:ok, server} <- ensure_session_started(entry, opts, nil),
+         {:ok, query} <- Validation.parse_scan_query(query_params) do
+      case entry.status do
+        "archived" -> H.Archive.scan(entry, cid, query, opts)
+        _ -> scan_live_entries(entry, cid, query, opts)
+      end
+    end
+  end
+
+  defp scan_live_entries(entry, cid, query, opts) do
+    with {:ok, server} <- ensure_session_started(entry, opts, nil),
          {:ok, %{items: items, next_cursor: next_cursor}} <-
            Server.scan_entries(server, cid, query) do
       {:ok,
@@ -483,9 +504,17 @@ defmodule H.Daemon do
          {:ok, entry} <- Catalog.get_session(session_id, table),
          :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, cid} <- Validation.parse_cid(conversation_id),
-         {:ok, last_event_id} <- Validation.parse_last_event_id(last_event_id_or_nil),
-         {:ok, server} <- ensure_session_started(entry, opts, nil) do
-      topic = {:conversation, session_id, cid}
+         {:ok, last_event_id} <- Validation.parse_last_event_id(last_event_id_or_nil) do
+      case entry.status do
+        "archived" -> H.Archive.snapshot(entry, cid, opts)
+        _ -> subscribe_live(entry, cid, subscriber_pid, last_event_id, pubsub, opts)
+      end
+    end
+  end
+
+  defp subscribe_live(entry, cid, subscriber_pid, last_event_id, pubsub, opts) do
+    with {:ok, server} <- ensure_session_started(entry, opts, nil) do
+      topic = {:conversation, entry.session_id, cid}
 
       already_registered? =
         subscriber_pid == self() and not is_nil(pubsub) and
@@ -530,6 +559,11 @@ defmodule H.Daemon do
     with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
          :ok <- Validation.ensure_not_quarantined(entry),
+         :ok <-
+           if(entry.status == "archived",
+             do: {:error, {:conflict, "session is archived"}},
+             else: :ok
+           ),
          {:ok, envelope} <- Validation.validate_envelope(raw_envelope),
          {:ok, server} <- ensure_session_started(entry, opts, nil) do
       Server.execute_command(server, envelope)

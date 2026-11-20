@@ -116,6 +116,23 @@ defmodule H.HTTP.SecurityPlug do
   end
 
   defp enforce_route_security(
+         %Plug.Conn{method: "POST", path_info: ["api", "v1", "archives"]} = conn,
+         opts,
+         _port
+       ) do
+    cond do
+      not bearer_authorized?(conn, opts[:auth_table] || :h_auth) ->
+        send_json_halt(conn, 401, %{"error" => "unauthorized"})
+
+      get_req_header(conn, "content-type") != ["application/x-ndjson"] ->
+        send_json_halt(conn, 415, %{"error" => "expected application/x-ndjson"})
+
+      true ->
+        conn
+    end
+  end
+
+  defp enforce_route_security(
          %Plug.Conn{path_info: ["api", "v1" | _]} = conn,
          opts,
          port

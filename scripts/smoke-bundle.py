@@ -117,6 +117,26 @@ def smoke(source):
                 })
                 assert len(json.loads(manifest.read_text())["http_urls"]) == 1
                 check_web("127.0.0.1")
+                imports = root / "pi sessions" / "nested"
+                imports.mkdir(parents=True)
+                source = imports / "fixture.jsonl"
+                timestamp = "2026-01-01T00:00:00Z"
+                def append_pi(*rows):
+                    with source.open("a") as f:
+                        for row in rows:
+                            f.write(json.dumps({"timestamp": timestamp, **row}) + "\n")
+                append_pi({"type": "session", "version": 3, "id": "smoke-pi", "cwd": "/missing/workspace"},
+                          {"type": "message", "id": "a", "parentId": None, "message": {"role": "user", "content": "archive prompt"}},
+                          {"type": "message", "id": "b", "parentId": "a", "message": {"role": "assistant", "content": "x" * 300_000}})
+                def import_pi():
+                    return run("/usr/bin/env", "PATH=" + str(bundle / "bin") + ":" + env["PATH"],
+                               hi, "import", "--harness", "pi", "--directory", imports.parent).stdout
+                assert "Created 1, updated 0" in import_pi()
+                assert "unchanged 1" in import_pi()
+                append_pi({"type": "message", "id": "c", "parentId": "a", "message": {"role": "user", "content": "forked prompt"}})
+                assert "Created 0, updated 1" in import_pi()
+                [archive] = api("archives")["archives"]
+                archived_sid = archive["session_id"]
                 # Both accounts are unsigned; the extension cannot contact OpenAI.
                 config = json.dumps({"version": 1, "extensions": [{"path": str(bundle / "extensions/multicodex"), "settings": {"sources": ["personal", "work"]}}]})
                 extensions.write_text("malformed")
@@ -133,6 +153,13 @@ def smoke(source):
                 replacement = launch("restart")
                 ready(replacement)
                 assert old.wait(timeout=5) == 0
+                assert "unchanged 1" in import_pi()
+                archive_detail = api(f"sessions/{archived_sid}")
+                assert archive_detail["session"]["status"] == "archived"
+                [main, fork] = archive_detail["conversations"]
+                assert fork["parent"]["conversation_id"] == main["id"]
+                fork_entries = api(f"sessions/{archived_sid}/conversations/{fork['id']}/entries")["items"]
+                assert [e["data"]["content"] for e in fork_entries] == ["forked prompt", "archive prompt"]
                 urls = json.loads(manifest.read_text())["http_urls"]
                 assert [urllib.parse.urlsplit(url).hostname for url in urls] == addresses
                 for ip, url in zip(addresses, urls):
