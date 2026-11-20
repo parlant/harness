@@ -66,6 +66,15 @@ defmodule H.ToolsTest do
       assert {:error, _} = Tool.validate_args(Edit, %{"path" => "a.txt", "edits" => []})
 
       assert {:ok, _} = Tool.validate_args(Bash, %{"command" => "echo hi", "timeout_ms" => 500})
+      assert {:ok, _} = Tool.validate_args(Bash, %{"command" => ":", "cwd" => "/work/tree"})
+
+      assert {:error, _} =
+               Tool.validate_args(Bash, %{
+                 "command" => ":",
+                 "cwd" => "/work/tree",
+                 "cwd_scope" => "turn"
+               })
+
       assert {:error, _} = Tool.validate_args(Bash, %{"command" => "echo hi", "timeout_ms" => 50})
     end
   end

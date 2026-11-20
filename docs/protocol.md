@@ -66,9 +66,13 @@ If a session's bound working directory no longer exists (`cwd_exists: false`), r
 
 ## Workspace mutation waits
 
-Mutating tools (including every `bash` call) and user-shell commands automatically queue when another conversation holds the session's `{env_id, cwd}` lease. Admission is FIFO, with a reserved handoff signalled by the daemon on release or owner exit; no retry polling or model round is needed. Non-mutating tools do not wait. Shell `cd` and `git -C` arguments do not change the session's lease key.
+Coding tools `bash`, `read`, `write`, and `edit` take an optional `cwd`: an existing absolute directory in the session's environment. Relative file paths and shell commands use that directory for the call. Mutating tools (including every `bash` call) automatically queue when another conversation holds the effective `{env_id, canonical_cwd}` lease. User-shell commands still use the session workspace. Admission is FIFO, with a reserved handoff signalled by the daemon on release or owner exit. Non-mutating tools do not wait. Shell `cd`, `git -C`, and absolute file arguments do not change the lease key; use `cwd` at the worktree root to coordinate writes there.
 
-While queued, `live.workspace_wait` contains `task_id`, `holder_session_id`, `holder_conversation_id`, and an opaque `lease_id`. Tool or user-shell live status is `"waiting"`; no execution attempt has started. Holder changes update the wait document. It disappears when execution starts or the wait is cancelled. Pending persisted workspace waits can rejoin the queue after restart; interrupted **running** unsafe commands are still never replayed.
+Overrides apply to one call only. Every call that omits `cwd` uses the session workspace. Catalog `cwd`, `AGENTS.md` instructions, session file browsing, and `!`/`!!` are unchanged. Results for workspace-bound coding calls record the resolved directory in `details.cwd`.
+
+For parallel subagent edits, prepare separate Git worktrees first, then pass each root as `subagent.cwd`. Omit it to use the parent's session workspace; `read_only: true` is suitable for shared-directory exploration. `cwd` is for new children only, not follow-ups. H does not create, merge, or remove worktrees automatically.
+
+While queued, `live.workspace_wait` contains `env_id`, `cwd` (the effective lease target), `task_id`, `holder_session_id`, `holder_conversation_id`, and an opaque `lease_id`. Tool or user-shell live status is `"waiting"`; no execution attempt has started. Holder changes update the wait document. It disappears when execution starts or the wait is cancelled. Pending persisted workspace waits can rejoin the queue for the recorded directory after restart; interrupted **running** unsafe commands are still never replayed.
 
 Both clients offer **Cancel wait** and **Stop holder and acquire**. hi opens an action picker on entering a wait; `/workspace` reopens it. Dismissing the picker keeps waiting. Cancelling does not stop the holder. Stop-holder targets that specific lease, not an arbitrary session or a later command; it never clears a live lock underneath a worker. The owner commits cancellation and stops its work before releasing. The receipt acknowledges the request, not completion of cleanup or acquisition.
 
@@ -105,7 +109,7 @@ HTTP 429 messages explain rate limits versus quota or spending-cap restrictions 
 
 Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST /sessions`, `GET /sessions/:sid`, `POST /sessions/:sid/{triage,stop,archive,fork}`, and `GET /fs` (`sessions` and `directories[*].latest_session`) includes immutable spawn lineage, attention, and lifecycle metadata:
 
-- `parent`: `null` for root sessions, or `{"session_id": "...", "conversation_id": "1", "at_entry_id": "42" | null, "task_id": "43" | null, "depth": 1}` anchoring a subsession to its parent step.
+- `parent`: `null` for root sessions, or `{"session_id": "...", "conversation_id": "1", "at_entry_id": "42" | null, "task_id": "43" | null, "depth": 1}` anchoring a subsession to its parent step. New subsessions also record the launch workspace as `parent.env_id` and `parent.cwd`: the parent's bound directory and environment. Older records may omit the launch workspace.
 - `role`: `null` or a short role string (max 64 chars, no control characters), defaulting to `"subagent"` when spawned with `parent`.
 - `attention`: `"idle"` | `"running"` | `"sleeping"` | `"retrying"` | `"error"` | `"quarantined"` | `"archived"` (always `"quarantined"` when `status == "quarantined"`, and `"archived"` when `archived == true` and not quarantined).
 - Imported sessions have `status: "archived"`, `archived: true`, `attention: "archived"`, and `active: false`.
@@ -116,7 +120,8 @@ Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST
 - `needs_attention`: boolean triage flag persisted in `H.Catalog` (`true` on creation and when a run settles to `"idle"`, `"error"`, or `"quarantined"`; `false` while `"running"`/`"sleeping"`/`"retrying"`, when `archived == true`, or when manually dismissed via `POST /sessions/:sid/triage`).
 - `archived`: boolean persisted in `H.Catalog` (`false` by default).
 - `loaded`: live boolean indicating whether the session's `H.Session.Server` coordinator is currently running in OTP RAM (never persisted to disk).
-- `cwd_exists`: live boolean indicating whether the session's working directory currently exists (`false` when a host `cwd` was deleted).
+- `cwd`: the original session working directory, not a turn-scoped tool override.
+- `cwd_exists`: live boolean indicating whether the session's original working directory currently exists (`false` when a host `cwd` was deleted).
 
 ## SSE cursor rules
 

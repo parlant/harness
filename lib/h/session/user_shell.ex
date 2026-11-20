@@ -162,7 +162,7 @@ defmodule H.Session.UserShell do
         now = System.system_time(:millisecond)
         command = task.checkpoint["command"]
 
-        case validate_bound_env(state.execution_env) do
+        case bind_shell_env(state.execution_env, task.checkpoint["exec_cwd"]) do
           {:error, reason} ->
             commit_immediate_failure(
               cid,
@@ -174,7 +174,10 @@ defmodule H.Session.UserShell do
             )
 
           {:ok, env} ->
-            case WorkspaceWait.acquire(cid, task, state) do
+            cwd = ExecutionEnv.cwd(env)
+            task = put_in(task.checkpoint["exec_cwd"], cwd)
+
+            case WorkspaceWait.acquire(cid, task, {state.env_id, cwd}, state) do
               {:waiting, state} ->
                 state
 
@@ -206,7 +209,7 @@ defmodule H.Session.UserShell do
                       "Session #{state.session_id} user_shell intent commit failed: #{inspect(io_err)}"
                     )
 
-                    state = State.release_lease(cid, state, env)
+                    state = State.release_lease(cid, state)
                     send(self(), {:stop_storage_failed, io_err})
                     %{state | storage_failed: true}
 
@@ -720,8 +723,17 @@ defmodule H.Session.UserShell do
     }
   end
 
-  defp validate_bound_env({mod, _env_state} = env) when is_atom(mod), do: {:ok, env}
-  defp validate_bound_env(_), do: {:error, "missing_execution_env"}
+  defp bind_shell_env({mod, _} = env, pinned) when is_atom(mod) do
+    case ExecutionEnv.bind_canonical_cwd(env, pinned || ExecutionEnv.cwd(env),
+           exact: is_binary(pinned)
+         ) do
+      {:ok, _} = ok -> ok
+      {:error, :cwd_changed} -> {:error, "cwd_changed"}
+      {:error, _} -> {:error, "cwd_unavailable"}
+    end
+  end
+
+  defp bind_shell_env(_, _), do: {:error, "missing_execution_env"}
 
   defp put_user_shell_status(live, status) when is_map(live) do
     if is_map(Map.get(live, "user_shell")) do

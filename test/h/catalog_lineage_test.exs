@@ -125,7 +125,9 @@ defmodule H.CatalogLineageTest do
                    "conversation_id" => "2",
                    "at_entry_id" => "42",
                    "task_id" => 43,
-                   "depth" => 1
+                   "depth" => 1,
+                   "cwd" => env.sub_dir,
+                   "env_id" => "host"
                  },
                  role: "  subagent  "
                })
@@ -137,7 +139,9 @@ defmodule H.CatalogLineageTest do
                conversation_id: 2,
                at_entry_id: 42,
                task_id: 43,
-               depth: 1
+               depth: 1,
+               cwd: env.sub_dir,
+               env_id: "host"
              }
 
       assert child.role == "subagent"
@@ -149,7 +153,9 @@ defmodule H.CatalogLineageTest do
                conversation_id: "2",
                at_entry_id: "42",
                task_id: "43",
-               depth: 1
+               depth: 1,
+               cwd: env.sub_dir,
+               env_id: "host"
              }
 
       assert wired.role == "subagent"
@@ -268,7 +274,9 @@ defmodule H.CatalogLineageTest do
                conversation_id: "1",
                at_entry_id: nil,
                task_id: nil,
-               depth: 1
+               depth: 1,
+               env_id: "host",
+               cwd: env.cwd
              }
 
       assert empty_child.role == "subagent"
@@ -351,7 +359,9 @@ defmodule H.CatalogLineageTest do
                conversation_id: "1",
                at_entry_id: latest.id,
                task_id: "77",
-               depth: 1
+               depth: 1,
+               env_id: "host",
+               cwd: env.cwd
              }
 
       assert auto_child.role == "subagent"
@@ -382,7 +392,9 @@ defmodule H.CatalogLineageTest do
         conversation_id: 1,
         at_entry_id: String.to_integer(latest.id),
         task_id: 77,
-        depth: 1
+        depth: 1,
+        env_id: "host",
+        cwd: env.cwd
       }
 
       assert detail.session_meta.parent == expected_meta_parent

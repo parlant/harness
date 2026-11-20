@@ -21,6 +21,7 @@ defmodule H.Tools.Edit do
     %{
       "type" => "object",
       "properties" => %{
+        "cwd" => H.Tool.cwd_schema(),
         "path" => %{"type" => "string", "description" => "Path to the file to edit"},
         "edits" => %{
           "type" => "array",

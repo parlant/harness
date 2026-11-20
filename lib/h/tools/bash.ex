@@ -14,7 +14,7 @@ defmodule H.Tools.Bash do
 
   @impl true
   def description do
-    "Execute a bash/shell command in the workspace directory with bounded tail output and process-group timeout cleanup."
+    "Execute a shell command with bounded output and process-group cleanup. Use cwd to run in another Git worktree and take its workspace lease; shell cd does not change the lease."
   end
 
   @impl true
@@ -22,6 +22,7 @@ defmodule H.Tools.Bash do
     %{
       "type" => "object",
       "properties" => %{
+        "cwd" => H.Tool.cwd_schema(),
         "command" => %{
           "type" => "string",
           "minLength" => 1,

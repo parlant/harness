@@ -28,8 +28,8 @@ defmodule H.Context do
   Builds a provider-neutral request map from visible entries, `agent` config,
   and offered `tool_specs`.
   """
-  @spec build_request([map()], map(), [map()]) :: request_map()
-  def build_request(entries, agent, tool_specs \\ [])
+  @spec build_request([map()], map(), [map()], keyword()) :: request_map()
+  def build_request(entries, agent, tool_specs \\ [], opts \\ [])
       when is_list(entries) and is_map(agent) and is_list(tool_specs) do
     {seed_messages, active_entries} = apply_head_cut(entries)
 
@@ -39,8 +39,12 @@ defmodule H.Context do
       |> project_entries()
       |> inject_missing_tool_results()
 
+    tools = select_tools(agent, tool_specs)
+
+    cwd = if Enum.any?(tools, &(&1.name in ~w(bash edit read write subagent))), do: opts[:cwd]
+
     messages =
-      leading_system_messages(agent) ++
+      leading_system_messages(agent, cwd) ++
         seed_messages ++
         transcript_messages
 
@@ -49,7 +53,7 @@ defmodule H.Context do
       thinking: fetch(agent, :thinking),
       max_tokens: fetch(agent, :max_tokens),
       messages: messages,
-      tools: select_tools(agent, tool_specs)
+      tools: tools
     }
   end
 
@@ -137,12 +141,14 @@ defmodule H.Context do
 
   # Leading system baseline
 
-  defp leading_system_messages(agent) do
+  defp leading_system_messages(agent, cwd) do
     system_prompt = fetch(agent, :system_prompt)
     instructions = fetch(agent, :instructions)
 
+    workspace_note = if is_binary(cwd), do: "Session workspace: #{inspect(cwd)}"
+
     parts =
-      [system_prompt, instructions]
+      [system_prompt, instructions, workspace_note]
       |> Enum.filter(&(is_binary(&1) and &1 != ""))
 
     case parts do

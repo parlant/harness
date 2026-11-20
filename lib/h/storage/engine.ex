@@ -28,7 +28,9 @@ defmodule H.Storage.Engine do
     "conversation_id" => :conversation_id,
     "at_entry_id" => :at_entry_id,
     "task_id" => :task_id,
-    "depth" => :depth
+    "depth" => :depth,
+    "env_id" => :env_id,
+    "cwd" => :cwd
   }
 
   @conversation_keys %{

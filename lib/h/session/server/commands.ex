@@ -767,7 +767,7 @@ defmodule H.Session.Server.Commands do
   end
 
   def stage_stop_workspace_holder(cwd, {sid, cid} = holder, lease_id, state) do
-    if sid == state.session_id and MapSet.member?(state.held_leases, cid) and
+    if sid == state.session_id and state.held_leases[cid] == cwd and
          H.WorkspaceLease.current?(state.workspace_lease, cwd, holder, lease_id) do
       {writes, ev, effects, _aborted?, state} =
         abort_conversation_tasks(

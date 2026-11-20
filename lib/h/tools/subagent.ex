@@ -16,7 +16,7 @@ defmodule H.Tools.Subagent do
 
   @impl true
   def description do
-    "Spawn or coordinate an isolated child subagent session (modes: wait, start, await, steer, abort)."
+    "Spawn or coordinate a child session (wait, start, await, steer, abort). For parallel edits, prepare separate Git worktrees with bash and pass each child its own cwd. Use read_only for shared-directory exploration."
   end
 
   @impl true
@@ -53,9 +53,9 @@ defmodule H.Tools.Subagent do
         },
         "cwd" => %{
           "type" => "string",
-          "minLength" => 1,
+          "pattern" => "^/",
           "description" =>
-            "Absolute working directory in the parent's environment (defaults to parent cwd; pass a worktree path for parallel mutations)."
+            "New spawns only. Existing absolute directory in the parent's environment. Defaults to the parent's session workspace. Pass the root of a separate Git worktree for parallel mutations; this tool does not create worktrees."
         },
         "model" => %{
           "type" => "string",

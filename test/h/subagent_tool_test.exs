@@ -245,7 +245,9 @@ defmodule H.SubagentToolTest do
                conversation_id: 1,
                at_entry_id: String.to_integer(assistant_entry.id),
                task_id: String.to_integer(tool_task.id),
-               depth: 1
+               depth: 1,
+               env_id: "host",
+               cwd: env.cwd
              }
 
       # Release child -> parent wakes and completes!
@@ -395,6 +397,17 @@ defmodule H.SubagentToolTest do
       [{task_sup_pid, _}] = Registry.lookup(env.registry, {:session_tasks, parent_sid})
       assert Task.Supervisor.children(task_sup_pid) == []
 
+      # Neither read-only explorers nor a writer in a separate worktree needs the parent's lease.
+      {:ok, origin} = H.ExecutionEnv.canonical_path(H.ExecutionEnv.Host.new(env.cwd), env.cwd)
+
+      assert :ok =
+               H.WorkspaceLease.acquire(
+                 env.opts[:workspace_lease],
+                 {"host", origin},
+                 {"busy-parent-tree", 1},
+                 self()
+               )
+
       # Release all 3 concurrently
       Enum.each(lanes, fn {_name, pid} -> send(pid, {:release_lane, gate}) end)
 
@@ -420,6 +433,17 @@ defmodule H.SubagentToolTest do
              ]
 
       assert File.read!(Path.join(wt_cwd, "out.txt")) == "from lane 3"
+
+      {:ok, worktree} = H.ExecutionEnv.canonical_path(H.ExecutionEnv.Host.new(env.cwd), wt_cwd)
+
+      children =
+        Enum.filter(
+          Catalog.list_sessions(env.catalog_table),
+          &(get_in(&1, [:parent, :session_id]) == parent_sid)
+        )
+
+      assert Enum.sort(Enum.map(children, & &1.cwd)) == Enum.sort([env.cwd, env.cwd, worktree])
+      assert Enum.all?(children, &(&1.parent.cwd == env.cwd and &1.parent.env_id == "host"))
     end
   end
 

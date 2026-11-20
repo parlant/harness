@@ -12,6 +12,8 @@ defmodule H.VmRestartTest do
     cwd = Path.join(tmp_root, "work")
     File.mkdir_p!(data_dir)
     File.mkdir_p!(cwd)
+    File.mkdir_p!(Path.join(cwd, "worktree"))
+    {:ok, worktree} = H.ExecutionEnv.canonical_path(H.ExecutionEnv.Host.new(cwd), "worktree")
 
     on_exit(fn ->
       File.rm(StoreLock.socket_path(data_dir))
@@ -33,6 +35,7 @@ defmodule H.VmRestartTest do
 
     data_dir = System.fetch_env!("H_TEST_DATA_DIR")
     cwd = System.fetch_env!("H_TEST_CWD")
+    worktree = System.fetch_env!("H_TEST_WORKTREE")
 
     {:ok, _} = H.StoreLock.start_link(data_dir: data_dir, name: H.StoreLock)
     {:ok, _} = Registry.start_link(keys: :unique, name: H.Registry)
@@ -51,7 +54,7 @@ defmodule H.VmRestartTest do
                %{
                  id: "call_vm_1",
                  name: "bash",
-                 arguments: %{"command" => "echo 'vm-partial'; sleep 2"}
+                 arguments: %{"command" => "printf tick >> unsafe-count; echo 'vm-partial'; sleep 5", "cwd" => worktree}
                }
              ],
              finish_reason: "tool_calls"
@@ -101,7 +104,7 @@ defmodule H.VmRestartTest do
 
     wait_flushed.(wait_flushed)
 
-    {:ok, %{seq: wait_seq}} = H.Daemon.create_session(%{"session_id" => "vm-wait", "cwd" => cwd}, opts)
+    {:ok, %{seq: wait_seq}} = H.Daemon.create_session(%{"session_id" => "vm-wait", "cwd" => worktree}, opts)
     {:ok, _} = H.Daemon.execute_command("vm-wait", %{
       "version" => 1, "request_id" => "queued-shell", "command" => "user_shell", "conversation_id" => "1",
       "args" => %{"command" => "printf tick >> wait-count", "include_in_context" => true, "expected_seq" => wait_seq}
@@ -126,7 +129,8 @@ defmodule H.VmRestartTest do
         {:env,
          [
            {~c"H_TEST_DATA_DIR", String.to_charlist(data_dir)},
-           {~c"H_TEST_CWD", String.to_charlist(cwd)}
+           {~c"H_TEST_CWD", String.to_charlist(cwd)},
+           {~c"H_TEST_WORKTREE", String.to_charlist(worktree)}
          ]}
       ])
 
@@ -167,7 +171,12 @@ defmodule H.VmRestartTest do
          script: [
            {:expect,
             fn req ->
-              tool_msg = Enum.find(req.messages, &(&1.role == "tool"))
+              assert hd(hd(req.messages).content).text =~
+                       "Session workspace: #{inspect(cwd)}"
+
+              tool_msg =
+                Enum.find(req.messages, &(&1.role == "tool" and &1.tool_call_id == "call_vm_1"))
+
               assert tool_msg.is_error == true
               text = hd(tool_msg.content).text
               assert text =~ "interrupted"
@@ -209,11 +218,20 @@ defmodule H.VmRestartTest do
         if length(items) == 4, do: items, else: nil
       end)
 
-    assert Enum.map(items, & &1.kind) == ["user", "assistant", "tool_result", "assistant"]
+    assert Enum.map(items, & &1.kind) == [
+             "user",
+             "assistant",
+             "tool_result",
+             "assistant"
+           ]
+
     tool_res = Enum.at(items, 2)
     assert tool_res.data["is_error"] == true
     assert tool_res.data["diagnostic"] == "interrupted"
     assert tool_res.data["details"]["partial_output"] =~ "vm-partial"
+    assert tool_res.data["details"]["cwd"] == worktree
+    assert File.read!(Path.join(worktree, "unsafe-count")) == "tick"
+    refute File.exists?(Path.join(cwd, "unsafe-count"))
 
     [queued_result] =
       wait_until(fn ->
@@ -222,9 +240,9 @@ defmodule H.VmRestartTest do
       end)
 
     assert queued_result.data["is_error"] == false
-    assert File.read!(Path.join(cwd, "wait-count")) == "tick"
+    assert File.read!(Path.join(worktree, "wait-count")) == "tick"
 
-    final_assistant = Enum.at(items, 3)
+    final_assistant = List.last(items)
 
     assert final_assistant.data["content"] == [
              %{"type" => "text", "text" => "Recovered after SIGKILL!"}

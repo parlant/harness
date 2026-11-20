@@ -188,7 +188,7 @@ defmodule H.Session.Server.Recovery do
         workers: %{},
         subagent_watches: %{},
         ephemeral: %{},
-        held_leases: MapSet.new(),
+        held_leases: %{},
         workspace_waits: %{},
         replay_rings: %{},
         ring_base_seq: %{},

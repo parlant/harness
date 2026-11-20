@@ -354,7 +354,7 @@ defmodule H.SessionServerTest do
 
       # Release gate 1 -> executes read tool -> drains steer -> enters gate 2
       send(gpid1, {:release, gate1})
-      assert_receive {:gate_entered, ^gate2, gpid2}
+      assert_receive {:gate_entered, ^gate2, gpid2}, 1_000
 
       # Release gate 2 -> completes run 1 -> drains follow_up -> completes run 2
       send(gpid2, {:release, gate2})

@@ -5,14 +5,14 @@ defmodule H.Session.Server.Tools do
   for `H.Session.Server`.
   """
 
-  alias H.{Document, Storage, Task, Tool}
+  alias H.{Document, ExecutionEnv, Storage, Task, Tool}
   alias H.Session.{LiveOutput, Subagents}
   alias H.Session.Server.{State, Stream, Submissions, WorkspaceWait}
 
   @doc """
   Computes the next `{:spawn_tool, cid, tid}` effects for a generation's tool round.
 
-  Regular worker tools execute sequentially one at a time, whereas consecutive
+  Regular worker tools execute sequentially one at a time, whereas
   pending `"subagent"` tool calls dispatch and park concurrently without holding
   `Task.Supervisor` workers.
   """
@@ -48,156 +48,170 @@ defmodule H.Session.Server.Tools do
   def spawn_worker(cid, tool_task_id, state, apply_effects_fn) do
     case Map.get(state.tasks, tool_task_id) do
       %{status: "pending"} = tool_task ->
-        now = System.system_time(:millisecond)
-        cp = tool_task.checkpoint
-        call_id = cp["call_id"]
-        name = cp["name"]
-        args = cp["arguments"] || %{}
-
-        tool = if Tool.selected?(name, state.docs[cid]["agent"]["tools"]), do: state.tools[name]
-
-        case tool do
-          nil ->
-            commit_immediate_error(
-              cid,
-              tool_task,
-              call_id,
-              name,
-              "Tool not available: #{name}",
-              "unknown_tool",
-              state,
-              now,
-              apply_effects_fn
-            )
-
-          tool_mod ->
-            case Tool.validate_args(tool_mod, args) do
-              {:error, reason} ->
-                commit_immediate_error(
-                  cid,
-                  tool_task,
-                  call_id,
-                  name,
-                  "Invalid arguments for #{name}: #{reason}",
-                  "invalid_arguments",
-                  state,
-                  now,
-                  apply_effects_fn
-                )
-
-              {:ok, validated_args} ->
-                if tool_mod == H.Tools.Subagent do
-                  Subagents.spawn_or_dispatch(
-                    cid,
-                    tool_task,
-                    validated_args,
-                    state,
-                    apply_effects_fn
-                  )
-                else
-                  case maybe_acquire_tool_lease(tool_mod, cid, tool_task, state) do
-                    {:waiting, state} ->
-                      state
-
-                    {:ok, state} ->
-                      {:ok, attempt_id, store} = Storage.mint_id(state.store)
-                      state = %{state | store: store}
-
-                      running_task =
-                        Task.start_running(tool_task, attempt_id, now, %{
-                          "phase" => "execute",
-                          "replay" => Atom.to_string(tool_mod.replay())
-                        })
-
-                      live = State.put_tool_status(state.docs[cid]["live"], call_id, "running")
-
-                      state =
-                        state
-                        |> State.put_task(running_task)
-                        |> State.put_doc(cid, "live", live)
-
-                      case Storage.commit(state.store, [
-                             [
-                               {:put_task, running_task},
-                               {:put_doc, {:conversation, cid, "live"},
-                                Document.wrap("live", live)}
-                             ]
-                           ]) do
-                        {:error, io_err} ->
-                          send(self(), {:stop_storage_failed, io_err})
-                          state = State.release_lease(cid, state)
-                          %{state | storage_failed: true}
-
-                        {:ok, %{seqs: [batch_seq]}, committed_store} ->
-                          state = %{state | store: committed_store, seq: batch_seq}
-
-                          state =
-                            Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
-                              "live" => [["replace", live]]
-                            })
-
-                          server_pid = self()
-                          inc = state.incarnation
-                          env = state.execution_env
-                          sid = state.session_id
-
-                          output_preview =
-                            LiveOutput.limit(fn chunk ->
-                              send(
-                                server_pid,
-                                {:tool_output, inc, tool_task_id, attempt_id, cid, call_id, chunk}
-                              )
-                            end)
-
-                          abort_ref = if name == "bash", do: make_ref()
-
-                          tool_ctx = %{
-                            abort_ref: abort_ref,
-                            env: env,
-                            session_id: sid,
-                            conversation_id: cid,
-                            task_id: tool_task_id,
-                            scan_entries: fn q ->
-                              H.Session.Server.scan_entries(server_pid, cid, q)
-                            end,
-                            on_output: fn chunk, _total -> output_preview.(chunk) end
-                          }
-
-                          {:ok, worker_pid} =
-                            Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
-                              if abort_ref, do: Process.flag(:trap_exit, true)
-                              t0 = System.monotonic_time(:millisecond)
-                              res = tool_mod.execute(validated_args, tool_ctx)
-                              dur = max(0, System.monotonic_time(:millisecond) - t0)
-
-                              send(
-                                server_pid,
-                                {:worker_done, inc, tool_task_id, attempt_id,
-                                 {:tool_result, dur, res}}
-                              )
-                            end)
-
-                          ref = Process.monitor(worker_pid)
-
-                          worker_info = %{
-                            abort_ref: abort_ref,
-                            task_id: tool_task_id,
-                            conv_id: cid,
-                            kind: :tool_call,
-                            pid: worker_pid,
-                            monitor_ref: ref,
-                            started_at: now
-                          }
-
-                          %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
-                      end
-                  end
-                end
-            end
+        if get_in(state.workspace_waits, [cid, :task_id]) == tool_task_id do
+          state
+        else
+          prepare_worker(cid, tool_task, state, apply_effects_fn)
         end
 
       _ ->
         state
+    end
+  end
+
+  defp prepare_worker(cid, task, state, apply_effects_fn) do
+    name = task.checkpoint["name"]
+    args = task.checkpoint["arguments"] || %{}
+    tool = if Tool.selected?(name, state.docs[cid]["agent"]["tools"]), do: state.tools[name]
+
+    with {:ok, args} <- validate_tool(tool, name, args) do
+      if tool == H.Tools.Subagent do
+        Subagents.spawn_or_dispatch(cid, task, args, state, apply_effects_fn)
+      else
+        with {:ok, env, task} <- bind_tool_cwd(tool, args, task, state),
+             {:ok, state} <- maybe_acquire_tool_lease(tool, cid, task, env, state) do
+          start_worker(cid, task, tool, args, env, state)
+        else
+          {:waiting, state} ->
+            state
+
+          {:error, diagnostic, message} ->
+            commit_immediate_error(cid, task, message, diagnostic, state, apply_effects_fn)
+        end
+      end
+    else
+      {:error, diagnostic, message} ->
+        commit_immediate_error(cid, task, message, diagnostic, state, apply_effects_fn)
+    end
+  end
+
+  defp validate_tool(nil, name, _args),
+    do: {:error, "unknown_tool", "Tool not available: #{name}"}
+
+  defp validate_tool(tool, name, args) do
+    case Tool.validate_args(tool, args) do
+      {:ok, _} = ok ->
+        ok
+
+      {:error, reason} ->
+        {:error, "invalid_arguments", "Invalid arguments for #{name}: #{reason}"}
+    end
+  end
+
+  defp bind_tool_cwd(tool, args, task, state) do
+    env = state.execution_env
+    coding_tool? = tool in [H.Tools.Bash, H.Tools.Edit, H.Tools.Read, H.Tools.Write]
+    pinned = task.checkpoint["exec_cwd"]
+
+    if coding_tool? or tool.mutating?() do
+      cwd = pinned || if(coding_tool?, do: args["cwd"]) || ExecutionEnv.cwd(env)
+
+      case ExecutionEnv.bind_canonical_cwd(env, cwd, exact: is_binary(pinned)) do
+        {:ok, bound} ->
+          {:ok, bound, put_in(task.checkpoint["exec_cwd"], ExecutionEnv.cwd(bound))}
+
+        {:error, reason} ->
+          {:error, "invalid_cwd",
+           "Cannot use working directory #{inspect(cwd)}: #{inspect(reason)}"}
+      end
+    else
+      {:ok, env, task}
+    end
+  end
+
+  defp start_worker(cid, tool_task, tool_mod, validated_args, env, state) do
+    now = System.system_time(:millisecond)
+    tool_task_id = tool_task.id
+    call_id = tool_task.checkpoint["call_id"]
+    name = tool_task.checkpoint["name"]
+
+    {:ok, attempt_id, store} = Storage.mint_id(state.store)
+    state = %{state | store: store}
+
+    running_task =
+      Task.start_running(tool_task, attempt_id, now, %{
+        "phase" => "execute",
+        "replay" => Atom.to_string(tool_mod.replay())
+      })
+
+    live = State.put_tool_status(state.docs[cid]["live"], call_id, "running")
+
+    state =
+      state
+      |> State.put_task(running_task)
+      |> State.put_doc(cid, "live", live)
+
+    case Storage.commit(state.store, [
+           [
+             {:put_task, running_task},
+             {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}
+           ]
+         ]) do
+      {:error, io_err} ->
+        send(self(), {:stop_storage_failed, io_err})
+        state = State.release_lease(cid, state)
+        %{state | storage_failed: true}
+
+      {:ok, %{seqs: [batch_seq]}, committed_store} ->
+        state = %{state | store: committed_store, seq: batch_seq}
+
+        state =
+          Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
+            "live" => [["replace", live]]
+          })
+
+        server_pid = self()
+        inc = state.incarnation
+        sid = state.session_id
+
+        output_preview =
+          LiveOutput.limit(fn chunk ->
+            send(
+              server_pid,
+              {:tool_output, inc, tool_task_id, attempt_id, cid, call_id, chunk}
+            )
+          end)
+
+        abort_ref = if name == "bash", do: make_ref()
+
+        tool_ctx = %{
+          abort_ref: abort_ref,
+          env: env,
+          session_id: sid,
+          conversation_id: cid,
+          task_id: tool_task_id,
+          scan_entries: fn q ->
+            H.Session.Server.scan_entries(server_pid, cid, q)
+          end,
+          on_output: fn chunk, _total -> output_preview.(chunk) end
+        }
+
+        {:ok, worker_pid} =
+          Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
+            if abort_ref, do: Process.flag(:trap_exit, true)
+            t0 = System.monotonic_time(:millisecond)
+            res = tool_mod.execute(validated_args, tool_ctx)
+            dur = max(0, System.monotonic_time(:millisecond) - t0)
+
+            send(
+              server_pid,
+              {:worker_done, inc, tool_task_id, attempt_id, {:tool_result, dur, res}}
+            )
+          end)
+
+        ref = Process.monitor(worker_pid)
+
+        worker_info = %{
+          abort_ref: abort_ref,
+          task_id: tool_task_id,
+          conv_id: cid,
+          kind: :tool_call,
+          pid: worker_pid,
+          monitor_ref: ref,
+          started_at: now
+        }
+
+        %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
     end
   end
 
@@ -223,21 +237,22 @@ defmodule H.Session.Server.Tools do
         live = Stream.merge_ephemeral_into_live(state.docs[cid]["live"], eph)
         state = Stream.clear_ephemeral_for_conv(state, cid)
 
-        out_map =
-          case tool_res do
-            {:ok, m} -> m
-            {:error, m} -> m
-          end
+        {_result, out_map} = tool_res
 
         {:ok, entry_id, store} = Storage.mint_id(state.store)
         state = %{state | store: store}
+
+        is_error = Map.get(out_map, :is_error, false) == true
+
+        details =
+          out_map |> Map.get(:details, %{}) |> State.stringify_json() |> put_result_cwd(tool_task)
 
         entry_data = %{
           "tool_call_id" => call_id,
           "name" => name,
           "content" => State.stringify_json(Map.get(out_map, :content, [])),
-          "details" => State.stringify_json(Map.get(out_map, :details, %{})),
-          "is_error" => Map.get(out_map, :is_error, false) == true,
+          "details" => details,
+          "is_error" => is_error,
           "diagnostic" => Map.get(out_map, :diagnostic),
           "duration_ms" => duration_ms
         }
@@ -435,7 +450,8 @@ defmodule H.Session.Server.Tools do
         "content" => [
           %{"type" => "text", "text" => interrupted_tool_message(name, partial_output)}
         ],
-        "details" => %{"interrupted" => true, "partial_output" => partial_output},
+        "details" =>
+          put_result_cwd(%{"interrupted" => true, "partial_output" => partial_output}, tool_task),
         "is_error" => true,
         "diagnostic" => "interrupted"
       }
@@ -491,7 +507,8 @@ defmodule H.Session.Server.Tools do
             "content" => [
               %{"type" => "text", "text" => aborted_tool_message(name, partial_out)}
             ],
-            "details" => %{"aborted" => true, "partial_output" => partial_out},
+            "details" =>
+              put_result_cwd(%{"aborted" => true, "partial_output" => partial_out}, tool_task),
             "is_error" => true,
             "diagnostic" => "aborted"
           }
@@ -526,8 +543,7 @@ defmodule H.Session.Server.Tools do
             end
 
           kill_eff =
-            State.worker_kill_effects(acc_s, tid) ++
-              [{:release_lease, cid}] ++ subagent_effects
+            State.worker_kill_effects(acc_s, tid) ++ subagent_effects
 
           {acc_w ++ [{:append_entry, entry}, {:put_task, aborted_tool}], acc_s, acc_k ++ kill_eff}
       end
@@ -539,25 +555,25 @@ defmodule H.Session.Server.Tools do
 
   # Internal helpers
 
-  defp maybe_acquire_tool_lease(tool_mod, cid, task, state) do
+  defp put_result_cwd(details, task) do
+    case task.checkpoint["exec_cwd"] do
+      nil -> details
+      cwd -> Map.put(details, "cwd", cwd)
+    end
+  end
+
+  defp maybe_acquire_tool_lease(tool_mod, cid, task, env, state) do
     if tool_mod.mutating?() do
-      WorkspaceWait.acquire(cid, task, state)
+      WorkspaceWait.acquire(cid, task, {state.env_id, ExecutionEnv.cwd(env)}, state)
     else
       {:ok, state}
     end
   end
 
-  defp commit_immediate_error(
-         cid,
-         tool_task,
-         call_id,
-         name,
-         message,
-         diagnostic,
-         state,
-         now,
-         apply_effects_fn
-       ) do
+  defp commit_immediate_error(cid, tool_task, message, diagnostic, state, apply_effects_fn) do
+    call_id = tool_task.checkpoint["call_id"]
+    name = tool_task.checkpoint["name"]
+    now = System.system_time(:millisecond)
     {:ok, entry_id, store} = Storage.mint_id(state.store)
     state = %{state | store: store}
 

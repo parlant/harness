@@ -28,7 +28,8 @@ defmodule H.Session.Server.Generation do
           Context.build_request(
             entries,
             state.docs[cid]["agent"],
-            State.build_tool_specs(state.tools)
+            State.build_tool_specs(state.tools),
+            cwd: state.cwd
           )
 
         case Compaction.auto_boundary(
@@ -339,6 +340,7 @@ defmodule H.Session.Server.Generation do
       |> Map.delete("run")
       |> Map.delete("generation")
       |> Map.delete("tools")
+      |> Map.delete("workspace_wait")
       |> Map.put("run_failure", %{"reason" => reason})
 
     state = State.put_doc(state, cid, "live", next_live)
@@ -350,7 +352,9 @@ defmodule H.Session.Server.Generation do
         sub_writes ++
         [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
 
-    effects = State.worker_kill_effects(state, gen_task.id) ++ tool_kills
+    effects =
+      State.worker_kill_effects(state, gen_task.id) ++ tool_kills ++ [{:release_lease, cid}]
+
     {writes, state, effects}
   end
 

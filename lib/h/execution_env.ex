@@ -97,6 +97,22 @@ defmodule H.ExecutionEnv do
     end
   end
 
+  @doc "Binds to an existing directory. With `exact: true`, rejects changes to its previously resolved canonical path."
+  @spec bind_canonical_cwd(t(), String.t(), keyword()) :: {:ok, t()} | {:error, term()}
+  def bind_canonical_cwd(env, path, opts \\ []) do
+    if String.valid?(path) and not String.contains?(path, <<0>>) do
+      with {:ok, canonical} <- canonical_path(env, path) do
+        if Keyword.get(opts, :exact, false) and canonical != path do
+          {:error, :cwd_changed}
+        else
+          bind_cwd(env, canonical)
+        end
+      end
+    else
+      {:error, :einval}
+    end
+  end
+
   @spec cwd(t()) :: String.t()
   def cwd({mod, state}), do: mod.cwd(state)
 

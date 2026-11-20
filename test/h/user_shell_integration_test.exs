@@ -110,6 +110,11 @@ defmodule H.UserShellIntegrationTest do
     }
   end
 
+  defp host_lease_key(cwd) do
+    {:ok, canonical} = H.ExecutionEnv.canonical_path(Host.new(cwd), cwd)
+    {"host", canonical}
+  end
+
   defp wait_until(fun, timeout_ms \\ 3_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_until(fun, deadline)
@@ -657,7 +662,7 @@ defmodule H.UserShellIntegrationTest do
 
     test "cancel wait removes queued work without stopping the holder" do
       %{opts: opts, cwd: cwd, lease: lease} = start_daemon_env()
-      :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"holder", 1}, self())
+      :ok = WorkspaceLease.acquire(lease, host_lease_key(cwd), {"holder", 1}, self())
       {:ok, %{seq: seq}} = Daemon.create_session(%{"session_id" => "waiter", "cwd" => cwd}, opts)
 
       {:ok, _} =
@@ -682,7 +687,7 @@ defmodule H.UserShellIntegrationTest do
       args = %{"action" => "cancel", "task_id" => wait["task_id"], "lease_id" => wait["lease_id"]}
       replacement = spawn(fn -> Process.sleep(:infinity) end)
       on_exit(fn -> Process.exit(replacement, :kill) end)
-      :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"holder", 1}, replacement)
+      :ok = WorkspaceLease.acquire(lease, host_lease_key(cwd), {"holder", 1}, replacement)
 
       wait_until(fn ->
         {:ok, {:snapshot, _, bin}} =
@@ -698,15 +703,15 @@ defmodule H.UserShellIntegrationTest do
                Daemon.execute_command("waiter", cmd("cancel", "workspace_wait", "1", args), opts)
 
       assert {:error, {:workspace_busy, {"holder", 1}}} =
-               WorkspaceLease.acquire(lease, {"host", cwd}, {"probe", 1}, self())
+               WorkspaceLease.acquire(lease, host_lease_key(cwd), {"probe", 1}, self())
 
-      :ok = WorkspaceLease.release(lease, {"host", cwd}, {"holder", 1})
+      :ok = WorkspaceLease.release(lease, host_lease_key(cwd), {"holder", 1})
       {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation("waiter", "1", self(), nil, opts)
       snap = JSON.decode!(bin)
       refute snap["docs"]["live"]["workspace_wait"]
       assert hd(snap["entries"])["data"]["diagnostic"] == "aborted"
       refute File.exists?(Path.join(cwd, "marker"))
-      assert :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"probe", 1}, self())
+      assert :ok = WorkspaceLease.acquire(lease, host_lease_key(cwd), {"probe", 1}, self())
     end
 
     test "stop holder and acquire waits for process-group cleanup and rejects stale actions" do
@@ -794,7 +799,7 @@ defmodule H.UserShellIntegrationTest do
 
     test "pending lease wait resumes after coordinator restart without replaying an execution" do
       %{opts: opts, cwd: cwd, lease: lease} = start_daemon_env()
-      :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"holder", 1}, self())
+      :ok = WorkspaceLease.acquire(lease, host_lease_key(cwd), {"holder", 1}, self())
       {:ok, %{seq: seq}} = Daemon.create_session(%{"session_id" => "waiter", "cwd" => cwd}, opts)
 
       {:ok, _} =
@@ -817,7 +822,7 @@ defmodule H.UserShellIntegrationTest do
 
       :ok = H.Session.Supervisor.stop_session(opts[:registry], opts[:runtime_sup], "waiter")
       {:ok, _} = Daemon.get_session_detail("waiter", opts)
-      :ok = WorkspaceLease.release(lease, {"host", cwd}, {"holder", 1})
+      :ok = WorkspaceLease.release(lease, host_lease_key(cwd), {"holder", 1})
 
       wait_until(fn ->
         {:ok, %{items: items}} = Daemon.scan_entries("waiter", "1", %{"order" => "asc"}, opts)

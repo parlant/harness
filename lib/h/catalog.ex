@@ -654,7 +654,9 @@ defmodule H.Catalog do
                  {:conversation_id, :pos_int, required: false, default: 1},
                  {:at_entry_id, :pos_int, required: false, nullable: true, default: nil},
                  {:task_id, :pos_int, required: false, nullable: true, default: nil},
-                 {:depth, :pos_int, required: false, default: 1}
+                 {:depth, :pos_int, required: false, default: 1},
+                 {:env_id, :non_empty_string},
+                 {:cwd, :abs_path}
                ]}, required: false, nullable: true},
              {:role, :string, required: false, nullable: true},
              {:tags, :session_tags},
@@ -1051,6 +1053,7 @@ defmodule H.Catalog do
           task_id: decode_optional_pos_int(Map.get(raw, "task_id")),
           depth: decode_pos_int(Map.get(raw, "depth"), 1)
         }
+        |> Map.merge(decode_parent_workspace(raw))
 
       {:error, _} ->
         nil
@@ -1082,6 +1085,16 @@ defmodule H.Catalog do
     end
   end
 
+  defp decode_parent_workspace(raw) do
+    case Schema.validate_map(Map.reject(raw, fn {_key, value} -> is_nil(value) end), [
+           {:env_id, :non_empty_string},
+           {:cwd, :abs_path}
+         ]) do
+      {:ok, workspace} -> workspace
+      {:error, _} -> %{}
+    end
+  end
+
   defp wire_parent(nil), do: nil
 
   defp wire_parent(p) when is_map(p) do
@@ -1092,18 +1105,13 @@ defmodule H.Catalog do
       task_id: if(p.task_id, do: to_string(p.task_id), else: nil),
       depth: p.depth || 1
     }
+    |> Map.merge(Map.take(p, [:env_id, :cwd]))
   end
 
   defp wire_parent_string_keys(nil), do: nil
 
   defp wire_parent_string_keys(p) when is_map(p) do
-    %{
-      "session_id" => p.session_id,
-      "conversation_id" => to_string(p.conversation_id || 1),
-      "at_entry_id" => if(p.at_entry_id, do: to_string(p.at_entry_id), else: nil),
-      "task_id" => if(p.task_id, do: to_string(p.task_id), else: nil),
-      "depth" => p.depth || 1
-    }
+    Map.new(wire_parent(p), fn {key, value} -> {Atom.to_string(key), value} end)
   end
 
   defp decode_archive(%{

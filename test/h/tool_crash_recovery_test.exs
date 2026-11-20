@@ -1,7 +1,7 @@
 defmodule H.ToolCrashRecoveryTest do
   use ExUnit.Case, async: true
 
-  alias H.{Catalog, Daemon}
+  alias H.{Catalog, Daemon, ExecutionEnv, WorkspaceLease}
   alias H.Provider.Fake
 
   @test_ets :h_tool_crash_recovery_test_state
@@ -452,6 +452,196 @@ defmodule H.ToolCrashRecoveryTest do
       # Crucial invariant: unsafe tool was executed ONLY ONCE!
       assert Agent.get(counter, & &1) == 1
     end
+  end
+
+  describe "working directory routing" do
+    test "per-call overrides bypass a busy origin and leave defaults unchanged in the same and later tool rounds" do
+      %{opts: opts, cwd: cwd, fake: fake} = start_env([])
+      worktree = Path.join(Path.dirname(cwd), "worktree")
+      File.mkdir!(worktree)
+      {:ok, canonical_origin} = ExecutionEnv.canonical_path(ExecutionEnv.Host.new(cwd), cwd)
+
+      {:ok, canonical_worktree} =
+        ExecutionEnv.canonical_path(ExecutionEnv.Host.new(cwd), worktree)
+
+      sid = "cwd-routing"
+      lease = opts[:workspace_lease]
+      origin_key = {"host", canonical_origin}
+      assert :ok = WorkspaceLease.acquire(lease, origin_key, {"origin-owner", 1}, self())
+
+      Fake.push_step(
+        fake,
+        calls([
+          {"bash", %{"command" => "printf once > once.txt", "cwd" => worktree}},
+          {"read", %{"path" => "once.txt"}},
+          {"write", %{"path" => "note.txt", "content" => "before", "cwd" => worktree}},
+          {"edit",
+           %{
+             "path" => "note.txt",
+             "cwd" => worktree,
+             "edits" => [%{"old_text" => "before", "new_text" => "after"}]
+           }},
+          {"read", %{"path" => "note.txt", "cwd" => worktree}},
+          {"bash", %{"command" => "printf wrong > wrong", "cwd" => Path.join(worktree, "absent")}}
+        ])
+      )
+
+      Fake.push_step(
+        fake,
+        {:expect,
+         fn req ->
+           assert hd(hd(req.messages).content).text =~ "Session workspace: #{inspect(cwd)}"
+           true
+         end,
+         calls("next-round", [{"write", %{"path" => "next-round", "content" => "back home"}}])}
+      )
+
+      Fake.push_step(fake, {:reply, [], %{content: [%{type: "text", text: "done"}]}})
+
+      {:ok, _} = Daemon.create_session(%{"session_id" => sid, "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          sid,
+          cmd("start", "submit", "1", %{"type" => "input", "content" => "Use worktree"}),
+          opts
+        )
+
+      [_, _, once, no_override, write, edit, read, invalid, _] =
+        wait_until(fn ->
+          {:ok, %{items: items}} = Daemon.scan_entries(sid, "1", %{"order" => "asc"}, opts)
+          if length(items) == 9, do: items
+        end)
+
+      for result <- [once, write, edit, read] do
+        assert result.data["is_error"] == false
+        assert result.data["details"]["cwd"] == canonical_worktree
+      end
+
+      assert read.data["content"] == [%{"type" => "text", "text" => "1: after"}]
+      assert no_override.data["details"]["cwd"] == canonical_origin
+      assert no_override.data["diagnostic"] == "not_found"
+      assert invalid.data["diagnostic"] == "invalid_cwd"
+      assert File.read!(Path.join(worktree, "once.txt")) == "once"
+      assert File.ls!(cwd) == []
+
+      {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation(sid, "1", self(), nil, opts)
+
+      assert get_in(JSON.decode!(bin), ["docs", "live", "workspace_wait", "cwd"]) ==
+               canonical_origin
+
+      assert :ok = WorkspaceLease.release(lease, origin_key, {"origin-owner", 1})
+
+      wait_until(fn ->
+        {:ok, %{items: items}} = Daemon.scan_entries(sid, "1", %{"order" => "asc"}, opts)
+        length(items) == 11
+      end)
+
+      assert File.read!(Path.join(cwd, "next-round")) == "back home"
+      refute File.exists?(Path.join(worktree, "next-round"))
+      assert {:ok, %{session: %{cwd: ^cwd}}} = Daemon.get_session_detail(sid, opts)
+      [{server, _}] = Registry.lookup(opts[:registry], {:session, sid})
+      assert {:ok, %{session_meta: %{cwd: ^cwd}}} = H.Session.Server.get_detail(server)
+    end
+
+    test "queues a symlink alias at the actual target and stop_holder hands off only after abort" do
+      %{opts: opts, cwd: cwd, fake: fake} = start_env([])
+      target = Path.join(Path.dirname(cwd), "target")
+      link = Path.join(cwd, "link")
+      File.mkdir!(target)
+      File.ln_s!(target, link)
+      {:ok, canonical} = ExecutionEnv.canonical_path(ExecutionEnv.Host.new(cwd), target)
+      key = {"host", canonical}
+      lease = opts[:workspace_lease]
+      holder = "worktree-holder"
+      waiter = "worktree-waiter"
+
+      for sid <- [holder, waiter] do
+        {:ok, _} = Daemon.create_session(%{"session_id" => sid, "cwd" => cwd}, opts)
+      end
+
+      Fake.push_step(
+        fake,
+        calls([{"bash", %{"command" => "echo holding; sleep 10", "cwd" => target}}])
+      )
+
+      {:ok, _} =
+        Daemon.execute_command(
+          holder,
+          cmd("hold", "submit", "1", %{"type" => "input", "content" => "hold target"}),
+          opts
+        )
+
+      wait_until(fn ->
+        {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation(holder, "1", self(), nil, opts)
+
+        (get_in(JSON.decode!(bin), ["docs", "live", "tools", "cwd-1", "output"]) || "") =~
+          "holding"
+      end)
+
+      Fake.push_step(
+        fake,
+        calls([{"write", %{"path" => "marker", "content" => "after handoff", "cwd" => link}}])
+      )
+
+      Fake.push_step(fake, {:reply, [], %{content: [%{type: "text", text: "done"}]}})
+
+      {:ok, _} =
+        Daemon.execute_command(
+          waiter,
+          cmd("wait", "submit", "1", %{"type" => "input", "content" => "wait for target"}),
+          opts
+        )
+
+      wait =
+        wait_until(fn ->
+          {:ok, {:snapshot, _, bin}} =
+            Daemon.subscribe_conversation(waiter, "1", self(), nil, opts)
+
+          get_in(JSON.decode!(bin), ["docs", "live", "workspace_wait"])
+        end)
+
+      assert wait["cwd"] == canonical
+      assert wait["holder_session_id"] == holder
+
+      assert {:error, {:workspace_busy, {^holder, 1}}} =
+               WorkspaceLease.acquire(lease, key, {"probe", 1}, self())
+
+      refute File.exists?(Path.join(target, "marker"))
+
+      # A queued call keeps the resolved target even if its original alias changes.
+      File.rm!(link)
+      File.ln_s!(cwd, link)
+
+      args = Map.put(Map.take(wait, ~w(task_id lease_id)), "action", "stop_holder")
+
+      assert {:ok, _} =
+               Daemon.execute_command(waiter, cmd("handoff", "workspace_wait", "1", args), opts)
+
+      wait_until(fn ->
+        {:ok, %{items: items}} = Daemon.scan_entries(waiter, "1", %{"order" => "asc"}, opts)
+        length(items) == 4
+      end)
+
+      assert File.read!(Path.join(target, "marker")) == "after handoff"
+      refute File.exists?(Path.join(cwd, "marker"))
+
+      assert {:ok, %{items: [_, _, stopped]}} =
+               Daemon.scan_entries(holder, "1", %{"order" => "asc"}, opts)
+
+      assert stopped.data["diagnostic"] == "aborted"
+      assert stopped.data["details"]["cwd"] == canonical
+      assert :ok = WorkspaceLease.acquire(lease, key, {"probe", 1}, self())
+      assert :ok = WorkspaceLease.release(lease, key, {"probe", 1})
+    end
+  end
+
+  defp calls(prefix \\ "cwd", specs) do
+    tool_calls =
+      for {{name, args}, n} <- Enum.with_index(specs, 1),
+          do: %{id: "#{prefix}-#{n}", name: name, arguments: args}
+
+    {:reply, [], %{tool_calls: tool_calls, finish_reason: "tool_calls"}}
   end
 
   describe "tool validation and workspace lease" do

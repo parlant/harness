@@ -9,7 +9,7 @@ defmodule H.Session.Subagents do
   and VM restarts.
   """
 
-  alias H.{Catalog, Daemon, Document, Storage, Task}
+  alias H.{Catalog, Daemon, Document, ExecutionEnv, Storage, Task}
   alias H.Session.Server.{State, Stream, Tools}
 
   @max_answer_bytes 32_768
@@ -26,7 +26,9 @@ defmodule H.Session.Subagents do
     target_sid = Map.get(validated_args, "session_id")
 
     with :ok <- validate_mode_args(mode, prompt, target_sid, validated_args),
-         {:ok, target_entry} <- resolve_target_and_guards(mode, target_sid, state) do
+         {:ok, target_entry} <- resolve_target_and_guards(mode, target_sid, state),
+         {:ok, validated_args} <-
+           resolve_spawn_cwd(validated_args, target_entry, state) do
       case mode do
         "wait" ->
           dispatch_wait(
@@ -381,36 +383,9 @@ defmodule H.Session.Subagents do
   # Mode handlers
 
   defp dispatch_wait(cid, tool_task, validated_args, target_entry, state, now, _apply_effects_fn) do
-    spawning_new? = is_nil(target_entry)
-
-    child_sid =
-      if target_entry,
-        do: target_entry.session_id,
-        else: mint_child_session_id(state.session_id, tool_task.id)
-
-    child_req_id = "sub:#{state.session_id}:#{tool_task.id}"
-    child_cwd = validated_args["cwd"] || if(target_entry, do: target_entry.cwd, else: state.cwd)
-    agent = state.docs[cid]["agent"] || %{}
-    child_model = validated_args["model"] || agent["model"]
-    child_thinking = validated_args["thinking"] || agent["thinking"]
-    read_only? = validated_args["read_only"] == true
-    title = validated_args["title"]
-    at_entry_id = tool_task.checkpoint["assistant_entry_id"]
-
-    memos = %{
-      "mode" => "wait",
-      "spawning_new" => spawning_new?,
-      "child_session_id" => child_sid,
-      "child_conversation_id" => 1,
-      "child_request_id" => child_req_id,
-      "at_entry_id" => at_entry_id,
-      "cwd" => child_cwd,
-      "model" => child_model,
-      "thinking" => child_thinking,
-      "read_only" => read_only?,
-      "title" => title,
-      "prompt" => validated_args["prompt"]
-    }
+    memos = child_input_memos("wait", cid, tool_task, validated_args, target_entry, state)
+    child_sid = memos["child_session_id"]
+    child_req_id = memos["child_request_id"]
 
     waiting_task = %{
       Task.start_waiting(tool_task, now, %{"phase" => "waiting", "replay" => "unsafe"})
@@ -489,36 +464,9 @@ defmodule H.Session.Subagents do
   end
 
   defp dispatch_start(cid, tool_task, validated_args, target_entry, state, now, apply_effects_fn) do
-    spawning_new? = is_nil(target_entry)
-
-    child_sid =
-      if target_entry,
-        do: target_entry.session_id,
-        else: mint_child_session_id(state.session_id, tool_task.id)
-
-    child_req_id = "sub:#{state.session_id}:#{tool_task.id}"
-    child_cwd = validated_args["cwd"] || if(target_entry, do: target_entry.cwd, else: state.cwd)
-    agent = state.docs[cid]["agent"] || %{}
-    child_model = validated_args["model"] || agent["model"]
-    child_thinking = validated_args["thinking"] || agent["thinking"]
-    read_only? = validated_args["read_only"] == true
-    title = validated_args["title"]
-    at_entry_id = tool_task.checkpoint["assistant_entry_id"]
-
-    memos = %{
-      "mode" => "start",
-      "spawning_new" => spawning_new?,
-      "child_session_id" => child_sid,
-      "child_conversation_id" => 1,
-      "child_request_id" => child_req_id,
-      "at_entry_id" => at_entry_id,
-      "cwd" => child_cwd,
-      "model" => child_model,
-      "thinking" => child_thinking,
-      "read_only" => read_only?,
-      "title" => title,
-      "prompt" => validated_args["prompt"]
-    }
+    memos = child_input_memos("start", cid, tool_task, validated_args, target_entry, state)
+    child_sid = memos["child_session_id"]
+    child_req_id = memos["child_request_id"]
 
     case commit_running_intent(cid, tool_task, memos, now, state) do
       {:error, state} ->
@@ -556,9 +504,9 @@ defmodule H.Session.Subagents do
                 "submission_id" => to_string(receipt.submission_id),
                 "status" => receipt.status,
                 "mode" => "start",
-                "cwd" => child_cwd,
-                "model" => child_model,
-                "read_only" => read_only?
+                "cwd" => memos["cwd"],
+                "model" => memos["model"],
+                "read_only" => memos["read_only"]
               },
               is_error: false,
               diagnostic: nil
@@ -778,6 +726,26 @@ defmodule H.Session.Subagents do
   end
 
   # Dispatch, watch, and persistence helpers
+
+  defp child_input_memos(mode, cid, task, args, target, state) do
+    agent = state.docs[cid]["agent"]
+
+    %{
+      "mode" => mode,
+      "spawning_new" => is_nil(target),
+      "child_session_id" =>
+        if(target, do: target.session_id, else: mint_child_session_id(state.session_id, task.id)),
+      "child_conversation_id" => 1,
+      "child_request_id" => "sub:#{state.session_id}:#{task.id}",
+      "at_entry_id" => task.checkpoint["assistant_entry_id"],
+      "cwd" => if(target, do: target.cwd, else: args["cwd"]),
+      "model" => args["model"] || agent["model"],
+      "thinking" => args["thinking"] || agent["thinking"],
+      "read_only" => args["read_only"] == true,
+      "title" => args["title"],
+      "prompt" => args["prompt"]
+    }
+  end
 
   defp dispatch_and_watch(tool_task, state) do
     cid = tool_task.checkpoint["conversation_id"]
@@ -1031,14 +999,27 @@ defmodule H.Session.Subagents do
       mode in ["await", "steer", "abort"] and not (is_binary(target_sid) and target_sid != "") ->
         {:error, "invalid_arguments", "session_id is required for mode #{mode}"}
 
-      is_nil(target_sid) and is_binary(validated_args["cwd"]) and
-          not String.starts_with?(validated_args["cwd"], "/") ->
-        {:error, "invalid_arguments", "cwd must be an absolute path"}
+      target_sid && validated_args["cwd"] ->
+        {:error, "invalid_arguments", "cwd can only be set when spawning a new subagent"}
 
       true ->
         :ok
     end
   end
+
+  defp resolve_spawn_cwd(%{"cwd" => cwd} = args, nil, state) do
+    case ExecutionEnv.bind_canonical_cwd(state.execution_env, cwd) do
+      {:ok, env} ->
+        {:ok, Map.put(args, "cwd", ExecutionEnv.cwd(env))}
+
+      {:error, reason} ->
+        {:error, "invalid_cwd",
+         "Cannot use working directory #{inspect(cwd)}: #{inspect(reason)}"}
+    end
+  end
+
+  defp resolve_spawn_cwd(args, nil, state), do: {:ok, Map.put(args, "cwd", state.cwd)}
+  defp resolve_spawn_cwd(args, _target, _state), do: {:ok, args}
 
   defp resolve_target_and_guards(_mode, nil, state) do
     depth = parent_depth(state)

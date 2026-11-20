@@ -1,6 +1,9 @@
 defmodule H.Tool do
   @moduledoc """
   Behaviour and JSON Schema validation helper for durable tools in `H`.
+
+  The coordinator binds the built-in coding tools' working directory before
+  acquiring a lease or calling `execute/2`. Workers use the bound `context.env`.
   """
 
   @type context :: %{
@@ -26,6 +29,16 @@ defmodule H.Tool do
   @callback replay() :: :safe | :unsafe
   @callback mutating?() :: boolean()
   @callback execute(args :: map(), context()) :: {:ok, tool_output()} | {:error, tool_output()}
+
+  @doc false
+  def cwd_schema do
+    %{
+      "type" => "string",
+      "pattern" => "^/",
+      "description" =>
+        "Existing absolute directory in this environment (e.g. a Git worktree). Applies only to this call; defaults to the session workspace."
+    }
+  end
 
   @doc false
   def selected?(name, selected) do

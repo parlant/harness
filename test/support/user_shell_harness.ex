@@ -6,7 +6,7 @@ defmodule H.Test.UserShellHarness do
 
   use GenServer
 
-  alias H.{Document, Storage, Submission, Task, WorkspaceLease}
+  alias H.{Document, Storage, Submission, Task}
   alias H.Session.UserShell
 
   def start_link(opts) when is_list(opts) do
@@ -104,7 +104,7 @@ defmodule H.Test.UserShellHarness do
       recent_submissions: recent_subs,
       workers: %{},
       ephemeral: %{},
-      held_leases: MapSet.new(),
+      held_leases: %{},
       workspace_waits: %{},
       replay_rings: %{},
       ring_base_seq: %{},
@@ -341,19 +341,7 @@ defmodule H.Test.UserShellHarness do
       end
     end)
 
-    if state.workspace_lease && GenServer.whereis(state.workspace_lease) do
-      ws_key = {state.env_id || "host", state.cwd}
-
-      cids = MapSet.union(state.held_leases, MapSet.new(Map.keys(state.workspace_waits)))
-
-      Enum.each(cids, fn cid ->
-        try do
-          WorkspaceLease.release(state.workspace_lease, ws_key, {state.session_id, cid})
-        catch
-          :exit, _ -> :ok
-        end
-      end)
-    end
+    H.Session.Server.State.release_all_leases(state)
 
     Storage.close(state.store)
     :ok

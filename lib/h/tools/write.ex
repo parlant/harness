@@ -18,6 +18,7 @@ defmodule H.Tools.Write do
     %{
       "type" => "object",
       "properties" => %{
+        "cwd" => H.Tool.cwd_schema(),
         "path" => %{"type" => "string", "description" => "Path to the file to write"},
         "content" => %{"type" => "string", "description" => "Content to write to the file"}
       },

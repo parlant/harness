@@ -459,7 +459,9 @@ defmodule H.Daemon do
                   conversation_id: parent_cid,
                   at_entry_id: at_entry_id,
                   task_id: Map.get(parent_req, :task_id),
-                  depth: depth
+                  depth: depth,
+                  env_id: parent_entry.env_id,
+                  cwd: parent_entry.cwd
                 }
 
                 resolved_role =

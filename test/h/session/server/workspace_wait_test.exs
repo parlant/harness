@@ -26,7 +26,7 @@ defmodule H.Session.Server.WorkspaceWaitTest do
       env_id: "host",
       cwd: cwd,
       workspace_lease: lease,
-      held_leases: MapSet.new(),
+      held_leases: %{},
       workspace_waits: %{},
       storage_failed: false,
       tasks: %{1 => task},
@@ -34,7 +34,7 @@ defmodule H.Session.Server.WorkspaceWaitTest do
       store: {FailedStorage, nil}
     }
 
-    {:waiting, state} = WorkspaceWait.acquire(1, task, state)
+    {:waiting, state} = WorkspaceWait.acquire(1, task, {"host", cwd}, state)
     assert state.storage_failed
     assert_receive {:stop_storage_failed, :eio}
     token = state.workspace_waits[1].token
@@ -42,7 +42,7 @@ defmodule H.Session.Server.WorkspaceWaitTest do
     assert_receive {:workspace_lease_granted, ^token}
     assert {[], state} = WorkspaceWait.granted(token, state)
     assert state.workspace_waits == %{}
-    assert state.held_leases == MapSet.new()
+    assert state.held_leases == %{}
     assert :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"probe", 1}, self())
   end
 end

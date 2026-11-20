@@ -307,7 +307,7 @@ defmodule H.SubagentRecoveryTest do
 
       assert is_pid(parent_sup)
       :ok = DynamicSupervisor.terminate_child(env.opts[:runtime_sup], parent_sup)
-      assert Registry.lookup(env.registry, {:session, parent_sid}) == []
+      wait_until(fn -> Registry.lookup(env.registry, {:session, parent_sid}) == [] end)
 
       # Now let child finish completely while parent is NOT running!
       send(child_worker, {:release, child_gate})

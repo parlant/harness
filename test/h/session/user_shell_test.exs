@@ -54,6 +54,11 @@ defmodule H.Session.UserShellTest do
     }
   end
 
+  defp host_lease_key(cwd) do
+    {:ok, canonical} = H.ExecutionEnv.canonical_path(Host.new(cwd), cwd)
+    {"host", canonical}
+  end
+
   defp wait_until(fun, timeout_ms \\ 3_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_until(fun, deadline)
@@ -286,7 +291,8 @@ defmodule H.Session.UserShellTest do
       marker = Path.join(cwd, "ran.txt")
 
       # Another session holds the lease on {"host", cwd}
-      assert :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"other-session", 1}, self())
+      assert :ok =
+               WorkspaceLease.acquire(lease, host_lease_key(cwd), {"other-session", 1}, self())
 
       {:ok, snap0} = UserShellHarness.state_snapshot(server)
 
@@ -307,7 +313,7 @@ defmodule H.Session.UserShellTest do
       assert snap.live["user_shell"]["status"] == "waiting"
       refute File.exists?(marker)
       assert {:ok, %{items: []}} = UserShellHarness.scan_entries(server)
-      :ok = WorkspaceLease.release(lease, {"host", cwd}, {"other-session", 1})
+      :ok = WorkspaceLease.release(lease, host_lease_key(cwd), {"other-session", 1})
 
       wait_until(fn ->
         {:ok, %{items: items}} = UserShellHarness.scan_entries(server)

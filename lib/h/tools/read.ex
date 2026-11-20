@@ -29,6 +29,7 @@ defmodule H.Tools.Read do
     %{
       "type" => "object",
       "properties" => %{
+        "cwd" => H.Tool.cwd_schema(),
         "path" => %{"type" => "string", "description" => "Path to the file to read"},
         "offset" => %{
           "type" => "integer",

@@ -41,7 +41,9 @@ When a subsession is launched—whether via the in-daemon `subagent` tool or `hi
   conversation_id: 1,        # wire: "1"
   at_entry_id: 42,           # wire: "42" — assistant tool_call entry (or latest visible entry) at launch
   task_id: 43,               # wire: "43" | nil — owning tool_call task when daemon-spawned
-  depth: 1                   # integer >= 1 (root sessions have parent: nil, depth: 0)
+  depth: 1,                  # integer >= 1 (root sessions have parent: nil, depth: 0)
+  env_id: "host",           # parent’s execution environment
+  cwd: "/work/project"      # parent’s directory at launch; child cwd is separate
 }
 ```
 
@@ -155,7 +157,7 @@ Offered in `H.Harness.Coding` when `session_depth < max_subagent_depth` (default
     - `"steer"`: Deliver a live `"steer"` input to a busy child `session_id` and return the placement/queue receipt immediately.
     - `"abort"`: Abort active work in an owned child `session_id`.
   - `title` (optional string): Display title for the subsession.
-  - `cwd` (optional absolute path): Working directory in the parent's `env_id` (defaults to parent's `cwd`; pass a worktree path for isolated parallel mutations).
+  - `cwd` (optional absolute path, new spawns only): Existing directory in the parent's `env_id`. Defaults to the parent's session workspace. For parallel mutations, prepare a separate Git worktree per child and pass its root; `subagent` does not create or clean up worktrees. `SessionSummary.cwd` retains the child's starting directory, while `parent.cwd` and `parent.env_id` retain the parent's launch location.
   - `model` (optional `provider:model` string): Defaults to parent conversation's current `agent["model"]`.
   - `thinking` (optional thinking level string): Defaults to parent conversation's current `agent["thinking"]`.
   - `read_only` (optional boolean, default `false`): When `true`, restricts the child's tools to `["read", "search_history"]` so N explorers can run in the same `cwd` with zero `WorkspaceLease` contention and zero mutation risk.
@@ -166,7 +168,7 @@ Offered in `H.Harness.Coding` when `session_depth < max_subagent_depth` (default
 - **`POST /api/v1/sessions` (`CreateSessionRequest`):**
   - Accepts optional `"parent"`: `%{"session_id" => sid, "conversation_id" => cid_optional, "at_entry_id" => entry_id_optional}` and optional `"role"` (`"subagent"`). When `conversation_id` is given without `at_entry_id`, daemon resolves the latest visible entry ID in that conversation (if any) so CLI-launched subsessions also anchor to the current step!
 - **`GET /api/v1/sessions` & `SessionSummary`:**
-  - Every `SessionSummary` includes `"parent"` (`null` for root sessions, or `%{"session_id" => ..., "conversation_id" => ..., "at_entry_id" => ..., "task_id" => ..., "depth" => ...}`) and `"role"` (`null | "subagent"`).
+  - Every `SessionSummary` includes `"parent"` (`null` for root sessions, or `%{"session_id" => ..., "conversation_id" => ..., "at_entry_id" => ..., "task_id" => ..., "depth" => ..., "env_id" => ..., "cwd" => ...}`; older records may omit the launch workspace fields) and `"role"` (`null | "subagent"`).
   - Optional query param `include_subsessions=true|false` on `GET /api/v1/sessions` when filtering by `cwd` (default `true` on raw `/sessions` snapshot so clients have the full graph for toggles/cards; `GET /api/v1/fs` directory counts exclude `parent != nil` by default).
 - **`GET /api/v1/sessions/:sid/submissions/:request_id` (or SSE settlement frame):**
   - Lightweight status/settlement lookup so external callers can inspect submission completion cleanly.

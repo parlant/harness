@@ -4,21 +4,27 @@ defmodule H.Session.Server.WorkspaceWait do
   alias H.{Document, Storage, WorkspaceLease}
   alias H.Session.Server.{State, Stream}
 
-  def acquire(cid, task, state) do
+  def acquire(cid, task, key, state) do
+    lease = state.workspace_lease
     token = make_ref()
 
-    case State.acquire_lease(cid, state, nil, token) do
-      {:ok, state} ->
-        {:ok,
-         State.put_doc(state, cid, "live", Map.delete(state.docs[cid]["live"], "workspace_wait"))}
+    result =
+      if lease && GenServer.whereis(lease) do
+        WorkspaceLease.acquire_or_wait(lease, key, {state.session_id, cid}, self(), token)
+      else
+        :unmanaged
+      end
 
+    case result do
       {:waiting, holder, lease_id} ->
-        waits = Map.get(state, :workspace_waits, %{})
-
-        state =
-          Map.put(state, :workspace_waits, Map.put(waits, cid, %{token: token, task_id: task.id}))
-
+        wait = %{token: token, task_id: task.id, key: key}
+        state = put_in(state.workspace_waits[cid], wait)
         {:waiting, persist(cid, task, holder, lease_id, state)}
+
+      granted when granted in [:ok, :unmanaged] ->
+        state = if granted == :ok, do: put_in(state.held_leases[cid], key), else: state
+        live = Map.delete(state.docs[cid]["live"], "workspace_wait")
+        {:ok, State.put_doc(state, cid, "live", live)}
     end
   end
 
@@ -37,7 +43,7 @@ defmodule H.Session.Server.WorkspaceWait do
         state = %{
           state
           | workspace_waits: Map.delete(state.workspace_waits, cid),
-            held_leases: MapSet.put(state.held_leases, cid)
+            held_leases: Map.put(state.held_leases, cid, wait.key)
         }
 
         task = state.tasks[wait.task_id]
@@ -56,10 +62,10 @@ defmodule H.Session.Server.WorkspaceWait do
 
   def stop_holder(cid, task_id, lease_id, state) do
     case Map.get(state.workspace_waits, cid) do
-      %{task_id: ^task_id, token: token} ->
+      %{task_id: ^task_id, token: token, key: key} ->
         WorkspaceLease.stop_holder(
           state.workspace_lease,
-          {state.env_id, state.cwd},
+          key,
           {state.session_id, cid},
           token,
           lease_id
@@ -81,7 +87,11 @@ defmodule H.Session.Server.WorkspaceWait do
         updated_at: now
     }
 
+    {env_id, cwd} = state.workspace_waits[cid].key
+
     wait = %{
+      "env_id" => env_id,
+      "cwd" => cwd,
       "task_id" => to_string(task.id),
       "holder_session_id" => sid,
       "holder_conversation_id" => to_string(owner_cid),

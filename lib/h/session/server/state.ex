@@ -113,69 +113,29 @@ defmodule H.Session.Server.State do
     Map.get(state, :cwd) || if(env, do: ExecutionEnv.cwd(env), else: nil)
   end
 
-  def acquire_lease(cid, state, env \\ nil, wait_token \\ nil) do
-    lease_server = Map.get(state, :workspace_lease)
+  def release_lease(cid, state) do
+    {held_key, held} = Map.pop(state.held_leases, cid)
+    {wait, waits} = Map.pop(state.workspace_waits, cid)
+    key = held_key || (wait && wait.key)
 
-    if not is_nil(lease_server) and GenServer.whereis(lease_server) != nil do
-      env = env || Map.get(state, :execution_env)
-      env_id = Map.get(state, :env_id) || if(env, do: ExecutionEnv.env_id(env), else: "host")
-      cwd = workspace_cwd(env, state)
-      ws_key = {env_id, cwd}
-      holder_key = {state.session_id, cid}
-
-      result =
-        if wait_token,
-          do:
-            WorkspaceLease.acquire_or_wait(lease_server, ws_key, holder_key, self(), wait_token),
-          else: WorkspaceLease.acquire(lease_server, ws_key, holder_key, self())
-
-      case result do
-        :ok ->
-          held = Map.get(state, :held_leases, MapSet.new())
-          {:ok, Map.put(state, :held_leases, MapSet.put(held, cid))}
-
-        other ->
-          other
-      end
-    else
-      {:ok, state}
+    if key && state.workspace_lease && GenServer.whereis(state.workspace_lease) do
+      WorkspaceLease.release(state.workspace_lease, key, {state.session_id, cid})
     end
-  end
 
-  def release_lease(cid, state, env \\ nil) do
-    lease_server = Map.get(state, :workspace_lease)
-    held = Map.get(state, :held_leases, MapSet.new())
-    waits = Map.get(state, :workspace_waits, %{})
-
-    if (MapSet.member?(held, cid) or Map.has_key?(waits, cid)) and not is_nil(lease_server) and
-         GenServer.whereis(lease_server) != nil do
-      env = env || Map.get(state, :execution_env)
-      env_id = Map.get(state, :env_id) || if(env, do: ExecutionEnv.env_id(env), else: "host")
-      cwd = workspace_cwd(env, state)
-      WorkspaceLease.release(lease_server, {env_id, cwd}, {state.session_id, cid})
-
-      state
-      |> Map.put(:held_leases, MapSet.delete(held, cid))
-      |> Map.put(:workspace_waits, Map.delete(waits, cid))
-    else
-      state
-    end
+    %{state | held_leases: held, workspace_waits: waits}
   end
 
   def release_all_leases(state) do
-    lease_server = Map.get(state, :workspace_lease)
-    held = Map.get(state, :held_leases, MapSet.new())
+    keys =
+      Map.merge(
+        Map.new(state.workspace_waits, fn {cid, wait} -> {cid, wait.key} end),
+        state.held_leases
+      )
 
-    if not is_nil(lease_server) and GenServer.whereis(lease_server) != nil do
-      env = Map.get(state, :execution_env)
-      env_id = Map.get(state, :env_id) || if(env, do: ExecutionEnv.env_id(env), else: "host")
-      ws_key = {env_id, workspace_cwd(env, state)}
-
-      cids = MapSet.union(held, MapSet.new(Map.keys(Map.get(state, :workspace_waits, %{}))))
-
-      Enum.each(cids, fn cid ->
+    if state.workspace_lease && GenServer.whereis(state.workspace_lease) do
+      Enum.each(keys, fn {cid, key} ->
         try do
-          WorkspaceLease.release(lease_server, ws_key, {state.session_id, cid})
+          WorkspaceLease.release(state.workspace_lease, key, {state.session_id, cid})
         catch
           :exit, _ -> :ok
         end
