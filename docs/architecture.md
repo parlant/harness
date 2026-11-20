@@ -44,6 +44,14 @@ one active alias; the optional path-loaded [MultiCodex](extensions/providers.md)
 package owns quota polling and account preferences. The adapter alone
 authorizes a second dispatch.
 
+Named Chat Completions providers are startup data, not extensions. The
+validated catalog supplies the route and limits, while the account service
+alone stores and resolves the active API-key profile. Both generation and
+compaction commit a one-dispatch, no-auto-resume policy for these routes.
+The owner web editor stages catalog writes through the account service under
+that same lock. An edit does not mutate the booted registry or change which
+endpoint can receive an existing provider's key.
+
 ## Planned shutdown
 
 The standalone launcher accepts an owner-authenticated, idle-only shutdown.
@@ -58,6 +66,8 @@ effects.
 ## Workspace boundary
 
 `H.EnvRegistry` resolves an environment for browsing or binds it to a session's working directory. The catalog and mutating-tool leases distinguish workspaces by `{env_id, cwd}`. `H.Harness.Coding` supplies `read`, `write`, `edit`, `bash`, `search_history`, and depth-gated `subagent` delegation (holding zero worker processes while parked on `H.PubSub` submission-settlement signals) and discovers ancestor `AGENTS.md` files through `H.ExecutionEnv` unless instructions are overridden. `H.ExecutionEnv.Host` operates with the host user's access; a lease coordinates writers, **not** filesystem confinement. `Local` is a compatibility wrapper.
+
+Mutating tools and user-shell commands queue at `H.WorkspaceLease` when another conversation owns the workspace. The manager monitors waiters and reserves the next lease before signalling its session coordinator; the coordinator stays responsive while waiting. A persisted `workspace_wait` checkpoint has no execution attempt and can safely requeue after restart. Client actions can cancel the waiting run or request cancellation of the specific current holder, with a lease-generation token fencing stale stop requests. Stop-holder prioritizes that waiter but does not revoke the lease: the owning coordinator commits cancellation, stops its workers, and releases normally. Running unsafe effects retain the interruption policy above.
 
 `H.ExecutionEnv.Remote` delegates to `H.RemoteAgent`. The implementation exercises stale-attempt fencing, lease renewal, expiry and process-group cleanup **in the same VM**. It is not an authenticated transport to another machine.
 

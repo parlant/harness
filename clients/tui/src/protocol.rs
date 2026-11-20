@@ -71,6 +71,8 @@ pub struct ModelInfo {
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
@@ -106,7 +108,7 @@ pub struct SessionParent {
     pub depth: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionSummary {
     pub session_id: String,
     #[serde(default)]
@@ -140,6 +142,14 @@ pub struct SessionSummary {
     pub parent: Option<SessionParent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(default)]
+    pub needs_attention: Option<bool>,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub loaded: Option<bool>,
+    #[serde(default)]
+    pub cwd_exists: Option<bool>,
 }
 
 impl SessionSummary {
@@ -154,16 +164,46 @@ impl SessionSummary {
     /// Returns the effective attention state for this session, falling back
     /// cleanly for older/minimal payloads that omit `attention`.
     pub fn effective_attention(&self) -> &str {
-        if self.status.as_deref() == Some("quarantined") {
-            return "quarantined";
+        match self.status.as_deref() {
+            Some("quarantined") => return "quarantined",
+            Some("archived") => return "archived",
+            _ => (),
+        }
+        if self.archived {
+            return "archived";
         }
         match self.attention.as_deref() {
-            Some("idle" | "running" | "sleeping" | "error" | "quarantined") => {
-                self.attention.as_deref().unwrap()
-            }
+            Some(
+                "idle" | "running" | "sleeping" | "retrying" | "error" | "quarantined" | "archived",
+            ) => self.attention.as_deref().unwrap(),
             _ if self.active => "running",
             _ => "idle",
         }
+    }
+
+    pub fn effective_archived(&self) -> bool {
+        self.archived || self.status.as_deref() == Some("archived")
+    }
+
+    pub fn effective_needs_attention(&self) -> bool {
+        if self.effective_archived() {
+            false
+        } else if let Some(na) = self.needs_attention {
+            na
+        } else {
+            !matches!(
+                self.effective_attention(),
+                "running" | "sleeping" | "retrying" | "archived"
+            )
+        }
+    }
+
+    pub fn effective_loaded(&self) -> bool {
+        self.loaded.unwrap_or(!self.effective_archived())
+    }
+
+    pub fn effective_cwd_exists(&self) -> bool {
+        self.cwd_exists.unwrap_or(true)
     }
 }
 
@@ -976,6 +1016,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(quarantined.effective_attention(), "quarantined");
+
+        // Verify backward-compatible lifecycle defaults & helpers
+        assert!(minimal.effective_needs_attention());
+        assert!(!minimal.effective_archived());
+        assert!(minimal.effective_loaded());
+        assert!(minimal.effective_cwd_exists());
+
+        assert!(!minimal_active.effective_needs_attention());
+        assert!(quarantined.effective_needs_attention());
+
+        let archived_user: SessionSummary = serde_json::from_str(
+            r#"{"session_id":"s4","cwd":"/tmp/a","active":false,"attention":"idle","needs_attention":true,"archived":true,"loaded":false,"cwd_exists":false}"#,
+        )
+        .unwrap();
+        assert!(archived_user.effective_archived());
+        assert!(!archived_user.effective_needs_attention());
+        assert!(!archived_user.effective_loaded());
+        assert!(!archived_user.effective_cwd_exists());
+
+        let archived_import: SessionSummary = serde_json::from_str(
+            r#"{"session_id":"s5","cwd":"/tmp/a","active":false,"status":"archived","attention":"archived"}"#,
+        )
+        .unwrap();
+        assert!(archived_import.effective_archived());
+        assert!(!archived_import.effective_needs_attention());
+        assert!(!archived_import.effective_loaded());
 
         let snap_ev = SseEvent {
             id: Some("4".into()),

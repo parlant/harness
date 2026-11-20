@@ -90,11 +90,30 @@ defmodule H.Session.Server.State do
 
   # Workspace leases
 
+  def cwd_available?(state) when is_map(state) do
+    env = Map.get(state, :execution_env)
+    cwd = workspace_cwd(env, state)
+
+    cond do
+      not is_binary(cwd) or cwd == "" ->
+        false
+
+      is_nil(env) ->
+        File.dir?(cwd)
+
+      ExecutionEnv.kind(env) == "host" ->
+        File.dir?(cwd)
+
+      true ->
+        match?({:ok, _}, ExecutionEnv.bind_cwd(env, cwd))
+    end
+  end
+
   def workspace_cwd(env, state) do
     Map.get(state, :cwd) || if(env, do: ExecutionEnv.cwd(env), else: nil)
   end
 
-  def acquire_lease(cid, state, env \\ nil) do
+  def acquire_lease(cid, state, env \\ nil, wait_token \\ nil) do
     lease_server = Map.get(state, :workspace_lease)
 
     if not is_nil(lease_server) and GenServer.whereis(lease_server) != nil do
@@ -104,13 +123,19 @@ defmodule H.Session.Server.State do
       ws_key = {env_id, cwd}
       holder_key = {state.session_id, cid}
 
-      case WorkspaceLease.acquire(lease_server, ws_key, holder_key, self()) do
+      result =
+        if wait_token,
+          do:
+            WorkspaceLease.acquire_or_wait(lease_server, ws_key, holder_key, self(), wait_token),
+          else: WorkspaceLease.acquire(lease_server, ws_key, holder_key, self())
+
+      case result do
         :ok ->
           held = Map.get(state, :held_leases, MapSet.new())
           {:ok, Map.put(state, :held_leases, MapSet.put(held, cid))}
 
-        {:error, _} = err ->
-          err
+        other ->
+          other
       end
     else
       {:ok, state}
@@ -120,14 +145,18 @@ defmodule H.Session.Server.State do
   def release_lease(cid, state, env \\ nil) do
     lease_server = Map.get(state, :workspace_lease)
     held = Map.get(state, :held_leases, MapSet.new())
+    waits = Map.get(state, :workspace_waits, %{})
 
-    if MapSet.member?(held, cid) and not is_nil(lease_server) and
+    if (MapSet.member?(held, cid) or Map.has_key?(waits, cid)) and not is_nil(lease_server) and
          GenServer.whereis(lease_server) != nil do
       env = env || Map.get(state, :execution_env)
       env_id = Map.get(state, :env_id) || if(env, do: ExecutionEnv.env_id(env), else: "host")
       cwd = workspace_cwd(env, state)
       WorkspaceLease.release(lease_server, {env_id, cwd}, {state.session_id, cid})
-      %{state | held_leases: MapSet.delete(held, cid)}
+
+      state
+      |> Map.put(:held_leases, MapSet.delete(held, cid))
+      |> Map.put(:workspace_waits, Map.delete(waits, cid))
     else
       state
     end
@@ -142,7 +171,9 @@ defmodule H.Session.Server.State do
       env_id = Map.get(state, :env_id) || if(env, do: ExecutionEnv.env_id(env), else: "host")
       ws_key = {env_id, workspace_cwd(env, state)}
 
-      Enum.each(held, fn cid ->
+      cids = MapSet.union(held, MapSet.new(Map.keys(Map.get(state, :workspace_waits, %{}))))
+
+      Enum.each(cids, fn cid ->
         try do
           WorkspaceLease.release(lease_server, ws_key, {state.session_id, cid})
         catch
@@ -172,7 +203,8 @@ defmodule H.Session.Server.State do
           derive_active_activity(active_tasks)
 
         sleeping_tasks != [] ->
-          {"sleeping", "retry", "retrying"}
+          task = Enum.min_by(sleeping_tasks, & &1.id)
+          {"retrying", "retry", retry_label(task, true)}
 
         true ->
           case find_conversation_failure(docs) do
@@ -195,7 +227,12 @@ defmodule H.Session.Server.State do
       attention: attention,
       activity_kind: activity_kind,
       activity_label: Catalog.sanitize_activity_label(activity_label),
-      queued_count: queued_count
+      queued_count: queued_count,
+      next_wake_at:
+        sleeping_tasks
+        |> Enum.map(&get_in(&1, [Access.key(:wake, %{}), "until"]))
+        |> Enum.reject(&is_nil/1)
+        |> Enum.min(fn -> nil end)
     }
   end
 
@@ -235,6 +272,12 @@ defmodule H.Session.Server.State do
         t.kind == "compaction" and t.status in ["running", "pending"]
       end)
 
+    retry_task =
+      Enum.find(sorted, fn task ->
+        task.kind in ["generation", "compaction"] and task.status in ["pending", "running"] and
+          (task.checkpoint["retry_count"] || 0) > 0
+      end)
+
     cond do
       tool_task != nil ->
         label =
@@ -248,11 +291,25 @@ defmodule H.Session.Server.State do
       user_shell_task != nil ->
         {"running", "user_shell", "shell"}
 
+      retry_task != nil ->
+        {"retrying", "retry", retry_label(retry_task, false)}
+
       compaction_task != nil ->
         {"running", "compaction", "compact"}
 
       true ->
         {"running", "generation", nil}
+    end
+  end
+
+  defp retry_label(task, waiting?) do
+    case task.checkpoint["retry"] do
+      %{"attempt" => attempt, "max_attempts" => limit, "code" => code, "delay_ms" => delay} ->
+        phase = if waiting?, do: "waiting #{ceil(delay / 1_000)}s", else: "requesting"
+        "Retry #{attempt}/#{limit} · #{code} · #{phase}"
+
+      _ ->
+        "retrying"
     end
   end
 
@@ -270,8 +327,8 @@ defmodule H.Session.Server.State do
       case Map.get(live, "run_failure") || Map.get(live, "compaction_failure") do
         failure when is_map(failure) ->
           raw =
-            Map.get(failure, "reason") ||
-              Map.get(failure, "code") ||
+            Map.get(failure, "code") ||
+              Map.get(failure, "reason") ||
               "error"
 
           {:ok, Catalog.sanitize_activity_label(to_string(raw)) || "error"}
@@ -297,6 +354,7 @@ defmodule H.Session.Server.State do
   def terminate_all_workers(state) do
     Enum.each(state.workers, fn {_attempt_id, worker} ->
       Process.demonitor(worker.monitor_ref, [:flush])
+      if worker[:abort_ref], do: send(worker.pid, {:abort_exec, worker.abort_ref})
       terminate_worker_pid(state.task_sup, worker.pid)
     end)
   end

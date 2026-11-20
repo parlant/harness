@@ -176,8 +176,19 @@ pub fn hi_main() -> ExitCode {
         let inbox_cli = InboxCli::parse_from(inbox_args);
         return report(run_inbox_cli(inbox_cli));
     }
-    let cmd = Cli::command()
-        .after_help("Subcommands: hi inbox, hi login, hi account, hi daemon (each accepts --help)");
+    if let Some(name) = args.get(1).and_then(|arg| arg.to_str()) {
+        if let Some(result) = exec_extension(name, &args[2..]) {
+            return report(Err(AppError::Message(result)));
+        }
+        if name == "import" {
+            return report(Err(AppError::Message(
+                "hi import requires hi-import on PATH".into(),
+            )));
+        }
+    }
+    let cmd = Cli::command().after_help(
+        "Subcommands: hi inbox, hi login, hi account, hi daemon. Extensions: hi <name> runs hi-<name> from PATH (e.g. hi import). Use -- for a literal prompt.",
+    );
     let cli = Cli::from_arg_matches(&cmd.get_matches_from(args)).unwrap_or_else(|err| err.exit());
     report(run(cli))
 }
@@ -207,6 +218,31 @@ fn run_inbox_cli(cli: InboxCli) -> Result<(), AppError> {
         reexec,
     )
     .map_err(AppError::Message)
+}
+
+fn exec_extension(name: &str, args: &[std::ffi::OsString]) -> Option<String> {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+
+    if !name.starts_with(|c: char| c.is_ascii_lowercase())
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        return None;
+    }
+    let executable = format!("hi-{name}");
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path).filter(|dir| dir.is_absolute()) {
+        let command = dir.join(&executable);
+        if command
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        {
+            let err = std::process::Command::new(command).args(args).exec();
+            return Some(format!("could not run {executable}: {err}"));
+        }
+    }
+    None
 }
 
 fn report(result: Result<(), AppError>) -> ExitCode {
@@ -426,9 +462,8 @@ fn sort_sessions_latest_first(sessions: &mut [SessionSummary]) {
 fn pick_latest_session(sessions: &[SessionSummary]) -> Option<&SessionSummary> {
     sessions
         .iter()
-        .filter(|s| s.is_root_session())
-        .find(|s| s.status.as_deref() != Some("quarantined"))
-        .or_else(|| sessions.iter().find(|s| s.is_root_session()))
+        .filter(|s| s.is_root_session() && !s.effective_archived())
+        .min_by_key(|s| s.status.as_deref() == Some("quarantined"))
 }
 
 fn resolve_session_for_run(
@@ -922,6 +957,10 @@ mod tests {
                 status: Some("ok".to_string()),
                 parent: None,
                 role: None,
+                needs_attention: None,
+                archived: false,
+                loaded: None,
+                cwd_exists: None,
             },
             SessionSummary {
                 session_id: "quar".to_string(),
@@ -941,6 +980,56 @@ mod tests {
                 status: Some("quarantined".to_string()),
                 parent: None,
                 role: None,
+                needs_attention: None,
+                archived: false,
+                loaded: None,
+                cwd_exists: None,
+            },
+            SessionSummary {
+                session_id: "arch-user".to_string(),
+                title: None,
+                env_id: Some("host".to_string()),
+                harness_id: None,
+                cwd: "/tmp/p".to_string(),
+                root_conversation_id: Some("1".to_string()),
+                created_at: Some(300),
+                updated_at: Some(300),
+                active: false,
+                attention: Some("idle".to_string()),
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
+                next_wake_at: None,
+                status: Some("ok".to_string()),
+                parent: None,
+                role: None,
+                needs_attention: Some(false),
+                archived: true,
+                loaded: Some(false),
+                cwd_exists: Some(true),
+            },
+            SessionSummary {
+                session_id: "arch-import".to_string(),
+                title: None,
+                env_id: Some("host".to_string()),
+                harness_id: None,
+                cwd: "/tmp/p".to_string(),
+                root_conversation_id: Some("1".to_string()),
+                created_at: Some(400),
+                updated_at: Some(400),
+                active: false,
+                attention: Some("archived".to_string()),
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
+                next_wake_at: None,
+                status: Some("archived".to_string()),
+                parent: None,
+                role: None,
+                needs_attention: Some(false),
+                archived: true,
+                loaded: Some(false),
+                cwd_exists: Some(true),
             },
         ];
         sort_sessions_latest_first(&mut sessions);
@@ -1086,6 +1175,7 @@ mod tests {
                 status: Some("ok".to_string()),
                 parent: None,
                 role: None,
+                ..Default::default()
             },
             SessionSummary {
                 session_id: "sub-newer".to_string(),
@@ -1111,6 +1201,7 @@ mod tests {
                     depth: Some(1),
                 }),
                 role: Some("subagent".to_string()),
+                ..Default::default()
             },
         ];
         sort_sessions_latest_first(&mut sessions);

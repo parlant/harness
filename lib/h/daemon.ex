@@ -11,12 +11,14 @@ defmodule H.Daemon do
 
   alias H.{
     Catalog,
+    Daemon.ColdSession,
     Daemon.Validation,
     Daemon.Workspace,
     EnvRegistry,
     ExecutionEnv,
     Harness,
     Session.Server,
+    Session.Server.Recovery,
     Session.Supervisor
   }
 
@@ -59,7 +61,7 @@ defmodule H.Daemon do
              | {:bad_request, String.t()}}
   def browse_workspace(query_params \\ %{}, opts \\ [])
       when is_map(query_params) and is_list(opts) do
-    Workspace.browse(query_params, opts, &wire_session/1)
+    Workspace.browse(query_params, opts, &wire_session(&1, opts))
   end
 
   @doc """
@@ -176,15 +178,16 @@ defmodule H.Daemon do
 
     table
     |> Catalog.list_sessions()
-    |> Enum.map(&wire_session/1)
+    |> Enum.map(&wire_session(&1, opts))
   end
 
-  @doc "Lists sessions filtered by `env_id`, `cwd`, `subtree`, and `include_subsessions`."
+  @doc "Lists sessions filtered by `env_id`, `cwd`, optional `subtree`, `archived`, and `include_subsessions`."
   @spec list_sessions(map(), keyword()) :: {:ok, [map()]} | {:error, {:bad_request, String.t()}}
   def list_sessions(query_params, opts) when is_map(query_params) and is_list(opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
     raw_env_id = Validation.param_get(query_params, "env_id", :env_id)
     raw_cwd = Validation.param_get(query_params, "cwd", :cwd)
+    raw_archived = Validation.param_get(query_params, "archived", :archived)
 
     subtree? =
       Validation.parse_bool_param(Validation.param_get(query_params, "subtree", :subtree), false)
@@ -195,59 +198,64 @@ defmodule H.Daemon do
         true
       )
 
-    cond do
-      not (is_nil(raw_env_id) or is_binary(raw_env_id)) ->
-        {:error, {:bad_request, "env_id must be a string"}}
+    with {:ok, archived_filter} <- parse_archived_filter(raw_archived) do
+      cond do
+        not (is_nil(raw_env_id) or is_binary(raw_env_id)) ->
+          {:error, {:bad_request, "env_id must be a string"}}
 
-      not (is_nil(raw_cwd) or is_binary(raw_cwd)) ->
-        {:error, {:bad_request, "cwd must be a string"}}
+        not (is_nil(raw_cwd) or is_binary(raw_cwd)) ->
+          {:error, {:bad_request, "cwd must be a string"}}
 
-      is_binary(raw_cwd) and raw_cwd != "" ->
-        env_id = if raw_env_id in [nil, ""], do: "host", else: raw_env_id
+        is_binary(raw_cwd) and raw_cwd != "" ->
+          env_id = if raw_env_id in [nil, ""], do: "host", else: raw_env_id
 
-        canonical_cwd =
-          case EnvRegistry.fetch_env(env_id, opts) do
-            {:ok, base_env, _desc} ->
-              case ExecutionEnv.resolve_path(base_env, raw_cwd) do
-                {:ok, resolved} -> resolved
-                _ -> raw_cwd
-              end
+          canonical_cwd =
+            case EnvRegistry.fetch_env(env_id, opts) do
+              {:ok, base_env, _desc} ->
+                case ExecutionEnv.resolve_path(base_env, raw_cwd) do
+                  {:ok, resolved} -> resolved
+                  _ -> raw_cwd
+                end
 
-            _ ->
-              raw_cwd
-          end
+              _ ->
+                raw_cwd
+            end
 
-        sessions =
-          env_id
-          |> Catalog.list_sessions_for_cwd(canonical_cwd,
-            table: table,
-            subtree: subtree?,
-            include_subsessions: include_subsessions?
-          )
-          |> Enum.map(&wire_session/1)
+          sessions =
+            env_id
+            |> Catalog.list_sessions_for_cwd(canonical_cwd,
+              table: table,
+              subtree: subtree?,
+              include_subsessions: include_subsessions?
+            )
+            |> filter_archived(archived_filter)
+            |> Enum.map(&wire_session(&1, opts))
 
-        {:ok, sessions}
+          {:ok, sessions}
 
-      is_binary(raw_env_id) and raw_env_id != "" ->
-        sessions =
-          table
-          |> Catalog.list_sessions()
-          |> Enum.filter(fn entry ->
-            (entry.env_id || "host") == raw_env_id and
-              (include_subsessions? or Catalog.root_session?(entry))
-          end)
-          |> Enum.map(&wire_session/1)
+        is_binary(raw_env_id) and raw_env_id != "" ->
+          sessions =
+            table
+            |> Catalog.list_sessions()
+            |> Enum.filter(fn entry ->
+              (entry.env_id || "host") == raw_env_id and
+                (include_subsessions? or Catalog.root_session?(entry))
+            end)
+            |> filter_archived(archived_filter)
+            |> Enum.map(&wire_session(&1, opts))
 
-        {:ok, sessions}
+          {:ok, sessions}
 
-      true ->
-        sessions =
-          table
-          |> Catalog.list_sessions()
-          |> Enum.filter(&(include_subsessions? or Catalog.root_session?(&1)))
-          |> Enum.map(&wire_session/1)
+        true ->
+          sessions =
+            table
+            |> Catalog.list_sessions()
+            |> Enum.filter(&(include_subsessions? or Catalog.root_session?(&1)))
+            |> filter_archived(archived_filter)
+            |> Enum.map(&wire_session(&1, opts))
 
-        {:ok, sessions}
+          {:ok, sessions}
+      end
     end
   end
 
@@ -279,6 +287,9 @@ defmodule H.Daemon do
       end
     end
   end
+
+  defp attach_session(%{status: "archived"}, _params, _opts),
+    do: {:error, {:conflict, "session is archived"}}
 
   defp attach_session(entry, params, opts) do
     harness_id = Map.get(entry, :harness_id) || "coding"
@@ -348,10 +359,27 @@ defmodule H.Daemon do
   defp match_workspace(env_id, cwd, params, opts) do
     if Map.get(params, :env_id, env_id) == env_id do
       case EnvRegistry.resolve_workspace(env_id, params.cwd, opts) do
-        {:ok, %{cwd: ^cwd}} -> :ok
-        {:error, :unknown_environment} -> {:error, :workspace_unavailable}
-        {:error, :workspace_unavailable} -> {:error, :workspace_unavailable}
-        _ -> {:error, {:conflict, "session already exists with different workspace"}}
+        {:ok, %{cwd: ^cwd}} ->
+          :ok
+
+        {:error, :unknown_environment} ->
+          {:error, :workspace_unavailable}
+
+        {:error, :workspace_unavailable} ->
+          {:error, :workspace_unavailable}
+
+        {:error, reason} when reason in [:enoent, :enotdir] ->
+          with {:ok, base_env, _desc} <- EnvRegistry.fetch_env(env_id, opts),
+               {:ok, ^cwd} <- ExecutionEnv.resolve_path(base_env, params.cwd) do
+            :ok
+          else
+            {:error, :unknown_environment} -> {:error, :workspace_unavailable}
+            {:error, :workspace_unavailable} -> {:error, :workspace_unavailable}
+            _ -> {:error, {:conflict, "session already exists with different workspace"}}
+          end
+
+        _ ->
+          {:error, {:conflict, "session already exists with different workspace"}}
       end
     else
       {:error, {:conflict, "session already exists with different workspace"}}
@@ -384,6 +412,7 @@ defmodule H.Daemon do
         |> maybe_put(:title, Map.get(params, :title))
         |> maybe_put(:parent, resolved_parent)
         |> maybe_put(:role, resolved_role)
+        |> maybe_put(:tags, Map.get(params, :tags))
 
       case Catalog.insert_session(catalog, attrs) do
         {:ok, entry} -> session_result(entry, opts, bootstrapped)
@@ -519,9 +548,312 @@ defmodule H.Daemon do
           _ -> entry
         end
 
-      {:ok, %{session: wire_session(latest_entry), seq: seq}}
+      {:ok, %{session: wire_session(latest_entry, opts), seq: seq}}
     end
   end
+
+  @doc "Updates a session’s `needs_attention` flag or `tags` without waking it."
+  @spec triage_session(String.t(), map(), keyword()) ::
+          {:ok, %{session: map()}}
+          | {:error, :not_found | {:bad_request, String.t()} | term()}
+  def triage_session(session_id, params, opts \\ [])
+
+  def triage_session(session_id, params, opts)
+      when is_binary(session_id) and is_map(params) and is_list(opts) do
+    H.Daemon.Maintenance.admit(opts, fn -> do_triage_session(session_id, params, opts) end)
+  end
+
+  def triage_session(_session_id, _params, _opts),
+    do: {:error, {:bad_request, "expected a map"}}
+
+  defp do_triage_session(session_id, params, opts) do
+    catalog = Keyword.get(opts, :catalog, @default_catalog)
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         {:ok, updated} <- Catalog.set_triage(catalog, session_id, params) do
+      {:ok, %{session: wire_session(updated, opts)}}
+    else
+      {:error, msg} when is_binary(msg) -> {:error, {:bad_request, msg}}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc "Stops all active runs across all conversations in a session."
+  @spec stop_session(String.t(), map(), keyword()) ::
+          {:ok, %{session: map()}}
+          | {:error,
+             :not_found | {:bad_request, String.t()} | {:quarantined, String.t()} | term()}
+  def stop_session(session_id, params \\ %{}, opts \\ [])
+
+  def stop_session(session_id, params, opts)
+      when is_binary(session_id) and is_map(params) and is_list(opts) do
+    H.Daemon.Maintenance.admit(opts, fn -> do_stop_session(session_id, params, opts) end)
+  end
+
+  def stop_session(_session_id, _params, _opts),
+    do: {:error, {:bad_request, "expected a map"}}
+
+  defp do_stop_session(session_id, params, opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+    catalog = Keyword.get(opts, :catalog, @default_catalog)
+    registry = Keyword.get(opts, :registry, @default_registry)
+    raw_reason = Validation.param_get(params, "reason", :reason)
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         {:ok, reason} <- parse_stop_reason(raw_reason),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- Validation.ensure_not_quarantined(entry),
+         :ok <-
+           if(entry.status == "archived",
+             do: {:error, {:conflict, "session is archived"}},
+             else: :ok
+           ) do
+      case lookup_live_server(registry, session_id) do
+        {:ok, pid} ->
+          {:ok, _} = Server.abort_all(pid, reason)
+
+        :not_running ->
+          if entry.active or entry.attention in ["running", "sleeping", "retrying"] do
+            Catalog.report_runtime(catalog, session_id, %{
+              active: false,
+              attention: "idle",
+              activity_kind: nil,
+              activity_label: nil
+            })
+          end
+      end
+
+      latest =
+        case Catalog.get_session(session_id, table) do
+          {:ok, cur} -> cur
+          _ -> entry
+        end
+
+      {:ok, %{session: wire_session(latest, opts)}}
+    end
+  end
+
+  @doc "Archives (and unloads from RAM) or unarchives a session."
+  @spec archive_session(String.t(), map(), keyword()) ::
+          {:ok, %{session: map()}}
+          | {:error,
+             :not_found
+             | {:bad_request, String.t()}
+             | {:conflict, String.t()}
+             | {:quarantined, String.t()}
+             | term()}
+  def archive_session(session_id, params \\ %{}, opts \\ [])
+
+  def archive_session(session_id, params, opts)
+      when is_binary(session_id) and is_map(params) and is_list(opts) do
+    H.Daemon.Maintenance.admit(opts, fn -> do_archive_session(session_id, params, opts) end)
+  end
+
+  def archive_session(_session_id, _params, _opts),
+    do: {:error, {:bad_request, "expected a map"}}
+
+  defp do_archive_session(session_id, params, opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+    catalog = Keyword.get(opts, :catalog, @default_catalog)
+    registry = Keyword.get(opts, :registry, @default_registry)
+    runtime_sup = Keyword.get(opts, :runtime_sup, @default_runtime_sup)
+
+    raw_archived = Validation.param_get(params, "archived", :archived)
+
+    raw_stop =
+      case Validation.param_get(params, "stop", :stop) do
+        nil -> Validation.param_get(params, "force", :force)
+        val -> val
+      end
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         {:ok, archived?} <- Validation.parse_optional_strict_bool(raw_archived, true, "archived"),
+         {:ok, stop?} <- Validation.parse_optional_strict_bool(raw_stop, false, "stop"),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- if(archived?, do: :ok, else: Validation.ensure_not_quarantined(entry)) do
+      if archived? do
+        live_server = lookup_live_server(registry, session_id)
+
+        busy? =
+          case live_server do
+            {:ok, pid} ->
+              try do
+                not GenServer.call(pid, :idle)
+              catch
+                :exit, _ -> false
+              end
+
+            :not_running ->
+              entry.active == true
+          end
+
+        cond do
+          busy? and not stop? ->
+            {:error, {:conflict, "session_busy"}}
+
+          true ->
+            if busy? do
+              case live_server do
+                {:ok, pid} ->
+                  {:ok, _} = Server.abort_all(pid, "archived")
+
+                :not_running ->
+                  :ok
+              end
+            end
+
+            :ok = Supervisor.stop_session(registry, runtime_sup, session_id)
+            {:ok, updated} = Catalog.set_archived(catalog, session_id, true)
+            {:ok, %{session: wire_session(updated, opts)}}
+        end
+      else
+        needs_attention =
+          case Map.fetch(params, "needs_attention") do
+            {:ok, v} when is_boolean(v) ->
+              v
+
+            _ ->
+              case Map.fetch(params, :needs_attention) do
+                {:ok, v} when is_boolean(v) -> v
+                _ -> true
+              end
+          end
+
+        case Catalog.set_archived(catalog, session_id, false, needs_attention: needs_attention) do
+          {:ok, updated} -> {:ok, %{session: wire_session(updated, opts)}}
+          {:error, _} = err -> err
+        end
+      end
+    end
+  end
+
+  @doc """
+  Forks a session's visible conversation history into a brand-new session bound
+  to an existing target `cwd` (allowing recovery/continuation when the original
+  `cwd` was deleted or moved).
+  """
+  @spec fork_session(String.t(), map(), keyword()) ::
+          {:ok, %{session: map(), seq: non_neg_integer()}}
+          | {:error,
+             :not_found
+             | {:bad_request, String.t()}
+             | {:conflict, String.t()}
+             | {:quarantined, String.t()}
+             | term()}
+  def fork_session(source_session_id, params, opts \\ [])
+
+  def fork_session(source_session_id, params, opts)
+      when is_binary(source_session_id) and is_map(params) and is_list(opts) do
+    H.Daemon.Maintenance.admit(opts, fn -> do_fork_session(source_session_id, params, opts) end)
+  end
+
+  def fork_session(_source_session_id, _params, _opts),
+    do: {:error, {:bad_request, "expected a map"}}
+
+  defp do_fork_session(source_session_id, params, opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+    catalog = Keyword.get(opts, :catalog, @default_catalog)
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(source_session_id),
+         {:ok, validated} <- Validation.validate_fork_session_params(params),
+         {:ok, source_entry} <- Catalog.get_session(source_session_id, table),
+         :ok <- Validation.ensure_not_quarantined(source_entry),
+         target_env_id = Map.get(validated, :env_id) || Map.get(source_entry, :env_id) || "host",
+         harness_id =
+           if(source_entry.status == "archived",
+             do: "coding",
+             else: Map.get(source_entry, :harness_id) || "coding"
+           ),
+         {:ok, harness} <- resolve_harness(harness_id, opts),
+         {:ok, ws} <- resolve_session_workspace(target_env_id, validated.cwd, opts),
+         source_cid =
+           Map.get(validated, :conversation_id) || Map.get(source_entry, :root_conversation_id) ||
+             1,
+         {:ok, %{entries: exported_entries, agent: source_agent}} <-
+           export_source_branch(
+             source_entry,
+             source_cid,
+             Map.get(validated, :at_entry_id),
+             opts
+           ),
+         agent_overrides = build_fork_agent_overrides(source_agent),
+         {:ok, bootstrapped} <- bootstrap_agent(harness, ws.env, agent_overrides, opts) do
+      new_sid = Map.get(validated, :session_id) || mint_session_id(ws.cwd, table)
+
+      new_title =
+        if Map.has_key?(validated, :title) do
+          validated.title
+        else
+          source_entry.title
+        end
+
+      attrs =
+        %{
+          session_id: new_sid,
+          env_id: ws.env_id,
+          harness_id: harness.id(),
+          cwd: ws.cwd,
+          tags: source_entry.tags
+        }
+        |> maybe_put(:title, new_title)
+
+      case Catalog.insert_session(catalog, attrs) do
+        {:ok, new_entry} ->
+          with {:ok, new_server} <- ensure_session_started(new_entry, opts, bootstrapped),
+               {:ok, _} <- Server.seed_entries(new_server, exported_entries, 1),
+               {:ok, seq} <- Server.get_seq(new_server) do
+            latest_new_entry =
+              case Catalog.get_session(new_entry.session_id, table) do
+                {:ok, latest} -> latest
+                _ -> new_entry
+              end
+
+            {:ok, %{session: wire_session(latest_new_entry, opts), seq: seq}}
+          end
+
+        {:existing, _} ->
+          {:error, {:conflict, "session already exists"}}
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  defp export_source_branch(%{status: "archived"} = source_entry, cid, at_entry_id, opts) do
+    H.Archive.export_branch(source_entry, cid, at_entry_id, opts)
+  end
+
+  defp export_source_branch(source_entry, cid, at_entry_id, opts) do
+    registry = Keyword.get(opts, :registry, @default_registry)
+
+    if Map.get(source_entry, :archived) == true and
+         lookup_live_server(registry, source_entry.session_id) == :not_running do
+      ColdSession.export_branch(
+        source_entry,
+        cid,
+        at_entry_id,
+        opts,
+        cold_default_model(opts)
+      )
+    else
+      with {:ok, source_server} <- ensure_session_started_preserving_archive(source_entry, opts) do
+        Server.export_branch(source_server, cid, at_entry_id)
+      end
+    end
+  end
+
+  defp build_fork_agent_overrides(source_agent) when is_map(source_agent) do
+    ["model", "thinking", "system_prompt", "tools"]
+    |> Enum.reduce(%{}, fn key, acc ->
+      case Map.fetch(source_agent, key) do
+        {:ok, val} -> Map.put(acc, key, val)
+        :error -> acc
+      end
+    end)
+  end
+
+  defp build_fork_agent_overrides(_), do: %{}
 
   @doc "Returns session detail, conversation ancestry forest, and live tasks."
   @spec get_session_detail(String.t(), keyword()) ::
@@ -533,9 +865,28 @@ defmodule H.Daemon do
 
     with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- Validation.ensure_not_quarantined(entry),
-         {:ok, server} <- ensure_session_started(entry, opts, nil),
+         :ok <- Validation.ensure_not_quarantined(entry) do
+      registry = Keyword.get(opts, :registry, @default_registry)
+
+      cond do
+        entry.status == "archived" ->
+          H.Archive.detail(entry, opts)
+
+        Map.get(entry, :archived) == true and
+            lookup_live_server(registry, session_id) == :not_running ->
+          ColdSession.detail(entry, opts, &wire_session(&1, opts), &wire_conversation/1)
+
+        true ->
+          live_session_detail(entry, opts, table)
+      end
+    end
+  end
+
+  defp live_session_detail(entry, opts, table) do
+    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts),
          {:ok, detail} <- Server.get_detail(server) do
+      session_id = entry.session_id
+
       session_entry =
         case Catalog.get_session(session_id, table) do
           {:ok, latest} -> latest
@@ -549,9 +900,14 @@ defmodule H.Daemon do
           end
         end)
 
+      wired_session =
+        session_entry
+        |> wire_session(opts)
+        |> Map.put(:cwd_exists, Map.get(detail, :cwd_exists, true))
+
       {:ok,
        %{
-         session: wire_session(session_entry),
+         session: wired_session,
          conversations: Enum.map(detail.conversations, &wire_conversation/1),
          tasks: Enum.map(detail.tasks, &H.Task.to_wire/1)
        }}
@@ -570,8 +926,25 @@ defmodule H.Daemon do
          {:ok, entry} <- Catalog.get_session(session_id, table),
          :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, cid} <- Validation.parse_cid(conversation_id),
-         {:ok, query} <- Validation.parse_scan_query(query_params),
-         {:ok, server} <- ensure_session_started(entry, opts, nil),
+         {:ok, query} <- Validation.parse_scan_query(query_params) do
+      registry = Keyword.get(opts, :registry, @default_registry)
+
+      cond do
+        entry.status == "archived" ->
+          H.Archive.scan(entry, cid, query, opts)
+
+        Map.get(entry, :archived) == true and
+            lookup_live_server(registry, session_id) == :not_running ->
+          ColdSession.scan(entry, cid, query, opts, &wire_entry/1)
+
+        true ->
+          scan_live_entries(entry, cid, query, opts)
+      end
+    end
+  end
+
+  defp scan_live_entries(entry, cid, query, opts) do
+    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts),
          {:ok, %{items: items, next_cursor: next_cursor}} <-
            Server.scan_entries(server, cid, query) do
       {:ok,
@@ -611,7 +984,7 @@ defmodule H.Daemon do
         %{
           "version" => 1,
           "seq" => seq,
-          "sessions" => Enum.map(entries, &wire_session/1)
+          "sessions" => Enum.map(entries, &wire_session(&1, opts))
         }
         |> JSON.encode_to_iodata!()
         |> IO.iodata_to_binary()
@@ -653,9 +1026,53 @@ defmodule H.Daemon do
          {:ok, entry} <- Catalog.get_session(session_id, table),
          :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, cid} <- Validation.parse_cid(conversation_id),
-         {:ok, last_event_id} <- Validation.parse_last_event_id(last_event_id_or_nil),
-         {:ok, server} <- ensure_session_started(entry, opts, nil) do
-      topic = {:conversation, session_id, cid}
+         {:ok, last_event_id} <- Validation.parse_last_event_id(last_event_id_or_nil) do
+      registry = Keyword.get(opts, :registry, @default_registry)
+
+      cond do
+        entry.status == "archived" ->
+          H.Archive.snapshot(entry, cid, opts)
+
+        Map.get(entry, :archived) == true and
+            lookup_live_server(registry, session_id) == :not_running ->
+          subscribe_cold_archived(entry, cid, subscriber_pid, pubsub, opts)
+
+        true ->
+          subscribe_live(entry, cid, subscriber_pid, last_event_id, pubsub, opts)
+      end
+    end
+  end
+
+  defp subscribe_cold_archived(entry, cid, subscriber_pid, pubsub, opts) do
+    topic = {:conversation, entry.session_id, cid}
+
+    already_registered? =
+      subscriber_pid == self() and not is_nil(pubsub) and
+        Process.whereis(pubsub) != nil and
+        topic in Registry.keys(pubsub, self())
+
+    if subscriber_pid == self() and not is_nil(pubsub) and
+         Process.whereis(pubsub) != nil and not already_registered? do
+      Registry.register(pubsub, topic, nil)
+    end
+
+    case ColdSession.snapshot(entry, cid, opts, cold_default_model(opts)) do
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, reason} ->
+        if subscriber_pid == self() and not is_nil(pubsub) and
+             Process.whereis(pubsub) != nil and not already_registered? do
+          Registry.unregister(pubsub, topic)
+        end
+
+        {:error, reason}
+    end
+  end
+
+  defp subscribe_live(entry, cid, subscriber_pid, last_event_id, pubsub, opts) do
+    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts) do
+      topic = {:conversation, entry.session_id, cid}
 
       already_registered? =
         subscriber_pid == self() and not is_nil(pubsub) and
@@ -805,6 +1222,11 @@ defmodule H.Daemon do
     with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
          :ok <- Validation.ensure_not_quarantined(entry),
+         :ok <-
+           if(entry.status == "archived",
+             do: {:error, {:conflict, "session is archived"}},
+             else: :ok
+           ),
          {:ok, envelope} <- Validation.validate_envelope(raw_envelope),
          {:ok, server} <- ensure_session_started(entry, opts, nil) do
       Server.execute_command(server, envelope)
@@ -851,7 +1273,7 @@ defmodule H.Daemon do
       data_dir = Keyword.get(opts, :data_dir) || Application.get_env(:harness, :data_dir)
 
       opts
-      |> Keyword.take([:accounts, :codex_account_policy])
+      |> Keyword.take([:accounts, :codex_account_policy, :compatible_providers])
       |> Map.new()
       |> then(&Map.merge(config, &1))
       |> Map.put(:data_dir, data_dir)
@@ -861,6 +1283,26 @@ defmodule H.Daemon do
   end
 
   defp ensure_session_started(entry, opts, initial_agent) do
+    catalog = Keyword.get(opts, :catalog, @default_catalog)
+
+    if Map.get(entry, :archived) == true and not is_nil(catalog) and
+         GenServer.whereis(catalog) != nil do
+      try do
+        Catalog.set_archived(catalog, entry.session_id, false, needs_attention: true)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    ensure_session_started_preserving_archive(entry, opts, initial_agent)
+  end
+
+  defp cold_default_model(opts) do
+    provider_mod = Keyword.get(opts, :provider, H.Provider.ReqLLM)
+    Recovery.resolve_default_model(opts[:default_model], provider_mod, provider_config(opts))
+  end
+
+  defp ensure_session_started_preserving_archive(entry, opts, initial_agent \\ nil) do
     session_id = entry.session_id
     registry = Keyword.get(opts, :registry, @default_registry)
     runtime_sup = Keyword.get(opts, :runtime_sup, @default_runtime_sup)
@@ -871,13 +1313,38 @@ defmodule H.Daemon do
           {:ok, pid}
         else
           Process.sleep(10)
-          ensure_session_started(entry, opts, initial_agent)
+          ensure_session_started_preserving_archive(entry, opts, initial_agent)
         end
 
       [] ->
-        with {:ok, sup_opts} <- build_session_sup_opts(entry, opts, initial_agent) do
-          start_session(runtime_sup, registry, session_id, sup_opts)
+        with {:ok, sup_opts} <- build_session_sup_opts(entry, opts, initial_agent),
+             {:ok, pid} <- start_session(runtime_sup, registry, session_id, sup_opts) do
+          catalog = Keyword.get(opts, :catalog, @default_catalog)
+
+          if not is_nil(catalog) and GenServer.whereis(catalog) != nil do
+            try do
+              Catalog.broadcast_live_state(catalog, session_id)
+            catch
+              :exit, _ -> :ok
+            end
+          end
+
+          {:ok, pid}
         end
+    end
+  end
+
+  defp lookup_live_server(registry, session_id) do
+    if is_atom(registry) and not is_nil(registry) and Process.whereis(registry) != nil do
+      case Registry.lookup(registry, {:session, session_id}) do
+        [{pid, _}] when is_pid(pid) ->
+          if Process.alive?(pid), do: {:ok, pid}, else: :not_running
+
+        _ ->
+          :not_running
+      end
+    else
+      :not_running
     end
   end
 
@@ -921,8 +1388,11 @@ defmodule H.Daemon do
 
     workspace =
       case Keyword.fetch(opts, :execution_env) do
-        {:ok, env} -> {:ok, %{env: env, cwd: entry.cwd}}
-        :error -> EnvRegistry.resolve_workspace(env_id, entry.cwd, opts)
+        {:ok, env} ->
+          {:ok, %{env: env, cwd: entry.cwd}}
+
+        :error ->
+          resolve_existing_session_workspace(env_id, entry.cwd, opts)
       end
 
     with {:ok, %{env: execution_env, cwd: cwd}} when cwd == entry.cwd <- workspace,
@@ -1030,9 +1500,76 @@ defmodule H.Daemon do
     end
   end
 
+  defp resolve_existing_session_workspace(env_id, cwd, opts) do
+    case EnvRegistry.resolve_workspace(env_id, cwd, opts) do
+      {:ok, ws} ->
+        {:ok, ws}
+
+      {:error, reason} when reason in [:enoent, :enotdir] ->
+        with {:ok, base_env, desc} <- EnvRegistry.fetch_env(env_id, opts),
+             {:ok, fallback_env} <- build_missing_cwd_env(base_env, desc, cwd) do
+          {:ok, %{env: fallback_env, cwd: cwd}}
+        else
+          _ -> {:error, :workspace_unavailable}
+        end
+
+      {:error, _} ->
+        {:error, :workspace_unavailable}
+    end
+  end
+
+  defp build_missing_cwd_env({mod, state} = base_env, desc, cwd) do
+    cond do
+      desc.kind == "host" ->
+        {:ok, H.ExecutionEnv.Host.new(cwd, env_id: desc.id)}
+
+      is_map(state) and Map.has_key?(state, :cwd) ->
+        case ExecutionEnv.resolve_path(base_env, cwd) do
+          {:ok, resolved} -> {:ok, {mod, %{state | cwd: resolved}}}
+          _ -> {:error, :workspace_unavailable}
+        end
+
+      true ->
+        {:ok, base_env}
+    end
+  rescue
+    _ -> {:error, :workspace_unavailable}
+  catch
+    :exit, _ -> {:error, :workspace_unavailable}
+  end
+
+  defp parse_archived_filter(nil), do: {:ok, :all}
+  defp parse_archived_filter(""), do: {:ok, :all}
+
+  defp parse_archived_filter(val) do
+    case Validation.parse_optional_strict_bool(val, false, "archived") do
+      {:ok, bool} -> {:ok, bool}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp filter_archived(entries, :all), do: entries
+
+  defp filter_archived(entries, archived?) when is_boolean(archived?) do
+    Enum.filter(entries, &(Map.get(&1, :archived, false) == archived?))
+  end
+
+  defp parse_stop_reason(nil), do: {:ok, "stopped"}
+  defp parse_stop_reason(""), do: {:ok, "stopped"}
+
+  defp parse_stop_reason(val) when is_binary(val) do
+    if String.contains?(val, <<0>>) do
+      {:error, {:bad_request, "invalid reason"}}
+    else
+      {:ok, val}
+    end
+  end
+
+  defp parse_stop_reason(_), do: {:error, {:bad_request, "reason must be a string"}}
+
   # Wire formatting & misc helpers
 
-  defp wire_session(entry), do: Catalog.wire_session(entry)
+  defp wire_session(entry, opts), do: Catalog.wire_session(entry, opts)
 
   defp wire_conversation(conv) do
     parent =

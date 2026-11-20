@@ -37,7 +37,8 @@ defmodule H.Session.Server.Generation do
                state.cwd,
                state.auto_compaction,
                state.compaction_keep_recent_chars,
-               state.provider_mod
+               state.provider_mod,
+               state.provider_config
              ) do
           nil ->
             start_generation_attempt(cid, gen_task, state, request)
@@ -102,7 +103,7 @@ defmodule H.Session.Server.Generation do
               |> Map.put("task_id", to_string(comp_task_id))
               |> Map.put("kept_from_id", kept_from_id)
               |> Map.put("status", "running")
-              |> Map.delete("retry")
+              |> mark_retry_running()
 
             next_live =
               live |> Map.drop(["run", "generation"]) |> Map.put("compaction", comp_live)
@@ -228,10 +229,12 @@ defmodule H.Session.Server.Generation do
         cid = gen_task.checkpoint["conversation_id"]
         pending_task = %{gen_task | status: "pending", wake: nil, updated_at: now}
 
-        next_live =
-          Map.put(state.docs[cid]["live"], "generation", %{
-            "message" => %{"thinking" => "", "text" => "", "tool_calls" => []}
-          })
+        generation =
+          (state.docs[cid]["live"]["generation"] || %{})
+          |> Map.put("message", %{"thinking" => "", "text" => "", "tool_calls" => []})
+          |> mark_retry_running()
+
+        next_live = Map.put(state.docs[cid]["live"], "generation", generation)
 
         state =
           state
@@ -264,7 +267,7 @@ defmodule H.Session.Server.Generation do
           |> Map.put("task_id", to_string(comp_task.id))
           |> Map.put("kept_from_id", comp_task.checkpoint["kept_from_id"])
           |> Map.put("status", "pending")
-          |> Map.delete("retry")
+          |> mark_retry_running()
 
         next_live = Map.put(live, "compaction", comp_live)
 
@@ -400,13 +403,27 @@ defmodule H.Session.Server.Generation do
     })
   end
 
-  def schedule_inference_retry(task, cid, live, retry_count, state, now) do
-    delay_ms = retry_delay_ms(state, retry_count)
+  def schedule_inference_retry(task, cid, live, retry_count, state, now, error \\ %{}) do
+    delay_ms = max(retry_delay_ms(state, retry_count), Map.get(error, :retry_after_ms, 0))
     until_ms = now + delay_ms
+
+    retry = %{
+      "attempt" => retry_count,
+      "max_attempts" => state.retry_limit,
+      "delay_ms" => delay_ms,
+      "until" => until_ms,
+      "status" => "waiting",
+      "code" => to_string(Map.get(error, :code, "interrupted")),
+      "message" =>
+        H.Credentials.sanitize(
+          to_string(Map.get(error, :message, "Inference interrupted; retrying"))
+        )
+    }
 
     sleeping_task =
       Task.sleep_until(task, until_ms, "retry", now, %{
-        "retry_count" => retry_count
+        "retry_count" => retry_count,
+        "retry" => retry
       })
 
     next_live =
@@ -414,7 +431,7 @@ defmodule H.Session.Server.Generation do
         "generation" ->
           Map.put(live, "generation", %{
             "message" => %{"thinking" => "", "text" => "", "tool_calls" => []},
-            "retry" => %{"attempt" => retry_count, "until" => until_ms}
+            "retry" => retry
           })
 
         "compaction" ->
@@ -423,7 +440,7 @@ defmodule H.Session.Server.Generation do
             |> Map.put("task_id", to_string(task.id))
             |> Map.put("kept_from_id", task.checkpoint["kept_from_id"])
             |> Map.put("status", "retrying")
-            |> Map.put("retry", %{"attempt" => retry_count, "until" => until_ms})
+            |> Map.put("retry", retry)
 
           Map.put(live, "compaction", comp_live)
       end
@@ -442,6 +459,13 @@ defmodule H.Session.Server.Generation do
   end
 
   # Internal worker & stage helpers
+
+  defp mark_retry_running(activity) do
+    case activity["retry"] do
+      %{} = retry -> Map.put(activity, "retry", Map.put(retry, "status", "running"))
+      _ -> Map.delete(activity, "retry")
+    end
+  end
 
   defp inference_config(%{provider_mod: H.Provider.ReqLLM, provider_config: config}),
     do: H.Provider.ReqLLM.attempt_config(config)
@@ -751,7 +775,15 @@ defmodule H.Session.Server.Generation do
 
     if retryable and replay_inference?(gen_task) and retry_count <= state.retry_limit do
       {writes, next_live, delay_ms, state} =
-        schedule_inference_retry(gen_task, cid, state.docs[cid]["live"], retry_count, state, now)
+        schedule_inference_retry(
+          gen_task,
+          cid,
+          state.docs[cid]["live"],
+          retry_count,
+          state,
+          now,
+          err
+        )
 
       staged = %{
         raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:error, err}}},
@@ -765,8 +797,7 @@ defmodule H.Session.Server.Generation do
 
       {:batch, staged, state}
     else
-      code = Map.get(err, :code, "model_error")
-      message = Map.get(err, :message, "Model error")
+      failure = inference_failure(err, gen_task, state)
 
       done_task =
         Task.complete(gen_task, %{"status" => "unanswered", "reason" => "model_error"}, now)
@@ -775,7 +806,7 @@ defmodule H.Session.Server.Generation do
       {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, "model_error", state, now)
 
       next_live = %{
-        "run_failure" => %{"reason" => "model_error", "code" => code, "message" => message}
+        "run_failure" => Map.put(failure, "reason", "model_error")
       }
 
       state =
@@ -930,6 +961,36 @@ defmodule H.Session.Server.Generation do
     end
   end
 
+  defp inference_failure(error, task, state) do
+    count = task.checkpoint["retry_count"] || 0
+
+    {default_code, default_message} =
+      if task.kind == "compaction",
+        do: {"compaction_error", "Compaction failed"},
+        else: {"model_error", "Model error"}
+
+    message = H.Credentials.sanitize(to_string(Map.get(error, :message, default_message)))
+
+    message =
+      if error[:retryable] == true and replay_inference?(task) and count >= state.retry_limit do
+        action =
+          if task.kind == "compaction" and task.checkpoint["automatic"] != true,
+            do: "retry /compact",
+            else: "continue"
+
+        message <>
+          " Automatic retries exhausted (#{count}/#{state.retry_limit}). Resolve the provider restriction, then #{action}; history is preserved."
+      else
+        message
+      end
+
+    %{
+      "code" => to_string(Map.get(error, :code, default_code)),
+      "message" => message,
+      "retry_count" => count
+    }
+  end
+
   defp stage_compaction_error(comp_task, cid, err, state, now) do
     retryable = Map.get(err, :retryable, false) == true
     retry_count = (comp_task.checkpoint["retry_count"] || 0) + 1
@@ -937,7 +998,7 @@ defmodule H.Session.Server.Generation do
 
     if retryable and replay_inference?(comp_task) and retry_count <= state.retry_limit do
       {writes, next_live, delay_ms, state} =
-        schedule_inference_retry(comp_task, cid, live, retry_count, state, now)
+        schedule_inference_retry(comp_task, cid, live, retry_count, state, now, err)
 
       staged = %{
         raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},
@@ -951,8 +1012,9 @@ defmodule H.Session.Server.Generation do
 
       {:batch, staged, state}
     else
-      code = to_string(Map.get(err, :code, "compaction_error"))
-      message = to_string(Map.get(err, :message, "Compaction failed"))
+      failure = inference_failure(err, comp_task, state)
+      code = failure["code"]
+      message = failure["message"]
 
       done_task =
         Task.complete(comp_task, %{"status" => "unanswered", "reason" => code}, now)
@@ -960,7 +1022,9 @@ defmodule H.Session.Server.Generation do
       sub_ids = comp_task.checkpoint["submission_ids"] || []
       {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, code, state, now)
 
-      next_live = compaction_failure(live, comp_task, code, message)
+      next_live =
+        compaction_failure(live, comp_task, code, message)
+        |> update_in(["compaction_failure"], &Map.merge(&1, failure))
 
       state =
         state

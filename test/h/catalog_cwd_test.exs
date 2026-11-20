@@ -280,6 +280,7 @@ defmodule H.CatalogCwdTest do
       assert app.latest_session == %{
                session_id: "app-nested",
                title: "Latest Nested",
+               tags: [],
                cwd: "/path/app/packages/ui",
                parent: nil,
                role: nil,
@@ -289,6 +290,10 @@ defmodule H.CatalogCwdTest do
                activity_kind: nil,
                activity_label: nil,
                queued_count: 0,
+               needs_attention: true,
+               archived: false,
+               loaded: false,
+               cwd_exists: false,
                status: "ok"
              }
 
@@ -333,6 +338,7 @@ defmodule H.CatalogCwdTest do
       assert str_app["latest_session"] == %{
                "session_id" => "vm-only-session",
                "title" => "VM Session",
+               "tags" => [],
                "cwd" => "/path/app",
                "parent" => nil,
                "role" => nil,
@@ -342,6 +348,10 @@ defmodule H.CatalogCwdTest do
                "activity_kind" => nil,
                "activity_label" => nil,
                "queued_count" => 0,
+               "needs_attention" => true,
+               "archived" => false,
+               "loaded" => false,
+               "cwd_exists" => true,
                "status" => "ok"
              }
 

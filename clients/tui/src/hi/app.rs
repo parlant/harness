@@ -6,7 +6,7 @@ use super::{
     completion::{self, Completion, Token},
     editor::Editor,
     external,
-    inbox::{CatalogSubscription, InboxState},
+    inbox::{CatalogSubscription, CatalogUpdate, InboxFilter, InboxState},
     login::{self, Login},
     markdown::StyledRow,
     picker::{Choice, Picker},
@@ -20,7 +20,7 @@ use crate::{
     client::{ClientError, DaemonClient},
     protocol::{CommandEnvelope, ServerFrame, WhenBusy, WhenIdle},
     render::{extract_entry_text, sanitize_single_line},
-    transcript::{CommitOutcome, TranscriptState},
+    transcript::{CommitOutcome, TranscriptState, WorkspaceWaitInfo},
 };
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers as Mod, MouseEventKind,
@@ -39,6 +39,22 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Workspace sessions"),
     ("/inbox", "Browse all sessions across workspaces"),
     ("/parent", "Jump to parent session"),
+    (
+        "/cwd",
+        "Show workspace directory or fork session into a new directory",
+    ),
+    (
+        "/attention",
+        "Toggle or set needs_attention flag on this session",
+    ),
+    (
+        "/archive",
+        "Archive and unload this session ('force' to stop work, 'off' to restore)",
+    ),
+    (
+        "/stop",
+        "Stop active work across all conversations in this session",
+    ),
     ("/new", "New session"),
     ("/name", "Show or rename session title"),
     ("/tree", "Conversations and branch history"),
@@ -57,6 +73,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/follow-up", "Queue follow-up"),
     ("/dequeue", "Withdraw queued prompts"),
     ("/abort", "Interrupt this conversation"),
+    ("/workspace", "Workspace wait actions"),
     ("/continue", "Continue conversation"),
     ("/compact", "Compact conversation history"),
     ("/tools", "Toggle tool details"),
@@ -102,6 +119,7 @@ enum PickerKind {
     Commands,
     ClientFiles,
     WorkspaceFiles,
+    WorkspaceWait,
     Search,
     Info,
 }
@@ -110,6 +128,7 @@ struct PickerState {
     kind: PickerKind,
     picker: Picker,
     scope: Option<(String, String)>,
+    workspace_wait: Option<WorkspaceWaitInfo>,
 }
 
 struct ForkEdit {
@@ -126,6 +145,11 @@ struct PendingRootFork {
     entry_id: String,
     text: String,
     attachments: Vec<Value>,
+}
+
+struct PendingCwdFork {
+    source_sid: String,
+    source_cid: String,
 }
 
 #[derive(Default)]
@@ -157,6 +181,7 @@ struct Ui {
     state: TranscriptState,
     historical: Option<TranscriptState>,
     sub: Option<Subscription>,
+    catalog_sub: Option<CatalogSubscription>,
     inbox: Option<InboxMode>,
     entered_from_inbox: bool,
     online: bool,
@@ -168,6 +193,7 @@ struct Ui {
     completion: Option<Completion>,
     path_lookup: Option<PathLookup>,
     pending_root_fork: Option<PendingRootFork>,
+    pending_cwd_fork: Option<PendingCwdFork>,
     config: UserConfig,
     status_metadata: StatusMetadata,
     data_dir: PathBuf,
@@ -201,6 +227,7 @@ pub fn run(
 ) -> Result<(), String> {
     let config = UserConfig::load(data_dir)?;
     let sub = Subscription::start(client.clone(), target.sid.clone(), target.cid.clone(), None);
+    let catalog_sub = CatalogSubscription::start(client.clone());
     let state = TranscriptState::new(Some(target.sid.clone()), Some(target.cid.clone()));
     let launch_env_id = target.env_id.clone();
     let launch_cwd = target.cwd.clone();
@@ -212,6 +239,7 @@ pub fn run(
         state,
         historical: None,
         sub: Some(sub),
+        catalog_sub: Some(catalog_sub),
         inbox: None,
         entered_from_inbox: false,
         online: false,
@@ -223,6 +251,7 @@ pub fn run(
         completion: None,
         path_lookup: None,
         pending_root_fork: None,
+        pending_cwd_fork: None,
         config,
         status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
@@ -267,6 +296,7 @@ pub fn run_inbox(
         state: TranscriptState::default(),
         historical: None,
         sub: None,
+        catalog_sub: None,
         inbox: Some(InboxMode {
             state: inbox_state,
             sub: catalog_sub,
@@ -281,6 +311,7 @@ pub fn run_inbox(
         completion: None,
         path_lookup: None,
         pending_root_fork: None,
+        pending_cwd_fork: None,
         config,
         status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
@@ -334,6 +365,7 @@ fn run_loop(
                 ui.update(update);
                 repaint = true;
             }
+            repaint |= ui.drain_session_catalog_updates();
             repaint |= ui.complete_path_lookup();
             repaint |=
                 ui.status_metadata
@@ -479,6 +511,46 @@ impl Ui {
         changed
     }
 
+    fn drain_session_catalog_updates(&mut self) -> bool {
+        let mut changed = false;
+        for _ in 0..32 {
+            let Some(update) = self
+                .catalog_sub
+                .as_ref()
+                .and_then(CatalogSubscription::next)
+            else {
+                break;
+            };
+            match update {
+                CatalogUpdate::Snapshot(list) => {
+                    if let Some(session) = list.iter().find(|s| s.session_id == self.target.sid) {
+                        changed |= self.sync_target_labels(session);
+                    }
+                }
+                CatalogUpdate::Upsert(session) if session.session_id == self.target.sid => {
+                    changed |= self.sync_target_labels(&session);
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    fn sync_target_labels(&mut self, session: &crate::protocol::SessionSummary) -> bool {
+        let next = super::actions::SessionLabels::from(session);
+        if self.target.labels != next {
+            let became_archived = !self.target.labels.archived && next.archived;
+            self.target.labels = next;
+            if became_archived && !self.target.labels.is_imported_archive() {
+                self.note =
+                    "Session archived (unloaded) · send a message or /archive off to resume".into();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     fn enter_inbox(&mut self) {
         self.dismiss_completion();
         if !self.target.sid.is_empty() {
@@ -489,8 +561,10 @@ impl Ui {
         self.login = None;
         self.secret = None;
         self.pending_root_fork = None;
+        self.pending_cwd_fork = None;
         self.historical = None;
         self.sub = None;
+        self.catalog_sub = None;
         let preselect = (!self.target.sid.is_empty()).then(|| self.target.sid.clone());
         let catalog_sub = CatalogSubscription::start(self.client.clone());
         let inbox_state = InboxState::new(
@@ -546,14 +620,110 @@ impl Ui {
                 if inbox.state.cycle_attention(forward) {
                     self.note.clear();
                 } else {
-                    self.note = "No idle or error sessions".into();
+                    self.note = "No sessions needing attention".into();
                 }
             }
             KeyCode::BackTab => {
                 if inbox.state.cycle_attention(false) {
                     self.note.clear();
                 } else {
-                    self.note = "No idle or error sessions".into();
+                    self.note = "No sessions needing attention".into();
+                }
+            }
+            KeyCode::Char(' ' | 'm' | 'M') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                let selected = inbox.state.selected_session().cloned();
+                let Some(session) = selected else {
+                    self.note = "No session selected".into();
+                    return;
+                };
+                if session.status.as_deref() == Some("archived") {
+                    self.note = "Imported archives are read-only".into();
+                    return;
+                }
+                let next_attention = !session.effective_needs_attention();
+                let sid = session.session_id;
+                self.note = if next_attention {
+                    "Marking as needing attention…".into()
+                } else {
+                    "Clearing attention…".into()
+                };
+                self.start(
+                    Effect::TriageSession {
+                        sid,
+                        needs_attention: next_attention,
+                    },
+                    None,
+                );
+            }
+            KeyCode::Char('s' | 'S') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                let selected = inbox.state.selected_session().cloned();
+                let Some(session) = selected else {
+                    self.note = "No session selected".into();
+                    return;
+                };
+                if session.status.as_deref() == Some("archived") {
+                    self.note = "Imported archives are read-only".into();
+                    return;
+                }
+                let sid = session.session_id;
+                self.note = format!("Stopping {}…", sanitize_single_line(&sid));
+                self.start(Effect::StopSession { sid }, None);
+            }
+            KeyCode::Char('x') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                let selected = inbox.state.selected_session().cloned();
+                let Some(session) = selected else {
+                    self.note = "No session selected".into();
+                    return;
+                };
+                if session.status.as_deref() == Some("archived") {
+                    self.note = "Imported archives are read-only".into();
+                    return;
+                }
+                let next_archived = !session.effective_archived();
+                let sid = session.session_id;
+                self.note = if next_archived {
+                    format!("Archiving {}…", sanitize_single_line(&sid))
+                } else {
+                    format!("Unarchiving {}…", sanitize_single_line(&sid))
+                };
+                self.start(
+                    Effect::ArchiveSession {
+                        sid,
+                        archived: next_archived,
+                        stop: false,
+                    },
+                    None,
+                );
+            }
+            KeyCode::Char('X') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                let selected = inbox.state.selected_session().cloned();
+                let Some(session) = selected else {
+                    self.note = "No session selected".into();
+                    return;
+                };
+                if session.status.as_deref() == Some("archived") {
+                    self.note = "Imported archives are read-only".into();
+                    return;
+                }
+                let sid = session.session_id;
+                self.note = format!("Stopping & archiving {}…", sanitize_single_line(&sid));
+                self.start(
+                    Effect::ArchiveSession {
+                        sid,
+                        archived: true,
+                        stop: true,
+                    },
+                    None,
+                );
+            }
+            KeyCode::Char('a' | 'A') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                match inbox.state.toggle_filter() {
+                    InboxFilter::All => {
+                        self.note = "Showing all sessions (including archived)".into();
+                    }
+                    InboxFilter::Inbox => {
+                        self.note = "Showing active inbox".into();
+                    }
                 }
             }
             KeyCode::Enter => {
@@ -569,17 +739,20 @@ impl Ui {
                     );
                     return;
                 }
-                inbox.state.mark_visited(&session.session_id);
                 let sid = session.session_id;
                 self.note = format!("Opening {}…", sanitize_single_line(&sid));
                 self.start(Effect::Attach(sid), None);
             }
             KeyCode::Char('n' | 'N') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
-                let (env_id, cwd) = inbox.state.new_session_workspace();
+                let (env_id, cwd, cwd_exists) = inbox.state.new_session_workspace();
+                if !cwd_exists {
+                    self.note = "Working directory no longer exists".into();
+                    return;
+                }
                 self.note = "Creating new session…".into();
                 self.start(Effect::NewIn { env_id, cwd }, None);
             }
-            KeyCode::Char('s' | 'S') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+            KeyCode::Char('t' | 'T') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
                 let shown = inbox.state.toggle_subsessions();
                 self.note = if shown {
                     "Subsessions: shown".into()
@@ -672,10 +845,28 @@ impl Ui {
                 self.note = msg;
             }
             Update::Frame(f) => {
+                let previous_wait = self.state.workspace_wait();
                 match f {
                     ServerFrame::Snapshot(s) => {
                         self.state.apply_snapshot(s);
-                        self.note = "Ready · /help".into();
+                        if self.target.labels.is_imported_archive() {
+                            self.note =
+                                "Imported archive (read-only) · use /cwd <path> to fork".into();
+                        } else if self.target.labels.archived && !self.target.labels.cwd_exists {
+                            self.note =
+                                "Archived [missing cwd] — use /cwd <path> to fork into an existing directory"
+                                    .into();
+                        } else if self.target.labels.archived {
+                            self.note =
+                                "Archived (unloaded) · send a message or /archive off to resume"
+                                    .into();
+                        } else if !self.target.labels.cwd_exists {
+                            self.note =
+                                "Missing cwd — use /cwd <path> to fork into an existing directory"
+                                    .into();
+                        } else {
+                            self.note = "Ready · /help".into();
+                        }
                     }
                     ServerFrame::Commit(c) => {
                         if self.state.apply_commit(c) == CommitOutcome::Gap {
@@ -702,8 +893,45 @@ impl Ui {
                     self.state.before_entry_id = self.state.entries.first().map(|e| e.id.clone());
                     self.state.has_more = true;
                 }
+                let wait = self.state.workspace_wait();
+                if wait != previous_wait {
+                    if wait.is_some()
+                        && self.picker.is_none()
+                        && self.login.is_none()
+                        && self.secret.is_none()
+                    {
+                        self.workspace_wait_menu();
+                    } else if self
+                        .picker
+                        .as_ref()
+                        .is_some_and(|p| p.kind == PickerKind::WorkspaceWait)
+                    {
+                        self.picker = None;
+                        if wait.is_some() {
+                            self.workspace_wait_menu();
+                        }
+                    }
+                }
                 self.rows_dirty |= self.historical.is_none();
             }
+        }
+    }
+    fn workspace_wait_menu(&mut self) {
+        if let Some(wait) = self.state.workspace_wait() {
+            self.scoped_menu(
+                PickerKind::WorkspaceWait,
+                &format!(
+                    "Workspace held by {}:{}",
+                    wait.holder_session_id, wait.holder_conversation_id
+                ),
+                vec![
+                    ("cancel".into(), "Cancel wait".into()),
+                    ("stop_holder".into(), "Stop holder and acquire".into()),
+                ],
+            );
+            self.picker.as_mut().unwrap().workspace_wait = Some(wait);
+        } else {
+            self.note = "Not waiting for a workspace".into();
         }
     }
     fn menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
@@ -712,6 +940,7 @@ impl Ui {
             kind,
             picker: Picker::new(title, choices),
             scope: None,
+            workspace_wait: None,
         });
     }
     fn scoped_menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
@@ -720,6 +949,7 @@ impl Ui {
             kind,
             picker: Picker::new(title, choices),
             scope: Some((self.target.sid.clone(), self.target.cid.clone())),
+            workspace_wait: None,
         });
     }
     fn current_view(&self) -> &TranscriptState {
@@ -760,7 +990,18 @@ impl Ui {
                 }) {
                     self.pending_root_fork = None;
                 }
-                self.note = e.clone();
+                if self.pending_cwd_fork.as_ref().is_some_and(|r| {
+                    r.source_sid == source_target.0 && r.source_cid == source_target.1
+                }) {
+                    self.pending_cwd_fork = None;
+                }
+                let is_cwd_missing = e.contains("cwd_missing");
+                if is_cwd_missing && source_target.0 == self.target.sid {
+                    self.target.labels.cwd_exists = false;
+                    self.note = "Working directory no longer exists · use /cwd <path> to fork into an existing directory; draft retained".into();
+                } else {
+                    self.note = e.clone();
+                }
                 if let Some((text, envelope)) = submitted {
                     if self.draft.editor.text().is_empty() {
                         self.draft.editor.set(&text);
@@ -768,7 +1009,8 @@ impl Ui {
                     if self.draft.attachments.is_empty() && envelope.command != "user_shell" {
                         self.draft.attachments = extract_non_text_blocks(&envelope.args);
                     }
-                    if envelope.command != "user_shell"
+                    if !is_cwd_missing
+                        && envelope.command != "user_shell"
                         && (envelope.command != "fork_and_submit" || is_ambiguous_submit_error(&e))
                     {
                         self.draft.retry = Some((text, envelope));
@@ -863,6 +1105,23 @@ impl Ui {
                 self.note = "Earlier page · /latest to follow".into();
                 screen.bottom();
             }
+            Ok(Reply::CatalogSession { session, note }) => {
+                if let Some(inbox) = self.inbox.as_mut() {
+                    inbox.state.apply(CatalogUpdate::Upsert(session.clone()));
+                }
+                if session.session_id == self.target.sid {
+                    self.target.labels = super::actions::SessionLabels::from(session.as_ref());
+                }
+                self.note = note;
+            }
+            Ok(Reply::ArchivedCurrent { sid }) => {
+                if self.entered_from_inbox {
+                    self.enter_inbox();
+                    self.note = format!("Archived {}", sanitize_single_line(&sid));
+                } else {
+                    self.quit = true;
+                }
+            }
             Ok(Reply::Target(t)) => {
                 let root = self.pending_root_fork.take().filter(|r| {
                     r.source_sid == source_target.0
@@ -870,6 +1129,22 @@ impl Ui {
                         && r.source_sid == self.target.sid
                         && r.source_cid == self.target.cid
                 });
+                let cwd_fork = self.pending_cwd_fork.take().filter(|r| {
+                    r.source_sid == source_target.0
+                        && r.source_cid == source_target.1
+                        && r.source_sid == self.target.sid
+                        && r.source_cid == self.target.cid
+                });
+                let carry_draft = if cwd_fork.is_some()
+                    && (!self.draft.editor.text().is_empty() || !self.draft.attachments.is_empty())
+                {
+                    let text = self.draft.editor.expanded_text();
+                    let attachments = std::mem::take(&mut self.draft.attachments);
+                    self.draft.editor.set("");
+                    Some((text, attachments))
+                } else {
+                    None
+                };
                 self.switch(t, screen);
                 if let Some(root) = root {
                     self.draft.editor.set(&root.text);
@@ -878,6 +1153,16 @@ impl Ui {
                         "New session {} for root prompt #{} (files unchanged) · Edit and submit",
                         sanitize_single_line(&self.target.sid),
                         sanitize_single_line(&root.entry_id)
+                    );
+                } else if cwd_fork.is_some() {
+                    if let Some((text, attachments)) = carry_draft {
+                        self.draft.editor.set(&text);
+                        self.draft.attachments = attachments;
+                    }
+                    self.note = format!(
+                        "Forked into {} ({})",
+                        sanitize_single_line(&self.target.cwd),
+                        sanitize_single_line(&self.target.sid)
                     );
                 }
             }
@@ -902,6 +1187,9 @@ impl Ui {
                     self.draft.retry = None;
                 }
                 self.switch(target, screen);
+                if self.target.labels.archived && !self.target.labels.is_imported_archive() {
+                    self.target.labels.archived = false;
+                }
                 self.note = format!(
                     "Forked to #{} · {} · seq {}",
                     sanitize_single_line(&self.target.cid),
@@ -910,6 +1198,9 @@ impl Ui {
                 );
             }
             Ok(Reply::Receipt(r)) => {
+                if self.target.labels.archived && !self.target.labels.is_imported_archive() {
+                    self.target.labels.archived = false;
+                }
                 // Only the daemon can return queue items to a draft. Never fabricate a dequeue from a local inbox snapshot.
                 for item in &r.withdrawn {
                     if let Some(blocks) = item.get("content").and_then(Value::as_array) {
@@ -952,8 +1243,9 @@ impl Ui {
     }
     fn switch(&mut self, t: Target, screen: &mut Screen) {
         self.dismiss_completion();
-        if self.inbox.take().is_some() {
+        if let Some(prev_inbox) = self.inbox.take() {
             self.entered_from_inbox = true;
+            self.catalog_sub = Some(prev_inbox.sub);
         } else if !self.target.sid.is_empty() {
             let key = (self.target.sid.clone(), self.target.cid.clone());
             self.saved.insert(key, std::mem::take(&mut self.draft));
@@ -966,6 +1258,7 @@ impl Ui {
             self.picker = None;
         }
         self.pending_root_fork = None;
+        self.pending_cwd_fork = None;
         self.historical = None;
         self.state = TranscriptState::new(Some(t.sid.clone()), Some(t.cid.clone()));
         self.sub = Some(Subscription::start(
@@ -977,10 +1270,39 @@ impl Ui {
         self.target = t;
         self.online = false;
         self.rows_dirty = true;
-        self.note = "Connecting".into();
+        self.note = if self.target.labels.is_imported_archive() {
+            "Connecting (imported archive · read-only)".into()
+        } else if self.target.labels.archived && !self.target.labels.cwd_exists {
+            "Connecting [archived · missing cwd — use /cwd <path> to fork]".into()
+        } else if self.target.labels.archived {
+            "Connecting (archived · unloaded)".into()
+        } else if !self.target.labels.cwd_exists {
+            "Connecting [missing cwd — use /cwd <path> to fork into an existing directory]".into()
+        } else {
+            "Connecting".into()
+        };
         screen.bottom();
     }
+    fn check_writable_workspace(&mut self, retain_draft: bool) -> bool {
+        let suffix = if retain_draft { "; draft retained" } else { "" };
+        if self.target.labels.is_imported_archive() {
+            self.note = format!(
+                "Imported archive is read-only · use /cwd <path> to fork into a live workspace{suffix}"
+            );
+            return false;
+        }
+        if !self.target.labels.cwd_exists {
+            self.note = format!(
+                "Working directory no longer exists · use /cwd <path> to fork into an existing directory{suffix}"
+            );
+            return false;
+        }
+        true
+    }
     fn send(&mut self, follow: bool) {
+        if !self.check_writable_workspace(true) {
+            return;
+        }
         if !self.online || self.state.seq.is_none() {
             self.note = "Not synchronized; draft retained".into();
             return;
@@ -1387,8 +1709,13 @@ impl Ui {
     fn tab(&mut self) {
         if let Some(completion) = &mut self.completion {
             if let Some(directory) = completion.sole_directory() {
+                let is_cwd = self.draft.editor.text().starts_with("/cwd ");
                 self.dismiss_completion();
-                self.start_path_lookup(directory);
+                if is_cwd {
+                    self.start_cwd_path_lookup(directory);
+                } else {
+                    self.start_path_lookup(directory);
+                }
             } else {
                 completion.cycle(&mut self.draft.editor);
             }
@@ -1402,6 +1729,10 @@ impl Ui {
         } else if let Some(prefix) = text[..editor.cursor()].strip_prefix('@') {
             let prefix = prefix.to_owned();
             self.workspace_file_menu(&prefix);
+        } else if text[..editor.cursor()].starts_with("/cwd ") {
+            if let Some(token) = Token::at_cursor(editor) {
+                self.start_cwd_path_lookup(token);
+            }
         } else if let Some(token) = Token::at_cursor(editor) {
             if token.is_command(editor) {
                 let prefix = token.prefix(editor);
@@ -1416,6 +1747,36 @@ impl Ui {
                 self.start_path_lookup(token);
             }
         }
+    }
+    fn start_cwd_path_lookup(&mut self, token: Token) {
+        if self.path_lookup.is_some() {
+            return;
+        }
+        let prefix = token.prefix(&self.draft.editor).to_owned();
+        let env_id = if self.target.env_id.trim().is_empty() {
+            "host".to_string()
+        } else {
+            self.target.env_id.clone()
+        };
+        let fallback_cwd = if self.target.labels.cwd_exists && self.target.cwd.starts_with('/') {
+            self.target.cwd.clone()
+        } else {
+            self.launch_cwd.clone()
+        };
+        let (tx, result) = mpsc::sync_channel(1);
+        let client = self.client.clone();
+        thread::spawn(move || {
+            let _ = tx.send(completion::directories(
+                &client,
+                &env_id,
+                &fallback_cwd,
+                &prefix,
+            ));
+        });
+        self.path_lookup = Some(PathLookup {
+            token: Some(token),
+            result,
+        });
     }
     fn start_path_lookup(&mut self, token: Token) {
         // Keep only one bounded read in flight. Dismissing it invalidates the
@@ -1606,6 +1967,124 @@ impl Ui {
             }
             "/inbox" => self.enter_inbox(),
             "/parent" => self.jump_to_parent(),
+            "/cwd" if arg.is_empty() => {
+                let status = if self.target.labels.is_imported_archive() {
+                    " (imported archive — use /cwd <existing-dir> to fork session)"
+                } else if !self.target.labels.cwd_exists {
+                    " (missing — use /cwd <existing-dir> to fork session)"
+                } else if self.target.labels.archived {
+                    " (archived)"
+                } else {
+                    ""
+                };
+                self.note = format!(
+                    "Workspace: {}:{}{status}",
+                    sanitize_single_line(&self.target.env_id),
+                    sanitize_single_line(&self.target.cwd)
+                );
+            }
+            "/cwd" => {
+                if self.job.is_some() {
+                    self.note = "Wait for pending command".into();
+                    return;
+                }
+                let base_cwd = if self.target.labels.cwd_exists && self.target.cwd.starts_with('/')
+                {
+                    self.target.cwd.as_str()
+                } else {
+                    self.launch_cwd.as_str()
+                };
+                let resolved = resolve_cwd_input(arg, &self.target.env_id, base_cwd);
+                match resolved {
+                    Ok(cwd) => {
+                        self.pending_cwd_fork = Some(PendingCwdFork {
+                            source_sid: self.target.sid.clone(),
+                            source_cid: self.target.cid.clone(),
+                        });
+                        self.note = format!("Forking session into {}…", sanitize_single_line(&cwd));
+                        self.start(Effect::ForkSessionCwd { cwd }, None);
+                    }
+                    Err(msg) => {
+                        self.note = msg;
+                    }
+                }
+            }
+            "/attention" => {
+                if self.target.labels.status.as_deref() == Some("archived") {
+                    self.note = "Imported archives are read-only".into();
+                    return;
+                }
+                let next_val = match arg.to_ascii_lowercase().as_str() {
+                    "" => !self.target.labels.needs_attention,
+                    "on" | "true" | "yes" | "1" => true,
+                    "off" | "false" | "no" | "0" => false,
+                    _ => {
+                        self.note = "Usage: /attention [on|off]".into();
+                        return;
+                    }
+                };
+                self.start(
+                    Effect::TriageSession {
+                        sid: self.target.sid.clone(),
+                        needs_attention: next_val,
+                    },
+                    None,
+                );
+            }
+            "/archive" => {
+                if self.target.labels.is_imported_archive() {
+                    self.note = "Imported archives are read-only".into();
+                    return;
+                }
+                match arg.to_ascii_lowercase().as_str() {
+                    "off" | "false" | "unarchive" | "restore" => {
+                        if !self.target.labels.archived {
+                            self.note = "Session is already active (not archived)".into();
+                            return;
+                        }
+                        self.note =
+                            format!("Unarchiving {}…", sanitize_single_line(&self.target.sid));
+                        self.start(
+                            Effect::ArchiveSession {
+                                sid: self.target.sid.clone(),
+                                archived: false,
+                                stop: false,
+                            },
+                            None,
+                        );
+                    }
+                    "" | "on" | "true" => {
+                        if self.target.labels.archived {
+                            self.note =
+                                "Session is already archived · use /archive off to restore or send a message to resume"
+                                    .into();
+                            return;
+                        }
+                        self.note = "Archiving session…".into();
+                        self.start(Effect::ArchiveCurrent { stop: false }, None);
+                    }
+                    "force" | "stop" => {
+                        self.note = "Stopping & archiving session…".into();
+                        self.start(Effect::ArchiveCurrent { stop: true }, None);
+                    }
+                    _ => {
+                        self.note = "Usage: /archive [force|off]".into();
+                    }
+                }
+            }
+            "/stop" => {
+                if self.target.labels.status.as_deref() == Some("archived") {
+                    self.note = "Imported archives are read-only".into();
+                    return;
+                }
+                self.note = format!("Stopping {}…", sanitize_single_line(&self.target.sid));
+                self.start(
+                    Effect::StopSession {
+                        sid: self.target.sid.clone(),
+                    },
+                    None,
+                );
+            }
             "/resume" | "/sessions" => self.start(Effect::Sessions, None),
             "/new" => {
                 self.pending_root_fork = None;
@@ -1701,8 +2180,16 @@ impl Ui {
             }
             "/envs" => self.start(Effect::Environments, None),
             "/abort" => self.start(Effect::Abort, None),
-            "/continue" => self.start(Effect::Continue, None),
+            "/workspace" => self.workspace_wait_menu(),
+            "/continue" => {
+                if self.check_writable_workspace(false) {
+                    self.start(Effect::Continue, None);
+                }
+            }
             "/compact" => {
+                if !self.check_writable_workspace(false) {
+                    return;
+                }
                 if self.state.seq.is_none() {
                     self.note = "Not synchronized; wait for snapshot before /compact".into();
                 } else {
@@ -1846,6 +2333,7 @@ impl Ui {
         let choice = state.picker.key(key);
         let kind = state.kind;
         let scope = state.scope.clone();
+        let workspace_wait = state.workspace_wait.clone();
         match choice {
             Choice::Stay => {}
             Choice::Cancel => {
@@ -1867,6 +2355,18 @@ impl Ui {
                     }
                 }
                 match kind {
+                    PickerKind::WorkspaceWait => {
+                        if let Some(wait) = workspace_wait {
+                            self.start(
+                                Effect::WorkspaceWait {
+                                    action: id,
+                                    task_id: wait.task_id,
+                                    lease_id: wait.lease_id,
+                                },
+                                None,
+                            );
+                        }
+                    }
                     PickerKind::Models => self.start(Effect::Configure("model".into(), id), None),
                     PickerKind::Thinking => {
                         self.start(Effect::Configure("thinking".into(), id), None)
@@ -1992,6 +2492,52 @@ fn extract_non_text_blocks(args: &Value) -> Vec<Value> {
 
 fn is_ambiguous_submit_error(err: &str) -> bool {
     err.contains("outcome unknown") || err.contains("disconnected")
+}
+
+fn resolve_cwd_input(raw: &str, env_id: &str, base_cwd: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Usage: /cwd <existing-dir>".into());
+    }
+    if trimmed.contains('\0') {
+        return Err("Directory path cannot contain NUL bytes".into());
+    }
+    let expanded = if env_id == "host" && (trimmed == "~" || trimmed.starts_with("~/")) {
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|h| !h.trim().is_empty())
+            .ok_or_else(|| "Cannot expand ~: HOME is not set".to_string())?;
+        if trimmed == "~" {
+            home
+        } else {
+            format!("{}{}", home.trim_end_matches('/'), &trimmed[1..])
+        }
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else if base_cwd.starts_with('/') {
+        format!("{}/{}", base_cwd.trim_end_matches('/'), trimmed)
+    } else {
+        return Err("Provide an absolute path for /cwd <path>".into());
+    };
+    Ok(normalize_abs_path(&expanded))
+}
+
+fn normalize_abs_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", parts.join("/"))
+    }
 }
 
 fn parse_user_shell_input(text: &str) -> Option<(bool, &str)> {
@@ -2171,6 +2717,7 @@ mod tests {
             state,
             historical: None,
             sub: Some(sub),
+            catalog_sub: None,
             inbox: None,
             entered_from_inbox: false,
             online: true,
@@ -2182,6 +2729,7 @@ mod tests {
             completion: None,
             path_lookup: None,
             pending_root_fork: None,
+            pending_cwd_fork: None,
             config: UserConfig::default(),
             status_metadata: StatusMetadata::default(),
             data_dir: PathBuf::from("/private/tmp/hi-app-nonexistent-config"),
@@ -2276,6 +2824,51 @@ mod tests {
 
     fn press_down(ui: &mut Ui, screen: &mut Screen) {
         ui.pick_key(KeyEvent::new(KeyCode::Down, Mod::NONE), screen);
+    }
+
+    #[test]
+    fn named_router_uses_masked_key_prompt_and_sends_only_to_provider_key_endpoint() {
+        let (server, client) = TestServer::bind("router-key");
+        let secret = "fixture-router-key";
+        let listener = server.listener.try_clone().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (header, body) = read_http_request(&mut stream);
+            let (mut stream, header, body) = if header.starts_with("GET ") {
+                drop(stream);
+                let (mut stream, _) = listener.accept().unwrap();
+                let (header, body) = read_http_request(&mut stream);
+                (stream, header, body)
+            } else {
+                (stream, header, body)
+            };
+            assert!(header.starts_with("POST /api/v1/provider-keys/set HTTP/1.1"));
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap(),
+                json!({"provider": "example-router", "source": "work", "api_key": secret})
+            );
+            write_json_response(
+                &mut stream,
+                "200 OK",
+                r#"{"provider":"example-router","active":"work"}"#,
+            );
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "s", "1");
+        ui.command("/key set example-router work");
+        let prompt = ui.secret.as_mut().expect("masked key prompt");
+        prompt.paste(secret);
+        assert!(prompt
+            .lines()
+            .join(" ")
+            .contains(&format!("Key: {}", "*".repeat(secret.len()))));
+        assert!(!prompt.lines().join(" ").contains(secret));
+        ui.secret_key(KeyEvent::new(KeyCode::Enter, Mod::NONE));
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.secret.is_none());
+        assert!(ui.note.contains("Saved example-router key work"));
+        assert!(!ui.note.contains(secret));
+        handle.join().unwrap();
     }
 
     #[test]
@@ -2743,6 +3336,7 @@ mod tests {
         ui.picker = Some(PickerState {
             kind: PickerKind::Fork,
             picker: Picker::new("fork", vec![("12".into(), "#12 second".into())]),
+            workspace_wait: None,
             scope: Some(("sess-1".into(), "1".into())),
         });
         press_enter(&mut ui, &mut screen);
@@ -3311,6 +3905,70 @@ mod tests {
     }
 
     #[test]
+    fn workspace_wait_picker_sends_fenced_actions_and_closes_on_resume() {
+        let (srv, client) = TestServer::bind("workspace-wait");
+        let listener = srv.listener.try_clone().unwrap();
+        let handle = thread::spawn(move || {
+            let mut commands = Vec::new();
+            while commands.len() < 2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, body) = read_http_request(&mut stream);
+                if head.starts_with("POST /api/v1/sessions/sess-1/commands ") {
+                    let command: Value = serde_json::from_str(&body).unwrap();
+                    write_json_response(&mut stream, "200 OK", &json!({
+                        "version": 1, "request_id": command["request_id"], "seq": 12, "status": "done"
+                    }).to_string());
+                    commands.push(command);
+                } else {
+                    write_json_response(&mut stream, "404 Not Found", "{}");
+                }
+            }
+            commands
+        });
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        let snapshot = |seq, wait: Value| {
+            ServerFrame::Snapshot(SnapshotFrame {
+                version: Some(1),
+                session_id: Some("sess-1".into()),
+                conversation_id: Some("1".into()),
+                seq,
+                before_entry_id: None,
+                has_more: Some(false),
+                entries: vec![],
+                docs: Some(
+                    json!({"live": {"run": {}, "workspace_wait": wait}, "agent": {}, "inbox": []}),
+                ),
+            })
+        };
+        let wait = json!({"task_id": "42", "lease_id": "lease-a", "holder_session_id": "holder", "holder_conversation_id": "2"});
+        ui.update(Update::Frame(snapshot(10, wait.clone())));
+        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::WorkspaceWait);
+        let lines = ui.picker.as_ref().unwrap().picker.lines().join("\n");
+        assert!(lines.contains("Cancel wait"));
+        assert!(lines.contains("Stop holder and acquire"));
+        let rows = cards::rows(&ui.state, false, false).join("\n");
+        assert!(rows.contains("held by holder:2"));
+        press_enter(&mut ui, &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+
+        ui.workspace_wait_menu();
+        ui.pick_key(KeyEvent::new(KeyCode::Down, Mod::NONE), &mut screen);
+        press_enter(&mut ui, &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+        ui.workspace_wait_menu();
+        ui.update(Update::Frame(snapshot(13, Value::Null)));
+        assert!(ui.picker.is_none(), "stale actions close after resume");
+        let commands = handle.join().unwrap();
+        for (command, action) in commands.iter().zip(["cancel", "stop_holder"]) {
+            assert_eq!(command["command"], "workspace_wait");
+            assert_eq!(
+                command["args"],
+                json!({"action": action, "task_id": "42", "lease_id": "lease-a"})
+            );
+        }
+    }
+
+    #[test]
     fn user_shell_wiring_excludes_attachments_never_falls_back_or_retries_and_supports_esc_cancel()
     {
         let (srv, client) = TestServer::bind("app-shell");
@@ -3673,6 +4331,10 @@ mod tests {
                         status: Some("ok".into()),
                         parent: None,
                         role: None,
+                        needs_attention: Some(true),
+                        archived: false,
+                        loaded: Some(true),
+                        cwd_exists: Some(true),
                     },
                     crate::protocol::SessionSummary {
                         session_id: "sess-run".into(),
@@ -3692,6 +4354,10 @@ mod tests {
                         status: Some("ok".into()),
                         parent: None,
                         role: None,
+                        needs_attention: Some(false),
+                        archived: false,
+                        loaded: Some(true),
+                        cwd_exists: Some(true),
                     },
                     crate::protocol::SessionSummary {
                         session_id: "sess-2".into(),
@@ -3711,6 +4377,10 @@ mod tests {
                         status: Some("ok".into()),
                         parent: None,
                         role: None,
+                        needs_attention: Some(true),
+                        archived: false,
+                        loaded: Some(true),
+                        cwd_exists: Some(true),
                     },
                     crate::protocol::SessionSummary {
                         session_id: "sess-q".into(),
@@ -3730,8 +4400,13 @@ mod tests {
                         status: Some("quarantined".into()),
                         parent: None,
                         role: None,
+                        needs_attention: Some(true),
+                        archived: false,
+                        loaded: Some(true),
+                        cwd_exists: Some(true),
                     },
                 ]));
+            // Ordered by tier: sess-q (tier 0), sess-1 (tier 1), sess-2 (tier 1), sess-run (tier 2)
             assert_eq!(inbox.state.selected_id(), Some("sess-1"));
         }
 
@@ -3742,18 +4417,24 @@ mod tests {
             Some("sess-2")
         );
 
-        // Enter on quarantined session shows clear note and stays in inbox
-        ui.inbox_key(KeyEvent::new(KeyCode::Char('j'), Mod::NONE));
+        // Next Tab wraps to sess-q (tier 0 quarantined)
+        ui.inbox_key(KeyEvent::new(KeyCode::Tab, Mod::NONE));
         assert_eq!(
             ui.inbox.as_ref().unwrap().state.selected_id(),
             Some("sess-q")
         );
+        // Enter on quarantined session shows clear note and stays in inbox
         ui.inbox_key(KeyEvent::new(KeyCode::Enter, Mod::NONE));
         assert!(ui.inbox.is_some());
         assert!(ui.note.contains("quarantined"), "note={}", ui.note);
 
-        // Move back up to sess-2 and press Enter -> attaches to sess-2
-        ui.inbox_key(KeyEvent::new(KeyCode::Char('k'), Mod::NONE));
+        // Move down twice (sess-q -> sess-1 -> sess-2) and press Enter -> attaches to sess-2
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('j'), Mod::NONE));
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('j'), Mod::NONE));
+        assert_eq!(
+            ui.inbox.as_ref().unwrap().state.selected_id(),
+            Some("sess-2")
+        );
         ui.inbox_key(KeyEvent::new(KeyCode::Enter, Mod::NONE));
         wait_job_complete(&mut ui, &mut screen);
         assert!(ui.inbox.is_none());
@@ -3788,7 +4469,7 @@ mod tests {
     }
 
     #[test]
-    fn inbox_s_toggles_subsessions_and_parent_command_and_alt_p_jump_to_parent_conversation() {
+    fn inbox_t_toggles_subsessions_and_parent_command_and_alt_p_jump_to_parent_conversation() {
         let (srv, client) = TestServer::bind("app-parent-subsessions");
         let listener = srv.listener.try_clone().unwrap();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3855,18 +4536,315 @@ mod tests {
         assert_eq!(ui.target.sid, "parent-1");
         assert_eq!(ui.target.cid, "2");
 
-        // 4. In inbox mode, `s` toggles show_subsessions and sets clear note
+        // 4. In inbox mode, `t` toggles show_subsessions and sets clear note
         ui.enter_inbox();
         assert!(!ui.inbox.as_ref().unwrap().state.show_subsessions());
-        ui.inbox_key(KeyEvent::new(KeyCode::Char('s'), Mod::NONE));
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('t'), Mod::NONE));
         assert!(ui.inbox.as_ref().unwrap().state.show_subsessions());
         assert_eq!(ui.note, "Subsessions: shown");
-        ui.inbox_key(KeyEvent::new(KeyCode::Char('s'), Mod::NONE));
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('t'), Mod::NONE));
         assert!(!ui.inbox.as_ref().unwrap().state.show_subsessions());
         assert_eq!(ui.note, "Subsessions: hidden");
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         drop(ui);
         let _ = handle.join();
+    }
+
+    #[test]
+    fn missing_cwd_guard_and_cwd_fork_preserves_draft_and_switches_session() {
+        let (srv, client) = TestServer::bind("cwd-fork");
+        let seen_reqs = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_srv = Arc::clone(&seen_reqs);
+        let listener = srv.listener.try_clone().unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let (head, body) = read_http_request(&mut stream);
+                        if head.starts_with("POST /api/v1/sessions/sess-1/fork ") {
+                            let val: Value = serde_json::from_str(&body).unwrap();
+                            let new_cwd = val["cwd"].as_str().unwrap().to_string();
+                            seen_srv.lock().unwrap().push((head.clone(), val));
+                            let resp = json!({
+                                "session": {
+                                    "session_id": "sess-forked",
+                                    "title": "Demo",
+                                    "env_id": "host",
+                                    "harness_id": "coding",
+                                    "cwd": new_cwd,
+                                    "root_conversation_id": "1",
+                                    "active": false,
+                                    "attention": "idle",
+                                    "needs_attention": true,
+                                    "archived": false,
+                                    "loaded": true,
+                                    "cwd_exists": true,
+                                    "status": "ok"
+                                },
+                                "seq": 5
+                            })
+                            .to_string();
+                            write_json_response(&mut stream, "200 OK", &resp);
+                        } else if head.starts_with("POST /api/v1/sessions/sess-1/commands ") {
+                            let val: Value = serde_json::from_str(&body).unwrap();
+                            seen_srv.lock().unwrap().push((head.clone(), val));
+                            write_json_response(
+                                &mut stream,
+                                "409 Conflict",
+                                r#"{"error":"cwd_missing"}"#,
+                            );
+                        } else {
+                            write_json_response(&mut stream, "404 Not Found", "{}");
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        load_snapshot(&mut ui, 10, vec![user_entry("1", "hi")], false);
+
+        // 1. Live session encounters 409 cwd_missing from daemon -> flips cwd_exists=false, retains draft, no retry lock
+        ui.draft.editor.set("unsent prompt after delete");
+        ui.send(false);
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(!ui.target.labels.cwd_exists);
+        assert_eq!(ui.draft.editor.text(), "unsent prompt after delete");
+        assert!(ui.draft.retry.is_none());
+        assert!(ui.note.contains("/cwd <path>"), "note={}", ui.note);
+
+        // 2. Subsequent local sends/continue/compact are immediately blocked with /cwd hint
+        ui.send(false);
+        assert!(ui.job.is_none());
+        assert!(ui.note.contains("/cwd <path>"), "note={}", ui.note);
+
+        ui.command("/continue");
+        assert!(ui.job.is_none());
+        assert!(ui.note.contains("/cwd <path>"), "note={}", ui.note);
+
+        ui.command("/compact");
+        assert!(ui.job.is_none());
+        assert!(ui.note.contains("/cwd <path>"), "note={}", ui.note);
+
+        // /cwd with no args prints missing status
+        ui.command("/cwd");
+        assert!(ui.note.contains("missing"), "note={}", ui.note);
+
+        // 3. /cwd /tmp/valid-dir forks session, switches to sess-forked, AND carries over the unsent draft!
+        ui.command("/cwd /tmp/valid-dir");
+        wait_job_complete(&mut ui, &mut screen);
+        assert_eq!(ui.target.sid, "sess-forked");
+        assert_eq!(ui.target.cwd, "/tmp/valid-dir");
+        assert!(ui.target.labels.cwd_exists);
+        assert_eq!(ui.draft.editor.text(), "unsent prompt after delete");
+        assert!(ui.note.contains("/tmp/valid-dir"), "note={}", ui.note);
+
+        // 4. Native archived session shows activity="archived" (not "idle") while allowing /archive off or prompts;
+        //    imported archive (status == "archived") is read-only.
+        ui.target.labels.status = Some("ok".into());
+        ui.target.labels.archived = true;
+        let rendered_status = ui.config.status.render(&ui.status_fields());
+        assert!(
+            rendered_status[0].contains("archived"),
+            "status={rendered_status:?}"
+        );
+        ui.command("/archive");
+        assert!(ui.note.contains("already archived"), "note={}", ui.note);
+
+        ui.target.labels.status = Some("archived".into());
+        let rendered_imported = ui.config.status.render(&ui.status_fields());
+        assert!(
+            rendered_imported[0].contains("archived"),
+            "status={rendered_imported:?}"
+        );
+        ui.send(false);
+        assert!(ui.job.is_none());
+        assert!(
+            ui.note.contains("Imported archive is read-only"),
+            "note={}",
+            ui.note
+        );
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(ui);
+        let _ = handle.join();
+
+        let reqs = seen_reqs.lock().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert!(reqs[1].0.starts_with("POST /api/v1/sessions/sess-1/fork "));
+        assert_eq!(reqs[1].1["cwd"], "/tmp/valid-dir");
+        assert_eq!(reqs[1].1["conversation_id"], 1);
+    }
+
+    #[test]
+    fn attention_archive_and_stop_commands_return_to_inbox_or_quit() {
+        let (srv, client) = TestServer::bind("triage-archive");
+        let seen = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_srv = Arc::clone(&seen);
+        let listener = srv.listener.try_clone().unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let mut archive_calls = 0usize;
+            while !stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let (head, body) = read_http_request(&mut stream);
+                        if head.starts_with("POST /api/v1/sessions/sess-1/triage ") {
+                            let val: Value = serde_json::from_str(&body).unwrap();
+                            let na = val["needs_attention"].as_bool().unwrap();
+                            seen_srv.lock().unwrap().push((head.clone(), val));
+                            write_json_response(
+                                &mut stream,
+                                "200 OK",
+                                &json!({
+                                    "session": {
+                                        "session_id": "sess-1",
+                                        "cwd": "/tmp/proj",
+                                        "active": false,
+                                        "attention": "idle",
+                                        "needs_attention": na,
+                                        "archived": false,
+                                        "loaded": true,
+                                        "cwd_exists": true,
+                                        "status": "ok"
+                                    }
+                                })
+                                .to_string(),
+                            );
+                        } else if head.starts_with("POST /api/v1/sessions/sess-1/archive ") {
+                            archive_calls += 1;
+                            let val: Value = serde_json::from_str(&body).unwrap();
+                            seen_srv.lock().unwrap().push((head.clone(), val.clone()));
+                            if archive_calls == 1 && !val["stop"].as_bool().unwrap_or(false) {
+                                write_json_response(
+                                    &mut stream,
+                                    "409 Conflict",
+                                    r#"{"error":"session_busy"}"#,
+                                );
+                            } else {
+                                write_json_response(
+                                    &mut stream,
+                                    "200 OK",
+                                    &json!({
+                                        "session": {
+                                            "session_id": "sess-1",
+                                            "cwd": "/tmp/proj",
+                                            "active": false,
+                                            "attention": "idle",
+                                            "needs_attention": false,
+                                            "archived": true,
+                                            "loaded": false,
+                                            "cwd_exists": true,
+                                            "status": "ok"
+                                        }
+                                    })
+                                    .to_string(),
+                                );
+                            }
+                        } else {
+                            write_json_response(&mut stream, "404 Not Found", "{}");
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        ui.entered_from_inbox = true;
+
+        // /attention off updates target.labels.needs_attention
+        ui.command("/attention off");
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(!ui.target.labels.needs_attention);
+        assert_eq!(ui.note, "Marked as not needing attention");
+
+        // /archive when busy surfaces helpful hint
+        ui.command("/archive");
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.note.contains("/archive force"), "note={}", ui.note);
+        assert!(ui.inbox.is_none());
+
+        // /archive force succeeds and returns to Inbox since entered_from_inbox == true
+        ui.command("/archive force");
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.inbox.is_some());
+        assert!(!ui.quit);
+        assert!(ui.note.contains("Archived sess-1"), "note={}", ui.note);
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(ui);
+        let _ = handle.join();
+
+        let reqs = seen.lock().unwrap();
+        assert_eq!(reqs.len(), 3);
+        assert_eq!(reqs[0].1["needs_attention"], false);
+        assert_eq!(reqs[1].1["stop"], false);
+        assert_eq!(reqs[2].1["stop"], true);
+    }
+
+    #[test]
+    fn cwd_tab_completes_directories_using_launch_cwd_when_session_cwd_is_missing() {
+        let (srv, client) = TestServer::bind("cwd-tab");
+        let listener = srv.listener.try_clone().unwrap();
+        let server = thread::spawn(move || loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (head, _) = read_http_request(&mut stream);
+            if !head.starts_with("GET /api/v1/fs/files?") {
+                write_json_response(&mut stream, "404 Not Found", "{}");
+                continue;
+            }
+            assert!(
+                    head.starts_with(
+                        "GET /api/v1/fs/files?env_id=host&cwd=%2Ftmp%2Flaunch&max_depth=1&limit=500&include_hidden=false&query=pr "
+                    ),
+                    "{head}"
+                );
+            write_json_response(
+                &mut stream,
+                "200 OK",
+                &json!({
+                    "env_id": "host",
+                    "cwd": "/tmp/launch",
+                    "entries": [
+                        {"path": "project-a", "type": "dir"},
+                        {"path": "prompt.txt", "type": "file"}
+                    ]
+                })
+                .to_string(),
+            );
+            break;
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        ui.launch_cwd = "/tmp/launch".into();
+        ui.target.cwd = "/tmp/deleted".into();
+        ui.target.labels.cwd_exists = false;
+
+        ui.draft.editor.set("/cwd pr");
+        ui.key(KeyEvent::new(KeyCode::Tab, Mod::NONE), &mut screen);
+        wait_path_lookup(&mut ui);
+        // Only directories are offered for /cwd completion (files like prompt.txt are filtered out)
+        assert_eq!(ui.draft.editor.text(), "/cwd project-a/");
+        assert_eq!(ui.completion.as_ref().unwrap().lines().len(), 2);
+
+        server.join().unwrap();
     }
 }

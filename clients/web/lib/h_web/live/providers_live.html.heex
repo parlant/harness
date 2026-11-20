@@ -1,0 +1,116 @@
+<main id="provider-settings" class="settings-page">
+  <nav aria-label="Settings navigation" class="settings-nav">
+    <.link navigate={~p"/workspaces"} class="btn btn-sm">Workspaces</.link>
+    <.link navigate={~p"/inbox"} class="btn btn-sm">Inbox</.link>
+    <.link navigate={~p"/settings/accounts"} class="btn btn-sm">Keys &amp; accounts</.link>
+  </nav>
+  <header>
+    <h1>Providers</h1>
+    <p class="muted">Manage the model catalog this daemon shares with the terminal client.</p>
+  </header>
+
+  <section class="settings-card" aria-labelledby="named-providers-heading">
+    <div class="settings-nav">
+      <h2 id="named-providers-heading">Named Chat Completions providers</h2>
+      <.link :if={@catalog} href={~p"/settings/providers"} class="btn btn-sm">Add provider</.link>
+    </div>
+    <p :if={!@catalog} id="provider-catalog-unavailable" role="alert">
+      The catalog is unavailable or invalid. Check the daemon and its openai-compatible.json file.
+    </p>
+    <p :if={@catalog && @catalog.pending?} id="provider-restart-required" class="badge badge-warn">
+      Saved catalog differs from the running catalog. Restart the daemon when idle to apply it.
+    </p>
+    <ul :if={@catalog && map_size(@catalog.providers) > 0} class="provider-list">
+      <li :for={{id, provider} <- Enum.sort(@catalog.providers)}>
+        <.link href={~p"/settings/providers?#{[provider: id]}"}>
+          <strong>{provider["name"]}</strong> <code>{id}</code>
+        </.link>
+        <span class="muted">{map_size(provider["models"])} models</span>
+        <span :if={id not in @running} class="badge badge-warn">Pending restart</span>
+        <span :if={id in @running} class="badge">Registered</span>
+        <% profile = Enum.find(@profiles, &(&1.provider == id)) %>
+        <span :if={profile} class="muted">
+          {if profile.active, do: "Active key alias: #{profile.active}", else: "No stored key"}
+        </span>
+      </li>
+    </ul>
+    <p :if={@catalog && map_size(@catalog.providers) == 0} class="muted">
+      No named providers configured yet.
+    </p>
+  </section>
+
+  <section :if={@editor} class="settings-card" aria-labelledby="provider-editor-heading">
+    <h2 id="provider-editor-heading">
+      {if @editor[:id].value == "", do: "Add a named provider", else: "Edit #{@editor[:id].value}"}
+    </h2>
+    <p class="muted">
+      Changes apply on the next daemon boot. Use a new provider ID for a different endpoint.
+      Manage keys separately in <.link navigate={~p"/settings/accounts"}>Keys &amp; accounts</.link>.
+    </p>
+    <.form :let={f} for={@editor} id="provider-config-form" action={~p"/settings/providers"}>
+      <input type="hidden" name={f[:revision].name} value={f[:revision].value} />
+      <div class="provider-fields">
+        <label class="field-group">
+          <span class="field-label">Provider ID</span>
+          <input
+            class="input mono"
+            name={f[:id].name}
+            value={f[:id].value}
+            required
+            maxlength="32"
+            pattern="[a-z][a-z0-9_\-]{0,31}"
+            readonly={f[:id].value != ""}
+          />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Display name</span>
+          <input
+            class="input"
+            name={f[:name].name}
+            value={f[:name].value}
+            required
+            maxlength="120"
+          />
+        </label>
+      </div>
+      <label class="field-group">
+        <span class="field-label">HTTPS base URL</span>
+        <input
+          class="input mono"
+          type="url"
+          name={f[:base_url].name}
+          value={f[:base_url].value}
+          placeholder="https://router.example.invalid/v1"
+          required
+          maxlength="512"
+          readonly={f[:id].value != ""}
+        />
+      </label>
+      <label class="field-group">
+        <span class="field-label">Models (JSON object keyed by exact model ID)</span>
+        <textarea
+          class="input mono"
+          id="provider-models"
+          name={f[:models].name}
+          rows="14"
+          required
+          spellcheck="false"
+        >{f[:models].value}</textarea>
+      </label>
+      <p class="muted">
+        Include token limits, image and reasoning support, and USD rates per million tokens. Never paste credentials here.
+      </p>
+      <button type="submit" class="btn btn-primary">Save for next restart</button>
+    </.form>
+  </section>
+
+  <section class="settings-card" aria-labelledby="stock-providers-heading">
+    <h2 id="stock-providers-heading">Stock providers in the active catalog</h2>
+    <ul class="provider-list">
+      <li :for={{id, models} <- Enum.sort(Map.drop(@model_groups, @running))}>
+        <code>{id}</code> <span class="muted">{length(models)} models · built-in</span>
+      </li>
+    </ul>
+    <p class="muted">Stock endpoints and extension settings are not editable here.</p>
+  </section>
+</main>

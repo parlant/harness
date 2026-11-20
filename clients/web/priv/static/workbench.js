@@ -43,7 +43,7 @@ export const FollowTranscript = {
 };
 
 // Desktop keyboard navigation for /inbox: j/k/arrows move across rows,
-// Tab/Shift+Tab cycle through non-processing (attention/idle) rows, Enter opens.
+// n/p cycle through attention rows without intercepting Tab between controls.
 export const InboxBrowser = {
   mounted() {
     this.selectedSid = null;
@@ -111,13 +111,14 @@ export const InboxBrowser = {
       } else if (event.key === "k" || event.key === "ArrowUp") {
         event.preventDefault();
         move(-1);
-      } else if (event.key === "Tab") {
+      } else if (event.key === "n" || event.key === "p") {
         const rows = getRows();
         if (rows.some(r => r.dataset.needsAttention === "true")) {
           event.preventDefault();
-          cycleAttention(event.shiftKey ? -1 : 1);
+          cycleAttention(event.key === "p" ? -1 : 1);
         }
       } else if (event.key === "Enter") {
+        if (event.target?.closest?.("button, a")) return;
         const rows = getRows();
         const selected = this.applySelection(rows, false);
         if (selected && event.target !== selected) {

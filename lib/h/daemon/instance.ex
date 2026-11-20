@@ -36,7 +36,8 @@ defmodule H.Daemon.Instance do
          data_dir: opts[:data_dir],
          name: opts[:catalog],
          table: opts[:catalog_table],
-         pubsub: opts[:pubsub]},
+         pubsub: opts[:pubsub],
+         registry: opts[:registry]},
         {H.Daemon.Runtime, opts}
       ],
       # Losing the instance/lock is a failed boot, not permission to reread
@@ -53,6 +54,7 @@ defmodule H.Daemon.Runtime do
 
   def start_link(opts) do
     with {:ok, opts, extension_children} <- H.Extensions.load(opts),
+         {:ok, opts} <- H.Provider.Compatible.load(opts),
          {:ok, opts, account_children} <- H.Accounts.boot(opts) do
       Supervisor.start_link(__MODULE__, {opts, account_children ++ extension_children})
     end

@@ -2,16 +2,20 @@ defmodule HWeb.Transcript do
   @moduledoc """
   Thin Phoenix LiveView state wrapper around `H.Transcript`.
 
-  Delegates all frame reduction (`apply_snapshot/2`, `apply_commit/2`,
-  `apply_ephemeral/2`, `prepend_older_page/3`) to `H.Transcript`, emits entry
-  lists for `Phoenix.LiveView.stream/4`, and clears committed entry bodies from
-  the retained struct so the LiveView process only keeps compact doc/cursor state.
+  Delegates frame reduction to `H.Transcript` and projects messages and activity
+  summaries for `Phoenix.LiveView.stream/4`. Only the boundary groups are kept
+  for merging commits and older pages; the trailing group is rendered separately
+  so its status can change with live docs without re-rendering committed messages.
   """
 
-  defstruct [:reducer]
+  alias HWeb.{Activity, ConversationComponents}
+
+  defstruct [:reducer, :head_activity, :tail_activity]
 
   @type t :: %__MODULE__{
-          reducer: H.Transcript.t()
+          reducer: H.Transcript.t(),
+          head_activity: Activity.t() | nil,
+          tail_activity: Activity.t() | nil
         }
 
   @doc "Creates a new empty `HWeb.Transcript`."
@@ -25,8 +29,10 @@ defmodule HWeb.Transcript do
   def apply_snapshot(%__MODULE__{reducer: reducer}, payload) do
     case H.Transcript.apply_snapshot(reducer, payload) do
       {:ok, next} ->
-        entries = Enum.map(next.entries, &normalize_entry/1)
-        {:ok, entries, %__MODULE__{reducer: %{next | entries: []}}}
+        {rows, head, tail} = project(next.entries, nil)
+
+        {:ok, rows,
+         %__MODULE__{reducer: %{next | entries: []}, head_activity: head, tail_activity: tail}}
 
       {:error, _} = err ->
         err
@@ -39,8 +45,17 @@ defmodule HWeb.Transcript do
   def apply_commit(%__MODULE__{reducer: reducer} = wrapper, payload) do
     case H.Transcript.apply_commit(reducer, payload) do
       {:ok, next, %{appended_entries: appended}} ->
-        entries = Enum.map(appended, &normalize_entry/1)
-        {:ok, entries, %__MODULE__{reducer: %{next | entries: []}}}
+        {rows, head, tail} = project(appended, wrapper.tail_activity)
+
+        head =
+          cond do
+            MapSet.size(reducer.entry_ids) == 0 -> head
+            same_group?(wrapper.head_activity, wrapper.tail_activity) -> head
+            true -> wrapper.head_activity
+          end
+
+        {:ok, rows,
+         %{wrapper | reducer: %{next | entries: []}, head_activity: head, tail_activity: tail}}
 
       {:gap, _next} ->
         {:gap, wrapper}
@@ -55,9 +70,9 @@ defmodule HWeb.Transcript do
 
   @doc "Applies an `ephemeral` payload via `H.Transcript.apply_ephemeral/2`."
   @spec apply_ephemeral(t(), map() | binary()) :: {:ok, t()} | :ignored | {:error, term()}
-  def apply_ephemeral(%__MODULE__{reducer: reducer}, payload) do
+  def apply_ephemeral(%__MODULE__{reducer: reducer} = wrapper, payload) do
     case H.Transcript.apply_ephemeral(reducer, payload) do
-      {:ok, next} -> {:ok, %__MODULE__{reducer: %{next | entries: []}}}
+      {:ok, next} -> {:ok, %{wrapper | reducer: next}}
       :ignored -> :ignored
       {:error, _} = err -> err
     end
@@ -65,15 +80,63 @@ defmodule HWeb.Transcript do
 
   @doc "Prepends an older page of entries via `H.Transcript.prepend_older_page/3`."
   @spec prepend_older_page(t(), [map()], String.t() | integer() | nil) :: {[map()], t()}
-  def prepend_older_page(%__MODULE__{reducer: reducer}, items, next_cursor) when is_list(items) do
+  def prepend_older_page(%__MODULE__{reducer: reducer} = wrapper, items, next_cursor) do
     next = H.Transcript.prepend_older_page(reducer, items, next_cursor)
-    entries = Enum.map(next.entries, &normalize_entry/1)
-    {entries, %__MODULE__{reducer: %{next | entries: []}}}
+    {rows, head, tail} = project(next.entries, nil)
+
+    {rows, head, tail} =
+      cond do
+        MapSet.size(reducer.entry_ids) == 0 ->
+          {rows, head, tail}
+
+        is_nil(tail) ->
+          {rows, if(rows == [], do: wrapper.head_activity, else: head), wrapper.tail_activity}
+
+        is_nil(wrapper.head_activity) ->
+          {rows ++ [activity_row(tail)], head, wrapper.tail_activity}
+
+        true ->
+          merged = Activity.merge(wrapper.head_activity, tail)
+          head = if same_group?(head, tail), do: merged, else: head
+
+          if same_group?(wrapper.head_activity, wrapper.tail_activity) do
+            {rows, head, merged}
+          else
+            {rows ++ [activity_row(merged)], head, wrapper.tail_activity}
+          end
+      end
+
+    {rows, %{wrapper | reducer: %{next | entries: []}, head_activity: head, tail_activity: tail}}
   end
+
+  # Fold one page or commit into display rows. A visible message closes the
+  # preceding group and may start a new one if it also contains tool calls.
+  defp project(entries, tail) do
+    {rows, tail, head} =
+      Enum.reduce(entries, {[], tail, nil}, fn raw, {rows, pending, head} ->
+        entry = normalize_entry(raw)
+
+        if ConversationComponents.message?(entry) do
+          head = if rows == [], do: pending, else: head
+          rows = if pending, do: [activity_row(pending) | rows], else: rows
+          {[entry | rows], Activity.after_message(entry), head}
+        else
+          {rows, Activity.merge(pending, Activity.from_entry(entry)), head}
+        end
+      end)
+
+    {Enum.reverse(rows), if(rows == [], do: tail, else: head), tail}
+  end
+
+  defp activity_row(activity),
+    do: %{"id" => "activity-#{activity.id}", "activity" => Activity.summary(activity)}
+
+  defp same_group?(%Activity{id: id}, %Activity{id: id}), do: true
+  defp same_group?(_, _), do: false
 
   @doc "Extracts compact Phoenix assigns from the underlying `H.Transcript`."
   @spec compact_assigns(t()) :: map()
-  def compact_assigns(%__MODULE__{reducer: r}) do
+  def compact_assigns(%__MODULE__{reducer: r, tail_activity: tail}) do
     docs = r.docs || %{}
     committed = r.committed_docs || %{}
     live = Map.get(docs, "live") || %{}
@@ -82,6 +145,7 @@ defmodule HWeb.Transcript do
       cursor_seq: r.seq,
       committed_docs: committed,
       ephemeral_live: live,
+      tail_activity: tail,
       inbox: Map.get(docs, "inbox") || [],
       agent: Map.get(committed, "agent") || %{},
       usage: Map.get(committed, "usage") || %{},
@@ -91,7 +155,7 @@ defmodule HWeb.Transcript do
     }
   end
 
-  @doc "Returns `true` when `live` indicates an active run or generation."
+  @doc "Returns `true` when `live` indicates active conversation work."
   @spec run_active?(map()) :: boolean()
   def run_active?(live) when is_map(live) do
     tools = Map.get(live, "tools")
@@ -103,14 +167,13 @@ defmodule HWeb.Transcript do
         true -> false
       end
 
-    not is_nil(Map.get(live, "run")) or not is_nil(Map.get(live, "generation")) or has_tools?
+    Enum.any?(~w(run generation compaction user_shell workspace_wait), &(not is_nil(live[&1]))) or
+      has_tools?
   end
 
   def run_active?(_), do: false
 
-  @doc "Normalizes a raw entry map (atom or string keys) into string-keyed display shape."
-  @spec normalize_entry(map()) :: map()
-  def normalize_entry(entry) when is_map(entry) do
+  defp normalize_entry(entry) do
     %{
       "id" => to_string(Map.get(entry, "id") || Map.get(entry, :id)),
       "conversation_id" =>

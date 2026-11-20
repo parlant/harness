@@ -49,7 +49,8 @@ defmodule H.Daemon.Workspace do
           Catalog.annotate_directories(desc.id, raw_dirs,
             table: table,
             parent_path: canonical_path,
-            include_subsessions: include_subsessions
+            include_subsessions: include_subsessions,
+            registry: Keyword.get(opts, :registry, H.Registry)
           )
 
         directories =

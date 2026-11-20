@@ -34,6 +34,9 @@ def smoke(source):
         accounts = data / "accounts.json"
         extensions = data / "extensions.json"
         network = data / "network.json"
+        compatible = data / "openai-compatible.json"
+        router_catalog = Path(__file__).resolve().parents[1] / "examples/providers/openai-compatible.json"
+        router_model = "example-router:vendor/Example-Vision"
         addresses = ["127.0.0.1"]
         second_ip = os.environ.get("H_SMOKE_BIND_ADDRESS") or ("127.0.0.2" if sys.platform == "linux" else None)
         if second_ip:
@@ -117,6 +120,26 @@ def smoke(source):
                 })
                 assert len(json.loads(manifest.read_text())["http_urls"]) == 1
                 check_web("127.0.0.1")
+                imports = root / "pi sessions" / "nested"
+                imports.mkdir(parents=True)
+                source = imports / "fixture.jsonl"
+                timestamp = "2026-01-01T00:00:00Z"
+                def append_pi(*rows):
+                    with source.open("a") as f:
+                        for row in rows:
+                            f.write(json.dumps({"timestamp": timestamp, **row}) + "\n")
+                append_pi({"type": "session", "version": 3, "id": "smoke-pi", "cwd": "/missing/workspace"},
+                          {"type": "message", "id": "a", "parentId": None, "message": {"role": "user", "content": "archive prompt"}},
+                          {"type": "message", "id": "b", "parentId": "a", "message": {"role": "assistant", "content": "x" * 300_000}})
+                def import_pi():
+                    return run("/usr/bin/env", "PATH=" + str(bundle / "bin") + ":" + env["PATH"],
+                               hi, "import", "--harness", "pi", "--directory", imports.parent).stdout
+                assert "Created 1, updated 0" in import_pi()
+                assert "unchanged 1" in import_pi()
+                append_pi({"type": "message", "id": "c", "parentId": "a", "message": {"role": "user", "content": "forked prompt"}})
+                assert "Created 0, updated 1" in import_pi()
+                [archive] = api("archives")["archives"]
+                archived_sid = archive["session_id"]
                 # Both accounts are unsigned; the extension cannot contact OpenAI.
                 config = json.dumps({"version": 1, "extensions": [{"path": str(bundle / "extensions/multicodex"), "settings": {"sources": ["personal", "work"]}}]})
                 extensions.write_text("malformed")
@@ -129,10 +152,22 @@ def smoke(source):
                 assert refused.returncode != 0 and "network_config" in refused.stderr
                 assert old.poll() is None
                 network.write_text(json.dumps({"bind_addresses": addresses}))
+                compatible.write_text("malformed")
+                refused = run(hi, "daemon", "restart", "--port", "0", check=False)
+                assert refused.returncode != 0 and "invalid_openai_compatible_json" in refused.stderr
+                assert old.poll() is None
+                shutil.copyfile(router_catalog, compatible)
 
                 replacement = launch("restart")
                 ready(replacement)
                 assert old.wait(timeout=5) == 0
+                assert "unchanged 1" in import_pi()
+                archive_detail = api(f"sessions/{archived_sid}")
+                assert archive_detail["session"]["status"] == "archived"
+                [main, fork] = archive_detail["conversations"]
+                assert fork["parent"]["conversation_id"] == main["id"]
+                fork_entries = api(f"sessions/{archived_sid}/conversations/{fork['id']}/entries")["items"]
+                assert [e["data"]["content"] for e in fork_entries] == ["forked prompt", "archive prompt"]
                 urls = json.loads(manifest.read_text())["http_urls"]
                 assert [urllib.parse.urlsplit(url).hostname for url in urls] == addresses
                 for ip, url in zip(addresses, urls):
@@ -154,6 +189,11 @@ def smoke(source):
                 models_by_id = {model["id"]: model for model in api("models")["models"]}
                 assert models_by_id["google:gemini-4-neon"]["context_window"] == 1_048_576
                 assert models_by_id["google:gemini-4-neon"]["max_output_tokens"] == 65_536
+                assert "unavailable_reason" in models_by_id[router_model]
+                saved = api("provider-keys/set", {"provider": "example-router", "source": "work", "api_key": fixture_key})
+                assert fixture_key not in json.dumps(saved)
+                named_models = [model for model in api("models")["models"] if model["provider"] == "example-router"]
+                assert len(named_models) == 2 and all("unavailable_reason" not in model for model in named_models)
                 for alias in ("personal", "work"):
                     run(hi, "account", "add", alias)
 
@@ -164,7 +204,9 @@ def smoke(source):
                 assert "personal\tnot_signed_in (stock active)" in run(hi, "account", "list").stdout
                 profiles = api("provider-keys")
                 assert {"active": "work", "provider": "openai", "sources": ["personal", "work"]} in profiles["providers"]
+                assert {"active": "work", "provider": "example-router", "sources": ["work"]} in profiles["providers"]
                 assert fixture_key not in json.dumps(profiles)
+                assert any(model["id"] == router_model for model in api("models")["models"])
                 entries = api(f"sessions/upgrade-smoke/conversations/{cid}/entries")["items"]
                 assert len(entries) == 1 and "survives planned restart" in json.dumps(entries)
                 # Host commands should use the original PATH, not the bundled Erlang toolchain.
@@ -201,7 +243,7 @@ def smoke(source):
 
         assert "not running" in run(hi, "daemon", "status", check=False).stderr
         assert extensions.read_text() == "malformed"
-    print("Bundle passed relocation, no-toolchain boot, authenticated web inbox, host PATH isolation, account/session persistence, extension startup/bypass, and guarded restart/shutdown.")
+    print("Bundle passed relocation, no-toolchain boot, authenticated web inbox, host PATH isolation, named provider config and profile persistence, account/session persistence, extension startup/bypass, and guarded restart/shutdown.")
 
 
 if __name__ == "__main__":

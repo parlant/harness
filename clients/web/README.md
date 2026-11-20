@@ -50,6 +50,14 @@ workspace stacks and the session sidebar becomes a drawer. The chat keeps its
 composer in place and follows output only while you're at the bottom; **Latest**
 returns there.
 
+The Inbox and session top bars share working-directory, tag, and text filters.
+The filters travel in the URL: opening a row, jumping to the next session
+needing attention, switching branches, and returning to the Inbox preserve
+them. A directory filter matches the exact environment and directory; a tag
+filter matches the full tag. Use **Clear filters** to reset the view. Edit a
+session's tags in the Session section of its sidebar. In the Inbox browser,
+`n`/`p` cycle through attention rows; Tab moves between controls.
+
 - Put presentation in function components (`ConversationComponents`), and
   page markup in colocated `*.html.heex`. Keep URL params, subscriptions,
   command dispatch and the entry stream in the routed LiveView.
@@ -65,6 +73,20 @@ returns there.
 The slotted navigation, bounded transcript and jump-to-latest interaction
 were informed by `diy-chat`; there is no dependency on that project. This
 workbench supports two resizable regions, not arbitrary drag-to-dock tabs.
+
+## Conversation display
+
+The session transcript shows user messages and assistant replies. Assistant
+replies render Markdown while streaming and after commit; fenced `console`
+and shell blocks use a scrollable terminal style and are never executed.
+User text stays plain, and existing screenshot attachments still display.
+Markdown does not render raw HTML or load images from URLs.
+
+Consecutive tool and system activity appears in one line between messages,
+including across **Load earlier** pages. A tool call and its result count once.
+The line shows a spinner while work is underway, or a status such as **Waiting**,
+**Complete**, **Paused**, or **Failed**. This is a web display change; the daemon
+and `hi` still have the original transcript and tool output.
 
 ## Check a change
 

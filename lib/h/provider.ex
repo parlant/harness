@@ -29,6 +29,7 @@ defmodule H.Provider do
         }
 
   @type error_reason :: %{
+          optional(:retry_after_ms) => non_neg_integer(),
           code: String.t(),
           message: String.t(),
           retryable: boolean()

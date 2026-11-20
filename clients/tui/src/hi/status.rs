@@ -15,7 +15,8 @@ use std::{
 use unicode_width::UnicodeWidthStr;
 
 const WORKSPACE_LINE: &str = concat!(
-    "{{ align(cwd_short ~ (' (' ~ git_branch ~ ')' if git_branch else ''), ",
+    "{{ align(cwd_short ~ (' (' ~ git_branch ~ ')' if git_branch else '')",
+    " ~ (' [missing cwd — use /cwd <path> to fork into an existing directory]' if not cwd_exists and session_status != 'archived' else ''), ",
     "activity ~ (' (' ~ connection ~ ')' if not online and connection else '')) }}",
 );
 
@@ -51,6 +52,8 @@ pub(super) struct StatusFields<'a> {
     session_title: Option<&'a str>,
     session_status: Option<&'a str>,
     harness_id: Option<&'a str>,
+    cwd_exists: bool,
+    needs_attention: bool,
     seq: Option<u64>,
     activity: &'static str,
     failure_reason: Option<String>,
@@ -108,8 +111,16 @@ impl<'a> StatusFields<'a> {
             session_title: target.labels.title.as_deref(),
             session_status: target.labels.status.as_deref(),
             harness_id: target.labels.harness_id.as_deref(),
+            cwd_exists: target.labels.cwd_exists,
+            needs_attention: target.labels.needs_attention,
             seq: state.seq,
-            activity: if state.is_run_active() {
+            activity: if target.labels.is_archived() {
+                "archived"
+            } else if state.workspace_wait().is_some() {
+                "waiting"
+            } else if state.inference_retry().is_some() {
+                "retrying"
+            } else if state.is_run_active() {
                 "busy"
             } else if failure.is_some() {
                 "paused"
@@ -191,6 +202,7 @@ impl StatusMetadata {
         }
         if status.needs_branch
             && target.env_id == "host"
+            && target.labels.cwd_exists
             && Path::new(&target.cwd).is_absolute()
             && self.branch_job.is_none()
             && self.next_branch_check.is_none_or(|due| now >= due)
@@ -492,8 +504,26 @@ mod tests {
                 status: Some("ok".into()),
                 harness_id: Some("coding".into()),
                 parent: None,
+                archived: false,
+                cwd_exists: true,
+                needs_attention: true,
             },
         }
+    }
+
+    #[test]
+    fn activity_distinguishes_retrying_from_busy_or_paused() {
+        let state = TranscriptState {
+            docs: json!({"live": {"generation": {"retry": {"status": "waiting"}}}})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            StatusFields::from_session(&target(), &state).activity,
+            "retrying"
+        );
     }
 
     #[test]

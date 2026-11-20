@@ -11,12 +11,14 @@ defmodule H.Schema do
   @session_id_regex ~r/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/
   @pos_int_regex ~r/^[0-9]+$/
   @max_title_length 200
+  @invalid_tag "must be 1–64 characters without commas or control characters"
 
   @type field_type ::
           :string
           | :non_empty_string
           | :id_string
           | :session_id
+          | :session_tags
           | :abs_path
           | :boolean
           | :int
@@ -188,6 +190,34 @@ defmodule H.Schema do
   defp validate_value(:id_string, _), do: {:error, "must be a valid id string"}
 
   defp validate_value(:session_id, value), do: validate_session_id(value)
+
+  defp validate_value(:session_tags, tags) when is_list(tags) do
+    if length(tags) <= 32 do
+      validate_value({:list, :session_tag}, tags)
+      |> case do
+        {:ok, tags} -> {:ok, Enum.uniq(tags)}
+        error -> error
+      end
+    else
+      {:error, "must contain at most 32 tags"}
+    end
+  end
+
+  defp validate_value(:session_tags, _), do: {:error, "must be a list of tags"}
+
+  defp validate_value(:session_tag, tag) when is_binary(tag) and byte_size(tag) <= 256 do
+    with true <- String.valid?(tag),
+         false <- Regex.match?(~r/[,\p{Cc}]/u, tag),
+         trimmed when trimmed != "" <- String.trim(tag),
+         true <- String.length(trimmed) <= 64 do
+      {:ok, trimmed}
+    else
+      _ -> {:error, @invalid_tag}
+    end
+  end
+
+  defp validate_value(:session_tag, _),
+    do: {:error, @invalid_tag}
 
   defp validate_value(:abs_path, value) when is_binary(value) do
     if Path.type(value) == :absolute do

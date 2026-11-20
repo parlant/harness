@@ -585,6 +585,45 @@ defmodule H.Provider.ReqLLMTest do
       assert_receive {:closed, ^closed_ref}
     end
 
+    test "explains HTTP 429 spending limits and preserves Retry-After without credentials" do
+      request = %{model: %{provider: :google, id: "gemini-2.5-flash"}, messages: [], tools: []}
+
+      date =
+        Calendar.strftime(
+          DateTime.add(DateTime.utc_now(), 120, :second),
+          "%a, %d %b %Y %H:%M:%S GMT"
+        )
+
+      for {header, expected} <- [{"15", 15_000}, {date, :date}, {"invalid", nil}] do
+        stream_fn = fn _, _, _ ->
+          {:error,
+           ReqLLM.Error.API.Request.exception(
+             status: 429,
+             provider_code: "RESOURCE_EXHAUSTED",
+             reason: "Monthly spending cap reached for Bearer private-key",
+             headers: [{"retry-after", header}],
+             retryable: false
+           )}
+        end
+
+        assert {:error, error} =
+                 Adapter.stream_turn(%{stream_fn: stream_fn}, request, fn _ -> :ok end)
+
+        assert error.code == "RESOURCE_EXHAUSTED"
+        assert error.retryable
+        assert error.message =~ "HTTP 429"
+        assert error.message =~ "Monthly spending cap"
+        assert error.message =~ "retries cannot remove the restriction"
+        refute error.message =~ "private-key"
+
+        if expected == :date do
+          assert error.retry_after_ms in 118_000..120_000
+        else
+          assert error[:retry_after_ms] == expected
+        end
+      end
+    end
+
     test "closes StreamResponse when worker exits mid-stream on abort" do
       test_pid = self()
       closed_ref = make_ref()

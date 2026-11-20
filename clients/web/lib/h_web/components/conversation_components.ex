@@ -1,8 +1,20 @@
 defmodule HWeb.ConversationComponents do
-  @moduledoc "Stateless rendering for committed entries and in-flight conversation activity."
+  @moduledoc "Stateless rendering for committed messages and in-flight conversation activity."
   use HWeb, :html
 
-  alias HWeb.CatalogState
+  alias HWeb.{Activity, CatalogState, Markdown}
+
+  def message?(%{"kind" => "user"}), do: true
+
+  def message?(%{"kind" => "assistant", "data" => data}) do
+    String.trim(message_text(data)) != "" or images(data) != [] or subagent_tool_calls(data) != []
+  end
+
+  def message?(%{"kind" => "tool_result", "data" => data}) do
+    (data["tool_name"] || data["name"]) == "subagent"
+  end
+
+  def message?(_), do: false
 
   attr(:entry, :map, required: true)
   attr(:catalog_by_id, :map, default: %{})
@@ -10,92 +22,101 @@ defmodule HWeb.ConversationComponents do
   def entry_body(assigns) do
     data = assigns.entry["data"] || %{}
     kind = assigns.entry["kind"]
-    {thinking, text} = extract_parts(data)
-    tool_calls = if is_list(data["tool_calls"]), do: data["tool_calls"], else: []
     tool_name = data["tool_name"] || data["name"]
 
     assigns =
       assign(assigns,
         data: data,
         kind: kind,
-        thinking: thinking,
-        text: text,
-        tool_calls: tool_calls,
-        tool_name: tool_name
+        tool_name: tool_name,
+        text: message_text(data),
+        images: images(data),
+        subagent_calls: subagent_tool_calls(data)
       )
 
     ~H"""
-    <details :if={@thinking != ""} class="collapsible">
-      <summary>Thinking</summary>
-      <pre class="code-pre">{@thinking}</pre>
-    </details>
-
-    <div :if={@kind == "tool_result"}>
+    <div :if={@kind == "tool_result" and @tool_name == "subagent"}>
       <.subagent_card
-        :if={@tool_name == "subagent"}
         source={:tool_result}
         data={@data}
         text={@text}
         catalog_by_id={@catalog_by_id}
       />
-
-      <details :if={@tool_name != "subagent"} class="collapsible">
-        <summary>Tool Output</summary>
-        <pre class="code-pre">{format_tool_output(@data, @text)}</pre>
-      </details>
     </div>
 
     <div :if={@kind != "tool_result"}>
       <img
-        :for={
-          %{
-            "type" => "image",
-            "encoding" => "base64",
-            "media_type" => "image/jpeg",
-            "data" => encoded
-          } <- List.wrap(@data["content"])
-        }
+        :for={encoded <- @images}
         src={"data:image/jpeg;base64," <> encoded}
         class="feedback-image"
         alt="Attached screenshot"
         loading="lazy"
       />
-      <p :if={@text != ""} class="entry-text">{@text}</p>
+      <.assistant_text :if={@kind == "assistant" and @text != ""} text={@text} />
+      <p :if={@kind == "user" and @text != ""} class="entry-text">{@text}</p>
 
-      <div :for={tc <- @tool_calls}>
+      <div :for={tc <- @subagent_calls}>
         <.subagent_card
-          :if={tc["name"] == "subagent"}
           source={:tool_call}
           data={tc}
           text=""
           catalog_by_id={@catalog_by_id}
         />
-
-        <div :if={tc["name"] != "subagent"} class="tool-call-card">
-          <div class="tool-call-head">
-            <span class="badge mono">{tc["name"] || "tool"}</span>
-            <span :if={tc["id"]} class="muted mono">{tc["id"]}</span>
-          </div>
-          <pre class="code-pre">{format_json(tc["arguments"] || tc["args"] || tc["input"] || %{})}</pre>
-        </div>
       </div>
+    </div>
+    """
+  end
 
-      <pre :if={@text == "" and @thinking == "" and @tool_calls == []} class="code-pre">{format_json(@data)}</pre>
+  attr(:text, :string, required: true)
+
+  defp assistant_text(assigns) do
+    ~H"""
+    <div class="markdown">{Markdown.render(@text)}</div>
+    """
+  end
+
+  attr(:id, :string, required: true)
+  attr(:count, :integer, required: true)
+  attr(:status, :atom, required: true)
+
+  def activity_line(assigns) do
+    {label, spinning?} =
+      case assigns.status do
+        :working -> {"Working", true}
+        :retrying -> {"Retrying", true}
+        :waiting -> {"Waiting", false}
+        :paused -> {"Paused", false}
+        :failed -> {"Failed", false}
+        :stopped -> {"Stopped", false}
+        :interrupted -> {"Interrupted", false}
+        :incomplete -> {"Incomplete", false}
+        :complete -> {"Complete", false}
+      end
+
+    assigns = assign(assigns, label: label, spinning?: spinning?)
+
+    ~H"""
+    <div id={@id} class="activity-line" data-status={@status}>
+      <span :if={@spinning?} class="activity-spinner" aria-hidden="true"></span>
+      <span>{@count} {if @count == 1, do: "activity", else: "activities"}</span>
+      <span class="activity-status">· {@label}</span>
     </div>
     """
   end
 
   attr(:live, :map, required: true)
   attr(:inbox, :list, required: true)
+  attr(:tail_activity, :any, default: nil)
   attr(:catalog_by_id, :map, default: %{})
 
   def live_region(assigns) do
     live = assigns.live || %{}
-    gen = Map.get(live, "generation")
-    run = Map.get(live, "run")
-    msg = if is_map(gen), do: Map.get(gen, "message") || gen, else: %{}
-    {thinking, text} = extract_parts(msg)
-    tools = normalize_live_tools(Map.get(live, "tools"))
+    gen = live["generation"] || %{}
+    msg = gen["message"] || gen
+    text = message_text(msg)
+    streaming_text? = String.trim(text) != ""
+    activity = Activity.live_summary(assigns.tail_activity, live, msg, streaming_text?)
+    subagent_slots = live_subagent_slots(live["tools"])
 
     {failure, failure_label} =
       case {live["run_failure"], live["compaction_failure"]} do
@@ -109,61 +130,65 @@ defmodule HWeb.ConversationComponents do
           {failure, "Compaction failed"}
       end
 
-    inbox = assigns.inbox || []
-
-    visible? =
-      not is_nil(gen) or not is_nil(run) or tools != [] or inbox != [] or not is_nil(failure)
+    retry = get_in(live, ["generation", "retry"]) || get_in(live, ["compaction", "retry"])
 
     assigns =
       assign(assigns,
-        visible?: visible?,
-        gen: gen,
-        run: run,
-        thinking: thinking,
+        activity: activity,
+        streaming_text?: streaming_text?,
+        subagent_slots: subagent_slots,
         text: text,
-        tools: tools,
         failure: failure,
         failure_label: failure_label,
-        inbox: inbox
+        retry: retry
       )
 
     ~H"""
-    <section :if={@visible?} id="live-region" class="live-region" aria-live="polite">
-      <div :if={@gen || @run} id="live-generation" class="entry-card entry-live">
-        <div class="entry-header-left">
-          <span class="role-label">assistant (live)</span>
-          <span :if={is_map(@run) and @run["turns"]} class="badge mono">
-            turn {@run["turns"]}
-          </span>
-        </div>
-
-        <details :if={@thinking != ""} class="collapsible" open>
-          <summary>Thinking (streaming)</summary>
-          <pre class="code-pre">{@thinking}</pre>
-        </details>
-
-        <p :if={@text != ""} class="entry-text">{@text}</p>
-        <p :if={@text == "" and @thinking == ""} class="muted mono">Streaming…</p>
+    <section
+      :if={
+        @streaming_text? || @activity || @subagent_slots != [] || @inbox != [] || @failure || @retry
+      }
+      id="live-region"
+      class="live-region"
+      aria-live="polite"
+    >
+      <.activity_line
+        :if={@activity}
+        id="live-activity"
+        count={@activity.count}
+        status={@activity.status}
+      />
+      <div :if={@retry} id="retry-banner" class="retry-banner" role="status">
+        <strong>Retrying after provider error · {@retry["attempt"]}/{@retry["max_attempts"]}</strong>
+        <p>{@retry["code"]}: {@retry["message"]}</p>
+        <p :if={@retry["status"] == "waiting"}>
+          Waiting {ceil((@retry["delay_ms"] || 0) / 1_000)}s before retry.
+          <time
+            :if={@retry["until"]}
+            datetime={DateTime.from_unix!(@retry["until"], :millisecond) |> DateTime.to_iso8601()}
+          >
+            Next attempt: {DateTime.from_unix!(@retry["until"], :millisecond)
+            |> Calendar.strftime("%H:%M:%S UTC")}
+          </time>
+          Stop remains available.
+        </p>
+        <p :if={@retry["status"] != "waiting"}>Retry request in progress.</p>
       </div>
+      <article :if={@streaming_text?} id="live-generation" class="entry-card entry-live">
+        <header class="entry-header">
+          <span class="role-label">assistant (live)</span>
+        </header>
+        <.assistant_text text={@text} />
+      </article>
 
-      <div :if={@tools != []} id="live-tools" class="live-tools">
-        <div class="role-label">Running Tools</div>
-        <div :for={slot <- @tools}>
+      <div :if={@subagent_slots != []} id="live-subagents" class="live-tools">
+        <div :for={slot <- @subagent_slots}>
           <.subagent_card
-            :if={slot["name"] == "subagent"}
             source={:live_slot}
             data={slot}
             text={tool_slot_output(slot)}
             catalog_by_id={@catalog_by_id}
           />
-
-          <div :if={slot["name"] != "subagent"} class="tool-call-card">
-            <div class="tool-call-head">
-              <span class="badge mono">{slot["name"] || "tool"}</span>
-              <span :if={slot["status"]} class="badge">{slot["status"]}</span>
-            </div>
-            <pre :if={tool_slot_output(slot) != ""} class="code-pre">{tool_slot_output(slot)}</pre>
-          </div>
         </div>
       </div>
 
@@ -317,6 +342,47 @@ defmodule HWeb.ConversationComponents do
     """
   end
 
+  defp subagent_tool_calls(data) when is_map(data) do
+    for %{"name" => "subagent"} = tc <- List.wrap(data["tool_calls"]), do: tc
+  end
+
+  defp subagent_tool_calls(_), do: []
+
+  defp live_subagent_slots(tools) when is_map(tools) do
+    tools
+    |> Enum.sort_by(fn {id, _} -> to_string(id) end)
+    |> Enum.flat_map(fn {id, slot} ->
+      if is_map(slot) and slot["name"] == "subagent" do
+        [Map.put_new(slot, "id", to_string(id))]
+      else
+        []
+      end
+    end)
+  end
+
+  defp live_subagent_slots(tools) when is_list(tools) do
+    for %{"name" => "subagent"} = slot <- tools, do: slot
+  end
+
+  defp live_subagent_slots(_), do: []
+
+  defp tool_slot_output(slot) when is_map(slot) do
+    out = slot["output"] || slot["text"] || ""
+    if is_binary(out), do: out, else: format_json(out)
+  end
+
+  defp format_tool_output(data, text) do
+    if text != "" do
+      text
+    else
+      case data["output"] || data["result"] do
+        out when is_binary(out) -> out
+        nil -> format_json(data)
+        other -> format_json(other)
+      end
+    end
+  end
+
   defp extract_tool_args(data) when is_map(data) do
     case data["arguments"] || data["args"] || data["input"] do
       args when is_map(args) -> args
@@ -357,78 +423,33 @@ defmodule HWeb.ConversationComponents do
 
   defp non_empty_string(_), do: nil
 
-  defp extract_parts(data) when is_map(data) do
-    thinking =
-      [data["thinking"], data["reasoning"]]
-      |> Enum.filter(&is_binary/1)
-
-    {content_thinking, content_text} =
-      case data["content"] do
-        text when is_binary(text) ->
-          {[], [text]}
-
-        blocks when is_list(blocks) ->
-          Enum.reduce(blocks, {[], []}, fn
-            block, {th, tx} when is_binary(block) ->
-              {th, tx ++ [block]}
-
-            %{"type" => type} = block, {th, tx} when type in ["thinking", "reasoning"] ->
-              t = block["thinking"] || block["text"]
-              if is_binary(t) and t != "", do: {th ++ [t], tx}, else: {th, tx}
-
-            %{"type" => "text"} = block, {th, tx} ->
-              t = block["text"]
-              if is_binary(t) and t != "", do: {th, tx ++ [t]}, else: {th, tx}
-
-            _, acc ->
-              acc
-          end)
-
-        _ ->
-          {[], []}
-      end
-
-    text_fallback =
-      if content_text == [] and is_binary(data["text"]) and data["text"] != "" do
-        [data["text"]]
-      else
-        content_text
-      end
-
-    {
-      Enum.join(thinking ++ content_thinking, "\n\n"),
-      Enum.join(text_fallback, "\n")
-    }
+  defp images(data) do
+    for %{
+          "type" => "image",
+          "encoding" => "base64",
+          "media_type" => "image/jpeg",
+          "data" => encoded
+        } <- List.wrap(data["content"]),
+        is_binary(encoded),
+        do: encoded
   end
 
-  defp extract_parts(_), do: {"", ""}
+  defp message_text(data) do
+    text =
+      data["content"]
+      |> List.wrap()
+      |> Enum.flat_map(fn
+        %{"type" => "text", "text" => text} when is_binary(text) -> [text]
+        text when is_binary(text) -> [text]
+        _ -> []
+      end)
+      |> Enum.join("\n")
 
-  defp normalize_live_tools(tools) when is_list(tools), do: tools
-
-  defp normalize_live_tools(tools) when is_map(tools) do
-    Enum.map(tools, fn {id, slot} ->
-      if is_map(slot), do: Map.put_new(slot, "id", id), else: %{"id" => id}
-    end)
-  end
-
-  defp normalize_live_tools(_), do: []
-
-  defp tool_slot_output(slot) do
-    to_string(slot["output"] || slot["stdout"] || slot["text"] || "")
-  end
-
-  defp format_tool_output(data, text) do
-    cond do
-      text != "" -> text
-      Map.has_key?(data, "output") -> format_json(data["output"])
-      Map.has_key?(data, "result") -> format_json(data["result"])
-      Map.has_key?(data, "error") -> format_json(data["error"])
-      true -> format_json(data)
-    end
+    if text == "" and is_binary(data["text"]), do: data["text"], else: text
   end
 
   defp format_inbox_item(item) when is_map(item) do
-    {_th, text} = extract_parts(item)
+    text = message_text(item)
     mode = if item["when_busy"], do: "[#{item["when_busy"]}] ", else: ""
     mode <> if(text != "", do: text, else: format_json(item))
   end

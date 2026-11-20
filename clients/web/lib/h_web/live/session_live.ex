@@ -2,10 +2,9 @@ defmodule HWeb.SessionLive do
   @moduledoc """
   LiveView for a running/resumed `H` session and conversation branch.
 
-  Uses `Phoenix.LiveView.stream/4` for committed entries, stores only compact
-  doc/cursor state, subscribes to `H.PubSub` on connected mount, reduces frames
-  through `H.Transcript` (via `HWeb.Transcript`), resnapshots on sequence gaps,
-  and updates only the live region on ephemeral streaming updates.
+  Uses `Phoenix.LiveView.stream/4` for committed messages and activity groups,
+  and retains compact boundary, doc and cursor state. Subscribes to `H.PubSub`
+  on connected mount and resnapshots on sequence gaps.
   """
   use HWeb, :live_view
 
@@ -14,6 +13,7 @@ defmodule HWeb.SessionLive do
     CatalogState,
     ConversationComponents,
     InboxComponents,
+    InboxFilter,
     Transcript,
     Workbench
   }
@@ -27,28 +27,37 @@ defmodule HWeb.SessionLive do
 
     socket =
       socket
+
+    inbox_filter = InboxFilter.from_params(params)
+
+    socket =
+      socket
       |> assign(
         session_id: session_id,
         conversation_id: cid,
         from_inbox?: from_inbox?,
+        inbox_filter: inbox_filter,
+        filter_options: %{workspaces: [], tags: []},
         subscribed_cid: nil,
         catalog: CatalogState.new(),
         catalog_subscribed?: false,
         catalog_groups: [],
         catalog_counts: CatalogState.counts([]),
-        show_subsessions?: false,
+        show_subsessions?: inbox_filter.subsessions == true,
         other_attention_count: 0,
         next_attention_session: nil,
         session: nil,
         session_parent: nil,
         conversations: [],
         tasks: [],
-        models: Backend.list_models(),
+        model_groups: Backend.list_models() |> Enum.group_by(& &1.provider),
+        provider_filter: nil,
         thinking_levels: @thinking_levels,
         transcript: Transcript.new(session_id: session_id, conversation_id: cid),
         cursor_seq: nil,
         committed_docs: %{},
         ephemeral_live: %{},
+        tail_activity: nil,
         inbox: [],
         agent: %{},
         usage: %{},
@@ -57,6 +66,13 @@ defmodule HWeb.SessionLive do
         run_active?: false,
         drawer_open?: false,
         composer_text: "",
+        cwd_missing?: false,
+        show_fork_picker?: false,
+        picker_env_id: "host",
+        picker_path: "",
+        picker_parent_path: nil,
+        picker_dirs: [],
+        picker_error: nil,
         error_banner: nil
       )
       |> stream_configure(:entries, dom_id: &"entry-#{&1["id"]}")
@@ -70,21 +86,29 @@ defmodule HWeb.SessionLive do
   def handle_params(%{"session_id" => sid} = params, _uri, socket) do
     cid = normalize_cid(params["conversation_id"])
 
-    from_inbox? =
-      if Map.has_key?(params, "from") do
-        params["from"] == "inbox"
-      else
-        socket.assigns.from_inbox?
-      end
+    inbox_filter = InboxFilter.from_params(params)
 
-    socket = assign(socket, :from_inbox?, from_inbox?)
+    socket =
+      assign(socket,
+        from_inbox?: params["from"] == "inbox",
+        inbox_filter: inbox_filter,
+        show_subsessions?: socket.assigns.show_subsessions? or inbox_filter.subsessions == true
+      )
 
     cond do
       sid != socket.assigns.session_id ->
         {:noreply,
          socket
          |> unsubscribe_current()
-         |> assign(session_id: sid, conversation_id: cid, drawer_open?: false)
+         |> assign(
+           session_id: sid,
+           conversation_id: cid,
+           provider_filter: nil,
+           drawer_open?: false,
+           cwd_missing?: false,
+           show_fork_picker?: false,
+           picker_error: nil
+         )
          |> recompute_catalog_assigns()
          |> load_initial(sid, cid)}
 
@@ -92,11 +116,12 @@ defmodule HWeb.SessionLive do
         {:noreply,
          socket
          |> unsubscribe_current()
-         |> assign(conversation_id: cid)
+         |> assign(conversation_id: cid, provider_filter: nil)
+         |> recompute_catalog_assigns()
          |> load_conversation(sid, cid)}
 
       true ->
-        {:noreply, socket}
+        {:noreply, recompute_catalog_assigns(socket)}
     end
   end
 
@@ -115,10 +140,13 @@ defmodule HWeb.SessionLive do
   def handle_info({:catalog_frame, seq, json_bin}, socket) do
     case CatalogState.apply_frame(socket.assigns.catalog, seq, json_bin) do
       {:ok, next_catalog} ->
-        {:noreply,
-         socket
-         |> assign(:catalog, next_catalog)
-         |> recompute_catalog_assigns()}
+        socket =
+          socket
+          |> assign(:catalog, next_catalog)
+          |> sync_current_session_from_catalog()
+          |> recompute_catalog_assigns()
+
+        {:noreply, socket}
 
       :stale ->
         {:noreply, socket}
@@ -130,16 +158,11 @@ defmodule HWeb.SessionLive do
 
   def handle_info({:commit_frame, _seq, json}, socket) do
     case Transcript.apply_commit(socket.assigns.transcript, json) do
-      {:ok, appended, next_t} ->
-        socket =
-          Enum.reduce(appended, socket, fn entry, acc ->
-            stream_insert(acc, :entries, entry)
-          end)
-
+      {:ok, rows, next_t} ->
         {:noreply,
          socket
-         |> assign(:transcript, next_t)
-         |> assign(Transcript.compact_assigns(next_t))}
+         |> stream(:entries, rows)
+         |> apply_transcript(next_t)}
 
       {:stale, _t} ->
         {:noreply, socket}
@@ -178,14 +201,160 @@ defmodule HWeb.SessionLive do
   end
 
   def handle_event("toggle_subsessions", _params, socket) do
+    next = not socket.assigns.show_subsessions?
+    filter = %{socket.assigns.inbox_filter | subsessions: next}
+
     {:noreply,
      socket
-     |> assign(:show_subsessions?, not socket.assigns.show_subsessions?)
+     |> assign(show_subsessions?: next, inbox_filter: filter)
      |> recompute_catalog_assigns()}
   end
 
+  def handle_event("filter_inbox", params, socket) do
+    filter = InboxFilter.from_form(socket.assigns.inbox_filter, params)
+
+    {:noreply,
+     push_patch(socket,
+       to:
+         session_filter_path(
+           socket.assigns.session_id,
+           socket.assigns.conversation_id,
+           socket.assigns.from_inbox?,
+           filter
+         ),
+       replace: true
+     )}
+  end
+
+  def handle_event("save_session_tags", %{"tags" => raw_tags}, socket) when is_binary(raw_tags) do
+    tags = raw_tags |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+    case Backend.triage_session(socket.assigns.session_id, %{"tags" => tags}) do
+      {:ok, %{session: updated}} ->
+        {:noreply,
+         socket
+         |> assign(error_banner: nil)
+         |> apply_session_to_catalog(updated)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("save_session_tags", _params, socket), do: {:noreply, socket}
+
   def handle_event("dismiss_error", _params, socket) do
     {:noreply, assign(socket, :error_banner, nil)}
+  end
+
+  def handle_event("toggle_session_attention", _params, socket) do
+    session = socket.assigns.session
+
+    if is_nil(session) or session.status == "archived" do
+      {:noreply, socket}
+    else
+      target = not (Map.get(session, :needs_attention, true) == true)
+
+      case Backend.triage_session(socket.assigns.session_id, %{"needs_attention" => target}) do
+        {:ok, %{session: updated}} ->
+          {:noreply,
+           socket
+           |> assign(session: updated, error_banner: nil)
+           |> apply_session_to_catalog(updated)}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    end
+  end
+
+  def handle_event("archive_current_session", _params, socket) do
+    stop? = socket.assigns.run_active?
+
+    case Backend.archive_session(socket.assigns.session_id, %{
+           "archived" => true,
+           "stop" => stop?
+         }) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> unsubscribe_current()
+         |> push_navigate(to: InboxFilter.inbox_path(socket.assigns.inbox_filter))}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("unarchive_current_session", _params, socket) do
+    case Backend.archive_session(socket.assigns.session_id, %{"archived" => false}) do
+      {:ok, %{session: updated}} ->
+        {:noreply,
+         socket
+         |> assign(session: updated, error_banner: nil)
+         |> apply_session_to_catalog(updated)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("open_fork_picker", _params, socket) do
+    socket =
+      socket
+      |> assign(:show_fork_picker?, true)
+      |> init_directory_picker(socket.assigns.session)
+
+    {:noreply, socket}
+  end
+
+  def handle_event("close_fork_picker", _params, socket) do
+    {:noreply, assign(socket, :show_fork_picker?, false)}
+  end
+
+  def handle_event("picker_browse", %{"path" => path}, socket) when is_binary(path) do
+    {:noreply, browse_picker(socket, socket.assigns.picker_env_id, path)}
+  end
+
+  def handle_event("picker_parent", _params, socket) do
+    case socket.assigns.picker_parent_path do
+      nil -> {:noreply, socket}
+      parent -> {:noreply, browse_picker(socket, socket.assigns.picker_env_id, parent)}
+    end
+  end
+
+  def handle_event("picker_go", %{"path" => path}, socket) when is_binary(path) do
+    {:noreply, browse_picker(socket, socket.assigns.picker_env_id, String.trim(path))}
+  end
+
+  def handle_event("picker_go", _params, socket), do: {:noreply, socket}
+
+  def handle_event("fork_to_directory", params, socket) do
+    cwd = non_empty(params["cwd"]) || non_empty(socket.assigns.picker_path)
+
+    if is_nil(cwd) do
+      {:noreply, assign(socket, :picker_error, "Select an existing directory first.")}
+    else
+      fork_params =
+        %{
+          "cwd" => cwd,
+          "env_id" => socket.assigns.picker_env_id,
+          "conversation_id" => socket.assigns.conversation_id
+        }
+
+      case Backend.fork_session(socket.assigns.session_id, fork_params) do
+        {:ok, %{session: new_session}} ->
+          new_sid = new_session[:session_id] || new_session["session_id"]
+
+          {:noreply,
+           socket
+           |> unsubscribe_current()
+           |> push_navigate(to: InboxFilter.session_path(new_sid, socket.assigns.inbox_filter))}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :picker_error, format_error(reason))}
+      end
+    end
   end
 
   def handle_event("composer_change", %{"content" => content}, socket) do
@@ -253,11 +422,47 @@ defmodule HWeb.SessionLive do
     end
   end
 
+  def handle_event("workspace_wait", params, socket) do
+    args = Map.take(params, ["action", "task_id", "lease_id"])
+    envelope = build_envelope(socket, "workspace_wait", args, params["request_id"])
+
+    case Backend.execute_command(socket.assigns.session_id, envelope) do
+      {:ok, _receipt} -> {:noreply, assign(socket, :error_banner, nil)}
+      {:error, reason} -> {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  def handle_event("select_provider", %{"provider" => provider}, socket)
+      when is_binary(provider) do
+    if is_map_key(socket.assigns.model_groups, provider) do
+      {:noreply, assign(socket, :provider_filter, provider)}
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_event("configure", params, socket) do
+    groups = socket.assigns.model_groups
+    current = socket.assigns.agent["model"]
+    provider = socket.assigns.provider_filter || model_provider(groups, current)
+    models = groups[provider] || []
+
     args =
-      %{}
-      |> maybe_put("model", non_empty(params["model"]))
-      |> maybe_put("thinking", non_empty(params["thinking"]))
+      case params["_target"] do
+        ["model"] -> Map.take(params, ["model"])
+        ["thinking"] -> Map.take(params, ["thinking"])
+        nil -> Map.take(params, ["model", "thinking"])
+        _ -> %{}
+      end
+
+    args =
+      Map.reject(args, fn
+        {"model", id} ->
+          id == current or not Enum.any?(models, &(&1.id == id))
+
+        {"thinking", level} ->
+          level == socket.assigns.agent["thinking"] or level not in @thinking_levels
+      end)
 
     if map_size(args) == 0 do
       {:noreply, socket}
@@ -289,10 +494,11 @@ defmodule HWeb.SessionLive do
               {:noreply,
                push_patch(socket,
                  to:
-                   conversation_path(
+                   InboxFilter.session_path(
                      socket.assigns.session_id,
-                     new_cid,
-                     socket.assigns.from_inbox?
+                     socket.assigns.inbox_filter,
+                     socket.assigns.from_inbox?,
+                     new_cid
                    )
                )}
             else
@@ -319,21 +525,13 @@ defmodule HWeb.SessionLive do
 
       case Backend.scan_entries(sid, cid, %{"order" => "desc", "cursor" => cursor, "limit" => 50}) do
         {:ok, %{items: items, next_cursor: next_cursor}} ->
-          ascending = Enum.reverse(items)
+          {rows, next_t} =
+            Transcript.prepend_older_page(socket.assigns.transcript, items, next_cursor)
 
-          {older_entries, next_t} =
-            Transcript.prepend_older_page(socket.assigns.transcript, ascending, next_cursor)
-
-          socket =
-            socket
-            |> stream(:entries, Enum.reverse(older_entries), at: 0)
-            |> assign(:transcript, next_t)
-            |> assign(
-              before_entry_id: next_t.reducer.before_entry_id,
-              has_more: next_t.reducer.has_more
-            )
-
-          {:noreply, socket}
+          {:noreply,
+           socket
+           |> stream(:entries, Enum.reverse(rows), at: 0)
+           |> apply_transcript(next_t)}
 
         {:error, reason} ->
           {:noreply, assign(socket, :error_banner, format_error(reason))}
@@ -376,11 +574,36 @@ defmodule HWeb.SessionLive do
   end
 
   defp recompute_catalog_assigns(socket) do
-    sessions = socket.assigns.catalog.sessions
+    all_sessions = socket.assigns.catalog.sessions
+    filter = socket.assigns.inbox_filter
+
+    scoped = InboxFilter.scope(filter, all_sessions)
     current_sid = socket.assigns.session_id
     show_subsessions? = socket.assigns.show_subsessions?
-    counts = CatalogState.counts(sessions)
-    groups = CatalogState.group_by_workspace(sessions, include_subsessions: show_subsessions?)
+
+    sessions =
+      CatalogState.filter_sessions(scoped, filter.mode, "",
+        include_subsessions: show_subsessions?
+      )
+
+    counts = CatalogState.counts(scoped)
+
+    sidebar_sessions =
+      if filter.mode == "inbox" do
+        Enum.filter(scoped, fn s ->
+          if CatalogState.subsession?(s) do
+            show_subsessions? and not s.archived
+          else
+            s.session_id == current_sid or CatalogState.active_inbox?(s)
+          end
+        end)
+      else
+        sessions
+      end
+
+    groups =
+      CatalogState.group_by_workspace(sidebar_sessions, include_subsessions: show_subsessions?)
+
     next_attention = CatalogState.next_attention_session(sessions, current_sid)
 
     other_attention_count =
@@ -391,6 +614,7 @@ defmodule HWeb.SessionLive do
     assign(socket,
       catalog_counts: counts,
       catalog_groups: groups,
+      filter_options: InboxFilter.options(filter, all_sessions),
       next_attention_session: next_attention,
       other_attention_count: other_attention_count,
       session_parent:
@@ -398,35 +622,101 @@ defmodule HWeb.SessionLive do
     )
   end
 
-  defp conversation_path(session_id, conversation_id, true),
-    do: ~p"/sessions/#{session_id}/conversations/#{conversation_id}?from=inbox"
+  defp apply_transcript(socket, transcript) do
+    assigns = Transcript.compact_assigns(transcript)
 
-  defp conversation_path(session_id, conversation_id, _false),
-    do: ~p"/sessions/#{session_id}/conversations/#{conversation_id}"
+    socket =
+      if socket.assigns.agent["model"] != assigns.agent["model"],
+        do: assign(socket, :provider_filter, nil),
+        else: socket
+
+    socket |> assign(:transcript, transcript) |> assign(assigns)
+  end
+
+  defp model_provider(groups, id) do
+    Enum.find_value(groups, fn {provider, models} ->
+      if Enum.any?(models, &(&1.id == id)), do: provider
+    end) ||
+      case id do
+        model when is_binary(model) ->
+          [provider | _] = String.split(model, [":", "/"], parts: 2)
+          if is_map_key(groups, provider), do: provider
+
+        _ ->
+          nil
+      end || groups |> Map.keys() |> Enum.min(fn -> nil end)
+  end
+
+  defp provider_label(provider, [model | _]) do
+    model[:provider_name] ||
+      case provider do
+        "openai" -> "OpenAI"
+        "openai_codex" -> "OpenAI Codex"
+        "anthropic" -> "Anthropic"
+        "google" -> "Google Gemini"
+        "google_vertex" -> "Google Vertex AI"
+        "deepseek" -> "DeepSeek"
+        "openrouter" -> "OpenRouter"
+        id -> id
+      end
+  end
+
+  defp session_filter_path(sid, cid, from_inbox?, filter) do
+    InboxFilter.session_path(sid, filter, from_inbox?, if(cid != "1", do: cid))
+  end
 
   defp load_initial(socket, session_id, cid) do
     case Backend.get_session_detail(session_id) do
       {:ok, detail} ->
-        socket
-        |> assign(
-          session: detail.session,
-          session_parent:
-            resolve_session_parent(detail.session, socket.assigns.catalog, session_id),
-          conversations: detail.conversations,
-          tasks: detail.tasks
-        )
-        |> load_conversation(session_id, cid)
+        session = detail.session
+
+        cwd_missing? =
+          session.status != "archived" and Map.get(session, :cwd_exists, true) == false
+
+        socket =
+          socket
+          |> assign(
+            session: session,
+            session_parent: resolve_session_parent(session, socket.assigns.catalog, session_id),
+            conversations: detail.conversations,
+            tasks: detail.tasks,
+            cwd_missing?: cwd_missing?,
+            show_fork_picker?: false
+          )
+          |> load_conversation(session_id, cid)
+
+        if cwd_missing? do
+          init_directory_picker(socket, session)
+        else
+          socket
+        end
 
       {:error, :not_found} ->
-        socket
-        |> put_flash(:error, "Session not found")
-        |> push_navigate(to: ~p"/")
+        redirect_with_error(socket, "Session not found.")
 
       {:error, {:quarantined, reason}} ->
-        socket
-        |> put_flash(:error, "Session quarantined: #{inspect(reason)}")
-        |> push_navigate(to: ~p"/")
+        redirect_with_error(socket, "Session quarantined: #{inspect(reason)}")
+
+      {:error, :workspace_unavailable} ->
+        redirect_with_error(socket, "Session workspace environment is currently unavailable.")
+
+      {:error, :harness_unavailable} ->
+        redirect_with_error(socket, "Session harness profile is currently unavailable.")
+
+      {:error, reason} ->
+        redirect_with_error(socket, "Unable to open session: #{format_error(reason)}")
     end
+  end
+
+  defp redirect_with_error(socket, message) do
+    dest =
+      if socket.assigns.from_inbox?,
+        do: InboxFilter.inbox_path(socket.assigns.inbox_filter),
+        else: ~p"/"
+
+    socket
+    |> put_flash(:error, message)
+    |> push_navigate(to: dest)
   end
 
   defp load_conversation(socket, session_id, cid) do
@@ -445,8 +735,8 @@ defmodule HWeb.SessionLive do
         case Transcript.apply_snapshot(t0, bin) do
           {:ok, entries, next_t} ->
             socket
-            |> assign(transcript: next_t, subscribed_cid: cid, error_banner: nil)
-            |> assign(Transcript.compact_assigns(next_t))
+            |> assign(subscribed_cid: cid, error_banner: nil)
+            |> apply_transcript(next_t)
             |> stream(:entries, entries, reset: true)
 
           {:error, reason} ->
@@ -464,14 +754,16 @@ defmodule HWeb.SessionLive do
   defp load_disconnected_entries(socket, session_id, cid) do
     case Backend.scan_entries(session_id, cid, %{"order" => "desc", "limit" => 50}) do
       {:ok, %{items: items, next_cursor: next_cursor}} ->
-        entries = items |> Enum.reverse() |> Enum.map(&Transcript.normalize_entry/1)
+        {rows, next_t} =
+          Transcript.prepend_older_page(
+            Transcript.new(session_id: session_id, conversation_id: cid),
+            items,
+            next_cursor
+          )
 
         socket
-        |> assign(
-          before_entry_id: next_cursor,
-          has_more: not is_nil(next_cursor)
-        )
-        |> stream(:entries, entries, reset: true)
+        |> apply_transcript(next_t)
+        |> stream(:entries, rows, reset: true)
 
       {:error, reason} ->
         socket
@@ -540,7 +832,16 @@ defmodule HWeb.SessionLive do
 
     case Backend.execute_command(socket.assigns.session_id, envelope) do
       {:ok, _receipt} ->
-        socket = assign(socket, :error_banner, nil)
+        socket =
+          socket
+          |> assign(:error_banner, nil)
+          |> then(fn s ->
+            if s.assigns.session && Map.get(s.assigns.session, :archived) == true do
+              refresh_detail(s)
+            else
+              s
+            end
+          end)
 
         socket =
           if Keyword.get(opts, :clear_composer?, false) do
@@ -556,9 +857,136 @@ defmodule HWeb.SessionLive do
 
         {:noreply, socket}
 
+      {:error, {:conflict, "cwd_missing"}} ->
+        socket =
+          socket
+          |> refresh_detail()
+          |> assign(
+            cwd_missing?: true,
+            error_banner:
+              "Working directory no longer exists. Select a directory below to fork and continue."
+          )
+          |> then(fn s -> init_directory_picker(s, s.assigns.session) end)
+
+        {:noreply, socket}
+
       {:error, reason} ->
         {:noreply, assign(socket, :error_banner, format_error(reason))}
     end
+  end
+
+  defp init_directory_picker(socket, nil), do: socket
+
+  defp init_directory_picker(socket, session) do
+    env_id = Map.get(session, :env_id) || "host"
+    cwd = Map.get(session, :cwd) || ""
+
+    case browse_nearest_existing(env_id, cwd) do
+      {:ok, view} ->
+        assign(socket,
+          picker_env_id: view.env_id,
+          picker_path: view.path,
+          picker_parent_path: view.parent_path,
+          picker_dirs: view.directories,
+          picker_error: nil
+        )
+
+      {:error, reason} ->
+        assign(socket,
+          picker_env_id: env_id,
+          picker_path: "",
+          picker_parent_path: nil,
+          picker_dirs: [],
+          picker_error: format_error(reason)
+        )
+    end
+  end
+
+  defp browse_nearest_existing(env_id, cwd) when is_binary(cwd) and cwd != "" do
+    cwd
+    |> ancestor_paths()
+    |> Enum.reduce_while({:error, :not_found}, fn candidate, _acc ->
+      case Backend.browse_workspace(%{"env_id" => env_id, "path" => candidate}) do
+        {:ok, view} -> {:halt, {:ok, view}}
+        {:error, _} -> {:cont, {:error, :not_found}}
+      end
+    end)
+    |> case do
+      {:ok, view} -> {:ok, view}
+      {:error, _} -> Backend.browse_workspace(%{"env_id" => env_id})
+    end
+  end
+
+  defp browse_nearest_existing(env_id, _cwd) do
+    Backend.browse_workspace(%{"env_id" => env_id})
+  end
+
+  defp ancestor_paths(path) do
+    expanded = Path.expand(path)
+    collect_ancestors(expanded, [])
+  end
+
+  defp collect_ancestors(path, acc) do
+    parent = Path.dirname(path)
+
+    if parent == path do
+      Enum.reverse([path | acc])
+    else
+      collect_ancestors(parent, [path | acc])
+    end
+  end
+
+  defp browse_picker(socket, env_id, path) do
+    query = %{"env_id" => env_id} |> maybe_put("path", non_empty(path))
+
+    case Backend.browse_workspace(query) do
+      {:ok, view} ->
+        assign(socket,
+          picker_env_id: view.env_id,
+          picker_path: view.path,
+          picker_parent_path: view.parent_path,
+          picker_dirs: view.directories,
+          picker_error: nil
+        )
+
+      {:error, reason} ->
+        assign(socket, :picker_error, format_error(reason))
+    end
+  end
+
+  defp sync_current_session_from_catalog(socket) do
+    case {socket.assigns.session,
+          Map.get(socket.assigns.catalog.by_id, socket.assigns.session_id)} do
+      {%{status: status} = current, %{session_id: _} = from_cat} when status != "archived" ->
+        updated =
+          current
+          |> Map.put(:needs_attention, from_cat.needs_attention)
+          |> Map.put(:archived, from_cat.archived)
+          |> Map.put(:attention, from_cat.attention)
+          |> Map.put(:cwd_exists, from_cat.cwd_exists)
+          |> Map.put(:loaded, from_cat.loaded)
+
+        assign(socket, :session, updated)
+
+      _ ->
+        socket
+    end
+  end
+
+  defp apply_session_to_catalog(socket, raw_session) do
+    normalized = CatalogState.normalize_session(raw_session)
+    catalog = socket.assigns.catalog
+    by_id = Map.put(catalog.by_id, normalized.session_id, normalized)
+
+    next_catalog = %{
+      catalog
+      | by_id: by_id,
+        sessions: Enum.sort_by(Map.values(by_id), &{&1.updated_at || 0, &1.session_id}, :desc)
+    }
+
+    socket
+    |> assign(:catalog, next_catalog)
+    |> recompute_catalog_assigns()
   end
 
   defp build_envelope(socket, command, args, request_id) do
@@ -614,5 +1042,7 @@ defmodule HWeb.SessionLive do
   defp format_error({:bad_request, msg}), do: msg
   defp format_error({:conflict, msg}), do: msg
   defp format_error(:not_found), do: "Not found"
+  defp format_error(:workspace_unavailable), do: "Workspace environment is unavailable."
+  defp format_error(:harness_unavailable), do: "Harness profile is unavailable."
   defp format_error(other), do: inspect(other)
 end

@@ -464,6 +464,101 @@ impl DaemonClient {
         self.get_json(&path)
     }
 
+    pub fn triage_session(
+        &self,
+        session_id: &str,
+        needs_attention: bool,
+    ) -> Result<SessionSummary, ClientError> {
+        #[derive(Deserialize)]
+        struct SessionResponse {
+            session: SessionSummary,
+        }
+        validate_path_segment("session_id", session_id)?;
+        let path = format!("/api/v1/sessions/{}/triage", percent_encode(session_id));
+        let resp: SessionResponse = self.post_json(
+            &path,
+            &serde_json::json!({ "needs_attention": needs_attention }),
+        )?;
+        Ok(resp.session)
+    }
+
+    pub fn stop_session(
+        &self,
+        session_id: &str,
+        reason: Option<&str>,
+    ) -> Result<SessionSummary, ClientError> {
+        #[derive(Deserialize)]
+        struct SessionResponse {
+            session: SessionSummary,
+        }
+        validate_path_segment("session_id", session_id)?;
+        let path = format!("/api/v1/sessions/{}/stop", percent_encode(session_id));
+        let body = match reason.filter(|r| !r.is_empty()) {
+            Some(r) => serde_json::json!({ "reason": r }),
+            None => serde_json::json!({}),
+        };
+        let resp: SessionResponse = self.post_json(&path, &body)?;
+        Ok(resp.session)
+    }
+
+    pub fn archive_session(
+        &self,
+        session_id: &str,
+        archived: bool,
+        stop: bool,
+    ) -> Result<SessionSummary, ClientError> {
+        #[derive(Deserialize)]
+        struct SessionResponse {
+            session: SessionSummary,
+        }
+        validate_path_segment("session_id", session_id)?;
+        let path = format!("/api/v1/sessions/{}/archive", percent_encode(session_id));
+        let resp: SessionResponse = self.post_json(
+            &path,
+            &serde_json::json!({ "archived": archived, "stop": stop }),
+        )?;
+        Ok(resp.session)
+    }
+
+    pub fn fork_session(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        env_id: Option<&str>,
+        conversation_id: Option<&str>,
+        at_entry_id: Option<u64>,
+    ) -> Result<CreateSessionResponse, ClientError> {
+        validate_path_segment("session_id", session_id)?;
+        if cwd.trim().is_empty() || !cwd.starts_with('/') || cwd.contains('\0') {
+            return Err(ClientError::InvalidInput(
+                "fork target cwd must be an absolute path".into(),
+            ));
+        }
+        let mut body = serde_json::Map::new();
+        body.insert("cwd".into(), serde_json::Value::String(cwd.to_string()));
+        if let Some(env) = env_id.filter(|s| !s.trim().is_empty()) {
+            body.insert("env_id".into(), serde_json::Value::String(env.to_string()));
+        }
+        if let Some(cid) = conversation_id.filter(|s| !s.trim().is_empty()) {
+            if let Ok(cid_num) = cid.trim().parse::<u64>() {
+                body.insert(
+                    "conversation_id".into(),
+                    serde_json::Value::Number(cid_num.into()),
+                );
+            } else {
+                body.insert(
+                    "conversation_id".into(),
+                    serde_json::Value::String(cid.to_string()),
+                );
+            }
+        }
+        if let Some(at) = at_entry_id {
+            body.insert("at_entry_id".into(), serde_json::Value::Number(at.into()));
+        }
+        let path = format!("/api/v1/sessions/{}/fork", percent_encode(session_id));
+        self.post_json(&path, &serde_json::Value::Object(body))
+    }
+
     pub(crate) fn list_directory_files(
         &self,
         env_id: &str,

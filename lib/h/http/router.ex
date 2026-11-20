@@ -179,6 +179,40 @@ defmodule H.HTTP.Router do
     end
   end
 
+  get "/api/v1/archives" do
+    {_daemon, opts} = daemon_config(conn)
+
+    archives =
+      (opts[:catalog_table] || :h_catalog)
+      |> H.Catalog.list_sessions()
+      |> Enum.flat_map(fn entry ->
+        if entry.archive, do: [Map.put(entry.archive, :session_id, entry.session_id)], else: []
+      end)
+
+    send_json(conn, 200, %{archives: archives})
+  end
+
+  post "/api/v1/archives" do
+    {_daemon, opts} = daemon_config(conn)
+
+    case H.HTTP.Archive.upload(conn, opts) do
+      {:ok, receipt, conn} ->
+        send_json(conn, 200, receipt)
+
+      {:error, {:bad_request, reason}} ->
+        send_json(conn, 422, %{error: reason})
+
+      {:error, {:conflict, reason}} ->
+        send_json(conn, 409, %{error: reason})
+
+      {:error, :archive_too_large} ->
+        send_json(conn, 413, %{error: "archive upload exceeds limits"})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
   post "/api/v1/sessions" do
     {daemon, daemon_opts} = daemon_config(conn)
 
@@ -275,6 +309,90 @@ defmodule H.HTTP.Router do
 
   get "/api/v1/sessions/:sid/conversations/:cid/events" do
     H.HTTP.SSE.stream(conn, sid, cid, router_opts(conn))
+  end
+
+  post "/api/v1/sessions/:sid/triage" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :triage_session, [sid, conn.body_params, daemon_opts]) do
+      {:ok, %{session: session}} ->
+        send_json(conn, 200, %{"session" => session})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "session not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
+  post "/api/v1/sessions/:sid/stop" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :stop_session, [sid, conn.body_params, daemon_opts]) do
+      {:ok, %{session: session}} ->
+        send_json(conn, 200, %{"session" => session})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "session not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
+  post "/api/v1/sessions/:sid/archive" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :archive_session, [sid, conn.body_params, daemon_opts]) do
+      {:ok, %{session: session}} ->
+        send_json(conn, 200, %{"session" => session})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "session not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
+  post "/api/v1/sessions/:sid/fork" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :fork_session, [sid, conn.body_params, daemon_opts]) do
+      {:ok, %{session: session, seq: seq}} ->
+        send_json(conn, 200, %{"session" => session, "seq" => seq})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
   end
 
   post "/api/v1/sessions/:sid/commands" do

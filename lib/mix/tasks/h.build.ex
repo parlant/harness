@@ -43,20 +43,17 @@ defmodule Mix.Tasks.H.Build do
     target =
       Path.expand(opts[:output] || System.get_env("CARGO_TARGET_DIR") || "clients/tui/target")
 
-    run!(
-      cargo,
-      ["build", "--locked", "--bin", "hi"],
-      Path.join(root, "clients/tui"),
-      [
+    for {project, bin} <- [{"tui", "hi"}, {"import", "hi-import"}] do
+      run!(cargo, ["build", "--locked", "--bin", bin], Path.join([root, "clients", project]), [
         {"CARGO_TARGET_DIR", target}
-      ]
-    )
+      ])
+    end
 
     Mix.shell().info("Run Phoenix against the same store (stop standalone first):
   cd clients/web && MIX_BUILD_PATH=#{inspect(web_build)} mix phx.server")
 
     Mix.shell().info(
-      "Daemon BEAMs: #{daemon_build}\nPhoenix BEAMs: #{web_build}\nTerminal binary: #{Path.join([target, "debug", "hi"])}"
+      "Daemon BEAMs: #{daemon_build}\nPhoenix BEAMs: #{web_build}\nClient binaries: #{Path.join(target, "debug")} (hi and hi-import)"
     )
   end
 

@@ -40,6 +40,8 @@ mix compile --warnings-as-errors
 )
 cargo build --locked --release --manifest-path clients/tui/Cargo.toml --bin hi
 install -m 755 "$CARGO_TARGET_DIR/release/hi" "$stage/otp/bin/hi"
+cargo build --locked --release --manifest-path clients/import/Cargo.toml
+install -m 755 "$CARGO_TARGET_DIR/release/hi-import" "$stage/otp/bin/hi-import"
 install -m 755 rel/h-daemon "$stage/otp/bin/h-daemon"
 cp rel/README.md "$stage/otp/README.md"
 # Ship the matching optional artifact without enabling it or copying any config.

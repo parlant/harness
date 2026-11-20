@@ -19,6 +19,7 @@ defmodule HWeb.CatalogState do
   @type session :: %{
           session_id: String.t(),
           title: String.t() | nil,
+          tags: [String.t()],
           env_id: String.t(),
           harness_id: String.t(),
           cwd: String.t(),
@@ -32,6 +33,10 @@ defmodule HWeb.CatalogState do
           activity_kind: String.t() | nil,
           activity_label: String.t() | nil,
           queued_count: non_neg_integer(),
+          needs_attention: boolean(),
+          archived: boolean(),
+          loaded: boolean(),
+          cwd_exists: boolean(),
           next_wake_at: integer() | nil,
           status: String.t()
         }
@@ -42,7 +47,7 @@ defmodule HWeb.CatalogState do
           sessions: [session()]
         }
 
-  @valid_attentions ~w(idle running sleeping error quarantined)
+  @valid_attentions ~w(idle running sleeping retrying error quarantined archived)
   @valid_activity_kinds ~w(generation tool user_shell compaction retry)
 
   @doc "Creates an empty catalog state."
@@ -107,9 +112,13 @@ defmodule HWeb.CatalogState do
     status = field(raw, :status, "status") || "ok"
     raw_attention = field(raw, :attention, "attention")
 
+    raw_archived = field(raw, :archived, "archived")
+    archived = status == "archived" or raw_archived == true
+
     attention =
       cond do
         status == "quarantined" -> "quarantined"
+        archived -> "archived"
         raw_attention in @valid_attentions -> raw_attention
         true -> "idle"
       end
@@ -120,9 +129,29 @@ defmodule HWeb.CatalogState do
     raw_queued = field(raw, :queued_count, "queued_count")
     queued_count = if is_integer(raw_queued) and raw_queued >= 0, do: raw_queued, else: 0
 
+    raw_na = field(raw, :needs_attention, "needs_attention")
+
+    needs_attention =
+      if archived do
+        false
+      else
+        if is_boolean(raw_na) do
+          raw_na
+        else
+          attention not in ["running", "sleeping", "retrying", "archived"]
+        end
+      end
+
+    raw_loaded = field(raw, :loaded, "loaded")
+    loaded = if is_boolean(raw_loaded), do: raw_loaded, else: not archived
+
+    raw_cwd_exists = field(raw, :cwd_exists, "cwd_exists")
+    cwd_exists = if is_boolean(raw_cwd_exists), do: raw_cwd_exists, else: true
+
     %{
       session_id: to_string(field(raw, :session_id, "session_id") || ""),
       title: field(raw, :title, "title"),
+      tags: normalize_tags(field(raw, :tags, "tags")),
       env_id: field(raw, :env_id, "env_id") || "host",
       harness_id: field(raw, :harness_id, "harness_id") || "coding",
       cwd: field(raw, :cwd, "cwd") || "/",
@@ -137,6 +166,10 @@ defmodule HWeb.CatalogState do
       activity_kind: activity_kind,
       activity_label: field(raw, :activity_label, "activity_label"),
       queued_count: queued_count,
+      needs_attention: needs_attention,
+      archived: archived,
+      loaded: loaded,
+      cwd_exists: cwd_exists,
       next_wake_at: field(raw, :next_wake_at, "next_wake_at"),
       status: status
     }
@@ -181,48 +214,75 @@ defmodule HWeb.CatalogState do
     Enum.count(sessions, &subsession?/1)
   end
 
-  @doc "Returns true if a root session needs human attention (`error`, `quarantined`, or `idle`). Subsessions are exempt."
+  @doc "Returns true if a root session needs human attention (not a subsession, not archived, flagged `needs_attention`, and not processing)."
   @spec needs_attention?(session()) :: boolean()
   def needs_attention?(%{parent: parent}) when not is_nil(parent), do: false
-  def needs_attention?(%{attention: att}) when att in ["error", "quarantined", "idle"], do: true
+
+  def needs_attention?(%{archived: false, needs_attention: true} = session) do
+    not processing?(session)
+  end
+
   def needs_attention?(_), do: false
 
-  @doc "Returns true if a session is currently processing (`running` or `sleeping`)."
+  @doc "Returns true if a session is running, sleeping, or retrying a provider error."
   @spec processing?(session()) :: boolean()
-  def processing?(%{attention: att}) when att in ["running", "sleeping"], do: true
+  def processing?(%{attention: att}) when att in ["running", "sleeping", "retrying"], do: true
   def processing?(_), do: false
 
+  @doc "Returns true if a session belongs in the active `/inbox` view."
+  @spec active_inbox?(session()) :: boolean()
+  def active_inbox?(%{archived: true}), do: false
+
+  def active_inbox?(session) when is_map(session) do
+    session.loaded or session.needs_attention or processing?(session) or
+      session.attention == "quarantined"
+  end
+
+  @doc "Returns true if a session belongs in the `archived` filter view (archived or cold unloaded)."
+  @spec archived_or_unloaded?(session()) :: boolean()
+  def archived_or_unloaded?(%{archived: true}), do: true
+
+  def archived_or_unloaded?(session) when is_map(session) do
+    not session.loaded and not session.needs_attention and not processing?(session)
+  end
+
   @doc """
-  Computes live attention / processing / total counts over root sessions, plus
-  `subsessions` and `subsessions_running` totals.
+  Computes live inbox / attention / processing / archived / total counts over root
+  sessions, plus `subsessions` and `subsessions_running` totals.
   """
   @spec counts([session()]) :: %{
-          all: non_neg_integer(),
+          inbox: non_neg_integer(),
           attention: non_neg_integer(),
           error: non_neg_integer(),
           idle: non_neg_integer(),
           processing: non_neg_integer(),
           running: non_neg_integer(),
           sleeping: non_neg_integer(),
+          archived: non_neg_integer(),
+          all: non_neg_integer(),
+          retrying: non_neg_integer(),
           subsessions: non_neg_integer(),
           subsessions_running: non_neg_integer()
         }
   def counts(sessions) when is_list(sessions) do
     initial = %{
-      all: 0,
+      inbox: 0,
       attention: 0,
       error: 0,
       idle: 0,
       processing: 0,
       running: 0,
       sleeping: 0,
+      archived: 0,
+      all: 0,
+      retrying: 0,
       subsessions: 0,
       subsessions_running: 0
     }
 
     Enum.reduce(sessions, initial, fn s, acc ->
       if subsession?(s) do
-        running_inc = if processing?(s), do: 1, else: 0
+        running_inc = if not s.archived and processing?(s), do: 1, else: 0
 
         %{
           acc
@@ -231,21 +291,26 @@ defmodule HWeb.CatalogState do
         }
       else
         acc = %{acc | all: acc.all + 1}
+        acc = if active_inbox?(s), do: %{acc | inbox: acc.inbox + 1}, else: acc
+        acc = if archived_or_unloaded?(s), do: %{acc | archived: acc.archived + 1}, else: acc
 
-        case s.attention do
-          att when att in ["error", "quarantined"] ->
+        cond do
+          needs_attention?(s) and s.attention in ["error", "quarantined"] ->
             %{acc | attention: acc.attention + 1, error: acc.error + 1}
 
-          "idle" ->
+          needs_attention?(s) ->
             %{acc | attention: acc.attention + 1, idle: acc.idle + 1}
 
-          "running" ->
+          s.attention == "running" and not s.archived ->
             %{acc | processing: acc.processing + 1, running: acc.running + 1}
 
-          "sleeping" ->
+          s.attention == "sleeping" and not s.archived ->
             %{acc | processing: acc.processing + 1, sleeping: acc.sleeping + 1}
 
-          _ ->
+          s.attention == "retrying" and not s.archived ->
+            %{acc | processing: acc.processing + 1, retrying: acc.retrying + 1}
+
+          true ->
             acc
         end
       end
@@ -253,11 +318,11 @@ defmodule HWeb.CatalogState do
   end
 
   @doc """
-  Filters sessions by attention mode (`\"all\"` | `\"attention\"`), optional
-  search query, and `:include_subsessions` (default `false`).
+  Filters sessions by mode (`\"inbox\"` | `\"attention\"` | `\"archived\"` | `\"all\"`),
+  optional search query, and `:include_subsessions` (default `false`).
   """
   @spec filter_sessions([session()], String.t(), String.t(), keyword()) :: [session()]
-  def filter_sessions(sessions, filter_mode \\ "all", query \\ "", opts \\ [])
+  def filter_sessions(sessions, filter_mode \\ "inbox", query \\ "", opts \\ [])
       when is_list(sessions) and is_list(opts) do
     q = query |> to_string() |> String.trim() |> String.downcase()
     include_subsessions = Keyword.get(opts, :include_subsessions, false)
@@ -284,11 +349,9 @@ defmodule HWeb.CatalogState do
   `cwd`). Orphan subsessions whose parent is not present in `sessions` fall back
   to their own `{env_id, cwd}` workspace group.
 
-  Groups are ordered by urgency (groups with `error`/`quarantined` first, then
-  `idle`, then processing-only groups) and recency (`updated_at` descending).
-  Within each group, top-level sessions follow the same urgency + recency
-  ordering, while nested children are ordered by `created_at` ascending and then
-  `session_id` ascending.
+  Groups are ordered by urgency tier (error/quarantined needing attention, then
+  other needs-attention, then processing, then cleared/dismissed, then archived)
+  and recency (`updated_at` descending).
   """
   @spec group_by_workspace([session()], keyword()) :: [map()]
   def group_by_workspace(sessions, opts \\ []) when is_list(sessions) and is_list(opts) do
@@ -310,7 +373,7 @@ defmodule HWeb.CatalogState do
       ordered = Enum.sort_by(group_sessions, &session_sort_key/1)
       flat_group_sessions = flatten_hierarchy(ordered)
       group_counts = counts(flat_group_sessions)
-      top_rank = ordered |> Enum.map(&top_level_attention_rank/1) |> Enum.min(fn -> 99 end)
+      top_rank = ordered |> Enum.map(&top_level_tier/1) |> Enum.min(fn -> 99 end)
 
       latest_updated =
         flat_group_sessions |> Enum.map(&(&1.updated_at || 0)) |> Enum.max(fn -> 0 end)
@@ -357,6 +420,9 @@ defmodule HWeb.CatalogState do
 
   @doc "Returns a concise secondary label for a session's current activity or failure."
   @spec status_detail(session()) :: String.t() | nil
+  def status_detail(%{archived: true}), do: nil
+  def status_detail(%{attention: "archived"}), do: nil
+
   def status_detail(%{attention: "quarantined", activity_label: label}),
     do: label || "quarantined"
 
@@ -372,11 +438,13 @@ defmodule HWeb.CatalogState do
   def status_detail(%{attention: "running", activity_kind: kind}) when is_binary(kind), do: kind
   def status_detail(%{attention: "running"}), do: "generation"
 
-  def status_detail(%{attention: "sleeping", activity_label: label})
-      when is_binary(label) and label != "",
+  def status_detail(%{attention: attention, activity_label: label})
+      when attention in ["sleeping", "retrying"] and is_binary(label) and label != "",
       do: label
 
-  def status_detail(%{attention: "sleeping"}), do: "retrying"
+  def status_detail(%{attention: attention}) when attention in ["sleeping", "retrying"],
+    do: "retrying"
+
   def status_detail(_), do: nil
 
   defp filter_with_subsessions(sessions, "attention", q) do
@@ -393,33 +461,57 @@ defmodule HWeb.CatalogState do
       if root_session?(s) do
         MapSet.member?(matching_root_ids, s.session_id)
       else
-        case ancestor_root_id(s, by_id) do
-          nil -> false
-          root_id -> MapSet.member?(matching_root_ids, root_id)
-        end
+        not s.archived and
+          case ancestor_root_id(s, by_id) do
+            nil -> false
+            root_id -> MapSet.member?(matching_root_ids, root_id)
+          end
       end
     end)
   end
 
-  defp filter_with_subsessions(sessions, _filter_mode, ""), do: sessions
-
-  defp filter_with_subsessions(sessions, _filter_mode, q) do
+  defp filter_with_subsessions(sessions, filter_mode, q) do
     by_id = Map.new(sessions, &{&1.session_id, &1})
 
-    direct_ids =
-      sessions
-      |> Enum.filter(&query_matches?(&1, q))
-      |> MapSet.new(& &1.session_id)
-
-    kept_ids =
-      Enum.reduce(direct_ids, direct_ids, fn sid, acc ->
-        add_ancestor_ids(sid, by_id, acc)
+    eligible =
+      Enum.filter(sessions, fn s ->
+        if root_session?(s) do
+          mode_matches?(s, filter_mode)
+        else
+          case filter_mode do
+            "inbox" -> not s.archived
+            "archived" -> s.archived
+            _ -> true
+          end
+        end
       end)
 
-    Enum.filter(sessions, &MapSet.member?(kept_ids, &1.session_id))
+    if q == "" do
+      eligible
+    else
+      eligible_by_id = Map.new(eligible, &{&1.session_id, &1})
+
+      direct_ids =
+        eligible
+        |> Enum.filter(&query_matches?(&1, q))
+        |> MapSet.new(& &1.session_id)
+
+      kept_ids =
+        Enum.reduce(direct_ids, direct_ids, fn sid, acc ->
+          add_ancestor_ids(sid, by_id, acc)
+        end)
+
+      sessions
+      |> Enum.filter(fn s ->
+        MapSet.member?(kept_ids, s.session_id) and
+          (Map.has_key?(eligible_by_id, s.session_id) or root_session?(s))
+      end)
+    end
   end
 
+  defp mode_matches?(s, "inbox"), do: active_inbox?(s)
   defp mode_matches?(s, "attention"), do: needs_attention?(s)
+  defp mode_matches?(s, "archived"), do: archived_or_unloaded?(s)
   defp mode_matches?(_s, _), do: true
 
   defp query_matches?(_s, ""), do: true
@@ -515,8 +607,10 @@ defmodule HWeb.CatalogState do
     {s.created_at || 0, s.session_id}
   end
 
-  defp top_level_attention_rank(%{parent: parent}) when not is_nil(parent), do: 4
-  defp top_level_attention_rank(s), do: attention_rank(s.attention)
+  defp top_level_tier(%{parent: parent, archived: archived}) when not is_nil(parent),
+    do: if(archived, do: 4, else: 3)
+
+  defp top_level_tier(s), do: session_tier(s)
 
   defp normalize_role(role) when is_binary(role) do
     trimmed = String.trim(role)
@@ -575,15 +669,24 @@ defmodule HWeb.CatalogState do
   end
 
   defp session_sort_key(s) do
-    {attention_rank(s.attention), -(s.updated_at || 0), s.session_id}
+    {session_tier(s), -(s.updated_at || 0), s.session_id}
   end
 
-  defp attention_rank("error"), do: 0
-  defp attention_rank("quarantined"), do: 0
-  defp attention_rank("idle"), do: 1
-  defp attention_rank("sleeping"), do: 2
-  defp attention_rank("running"), do: 3
-  defp attention_rank(_), do: 4
+  defp session_tier(s) do
+    cond do
+      s.archived -> 4
+      needs_attention?(s) and s.attention in ["error", "quarantined"] -> 0
+      needs_attention?(s) -> 1
+      processing?(s) -> 2
+      true -> 3
+    end
+  end
+
+  defp normalize_tags(tags) when is_list(tags) do
+    tags |> Enum.filter(&(is_binary(&1) and &1 != "" and String.valid?(&1))) |> Enum.uniq()
+  end
+
+  defp normalize_tags(_), do: []
 
   defp field(map, atom_key, string_key) do
     case Map.fetch(map, atom_key) do

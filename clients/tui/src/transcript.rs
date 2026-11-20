@@ -39,6 +39,14 @@ impl RunFailureInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct WorkspaceWaitInfo {
+    pub task_id: String,
+    pub lease_id: String,
+    pub holder_session_id: String,
+    pub holder_conversation_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct TranscriptState {
     pub session_id: Option<String>,
@@ -187,6 +195,10 @@ impl TranscriptState {
         self.docs.get("live").and_then(Value::as_object)
     }
 
+    pub fn workspace_wait(&self) -> Option<WorkspaceWaitInfo> {
+        serde_json::from_value(self.live_doc()?.get("workspace_wait")?.clone()).ok()
+    }
+
     pub fn active_user_shell(&self) -> Option<(&str, &str, bool)> {
         let shell = self.live_doc()?.get("user_shell")?.as_object()?;
         let cmd = shell.get("command").and_then(Value::as_str).unwrap_or("");
@@ -201,6 +213,14 @@ impl TranscriptState {
         Some((cmd, status, include))
     }
 
+    pub fn inference_retry(&self) -> Option<&Value> {
+        let live = self.live_doc()?;
+        live.get("generation")
+            .and_then(|v| v.get("retry"))
+            .or_else(|| live.get("compaction").and_then(|v| v.get("retry")))
+            .filter(|v| v.is_object())
+    }
+
     pub fn is_run_active(&self) -> bool {
         let Some(live) = self.live_doc() else {
             return false;
@@ -209,6 +229,9 @@ impl TranscriptState {
             return true;
         }
         if live.get("generation").is_some_and(|v| !v.is_null()) {
+            return true;
+        }
+        if live.get("compaction").is_some_and(|v| !v.is_null()) {
             return true;
         }
         if live.get("user_shell").is_some_and(|v| !v.is_null()) {

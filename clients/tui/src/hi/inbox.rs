@@ -279,6 +279,13 @@ fn next_backoff(current: Duration, max_backoff: Duration) -> Duration {
     base.saturating_mul(2).min(max_backoff)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InboxFilter {
+    #[default]
+    Inbox,
+    All,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxRendered {
     pub rows: Vec<StyledRow>,
@@ -298,7 +305,7 @@ pub struct InboxRowItem<'a> {
 #[derive(Debug)]
 pub struct InboxState {
     sessions: HashMap<String, SessionSummary>,
-    newly_idle: HashSet<String>,
+    filter: InboxFilter,
     selected_id: Option<String>,
     launch_env_id: String,
     launch_cwd: String,
@@ -328,7 +335,7 @@ impl InboxState {
     ) -> Self {
         Self {
             sessions: HashMap::new(),
-            newly_idle: HashSet::new(),
+            filter: InboxFilter::Inbox,
             selected_id: preselect_sid,
             launch_env_id,
             launch_cwd,
@@ -360,6 +367,19 @@ impl InboxState {
         self.sessions.values().filter(|s| s.is_subsession()).count()
     }
 
+    pub fn filter(&self) -> InboxFilter {
+        self.filter
+    }
+
+    pub fn toggle_filter(&mut self) -> InboxFilter {
+        self.filter = match self.filter {
+            InboxFilter::Inbox => InboxFilter::All,
+            InboxFilter::All => InboxFilter::Inbox,
+        };
+        self.reconcile_selection();
+        self.filter
+    }
+
     pub fn apply(&mut self, update: CatalogUpdate) -> Option<String> {
         match update {
             CatalogUpdate::Online => {
@@ -373,16 +393,8 @@ impl InboxState {
             CatalogUpdate::Snapshot(list) => {
                 let mut next = HashMap::with_capacity(list.len());
                 for session in list {
-                    let sid = session.session_id.clone();
-                    if let Some(prev) = self.sessions.get(&sid) {
-                        track_transition(&mut self.newly_idle, prev, &session);
-                    }
-                    next.insert(sid, session);
+                    next.insert(session.session_id.clone(), session);
                 }
-                self.newly_idle.retain(|sid| {
-                    next.get(sid)
-                        .is_some_and(|s| !s.is_subsession() && s.effective_attention() == "idle")
-                });
                 self.sessions = next;
                 self.loaded = true;
                 self.reconcile_selection();
@@ -390,34 +402,23 @@ impl InboxState {
             }
             CatalogUpdate::Upsert(session) => {
                 let session = *session;
-                let sid = session.session_id.clone();
-                if let Some(prev) = self.sessions.get(&sid) {
-                    track_transition(&mut self.newly_idle, prev, &session);
-                } else if session.effective_attention() != "idle" {
-                    self.newly_idle.remove(&sid);
-                }
-                self.sessions.insert(sid, session);
+                self.sessions.insert(session.session_id.clone(), session);
                 self.loaded = true;
                 self.reconcile_selection();
                 None
             }
             CatalogUpdate::Removed(session_id) => {
                 self.sessions.remove(&session_id);
-                self.newly_idle.remove(&session_id);
                 self.reconcile_selection();
                 None
             }
         }
     }
 
-    pub fn mark_visited(&mut self, session_id: &str) {
-        self.newly_idle.remove(session_id);
-    }
-
     pub fn has_processing_sessions(&self) -> bool {
-        self.sessions.values().any(|s| {
-            (self.show_subsessions || !s.is_subsession()) && s.effective_attention() == "running"
-        })
+        self.sessions
+            .values()
+            .any(|s| self.is_visible(s) && s.effective_attention() == "running")
     }
 
     /// Advances the spinner animation when any session is running.
@@ -444,14 +445,36 @@ impl InboxState {
 
     pub fn selected_session(&self) -> Option<&SessionSummary> {
         let sid = self.selected_id.as_deref()?;
-        self.sessions.get(sid)
+        self.sessions.get(sid).filter(|s| self.is_visible(s))
     }
 
     pub fn selected_id(&self) -> Option<&str> {
         self.selected_id.as_deref()
     }
 
-    pub fn new_session_workspace(&self) -> (String, String) {
+    fn is_visible(&self, session: &SessionSummary) -> bool {
+        if session.is_subsession() && !self.show_subsessions {
+            return false;
+        }
+        match self.filter {
+            InboxFilter::All => true,
+            InboxFilter::Inbox => {
+                if session.is_subsession() {
+                    !session.effective_archived()
+                } else {
+                    !session.effective_archived()
+                        && (session.effective_loaded()
+                            || session.effective_needs_attention()
+                            || matches!(
+                                session.effective_attention(),
+                                "running" | "sleeping" | "retrying" | "quarantined"
+                            ))
+                }
+            }
+        }
+    }
+
+    pub fn new_session_workspace(&self) -> (String, String, bool) {
         if let Some(s) = self.selected_session() {
             (
                 s.env_id
@@ -459,16 +482,16 @@ impl InboxState {
                     .filter(|e| !e.trim().is_empty())
                     .unwrap_or_else(|| "host".to_string()),
                 s.cwd.clone(),
+                s.effective_cwd_exists(),
             )
         } else {
-            (self.launch_env_id.clone(), self.launch_cwd.clone())
+            (self.launch_env_id.clone(), self.launch_cwd.clone(), true)
         }
     }
 
     /// Returns groups sorted deterministically:
     /// 1. Launch workspace first (if present), then lexicographically by `(env_id, cwd)`.
-    /// 2. Root sessions within each group sorted deterministically by `(created_at asc, session_id asc)`
-    ///    so rows do not jump when `updated_at` changes during live activity.
+    /// 2. Root sessions within each group sorted by triage tier (0..=4), then `(created_at asc, session_id asc)`.
     /// 3. When `show_subsessions` is `false`, subsessions are excluded. When `true`, child
     ///    subsessions are nested directly beneath their parent inside the parent's workspace group
     ///    (even across different cwds), and orphan subsessions fall back to their own workspace group.
@@ -483,14 +506,13 @@ impl InboxState {
         let mut by_root: BTreeMap<(String, String), Vec<&SessionSummary>> = BTreeMap::new();
         let mut children_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
 
-        for session in self.sessions.values() {
+        for session in self.sessions.values().filter(|s| self.is_visible(s)) {
             if let Some(parent) = session.parent.as_ref() {
-                if !self.show_subsessions {
-                    continue;
-                }
-                if self.sessions.contains_key(parent.session_id.as_str())
-                    && parent.session_id != session.session_id
-                {
+                let parent_visible = self
+                    .sessions
+                    .get(parent.session_id.as_str())
+                    .is_some_and(|p| self.is_visible(p));
+                if parent_visible && parent.session_id != session.session_id {
                     children_by_parent
                         .entry(parent.session_id.as_str())
                         .or_default()
@@ -526,7 +548,12 @@ impl InboxState {
 
         let mut out = Vec::with_capacity(raw_groups.len());
         for (key, mut roots) in raw_groups {
-            sort_sessions_deterministically(&mut roots);
+            roots.sort_by(|a, b| {
+                triage_tier(a)
+                    .cmp(&triage_tier(b))
+                    .then_with(|| a.created_at.unwrap_or(0).cmp(&b.created_at.unwrap_or(0)))
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            });
             let mut rows = Vec::new();
             let root_count = roots.len();
             let mut visited = HashSet::new();
@@ -572,7 +599,7 @@ impl InboxState {
             .find(|sid| {
                 self.sessions
                     .get(sid.as_str())
-                    .is_some_and(|s| !s.is_subsession() && needs_attention(s.effective_attention()))
+                    .is_some_and(session_needs_user_attention)
             })
             .cloned()
             .or_else(|| ordered.into_iter().next());
@@ -597,9 +624,8 @@ impl InboxState {
         self.selected_id = Some(ordered[next_idx].clone());
     }
 
-    /// Cycles selection across root sessions needing user attention (non-processing:
-    /// idle, error, quarantined), skipping subsessions and actively processing
-    /// (`running`/`sleeping`) sessions.
+    /// Cycles selection across visible root sessions needing user attention
+    /// (`!is_subsession() && !effective_archived() && effective_needs_attention() && !is_processing_attention`).
     pub fn cycle_attention(&mut self, forward: bool) -> bool {
         let ordered = self.ordered_session_ids();
         let candidates: Vec<(usize, &String)> = ordered
@@ -608,7 +634,7 @@ impl InboxState {
             .filter(|(_, sid)| {
                 self.sessions
                     .get(sid.as_str())
-                    .is_some_and(|s| !s.is_subsession() && needs_attention(s.effective_attention()))
+                    .is_some_and(session_needs_user_attention)
             })
             .collect();
         if candidates.is_empty() {
@@ -649,49 +675,70 @@ impl InboxState {
         true
     }
 
-    pub fn counts(&self) -> (usize, usize, usize, usize) {
+    pub fn counts(&self) -> (usize, usize, usize, usize, usize) {
         let mut total = 0usize;
+        let mut attention_count = 0usize;
         let mut errors = 0usize;
-        let mut idle = 0usize;
         let mut running = 0usize;
-        for session in self.sessions.values() {
-            if session.is_subsession() {
-                continue;
-            }
+        let mut archived = 0usize;
+        for session in self
+            .sessions
+            .values()
+            .filter(|s| !s.is_subsession() && self.is_visible(s))
+        {
             total += 1;
-            match session.effective_attention() {
-                "error" | "quarantined" => errors += 1,
-                "idle" => idle += 1,
-                "running" | "sleeping" => running += 1,
-                _ => idle += 1,
+            if session.effective_archived() {
+                archived += 1;
+            } else if is_processing_attention(session.effective_attention()) {
+                running += 1;
+            } else if session.effective_needs_attention() {
+                if matches!(session.effective_attention(), "error" | "quarantined") {
+                    errors += 1;
+                } else {
+                    attention_count += 1;
+                }
             }
         }
-        (total, errors, idle, running)
+        (total, errors, attention_count, running, archived)
     }
 
     pub fn render(&self, theme: &Theme) -> InboxRendered {
         let mut rows = Vec::new();
         let mut selected_row = None;
 
-        let (total, errors, idle, running) = self.counts();
+        let (total, errors, attention_count, running, archived) = self.counts();
         let sub_count = self.subsession_count();
-        let mut header_spans = vec![StyledSpan::new("Inbox", theme.inbox_dir)];
+        let title = match self.filter {
+            InboxFilter::Inbox => "Inbox",
+            InboxFilter::All => "Inbox [All]",
+        };
+        let mut header_spans = vec![StyledSpan::new(title, theme.inbox_dir)];
         let mut summary = if !self.loaded {
             "  loading sessions…".to_string()
         } else if total == 0 {
-            "  no sessions".to_string()
+            match self.filter {
+                InboxFilter::Inbox => "  no active sessions (press a for all)".to_string(),
+                InboxFilter::All => "  no sessions".to_string(),
+            }
         } else {
             let mut parts = Vec::new();
             if errors > 0 {
                 parts.push(format!("{errors} error"));
             }
-            if idle > 0 {
-                parts.push(format!("{idle} idle"));
+            if attention_count > 0 {
+                parts.push(format!("{attention_count} attention"));
             }
             if running > 0 {
                 parts.push(format!("{running} processing"));
             }
-            format!("  {total} sessions ({})", parts.join(" · "))
+            if archived > 0 {
+                parts.push(format!("{archived} archived"));
+            }
+            if parts.is_empty() {
+                format!("  {total} sessions")
+            } else {
+                format!("  {total} sessions ({})", parts.join(" · "))
+            }
         };
         if self.loaded && sub_count > 0 {
             let noun = if sub_count == 1 {
@@ -714,9 +761,16 @@ impl InboxState {
         if groups.is_empty() {
             let msg = if self.loaded {
                 if sub_count > 0 && !self.show_subsessions {
-                    "No root sessions yet. Press s to show subsessions or n to start a new session."
+                    "No root sessions yet. Press t to show subsessions or n to start a new session."
                 } else {
-                    "No sessions yet. Press n to start a new session in this workspace."
+                    match self.filter {
+                        InboxFilter::Inbox => {
+                            "No active sessions. Press a to show all sessions or n to start a new one."
+                        }
+                        InboxFilter::All => {
+                            "No sessions yet. Press n to start a new session in this workspace."
+                        }
+                    }
                 }
             } else {
                 "Connecting to daemon catalog…"
@@ -755,11 +809,10 @@ impl InboxState {
         theme: &Theme,
     ) -> StyledRow {
         let session = item.session;
+        let tier = triage_tier(session);
         let attention = session.effective_attention();
-        let is_newly_idle = !session.is_subsession()
-            && attention == "idle"
-            && self.newly_idle.contains(&session.session_id);
-        let processing = is_processing_attention(attention);
+        let processing = tier == 2;
+        let dimmed = matches!(tier, 2..=4);
 
         let cursor_prefix = if is_selected { "> " } else { "  " };
         let connector = if item.depth == 0 {
@@ -775,23 +828,33 @@ impl InboxState {
             format!("{indent}{branch}{arrow}")
         };
 
-        let (glyph, glyph_style) = match attention {
-            "error" | "quarantined" => ("!".to_string(), theme.tool_error),
-            "running" => (
-                self.spinner_char(theme.is_plain).to_string(),
-                theme.inbox_processing,
-            ),
-            "sleeping" => (
-                if theme.is_plain { "~" } else { "◷" }.to_string(),
-                theme.inbox_processing,
-            ),
-            _ if is_newly_idle => (
+        let (glyph, glyph_style) = match tier {
+            0 => ("!".to_string(), theme.tool_error),
+            1 => (
                 if theme.is_plain { "*" } else { "●" }.to_string(),
                 theme.inbox_idle_new,
             ),
-            _ => (
+            2 => match attention {
+                "retrying" => (
+                    if theme.is_plain { "~" } else { "↻" }.to_string(),
+                    theme.inbox_processing,
+                ),
+                "sleeping" => (
+                    if theme.is_plain { "~" } else { "◷" }.to_string(),
+                    theme.inbox_processing,
+                ),
+                _ => (
+                    self.spinner_char(theme.is_plain).to_string(),
+                    theme.inbox_processing,
+                ),
+            },
+            3 => (
                 if theme.is_plain { "o" } else { "○" }.to_string(),
-                theme.inbox_idle,
+                theme.inbox_processing,
+            ),
+            _ => (
+                if theme.is_plain { "-" } else { "·" }.to_string(),
+                theme.inbox_processing,
             ),
         };
 
@@ -818,47 +881,46 @@ impl InboxState {
 
         let tree_style = if is_selected {
             base_sel
-        } else if processing {
+        } else if dimmed {
             theme.inbox_processing
         } else {
             theme.tool_meta
         };
 
-        let title_style = match attention {
-            "error" | "quarantined" => {
+        let title_style = match tier {
+            0 => {
                 if is_selected {
                     base_sel.patch(theme.tool_error)
                 } else {
                     theme.tool_error
                 }
             }
-            "running" | "sleeping" => {
+            1 => {
+                if is_selected {
+                    base_sel.add_modifier(Modifier::BOLD)
+                } else {
+                    theme.inbox_idle_new
+                }
+            }
+            2..=4 => {
                 if is_selected {
                     base_sel.add_modifier(Modifier::DIM)
                 } else {
                     theme.inbox_processing
                 }
             }
-            _ => {
-                if is_selected {
-                    base_sel.add_modifier(Modifier::BOLD)
-                } else if is_newly_idle {
-                    theme.inbox_idle_new
-                } else {
-                    theme.inbox_idle
-                }
-            }
+            _ => theme.inbox_idle,
         };
 
-        let detail_style = match attention {
-            "error" | "quarantined" => {
+        let detail_style = match tier {
+            0 => {
                 if is_selected {
                     base_sel.patch(theme.failure_text)
                 } else {
                     theme.failure_text
                 }
             }
-            "running" | "sleeping" => {
+            2..=4 => {
                 if is_selected {
                     base_sel.add_modifier(Modifier::DIM)
                 } else {
@@ -930,6 +992,15 @@ impl InboxState {
             spans.push(StyledSpan::new(format!("  {detail}"), detail_style));
         }
 
+        if !session.effective_cwd_exists() && session.status.as_deref() != Some("archived") {
+            let missing_style = if is_selected {
+                base_sel.patch(theme.tool_error)
+            } else {
+                theme.tool_error
+            };
+            spans.push(StyledSpan::new("  [missing cwd]", missing_style));
+        }
+
         if session.queued_count > 0 {
             let q_style = if is_selected {
                 base_sel.patch(theme.queued_header)
@@ -953,8 +1024,12 @@ impl InboxState {
 
     pub fn status_line(&self, note: &str) -> String {
         let conn = if self.online { "online" } else { "offline" };
-        let mut line = String::from(
-            "Inbox · j/k move · Tab next idle · Enter open · n new · s subsessions · q/Ctrl-D quit",
+        let mode = match self.filter {
+            InboxFilter::Inbox => "Inbox",
+            InboxFilter::All => "Inbox [All]",
+        };
+        let mut line = format!(
+            "{mode} · j/k move · Tab next · Space attention · s stop · x archive · a all · t subsessions · Enter open · q quit"
         );
         if !note.trim().is_empty() {
             line.push_str(" · ");
@@ -1015,33 +1090,46 @@ fn append_children<'a>(
     }
 }
 
-fn track_transition(
-    newly_idle: &mut HashSet<String>,
-    prev: &SessionSummary,
-    next: &SessionSummary,
-) {
-    if next.is_subsession() {
-        newly_idle.remove(&next.session_id);
-        return;
+pub fn triage_tier(session: &SessionSummary) -> u8 {
+    if session.effective_archived() {
+        return 4;
     }
-    let prev_att = prev.effective_attention();
-    let next_att = next.effective_attention();
-    if is_processing_attention(prev_att) && next_att == "idle" {
-        newly_idle.insert(next.session_id.clone());
-    } else if next_att != "idle" {
-        newly_idle.remove(&next.session_id);
+    let attention = session.effective_attention();
+    if is_processing_attention(attention) {
+        return 2;
     }
+    if session.is_subsession() {
+        if matches!(attention, "error" | "quarantined") {
+            0
+        } else {
+            3
+        }
+    } else if session.effective_needs_attention() {
+        if matches!(attention, "error" | "quarantined") {
+            0
+        } else {
+            1
+        }
+    } else {
+        3
+    }
+}
+
+pub fn session_needs_user_attention(session: &SessionSummary) -> bool {
+    !session.is_subsession()
+        && !session.effective_archived()
+        && session.effective_needs_attention()
+        && !is_processing_attention(session.effective_attention())
 }
 
 pub fn is_processing_attention(attention: &str) -> bool {
-    matches!(attention, "running" | "sleeping")
-}
-
-pub fn needs_attention(attention: &str) -> bool {
-    !is_processing_attention(attention)
+    matches!(attention, "running" | "sleeping" | "retrying")
 }
 
 fn format_attention_detail(session: &SessionSummary, attention: &str) -> String {
+    if session.effective_archived() {
+        return "archived".to_string();
+    }
     let label = session
         .activity_label
         .as_deref()
@@ -1072,7 +1160,8 @@ fn format_attention_detail(session: &SessionSummary, attention: &str) -> String 
             },
             (None, None) => "running".to_string(),
         },
-        "sleeping" => label.unwrap_or_else(|| "retrying".to_string()),
+        "sleeping" | "retrying" => label.unwrap_or_else(|| "retrying".to_string()),
+        "archived" => "archived".to_string(),
         _ => "idle".to_string(),
     }
 }
@@ -1124,7 +1213,7 @@ mod tests {
             root_conversation_id: Some("1".to_string()),
             created_at: Some(created_at),
             updated_at: Some(created_at),
-            active: matches!(attention, "running" | "sleeping"),
+            active: matches!(attention, "running" | "sleeping" | "retrying"),
             attention: Some(attention.to_string()),
             activity_kind: activity_kind.map(str::to_string),
             activity_label: activity_label.map(str::to_string),
@@ -1133,6 +1222,8 @@ mod tests {
             status: Some(
                 if attention == "quarantined" {
                     "quarantined"
+                } else if attention == "archived" {
+                    "archived"
                 } else {
                     "ok"
                 }
@@ -1140,6 +1231,10 @@ mod tests {
             ),
             parent: None,
             role: None,
+            needs_attention: None,
+            archived: attention == "archived",
+            loaded: Some(attention != "archived"),
+            cwd_exists: Some(true),
         }
     }
 
@@ -1236,7 +1331,7 @@ mod tests {
             joined.contains("! Broken Task (s-err)  paused: model_error"),
             "{joined}"
         );
-        assert!(joined.contains("○ Ready Task (s-idle)  idle"), "{joined}");
+        assert!(joined.contains("● Ready Task (s-idle)  idle"), "{joined}");
         assert!(
             joined.contains("⠋ Running Task (s-run)  generating"),
             "{joined}"
@@ -1251,6 +1346,24 @@ mod tests {
         assert!(run_row.spans.iter().any(
             |s| s.text.contains("Running Task") && s.style.add_modifier.contains(Modifier::DIM)
         ));
+    }
+
+    #[test]
+    fn retrying_is_processing_not_operator_attention() {
+        let session = make_session(
+            "retry",
+            "/tmp/a",
+            "host",
+            None,
+            "retrying",
+            Some("retry"),
+            Some("Retry 1/3 · http_429 · waiting 2s"),
+            1,
+        );
+        assert_eq!(session.effective_attention(), "retrying");
+        assert!(is_processing_attention(session.effective_attention()));
+        assert!(!session.effective_needs_attention());
+        assert!(format_attention_detail(&session, "retrying").contains("http_429"));
     }
 
     #[test]
@@ -1291,10 +1404,16 @@ mod tests {
             make_session("s5", "/work/b", "host", Some("Five"), "idle", None, None, 5),
         ]));
 
-        // Ordered IDs: s1(running), s2(idle), s3(sleeping), s4(error), s5(idle)
+        // Ordered IDs by triage tier within each group:
+        // /work/a: s2(tier 1 idle), s1(tier 2 running), s3(tier 2 sleeping)
+        // /work/b: s4(tier 0 error), s5(tier 1 idle)
+        assert_eq!(
+            inbox.ordered_session_ids(),
+            vec!["s2", "s1", "s3", "s4", "s5"]
+        );
         assert_eq!(inbox.selected_id(), Some("s2"));
 
-        // Tab skips s3 (sleeping) and s1 (running)
+        // Tab skips s1 (running) and s3 (sleeping)
         assert!(inbox.cycle_attention(true));
         assert_eq!(inbox.selected_id(), Some("s4"));
         assert!(inbox.cycle_attention(true));
@@ -1308,63 +1427,201 @@ mod tests {
 
         // j / k move across ALL sessions including running/sleeping and wrap around
         inbox.move_selection(1);
+        assert_eq!(inbox.selected_id(), Some("s2"));
+        inbox.move_selection(1);
         assert_eq!(inbox.selected_id(), Some("s1"));
-        inbox.move_selection(-1);
+        inbox.move_selection(-2);
         assert_eq!(inbox.selected_id(), Some("s5"));
     }
 
     #[test]
-    fn transition_from_running_to_idle_marks_session_with_filled_dot_until_visited() {
+    fn triage_tiers_ordering_explicit_needs_attention_and_inbox_vs_all_filter() {
         let mut inbox = InboxState::with_home("host".into(), "/work".into(), None, None);
-        inbox.apply(CatalogUpdate::Snapshot(vec![make_session(
-            "s1",
+
+        let mut s_dismissed = make_session(
+            "s-dismiss",
             "/work",
             "host",
-            Some("Job"),
-            "running",
-            Some("generation"),
-            None,
-            1,
-        )]));
-
-        let before = inbox.render(&Theme::dark());
-        let joined_before = before
-            .rows
-            .iter()
-            .map(StyledRow::plain_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined_before.contains("⠋ Job"), "{joined_before}");
-
-        inbox.apply(CatalogUpdate::Upsert(Box::new(make_session(
-            "s1",
-            "/work",
-            "host",
-            Some("Job"),
+            Some("Dismissed"),
             "idle",
             None,
             None,
             1,
-        ))));
+        );
+        s_dismissed.needs_attention = Some(false);
+        s_dismissed.loaded = Some(true);
 
-        let after = inbox.render(&Theme::dark());
-        let joined_after = after
+        let mut s_cold_dismissed = make_session(
+            "s-cold",
+            "/work",
+            "host",
+            Some("Cold"),
+            "idle",
+            None,
+            None,
+            2,
+        );
+        s_cold_dismissed.needs_attention = Some(false);
+        s_cold_dismissed.loaded = Some(false);
+
+        let mut s_cold_attn = make_session(
+            "s-cold-attn",
+            "/work",
+            "host",
+            Some("Unloaded Attn"),
+            "idle",
+            None,
+            None,
+            3,
+        );
+        s_cold_attn.needs_attention = Some(true);
+        s_cold_attn.loaded = Some(false);
+
+        let s_run = make_session(
+            "s-run",
+            "/work",
+            "host",
+            Some("Running"),
+            "running",
+            Some("generation"),
+            None,
+            4,
+        );
+
+        let mut s_err = make_session(
+            "s-err",
+            "/work",
+            "host",
+            Some("Errored"),
+            "error",
+            None,
+            Some("boom"),
+            5,
+        );
+        s_err.needs_attention = Some(true);
+        s_err.cwd_exists = Some(false);
+
+        let mut s_arch = make_session(
+            "s-arch",
+            "/work",
+            "host",
+            Some("Archived"),
+            "idle",
+            None,
+            None,
+            6,
+        );
+        s_arch.archived = true;
+        s_arch.needs_attention = Some(false);
+        s_arch.loaded = Some(false);
+
+        let s_imported = make_session(
+            "s-imp",
+            "/work",
+            "host",
+            Some("Imported"),
+            "archived",
+            None,
+            None,
+            7,
+        );
+
+        inbox.apply(CatalogUpdate::Snapshot(vec![
+            s_dismissed.clone(),
+            s_cold_dismissed,
+            s_cold_attn,
+            s_run,
+            s_err,
+            s_arch,
+            s_imported,
+        ]));
+
+        // Default Inbox filter hides s-cold (unloaded + !needs_attention), s-arch, and s-imp,
+        // while keeping s-cold-attn (unloaded + needs_attention) and ordering by Tier 0..3.
+        assert_eq!(
+            inbox.ordered_session_ids(),
+            vec!["s-err", "s-cold-attn", "s-run", "s-dismiss"]
+        );
+
+        let rendered_inbox = inbox.render(&Theme::dark());
+        let joined_inbox = rendered_inbox
             .rows
             .iter()
             .map(StyledRow::plain_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined_after.contains("● Job"), "{joined_after}");
+        assert!(
+            joined_inbox.contains("! Errored (s-err)  paused: boom  [missing cwd]"),
+            "{joined_inbox}"
+        );
+        assert!(
+            joined_inbox.contains("● Unloaded Attn (s-cold-attn)  idle"),
+            "{joined_inbox}"
+        );
+        assert!(
+            joined_inbox.contains("○ Dismissed (s-dismiss)  idle"),
+            "{joined_inbox}"
+        );
 
-        inbox.mark_visited("s1");
-        let visited = inbox.render(&Theme::dark());
-        let joined_visited = visited
+        // Tab cycling visits only Tier 0 & Tier 1 (skips Tier 2 running and Tier 3 dismissed)
+        assert_eq!(inbox.selected_id(), Some("s-err"));
+        assert!(inbox.cycle_attention(true));
+        assert_eq!(inbox.selected_id(), Some("s-cold-attn"));
+        assert!(inbox.cycle_attention(true));
+        assert_eq!(inbox.selected_id(), Some("s-err"));
+
+        // Toggle filter to All: reveals cold unloaded, user-archived, and imported archives in Tier 3 & 4
+        assert_eq!(inbox.toggle_filter(), InboxFilter::All);
+        assert_eq!(
+            inbox.ordered_session_ids(),
+            vec![
+                "s-err",
+                "s-cold-attn",
+                "s-run",
+                "s-dismiss",
+                "s-cold",
+                "s-arch",
+                "s-imp"
+            ]
+        );
+        let rendered_all = inbox.render(&Theme::dark());
+        let joined_all = rendered_all
             .rows
             .iter()
             .map(StyledRow::plain_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined_visited.contains("○ Job"), "{joined_visited}");
+        assert!(joined_all.contains("Inbox [All]"), "{joined_all}");
+        assert!(
+            joined_all.contains("· Archived (s-arch)  archived"),
+            "{joined_all}"
+        );
+        assert!(
+            joined_all.contains("· Imported (s-imp)  archived"),
+            "{joined_all}"
+        );
+        // Imported archive does NOT show [missing cwd] even if cwd_exists were false
+        assert!(
+            !joined_all.contains("Imported (s-imp)  archived  [missing cwd]"),
+            "{joined_all}"
+        );
+
+        // Explicit catalog triage upsert updates indicator from ○ to ● and moves session up to Tier 1
+        let mut s_retagged = s_dismissed;
+        s_retagged.needs_attention = Some(true);
+        inbox.apply(CatalogUpdate::Upsert(Box::new(s_retagged)));
+        assert_eq!(
+            inbox.ordered_session_ids(),
+            vec![
+                "s-err",
+                "s-dismiss",
+                "s-cold-attn",
+                "s-run",
+                "s-cold",
+                "s-arch",
+                "s-imp"
+            ]
+        );
     }
 
     #[test]
@@ -1628,18 +1885,19 @@ mod tests {
         // Default: subsessions hidden
         assert!(!inbox.show_subsessions());
         assert_eq!(inbox.subsession_count(), 2);
-        // Counts only count root sessions: 2 total, 0 errors, 1 idle, 1 running
-        assert_eq!(inbox.counts(), (2, 0, 1, 1));
-        assert_eq!(inbox.ordered_session_ids(), vec!["root-run", "root-idle"]);
+        // Counts only count root sessions: 2 total, 0 errors, 1 attention, 1 running, 0 archived
+        assert_eq!(inbox.counts(), (2, 0, 1, 1, 0));
+        // Root-idle (tier 1) sorts before root-run (tier 2)
+        assert_eq!(inbox.ordered_session_ids(), vec!["root-idle", "root-run"]);
         assert_eq!(inbox.selected_id(), Some("root-idle"));
 
-        // Subsession transitioning from running -> idle must NOT be marked newly_idle
+        // Subsession transitioning from running -> idle stays calm (tier 3 ○)
         let mut sub_done = sub_running;
         sub_done.attention = Some("idle".into());
         sub_done.active = false;
         inbox.apply(CatalogUpdate::Upsert(Box::new(sub_done)));
 
-        // Header shows hidden subsessions count; status line mentions `s subsessions`
+        // Header shows hidden subsessions count; status line mentions `t subsessions`
         let hidden_text: String = inbox
             .render(&Theme::dark())
             .rows
@@ -1653,17 +1911,17 @@ mod tests {
         );
         assert!(!hidden_text.contains("Lane 1"), "{hidden_text}");
         assert!(!hidden_text.contains("/private/tmp/wt-1"), "{hidden_text}");
-        assert!(inbox.status_line("").contains("s subsessions"));
+        assert!(inbox.status_line("").contains("t subsessions"));
 
         // Toggle subsessions ON -> hierarchical rendering under root-run even with different cwd!
         assert!(inbox.toggle_subsessions());
         assert!(inbox.show_subsessions());
         // Counts STILL only count root sessions
-        assert_eq!(inbox.counts(), (2, 0, 1, 1));
-        // Order: root-run -> sub-1 -> sub-err -> root-idle (all inside ~/repo group!)
+        assert_eq!(inbox.counts(), (2, 0, 1, 1, 0));
+        // Order: root-idle -> root-run -> sub-1 -> sub-err (all inside ~/repo group!)
         assert_eq!(
             inbox.ordered_session_ids(),
-            vec!["root-run", "sub-1", "sub-err", "root-idle"]
+            vec!["root-idle", "root-run", "sub-1", "sub-err"]
         );
 
         // Tab (`cycle_attention`) skips sub-1 (idle) and sub-err (error), landing only on root-idle!
@@ -1733,7 +1991,7 @@ mod tests {
         orphan.role = Some("subagent".into());
 
         inbox.apply(CatalogUpdate::Snapshot(vec![orphan]));
-        assert_eq!(inbox.counts(), (0, 0, 0, 0));
+        assert_eq!(inbox.counts(), (0, 0, 0, 0, 0));
         assert_eq!(inbox.subsession_count(), 1);
         assert_eq!(inbox.ordered_session_ids(), vec!["sub-orphan"]);
         // Tab never selects orphan subsession

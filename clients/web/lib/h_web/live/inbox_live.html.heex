@@ -19,12 +19,13 @@
       <.link
         :if={@next_attention}
         id="inbox-jump-next-btn"
-        navigate={~p"/sessions/#{@next_attention.session_id}?from=inbox"}
+        navigate={InboxFilter.session_path(@next_attention.session_id, @inbox_filter)}
         class="btn btn-sm btn-primary"
       >
         Jump to next →
       </.link>
       <.link navigate={~p"/workspaces"} class="btn btn-sm">Workspaces</.link>
+      <.link navigate={~p"/settings/providers"} class="btn btn-sm">Providers</.link>
       <button
         id="inbox-refresh-btn"
         type="button"
@@ -38,6 +39,12 @@
         <button type="submit" class="btn btn-sm btn-ghost">Sign out</button>
       </form>
     </nav>
+    <InboxComponents.scope_controls
+      id="inbox-filter"
+      filter={@inbox_filter}
+      options={@filter_options}
+      clear_path={InboxFilter.inbox_path(%InboxFilter{})}
+    />
   </header>
 
   <main class="inbox-main" aria-label="Multi-session inbox">
@@ -58,15 +65,14 @@
         <InboxComponents.filter_bar
           id="inbox-filter"
           counts={@counts}
-          filter_mode={@filter_mode}
-          search={@search}
+          filter_mode={@inbox_filter.mode}
           show_subsessions={@show_subsessions?}
           toggle_subsessions_event="toggle_subsessions"
         />
 
         <div class="inbox-shortcuts muted" aria-hidden="true">
           <span class="mono">j/k</span>
-          move · <span class="mono">Tab</span>
+          move · <span class="mono">n/p</span>
           next attention · <span class="mono">Enter</span>
           open
         </div>
@@ -75,10 +81,10 @@
       <InboxComponents.workspace_tree
         id="inbox-workspace-tree"
         groups={@groups}
-        from_inbox={true}
+        inbox_filter={@inbox_filter}
         new_session_event="new_session"
         empty_message={
-          if @counts.all == 0 do
+          if @catalog_empty? do
             "No sessions yet. Open Workspaces to start one in any folder."
           else
             "No sessions match the current filter."

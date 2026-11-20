@@ -7,7 +7,11 @@
   <:sidebar>
     <div class="sidebar-top">
       <div class="sidebar-nav-links">
-        <.link id="sidebar-inbox-link" navigate={~p"/inbox"} class="btn btn-sm btn-ghost">
+        <.link
+          id="sidebar-inbox-link"
+          navigate={InboxFilter.inbox_path(@inbox_filter)}
+          class="btn btn-sm btn-ghost"
+        >
           ← Inbox
         </.link>
         <.link navigate={~p"/"} class="btn btn-sm btn-ghost">Workspaces</.link>
@@ -43,6 +47,21 @@
           <span :if={@session_parent.at_entry_id}> @ entry #{@session_parent.at_entry_id}</span>
         </.link>
       </div>
+      <form
+        :if={@session}
+        id="session-tags-form"
+        phx-submit="save_session_tags"
+        class="inbox-scope-controls"
+      >
+        <label class="field-label" for="session-tags-input">Session tags (comma-separated)</label>
+        <input
+          id="session-tags-input"
+          name="tags"
+          class="input"
+          value={Enum.join(Map.get(@catalog.by_id[@session_id] || @session, :tags, []), ", ")}
+        />
+        <button type="submit" class="btn btn-sm">Save tags</button>
+      </form>
     </div>
 
     <div class="sidebar-section">
@@ -50,7 +69,7 @@
       <ul id="branches-list" class="branch-list">
         <li :for={conv <- @conversations}>
           <.link
-            patch={conversation_path(@session_id, conv.id, @from_inbox?)}
+            patch={InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, conv.id)}
             class={[
               "branch-link mono",
               if(to_string(conv.id) == @conversation_id, do: "is-active")
@@ -67,7 +86,7 @@
 
     <div id="session-inbox-switcher" class="sidebar-section sidebar-inbox-section">
       <div class="sidebar-section-head">
-        <span class="section-title">All Sessions (Inbox)</span>
+        <span class="section-title">Inbox sessions</span>
         <div class="sidebar-header-actions">
           <button
             :if={@catalog_counts.subsessions > 0 or @show_subsessions?}
@@ -99,9 +118,9 @@
         id="session-sidebar-inbox-tree"
         groups={@catalog_groups}
         current_session_id={@session_id}
-        from_inbox={true}
+        inbox_filter={@inbox_filter}
         compact={true}
-        empty_message="No other sessions."
+        empty_message="No sessions match the current filters."
       />
     </div>
   </:sidebar>
@@ -128,7 +147,7 @@
         </button>
         <.link
           id="header-inbox-link"
-          navigate={~p"/inbox"}
+          navigate={InboxFilter.inbox_path(@inbox_filter)}
           class={["btn btn-sm", if(@from_inbox?, do: "btn-inbox-return", else: "btn-ghost")]}
         >
           ← Inbox
@@ -152,6 +171,13 @@
         </.link>
         <span class="mono header-sid">{@session_id}</span>
         <span class="badge mono">conv #{@conversation_id}</span>
+        <span
+          :if={@session && Map.get(@session, :archived, false)}
+          id="hdr-archived-badge"
+          class="badge badge-warn mono"
+        >
+          archived
+        </span>
         <span :if={!is_nil(@cursor_seq)} id="hdr-seq" class="badge mono">
           seq {@cursor_seq}
         </span>
@@ -164,7 +190,7 @@
         <.link
           :if={@next_attention_session}
           id="next-attention-btn"
-          navigate={~p"/sessions/#{@next_attention_session.session_id}?from=inbox"}
+          navigate={InboxFilter.session_path(@next_attention_session.session_id, @inbox_filter)}
           class={[
             "btn btn-sm session-attention-pill",
             if(@next_attention_session.attention in ["error", "quarantined"],
@@ -181,9 +207,54 @@
           <span>
             {if @next_attention_session.attention in ["error", "quarantined"],
               do: "Next error →",
-              else: "Next idle →"}
+              else: "Next →"}
           </span>
         </.link>
+        <button
+          :if={
+            @session && @session.status != "archived" && !Map.get(@session, :archived, false) &&
+              !@run_active?
+          }
+          id="session-attention-toggle"
+          type="button"
+          class={[
+            "btn btn-sm",
+            if(Map.get(@session, :needs_attention, true),
+              do: "btn-inbox-return",
+              else: "btn-ghost"
+            )
+          ]}
+          phx-click="toggle_session_attention"
+          title={
+            if Map.get(@session, :needs_attention, true),
+              do: "Mark as not needing attention",
+              else: "Mark as needing attention"
+          }
+        >
+          {if Map.get(@session, :needs_attention, true),
+            do: "Needs attention",
+            else: "Mark attention"}
+        </button>
+        <button
+          :if={@session && @session.status != "archived" && !Map.get(@session, :archived, false)}
+          id="archive-session-btn"
+          type="button"
+          class="btn btn-sm btn-ghost"
+          phx-click="archive_current_session"
+          title="Archive and unload this session"
+        >
+          Archive
+        </button>
+        <button
+          :if={@session && @session.status != "archived" && Map.get(@session, :archived, false)}
+          id="unarchive-session-btn"
+          type="button"
+          class="btn btn-sm btn-primary"
+          phx-click="unarchive_current_session"
+          title="Restore session to Inbox"
+        >
+          Unarchive
+        </button>
         <button
           :if={@run_active?}
           id="stop-btn"
@@ -198,6 +269,15 @@
           <button type="submit" class="btn btn-sm btn-ghost">Sign out</button>
         </form>
       </div>
+      <InboxComponents.scope_controls
+        id="carousel-filter"
+        filter={@inbox_filter}
+        options={@filter_options}
+        clear_path={
+          session_filter_path(@session_id, @conversation_id, @from_inbox?, %InboxFilter{})
+        }
+        show_mode={true}
+      />
     </header>
 
     <div
@@ -225,83 +305,354 @@
       </div>
 
       <div id="entries-stream" phx-update="stream" class="entries-list">
-        <article
-          :for={{dom_id, entry} <- @streams.entries}
-          id={dom_id}
-          class={["entry-card", "entry-#{entry["kind"]}"]}
-        >
-          <header class="entry-header">
-            <div class="entry-header-left">
-              <span class="role-label">{entry["kind"]}</span>
-              <span class="badge mono">#{entry["id"]}</span>
-              <span :if={entry["data"]["aborted"]} class="badge badge-warn">aborted</span>
-              <span :if={entry["kind"] == "tool_result"} class="badge mono">
-                {entry["data"]["tool_name"] || entry["data"]["name"] || "tool"}
-              </span>
-              <span
-                :if={
-                  entry["kind"] == "tool_result" and
-                    (entry["data"]["is_error"] || entry["data"]["error"])
-                }
-                class="badge badge-danger"
-              >
-                error
-              </span>
-            </div>
+        <%= for {dom_id, entry} <- @streams.entries do %>
+          <%= if activity = entry["activity"] do %>
+            <ConversationComponents.activity_line
+              id={dom_id}
+              count={activity.count}
+              status={activity.status}
+            />
+          <% else %>
+            <article id={dom_id} class={["entry-card", "entry-#{entry["kind"]}"]}>
+              <header class="entry-header">
+                <div class="entry-header-left">
+                  <span class="role-label">{entry["kind"]}</span>
+                  <span class="badge mono">#{entry["id"]}</span>
+                  <span :if={entry["data"]["aborted"]} class="badge badge-warn">aborted</span>
+                </div>
 
-            <button
-              type="button"
-              class="btn btn-sm btn-ghost"
-              phx-click="fork_entry"
-              phx-value-entry_id={entry["id"]}
-            >
-              Fork here
-            </button>
-          </header>
+                <button
+                  :if={@session && @session.status != "archived"}
+                  type="button"
+                  class="btn btn-sm btn-ghost"
+                  phx-click="fork_entry"
+                  phx-value-entry_id={entry["id"]}
+                >
+                  Fork here
+                </button>
+              </header>
 
-          <div class="entry-body">
-            <ConversationComponents.entry_body entry={entry} catalog_by_id={@catalog.by_id} />
-          </div>
-        </article>
+              <div class="entry-body">
+                <ConversationComponents.entry_body entry={entry} catalog_by_id={@catalog.by_id} />
+              </div>
+            </article>
+          <% end %>
+        <% end %>
       </div>
 
+      <div
+        :if={wait = @ephemeral_live["workspace_wait"]}
+        id="workspace-wait"
+        class="entry-card entry-live"
+        role="status"
+      >
+        <p>
+          Waiting for workspace held by <.link
+            id="workspace-holder-link"
+            navigate={
+              InboxFilter.session_path(
+                wait["holder_session_id"],
+                @inbox_filter,
+                @from_inbox?,
+                wait["holder_conversation_id"]
+              )
+            }
+          >
+            session <span class="mono">{wait["holder_session_id"]}</span>,
+            conversation #{wait["holder_conversation_id"]}
+          </.link>.
+        </p>
+        <button
+          id="cancel-wait-btn"
+          type="button"
+          class="btn btn-sm"
+          phx-click="workspace_wait"
+          phx-value-action="cancel"
+          phx-value-task_id={wait["task_id"]}
+          phx-value-lease_id={wait["lease_id"]}
+        >
+          Cancel wait
+        </button>
+        <button
+          id="stop-holder-btn"
+          type="button"
+          class="btn btn-sm btn-danger"
+          phx-click="workspace_wait"
+          phx-value-action="stop_holder"
+          phx-value-task_id={wait["task_id"]}
+          phx-value-lease_id={wait["lease_id"]}
+          data-confirm="Stop the holding conversation's active work and acquire its workspace after cleanup?"
+        >
+          Stop holder and acquire
+        </button>
+      </div>
       <ConversationComponents.live_region
         live={@ephemeral_live}
         inbox={@inbox}
+        tail_activity={@tail_activity}
         catalog_by_id={@catalog.by_id}
       />
     </div>
 
     <button type="button" id="jump-latest" class="btn btn-sm jump-latest" hidden>Latest ↓</button>
 
-    <div class="composer-shell">
-      <form id="agent-config-form" phx-change="configure" class="composer-config">
-        <label class="composer-select-group">
-          <span class="field-label">Model</span>
-          <select id="model-select" name="model" class="input composer-select">
-            <option
-              :for={model <- @models}
-              value={model.id}
-              selected={model.id == @agent["model"]}
-            >
-              {model.name || model.id}
-            </option>
-          </select>
-        </label>
+    <div :if={@session && @session.status == "archived"} class="composer-shell">
+      <div class="archive-readonly-bar">
+        <span class="muted">Archived {@session.harness_id} session · read only</span>
+        <button
+          :if={!@show_fork_picker?}
+          id="open-archive-fork-picker-btn"
+          type="button"
+          class="btn btn-sm"
+          phx-click="open_fork_picker"
+        >
+          Fork into workspace…
+        </button>
+        <button
+          :if={@show_fork_picker?}
+          type="button"
+          class="btn btn-sm btn-ghost"
+          phx-click="close_fork_picker"
+        >
+          Close picker
+        </button>
+      </div>
 
-        <label class="composer-select-group">
-          <span class="field-label">Thinking</span>
-          <select id="thinking-select" name="thinking" class="input composer-select">
-            <option
-              :for={level <- @thinking_levels}
-              value={level}
-              selected={level == (@agent["thinking"] || "medium")}
+      <div :if={@show_fork_picker?} id="missing-cwd-picker" class="missing-cwd-picker">
+        <div class="missing-cwd-header">
+          <h3 class="missing-cwd-title">Fork archived session into a workspace</h3>
+          <p class="muted missing-cwd-desc">
+            Select an existing directory to fork this conversation into a new live session.
+          </p>
+        </div>
+
+        <div class="missing-cwd-toolbar">
+          <button
+            id="picker-parent-btn"
+            type="button"
+            class="btn btn-sm"
+            phx-click="picker_parent"
+            disabled={is_nil(@picker_parent_path)}
+          >
+            ↑ Up
+          </button>
+          <form id="picker-go-form" phx-submit="picker_go" class="path-form">
+            <input
+              id="picker-path-input"
+              type="text"
+              name="path"
+              value={@picker_path}
+              aria-label="Target directory path"
+              class="input mono"
+            />
+            <button type="submit" class="btn btn-sm">Go</button>
+          </form>
+        </div>
+
+        <div :if={@picker_error} id="picker-error" class="flash-banner flash-error">
+          <span>{@picker_error}</span>
+        </div>
+
+        <ul :if={@picker_dirs != []} id="picker-dir-list" class="missing-cwd-dirs">
+          <li :for={dir <- @picker_dirs}>
+            <button
+              type="button"
+              class="missing-cwd-dir-btn mono"
+              phx-click="picker_browse"
+              phx-value-path={dir.path}
             >
-              {level}
+              {dir.name}/
+            </button>
+          </li>
+        </ul>
+
+        <div class="missing-cwd-actions">
+          <button
+            id="fork-to-cwd-btn"
+            type="button"
+            class="btn btn-primary"
+            phx-click="fork_to_directory"
+            phx-value-cwd={@picker_path}
+            disabled={@picker_path == ""}
+          >
+            Continue in <span class="mono">{@picker_path}</span> →
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      :if={
+        @session && @session.status != "archived" &&
+          (@cwd_missing? || !Map.get(@session, :cwd_exists, true))
+      }
+      class="composer-shell"
+    >
+      <div id="missing-cwd-picker" class="missing-cwd-picker">
+        <div class="missing-cwd-header">
+          <h3 class="missing-cwd-title">Working directory no longer exists</h3>
+          <p class="muted missing-cwd-desc">
+            Working directory <span class="mono">{@session.cwd}</span>
+            no longer exists. New work is paused in this session. Select an existing directory to fork and continue this conversation, or archive this session.
+          </p>
+        </div>
+
+        <div class="missing-cwd-toolbar">
+          <button
+            id="picker-parent-btn"
+            type="button"
+            class="btn btn-sm"
+            phx-click="picker_parent"
+            disabled={is_nil(@picker_parent_path)}
+          >
+            ↑ Up
+          </button>
+          <form id="picker-go-form" phx-submit="picker_go" class="path-form">
+            <input
+              id="picker-path-input"
+              type="text"
+              name="path"
+              value={@picker_path}
+              aria-label="Target directory path"
+              class="input mono"
+            />
+            <button type="submit" class="btn btn-sm">Go</button>
+          </form>
+        </div>
+
+        <div :if={@picker_error} id="picker-error" class="flash-banner flash-error">
+          <span>{@picker_error}</span>
+        </div>
+
+        <ul :if={@picker_dirs != []} id="picker-dir-list" class="missing-cwd-dirs">
+          <li :for={dir <- @picker_dirs}>
+            <button
+              type="button"
+              class="missing-cwd-dir-btn mono"
+              phx-click="picker_browse"
+              phx-value-path={dir.path}
+            >
+              {dir.name}/
+            </button>
+          </li>
+        </ul>
+
+        <div class="missing-cwd-actions">
+          <button
+            id="fork-to-cwd-btn"
+            type="button"
+            class="btn btn-primary"
+            phx-click="fork_to_directory"
+            phx-value-cwd={@picker_path}
+            disabled={@picker_path == ""}
+          >
+            Continue in <span class="mono">{@picker_path}</span> →
+          </button>
+          <button
+            :if={!Map.get(@session, :archived, false)}
+            id="missing-cwd-archive-btn"
+            type="button"
+            class="btn btn-ghost"
+            phx-click="archive_current_session"
+          >
+            Archive session
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      :if={
+        @session && @session.status != "archived" && !@cwd_missing? &&
+          Map.get(@session, :cwd_exists, true)
+      }
+      class="composer-shell"
+    >
+      <% provider = @provider_filter || model_provider(@model_groups, @agent["model"]) %>
+      <% visible_models = Map.get(@model_groups, provider, []) %>
+      <% current_visible? = Enum.any?(visible_models, &(&1.id == @agent["model"])) %>
+      <div class="composer-config">
+        <form id="provider-filter-form" phx-change="select_provider" class="composer-select-group">
+          <label class="field-label" for="provider-select">Provider</label>
+          <select
+            id="provider-select"
+            name="provider"
+            class="input composer-select"
+            disabled={@model_groups == %{}}
+          >
+            <option :if={@model_groups == %{}}>No providers</option>
+            <option
+              :for={{id, models} <- Enum.sort(@model_groups)}
+              value={id}
+              selected={id == provider}
+            >
+              {provider_label(id, models)}
             </option>
           </select>
-        </label>
-      </form>
+        </form>
+        <form
+          id="agent-config-form"
+          phx-change="configure"
+          phx-auto-recover="ignore"
+          class="composer-model-config"
+        >
+          <label class="composer-select-group">
+            <span class="field-label">Model</span>
+            <select
+              id="model-select"
+              name="model"
+              class="input composer-select"
+              disabled={visible_models == []}
+            >
+              <option :if={!current_visible?} value="" selected disabled>Choose a model</option>
+              <option
+                :for={model <- visible_models}
+                value={model.id}
+                selected={model.id == @agent["model"]}
+              >
+                {model.name || model.id}{if model[:unavailable_reason], do: " · unavailable"}
+              </option>
+            </select>
+          </label>
+          <label class="composer-select-group">
+            <span class="field-label">Thinking</span>
+            <select id="thinking-select" name="thinking" class="input composer-select">
+              <option
+                :for={level <- @thinking_levels}
+                value={level}
+                selected={level == (@agent["thinking"] || "medium")}
+              >
+                {level}
+              </option>
+            </select>
+          </label>
+        </form>
+        <.link
+          id="provider-settings-link"
+          navigate={~p"/settings/providers"}
+          class="btn btn-sm btn-ghost"
+        >
+          Manage providers
+        </.link>
+      </div>
+      <p
+        :if={@agent["model"] && !current_visible?}
+        id="active-model-note"
+        class="muted composer-model-note"
+      >
+        Current model: <code>{@agent["model"]}</code>. Choosing a provider only filters this list.
+      </p>
+      <% reason =
+        Enum.find_value(visible_models, fn model ->
+          if model.id == @agent["model"], do: model[:unavailable_reason]
+        end) %>
+      <p
+        :if={reason}
+        id="model-unavailable-note"
+        class="muted composer-model-note"
+      >
+        {reason}
+      </p>
 
       <form
         id="composer-form"
@@ -313,7 +664,11 @@
           id="prompt-input"
           name="content"
           rows="2"
-          placeholder="Message the agent…"
+          placeholder={
+            if Map.get(@session, :archived, false),
+              do: "Session is archived (unloaded) — send a message to resume…",
+              else: "Message the agent…"
+          }
           phx-hook="ComposerDraft"
           phx-mounted={JS.ignore_attributes("style")}
           data-session-id={@session_id}

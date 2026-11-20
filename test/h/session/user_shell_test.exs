@@ -281,7 +281,7 @@ defmodule H.Session.UserShellTest do
       assert RemoteAgent.active_fences(agent) == []
     end
 
-    test "respects workspace lease contention without spawning command" do
+    test "waits without spawning and resumes on workspace lease release" do
       %{server: server, cwd: cwd, lease: lease} = start_harness_env()
       marker = Path.join(cwd, "ran.txt")
 
@@ -300,12 +300,23 @@ defmodule H.Session.UserShellTest do
       snap =
         wait_until(fn ->
           {:ok, s} = UserShellHarness.state_snapshot(server)
-          if s.live["run_failure"], do: s, else: nil
+          if s.live["workspace_wait"], do: s, else: nil
         end)
 
-      assert snap.live["run_failure"]["reason"] == "workspace_busy"
+      assert snap.live["workspace_wait"]["holder_session_id"] == "other-session"
+      assert snap.live["user_shell"]["status"] == "waiting"
       refute File.exists?(marker)
       assert {:ok, %{items: []}} = UserShellHarness.scan_entries(server)
+      :ok = WorkspaceLease.release(lease, {"host", cwd}, {"other-session", 1})
+
+      wait_until(fn ->
+        {:ok, %{items: items}} = UserShellHarness.scan_entries(server)
+        if length(items) == 1, do: items, else: nil
+      end)
+
+      assert File.exists?(marker)
+      {:ok, resumed} = UserShellHarness.state_snapshot(server)
+      refute resumed.live["workspace_wait"]
     end
 
     test "supports cooperative abort_ref cancellation, PGID reaping, and immediate abort" do

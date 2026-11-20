@@ -68,6 +68,57 @@ defmodule HWeb.CatalogStateTest do
       assert invalid.parent == nil
       assert CatalogState.root_session?(invalid)
     end
+
+    test "normalizes new daemon lifecycle fields and provides backward-compatible fallbacks" do
+      s1 =
+        CatalogState.normalize_session(%{
+          "session_id" => "s1",
+          "cwd" => "/work/a",
+          "attention" => "idle",
+          "needs_attention" => false,
+          "archived" => false,
+          "loaded" => true,
+          "cwd_exists" => false
+        })
+
+      assert s1.needs_attention == false
+      assert s1.archived == false
+      assert s1.loaded == true
+      assert s1.cwd_exists == false
+
+      s2 =
+        CatalogState.normalize_session(%{
+          session_id: "s2",
+          cwd: "/work/a",
+          attention: "idle"
+        })
+
+      assert s2.archived == false
+      assert s2.needs_attention == true
+      assert s2.loaded == true
+      assert s2.cwd_exists == true
+
+      s3 =
+        CatalogState.normalize_session(%{
+          session_id: "s3",
+          cwd: "/work/a",
+          attention: "running"
+        })
+
+      assert s3.needs_attention == false
+      assert s3.loaded == true
+
+      s4 =
+        CatalogState.normalize_session(%{
+          session_id: "s4",
+          cwd: "/work/a",
+          status: "archived"
+        })
+
+      assert s4.archived == true
+      assert s4.needs_attention == false
+      assert s4.loaded == false
+    end
   end
 
   describe "needs_attention?/1, counts/1, and next_attention_session/2" do
@@ -132,19 +183,123 @@ defmodule HWeb.CatalogStateTest do
       assert CatalogState.subsession_count(sessions) == 3
 
       assert CatalogState.counts(sessions) == %{
+               inbox: 2,
                all: 2,
+               archived: 0,
                attention: 1,
                error: 0,
                idle: 1,
                processing: 1,
                running: 1,
                sleeping: 0,
+               retrying: 0,
                subsessions: 3,
                subsessions_running: 1
              }
 
       assert %{session_id: "root-idle"} = CatalogState.next_attention_session(sessions)
       assert nil == CatalogState.next_attention_session(sessions, "root-idle")
+    end
+
+    test "orders tiers within workspace groups and filters inbox/attention/archived/all correctly" do
+      sessions =
+        [
+          %{
+            session_id: "s-archived",
+            cwd: "/work/repo",
+            attention: "idle",
+            needs_attention: false,
+            archived: true,
+            loaded: false,
+            updated_at: 999
+          },
+          %{
+            session_id: "s-cleared",
+            cwd: "/work/repo",
+            attention: "idle",
+            needs_attention: false,
+            archived: false,
+            loaded: true,
+            updated_at: 900
+          },
+          %{
+            session_id: "s-cold",
+            cwd: "/work/repo",
+            attention: "idle",
+            needs_attention: false,
+            archived: false,
+            loaded: false,
+            updated_at: 850
+          },
+          %{
+            session_id: "s-running",
+            cwd: "/work/repo",
+            attention: "running",
+            needs_attention: false,
+            archived: false,
+            loaded: true,
+            updated_at: 800
+          },
+          %{
+            session_id: "s-idle-na",
+            cwd: "/work/repo",
+            attention: "idle",
+            needs_attention: true,
+            archived: false,
+            loaded: true,
+            updated_at: 700
+          },
+          %{
+            session_id: "s-error-na",
+            cwd: "/work/repo",
+            attention: "error",
+            needs_attention: true,
+            archived: false,
+            loaded: true,
+            updated_at: 600
+          }
+        ]
+        |> Enum.map(&CatalogState.normalize_session/1)
+
+      counts = CatalogState.counts(sessions)
+      assert counts.inbox == 4
+      assert counts.attention == 2
+      assert counts.error == 1
+      assert counts.idle == 1
+      assert counts.processing == 1
+      assert counts.running == 1
+      assert counts.sleeping == 0
+      assert counts.archived == 2
+      assert counts.all == 6
+
+      assert Enum.map(CatalogState.filter_sessions(sessions, "inbox"), & &1.session_id) --
+               ["s-cleared", "s-running", "s-idle-na", "s-error-na"] == []
+
+      assert Enum.map(CatalogState.filter_sessions(sessions, "attention"), & &1.session_id) --
+               ["s-idle-na", "s-error-na"] == []
+
+      assert Enum.map(CatalogState.filter_sessions(sessions, "archived"), & &1.session_id) --
+               ["s-archived", "s-cold"] == []
+
+      assert length(CatalogState.filter_sessions(sessions, "all")) == 6
+
+      [group] = CatalogState.group_by_workspace(sessions)
+
+      assert Enum.map(group.sessions, & &1.session_id) == [
+               "s-error-na",
+               "s-idle-na",
+               "s-running",
+               "s-cleared",
+               "s-cold",
+               "s-archived"
+             ]
+
+      assert CatalogState.next_attention_session(sessions).session_id == "s-error-na"
+      assert CatalogState.next_attention_session(sessions, "s-error-na").session_id == "s-idle-na"
+
+      assert CatalogState.next_attention_session(
+               Enum.reject(sessions, &(&1.session_id in ["s-error-na", "s-idle-na"]))
+             ) == nil
     end
   end
 
@@ -299,7 +454,6 @@ defmodule HWeb.CatalogStateTest do
           include_subsessions: true
         )
 
-      # Only two workspace groups: /repo (holding coord-1 + nested children) and /private/tmp/wt-orphan
       assert Enum.map(groups, & &1.cwd) == ["/repo", "/private/tmp/wt-orphan"]
 
       [repo_group, orphan_group] = groups

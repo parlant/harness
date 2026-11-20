@@ -24,10 +24,12 @@ defmodule HWeb.SessionLiveTest do
       {:gate,
        [
          %{type: :thinking_delta, text: "Checking project files...", metadata: %{}},
-         %{type: :text_delta, text: "Partial ", metadata: %{}}
+         %{type: :text_delta, text: "**Partial**\n\n```console\n$ mix test", metadata: %{}}
        ], parent, gate_ref,
        %{
-         content: [%{type: "text", text: "Partial answer complete."}],
+         content: [
+           %{type: "text", text: "**Partial answer complete.**\n\n```console\n$ mix test\n```"}
+         ],
          finish_reason: "stop"
        }}
     )
@@ -51,14 +53,15 @@ defmodule HWeb.SessionLiveTest do
 
     # Wait briefly for ephemeral live progress frame to arrive
     wait_until(fn ->
-      html = render(view)
-      html =~ "assistant (live)" and html =~ "Partial "
+      has_element?(view, "#live-generation strong", "Partial") and
+        has_element?(view, "#live-generation .console-block code", "$ mix test")
     end)
 
     live_html = render(view)
-    assert live_html =~ "Checking project files..."
+    refute live_html =~ "Checking project files..."
     assert has_element?(view, "#stop-btn")
     assert has_element?(view, "#steer-btn")
+    refute has_element?(view, ".tool-call-card")
 
     # Release gated fake provider to finish turn
     send(gate_pid, {:release, gate_ref})
@@ -70,8 +73,118 @@ defmodule HWeb.SessionLiveTest do
 
     final_html = render(view)
     assert final_html =~ "Hello fake model"
-    assert final_html =~ "Partial answer complete."
+
+    assert has_element?(
+             view,
+             "#entries-stream .entry-assistant strong",
+             "Partial answer complete."
+           )
+
+    assert has_element?(view, "#entries-stream .console-block code", "$ mix test")
     assert length(Fake.requests(fake)) == 1
+  end
+
+  test "provider filters the model list without changing the conversation", ctx do
+    id = "example-router:vendor/Exact-Model"
+
+    models =
+      Fake.list_models(%{}) ++
+        [
+          %{
+            id: id,
+            provider: "example-router",
+            provider_name: "Example Model Router",
+            name: "Exact Model",
+            unavailable_reason: "API key required"
+          }
+        ]
+
+    opts = Keyword.update!(ctx.daemon_opts, :provider_config, &Map.put(&1, :models, models))
+    Application.put_env(:harness_web, :daemon_opts, opts)
+
+    assert {:ok, %{session: session}} = Daemon.create_session(%{"cwd" => ctx.projects_dir}, opts)
+    sid = session.session_id
+    {:ok, view, _} = live(log_in_owner(ctx.conn, ctx.owner_token), "/sessions/#{sid}")
+    assert has_element?(view, ~s(#provider-select option[value="fake"][selected]))
+    assert has_element?(view, ~s(#model-select option[value="fake:coder"][selected]))
+
+    view |> form("#provider-filter-form", %{provider: "example-router"}) |> render_change()
+
+    assert has_element?(
+             view,
+             ~s(#provider-select option[value="example-router"][selected]),
+             "Example Model Router"
+           )
+
+    assert has_element?(view, "#active-model-note", "fake:coder")
+    refute has_element?(view, ~s(#model-select option[value="fake:coder"]))
+
+    assert has_element?(
+             view,
+             ~s(#model-select option[value="#{id}"]),
+             "Exact Model · unavailable"
+           )
+
+    # A thinking event includes the model field in the browser form, but does not change it.
+    render_change(element(view, "#agent-config-form"), %{
+      "_target" => ["thinking"],
+      "model" => id,
+      "thinking" => "high"
+    })
+
+    wait_until(fn -> has_element?(view, ~s(#thinking-select option[value="high"][selected])) end)
+    assert has_element?(view, "#active-model-note", "fake:coder")
+
+    render_change(element(view, "#agent-config-form"), %{
+      "_target" => ["model"],
+      "model" => id,
+      "thinking" => "off"
+    })
+
+    wait_until(fn -> has_element?(view, ~s(#model-select option[value="#{id}"][selected])) end)
+    assert has_element?(view, ~s(#thinking-select option[value="high"][selected]))
+    assert has_element?(view, "#model-unavailable-note", "API key required")
+
+    # A fresh view reads the exact qualified model back from the daemon.
+    {:ok, new_view, _} = live(log_in_owner(ctx.conn, ctx.owner_token), "/sessions/#{sid}")
+    assert has_element?(new_view, ~s(#model-select option[value="#{id}"][selected]))
+  end
+
+  test "shows provider backoff as active retrying work and clears it on success", %{
+    conn: conn,
+    projects_dir: cwd,
+    owner_token: token,
+    daemon_opts: opts,
+    fake: fake
+  } do
+    gate = make_ref()
+
+    Fake.push_step(
+      fake,
+      {:error, %{code: "http_429", message: "Monthly spending cap reached", retryable: true}}
+    )
+
+    Fake.push_step(
+      fake,
+      {:gate, [], self(), gate, %{content: [%{type: "text", text: "Recovered after rate limit"}]}}
+    )
+
+    {:ok, %{session: session}} =
+      Daemon.create_session(%{"cwd" => cwd}, Keyword.put(opts, :retry_backoff_ms, 300))
+
+    {:ok, view, _} = live(log_in_owner(conn, token), "/sessions/#{session.session_id}")
+    view |> form("#composer-form", %{content: "Retry this work"}) |> render_submit()
+    wait_until(fn -> has_element?(view, "#retry-banner", "Monthly spending cap reached") end)
+    assert has_element?(view, "#retry-banner", "Waiting 1s")
+    assert has_element?(view, "#stop-btn")
+    refute has_element?(view, "#continue-run-btn")
+    refute has_element?(view, "#run-failure-banner")
+    assert_receive {:gate_entered, ^gate, pid}, 2_000
+    wait_until(fn -> has_element?(view, "#retry-banner", "Retry request in progress") end)
+    send(pid, {:release, gate})
+    wait_until(fn -> has_element?(view, "#entries-stream", "Recovered after rate limit") end)
+    refute has_element?(view, "#retry-banner")
+    assert length(Fake.requests(fake)) == 2
   end
 
   test "supports configure, steer, abort, fork, and resnapshot on sequence gap", %{
@@ -367,6 +480,194 @@ defmodule HWeb.SessionLiveTest do
     assert live_html =~ "subagent-card"
     assert live_html =~ "Open subsession →"
     assert live_html =~ "idle"
+  end
+
+  test "workspace wait links to the holder and offers cancel and stop-holder actions", %{
+    conn: conn,
+    projects_dir: cwd,
+    owner_token: token,
+    daemon_opts: opts,
+    fake: fake
+  } do
+    {:ok, %{session: %{session_id: holder_sid}}} =
+      Daemon.create_session(%{"cwd" => cwd, "session_id" => "holder"}, opts)
+
+    {:ok, _} =
+      Daemon.execute_command(
+        holder_sid,
+        %{
+          "version" => 1,
+          "request_id" => "holder-note",
+          "conversation_id" => 1,
+          "command" => "submit",
+          "args" => %{"type" => "write", "content" => "Holder transcript"}
+        },
+        opts
+      )
+
+    {:ok, %{items: [note]}} = Daemon.scan_entries(holder_sid, 1, %{}, opts)
+
+    {:ok, %{conversation_id: holder_cid}} =
+      Daemon.execute_command(
+        holder_sid,
+        %{
+          "version" => 1,
+          "request_id" => "holder-fork",
+          "conversation_id" => 1,
+          "command" => "fork",
+          "args" => %{"at_entry_id" => note.id}
+        },
+        opts
+      )
+
+    holder = {holder_sid, String.to_integer(holder_cid)}
+    :ok = H.WorkspaceLease.acquire(opts[:workspace_lease], {"host", cwd}, holder, self())
+
+    for call <- ["first", "second"] do
+      Fake.push_step(
+        fake,
+        {:reply, [],
+         %{
+           content: [],
+           tool_calls: [
+             %{id: call, name: "write", arguments: %{"path" => "marker", "content" => "ran"}}
+           ],
+           finish_reason: "tool_calls"
+         }}
+      )
+    end
+
+    Fake.push_step(fake, {:reply, [], %{content: [%{type: "text", text: "Finished waiting"}]}})
+    {:ok, %{session: session}} = Daemon.create_session(%{"cwd" => cwd}, opts)
+    conn = log_in_owner(conn, token)
+    waiter_path = ~p"/sessions/#{session.session_id}?from=inbox"
+    holder_path = ~p"/sessions/#{holder_sid}/conversations/#{holder_cid}?from=inbox"
+    {:ok, view, _} = live(conn, waiter_path)
+    view |> form("#composer-form", %{content: "First attempt"}) |> render_submit()
+    wait_until(fn -> has_element?(view, "#workspace-wait") end)
+
+    {:ok, holder_view, _html} =
+      view
+      |> element("#workspace-holder-link")
+      |> render_click()
+      |> follow_redirect(conn, holder_path)
+
+    assert has_element?(holder_view, ".header-sid", holder_sid)
+    assert has_element?(holder_view, ".session-header .badge", "conv ##{holder_cid}")
+    assert has_element?(holder_view, "#header-inbox-link.btn-inbox-return")
+
+    {:ok, view, _} = live(conn, waiter_path)
+    assert has_element?(view, "#workspace-wait")
+    assert has_element?(view, "#live-activity[data-status=waiting]", "1 activity")
+    refute has_element?(view, "#live-activity .activity-spinner")
+    refute has_element?(view, "#entries-stream .entry-assistant")
+    assert has_element?(view, "#stop-holder-btn", "Stop holder and acquire")
+    view |> element("#cancel-wait-btn") |> render_click()
+    wait_until(fn -> not has_element?(view, "#workspace-wait") end)
+    wait_until(fn -> has_element?(view, "#live-activity[data-status=paused]", "1 activity") end)
+    refute File.exists?(Path.join(cwd, "marker"))
+    refute_receive {:stop_workspace_holder, _, _, _}, 0
+
+    view |> form("#composer-form", %{content: "Second attempt"}) |> render_submit()
+    wait_until(fn -> has_element?(view, "#workspace-wait") end)
+    view |> element("#stop-holder-btn") |> render_click()
+    assert_receive {:stop_workspace_holder, {"host", ^cwd}, ^holder, _}
+    :ok = H.WorkspaceLease.release(opts[:workspace_lease], {"host", cwd}, holder)
+    wait_until(fn -> render(view) =~ "Finished waiting" end)
+    refute has_element?(view, "#workspace-wait")
+
+    assert has_element?(
+             view,
+             "#entries-stream .activity-line[data-status=complete]",
+             "1 activity"
+           )
+
+    refute has_element?(view, "#entries-stream .entry-tool_result")
+    assert File.read!(Path.join(cwd, "marker")) == "ran"
+  end
+
+  test "shows a spinner for a tool-only stream, then counts the call and result once", %{
+    conn: conn,
+    projects_dir: cwd,
+    owner_token: token,
+    daemon_opts: opts,
+    fake: fake
+  } do
+    parent = self()
+    gate_ref = make_ref()
+
+    Fake.push_step(
+      fake,
+      {:gate,
+       [%{type: :tool_call_delta, id: "read-1", name: "read", args_delta: "hidden arguments"}],
+       parent, gate_ref,
+       %{
+         tool_calls: [%{id: "read-1", name: "read", arguments: %{"path" => "missing.txt"}}],
+         finish_reason: "tool_calls"
+       }}
+    )
+
+    Fake.push_step(fake, {:reply, [], %{content: [%{type: "text", text: "Final answer"}]}})
+
+    {:ok, %{session: session}} = Daemon.create_session(%{"cwd" => cwd}, opts)
+    {:ok, view, _} = live(log_in_owner(conn, token), "/sessions/#{session.session_id}")
+    view |> form("#composer-form", %{content: "A question"}) |> render_submit()
+    assert_receive {:gate_entered, ^gate_ref, gate_pid}, 2_000
+
+    wait_until(fn ->
+      has_element?(view, "#live-activity[data-status=working] .activity-spinner")
+    end)
+
+    assert has_element?(view, "#live-activity", "1 activity")
+    refute has_element?(view, "#live-generation")
+    refute render(view) =~ "hidden arguments"
+    send(gate_pid, {:release, gate_ref})
+
+    wait_until(fn -> has_element?(view, "#entries-stream .entry-assistant", "Final answer") end)
+    assert has_element?(view, "#entries-stream .activity-line[data-status=failed]", "1 activity")
+    refute has_element?(view, "#entries-stream .activity-spinner")
+    refute render(view) =~ "missing.txt"
+  end
+
+  test "merges activity across Load earlier without exposing system and tool entries", ctx do
+    {:ok, %{session: session}} =
+      Daemon.create_session(%{"cwd" => ctx.projects_dir}, ctx.daemon_opts)
+
+    sid = session.session_id
+    server = {:via, Registry, {ctx.daemon_opts[:registry], {:session, sid}}}
+
+    entries =
+      [%{kind: "user", data: %{"content" => "First **prompt**"}}] ++
+        for(_ <- 1..51, do: %{kind: "system", data: %{"content" => "Hidden system text"}}) ++
+        [
+          %{kind: "tool_result", data: %{"content" => "Hidden tool output", "is_error" => true}},
+          %{kind: "assistant", data: %{"content" => "Done"}}
+        ]
+
+    assert {:ok, %{seeded: 54}} = H.Session.Server.seed_entries(server, entries)
+    {:ok, view, html} = live(log_in_owner(ctx.conn, ctx.owner_token), "/sessions/#{sid}")
+    refute html =~ "Hidden"
+    refute has_element?(view, ".entry-user")
+
+    assert has_element?(
+             view,
+             "#entries-stream > .activity-line[data-status=failed]",
+             "49 activities"
+           )
+
+    view |> element("#load-earlier-btn") |> render_click()
+
+    assert has_element?(view, "#entries-stream > :nth-child(1).entry-user", "First **prompt**")
+
+    assert has_element?(
+             view,
+             "#entries-stream > :nth-child(2).activity-line[data-status=failed]",
+             "52 activities"
+           )
+
+    assert has_element?(view, "#entries-stream > :nth-child(3).entry-assistant", "Done")
+    refute has_element?(view, "#entries-stream > :nth-child(4)")
+    refute has_element?(view, "#load-earlier-btn")
   end
 
   defp wait_until(fun, attempts \\ 50)

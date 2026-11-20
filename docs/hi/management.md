@@ -7,7 +7,7 @@ first word, e.g. `hi account list --data-dir /path/to/store`.
 
 | Outside a session | In a session / web |
 |---|---|
-| `hi inbox [--tui-mode <fullscreen\|regular>] [--env ID]` | `/inbox` or `Alt+I` opens the live multi-session inbox grouped by workspace (`j`/`k` or arrows move, `Tab` cycles idle/error sessions, `Enter` opens, `n` creates a session, `Ctrl+D` returns to the inbox from a session opened through it). |
+| `hi inbox [--tui-mode <fullscreen\|regular>] [--env ID]` | `/inbox` or `Alt+I` opens the live multi-session inbox grouped by workspace (`j`/`k` or arrows move, `Tab` cycles attention-needing sessions, `Space`/`m` toggles `needs_attention`, `s` stops active work, `x`/`X` archives & unloads or force-stops-and-archives, `a` toggles Inbox vs All sessions, `Enter` opens, `n` creates a session, `Ctrl+D` returns to the inbox from a session opened through it). Inside a session, `/attention [on\|off]`, `/stop`, `/archive [force]`, and `/cwd [path]` manage triage, lifecycle, and forking missing-directory or archived sessions into an existing directory. |
 | `hi login [openai_codex [alias]]` | `/login [openai_codex [alias]]`, or sign in on Phoenix **Account settings**. |
 | `hi account list` | `/account` picker, or the accounts page. |
 | `hi account add <alias>` | `/account add <alias>`, or the add-alias form. |

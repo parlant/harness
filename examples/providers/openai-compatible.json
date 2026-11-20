@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "providers": {
+    "example-router": {
+      "name": "Example Model Router",
+      "base_url": "https://router.example.invalid/v1",
+      "models": {
+        "gpt-5-example": {
+          "name": "Example Reasoning Model",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "supports_reasoning": true,
+          "supports_images": true,
+          "price_per_million_tokens": {
+            "input": 0.15,
+            "output": 0.15,
+            "cache_read": 0,
+            "cache_write": 0
+          }
+        },
+        "vendor/Example-Vision": {
+          "name": "Example Vision Model",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "supports_reasoning": false,
+          "supports_images": true,
+          "price_per_million_tokens": {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0
+          }
+        }
+      }
+    }
+  }
+}

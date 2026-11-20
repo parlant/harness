@@ -99,6 +99,79 @@ impl Completion {
     }
 }
 
+pub(super) fn directories(
+    client: &DaemonClient,
+    env_id: &str,
+    fallback_cwd: &str,
+    prefix: &str,
+) -> Result<Vec<(String, String)>, ClientError> {
+    let expanded_home = if env_id == "host" && (prefix == "~" || prefix.starts_with("~/")) {
+        std::env::var("HOME").ok().filter(|h| !h.is_empty())
+    } else {
+        None
+    };
+    let (display_prefix, lookup_prefix) = match &expanded_home {
+        Some(home) => {
+            let trimmed = home.trim_end_matches('/');
+            let rest = prefix.strip_prefix('~').unwrap_or("");
+            if rest.is_empty() {
+                ("~/", format!("{trimmed}/"))
+            } else {
+                (prefix, format!("{trimmed}{rest}"))
+            }
+        }
+        None => (prefix, prefix.to_owned()),
+    };
+
+    let (dir, basename) = lookup_prefix
+        .rfind('/')
+        .map_or(("", lookup_prefix.as_str()), |slash| {
+            lookup_prefix.split_at(slash + 1)
+        });
+    let display_dir = display_prefix
+        .rfind('/')
+        .map_or("", |slash| &display_prefix[..=slash]);
+
+    let parent = if dir.starts_with('/') {
+        dir.to_owned()
+    } else if !fallback_cwd.starts_with('/') {
+        return Err(ClientError::InvalidInput(
+            "no absolute base directory for path completion".into(),
+        ));
+    } else if dir.is_empty() {
+        fallback_cwd.to_owned()
+    } else {
+        format!("{}/{dir}", fallback_cwd.trim_end_matches('/'))
+    };
+
+    let response = match client.list_directory_files(env_id, &parent, basename) {
+        Err(ClientError::HttpStatus { status: 404, .. }) => return Ok(Vec::new()),
+        other => other?,
+    };
+    let prefix_lower = basename.to_lowercase();
+    let mut choices: Vec<_> = response
+        .entries
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.kind != "dir" {
+                return None;
+            }
+            let name = entry.path;
+            if matches!(name.as_str(), "" | "." | "..")
+                || name.contains('/')
+                || name.chars().any(char::is_control)
+                || !name.to_lowercase().starts_with(&prefix_lower)
+            {
+                return None;
+            }
+            Some((format!("{display_dir}{name}/"), format!("{name}/")))
+        })
+        .collect();
+    choices.sort_by(|a, b| a.0.cmp(&b.0));
+    choices.dedup();
+    Ok(choices)
+}
+
 pub(super) fn paths(
     client: &DaemonClient,
     target: &Target,

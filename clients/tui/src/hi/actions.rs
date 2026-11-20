@@ -22,12 +22,39 @@ pub struct Target {
     pub labels: SessionLabels,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLabels {
     pub title: Option<String>,
     pub status: Option<String>,
     pub harness_id: Option<String>,
     pub parent: Option<SessionParent>,
+    pub archived: bool,
+    pub cwd_exists: bool,
+    pub needs_attention: bool,
+}
+
+impl SessionLabels {
+    pub fn is_imported_archive(&self) -> bool {
+        self.status.as_deref() == Some("archived")
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.archived || self.is_imported_archive()
+    }
+}
+
+impl Default for SessionLabels {
+    fn default() -> Self {
+        Self {
+            title: None,
+            status: None,
+            harness_id: None,
+            parent: None,
+            archived: false,
+            cwd_exists: true,
+            needs_attention: true,
+        }
+    }
 }
 
 impl From<&SessionSummary> for SessionLabels {
@@ -37,6 +64,9 @@ impl From<&SessionSummary> for SessionLabels {
             status: session.status.clone(),
             harness_id: session.harness_id.clone(),
             parent: session.parent.clone(),
+            archived: session.effective_archived(),
+            cwd_exists: session.effective_cwd_exists(),
+            needs_attention: session.effective_needs_attention(),
         }
     }
 }
@@ -68,6 +98,11 @@ pub enum Effect {
     Fork(u64),
     Configure(String, String),
     Abort,
+    WorkspaceWait {
+        action: String,
+        task_id: String,
+        lease_id: String,
+    },
     Continue,
     Environments,
     Branch(String),
@@ -86,6 +121,24 @@ pub enum Effect {
         include_in_context: bool,
     },
     Compact(Option<String>),
+    TriageSession {
+        sid: String,
+        needs_attention: bool,
+    },
+    StopSession {
+        sid: String,
+    },
+    ArchiveSession {
+        sid: String,
+        archived: bool,
+        stop: bool,
+    },
+    ArchiveCurrent {
+        stop: bool,
+    },
+    ForkSessionCwd {
+        cwd: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +162,13 @@ pub enum Reply {
         env_id: String,
         truncated: bool,
         block: Value,
+    },
+    CatalogSession {
+        session: Box<SessionSummary>,
+        note: String,
+    },
+    ArchivedCurrent {
+        sid: String,
     },
 }
 
@@ -197,8 +257,12 @@ pub fn execute(
                         .unwrap_or_else(|| "(untitled)".to_string());
                     let status = if s.status.as_deref() == Some("quarantined") {
                         "quarantined"
+                    } else if s.effective_archived() {
+                        "archived"
                     } else if s.active {
                         "active"
+                    } else if s.effective_attention() == "error" {
+                        "error"
                     } else {
                         "idle"
                     };
@@ -331,10 +395,16 @@ pub fn execute(
                         .map(|n| format!(" ({})", sanitize_single_line(n)))
                         .unwrap_or_default();
                     let provider_part = m
-                        .provider
+                        .provider_name
                         .as_deref()
                         .map(str::trim)
                         .filter(|p| !p.is_empty())
+                        .or_else(|| {
+                            m.provider
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|p| !p.is_empty())
+                        })
                         .map(|p| format!(" [{}]", sanitize_single_line(p)))
                         .unwrap_or_default();
                     let unavailable = m
@@ -470,6 +540,22 @@ pub fn execute(
             let cid_num = parse_cid(&target.cid)?;
             let envelope =
                 CommandEnvelope::abort(generate_request_id(), cid_num, Some("user_abort"));
+            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+            Ok(Reply::Receipt(receipt))
+        }
+
+        Effect::WorkspaceWait {
+            action,
+            task_id,
+            lease_id,
+        } => {
+            let envelope = CommandEnvelope {
+                version: 1,
+                request_id: generate_request_id(),
+                conversation_id: parse_cid(&target.cid)?,
+                command: "workspace_wait".to_string(),
+                args: json!({"action": action, "task_id": task_id, "lease_id": lease_id}),
+            };
             let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
             Ok(Reply::Receipt(receipt))
         }
@@ -736,6 +822,108 @@ pub fn execute(
             let envelope = build_compact_envelope(cid_num, expected_seq, instructions.as_deref())?;
             let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
             Ok(Reply::Receipt(receipt))
+        }
+
+        Effect::TriageSession {
+            sid,
+            needs_attention,
+        } => {
+            if sid.trim().is_empty() {
+                return Err("cannot triage session: missing session_id".to_string());
+            }
+            let session = client
+                .triage_session(&sid, needs_attention)
+                .map_err(|e| format_client_error(&e))?;
+            let note = if session.effective_needs_attention() {
+                "Marked as needing attention".to_string()
+            } else {
+                "Marked as not needing attention".to_string()
+            };
+            Ok(Reply::CatalogSession {
+                session: Box::new(session),
+                note,
+            })
+        }
+
+        Effect::StopSession { sid } => {
+            if sid.trim().is_empty() {
+                return Err("cannot stop session: missing session_id".to_string());
+            }
+            let session = client
+                .stop_session(&sid, Some("user_stop"))
+                .map_err(|e| format_client_error(&e))?;
+            let note = format!("Stopped {}", sanitize_single_line(&session.session_id));
+            Ok(Reply::CatalogSession {
+                session: Box::new(session),
+                note,
+            })
+        }
+
+        Effect::ArchiveSession {
+            sid,
+            archived,
+            stop,
+        } => {
+            if sid.trim().is_empty() {
+                return Err("cannot archive session: missing session_id".to_string());
+            }
+            let session = client
+                .archive_session(&sid, archived, stop)
+                .map_err(|e| format_archive_error(&e))?;
+            let note = if session.effective_archived() {
+                format!("Archived {}", sanitize_single_line(&session.session_id))
+            } else {
+                format!("Unarchived {}", sanitize_single_line(&session.session_id))
+            };
+            Ok(Reply::CatalogSession {
+                session: Box::new(session),
+                note,
+            })
+        }
+
+        Effect::ArchiveCurrent { stop } => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot archive: missing session_id".to_string());
+            }
+            let session = client
+                .archive_session(&target.sid, true, stop)
+                .map_err(|e| format_archive_error(&e))?;
+            Ok(Reply::ArchivedCurrent {
+                sid: session.session_id,
+            })
+        }
+
+        Effect::ForkSessionCwd { cwd } => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot fork session: missing session_id".to_string());
+            }
+            let env_id = (!target.env_id.trim().is_empty()).then_some(target.env_id.as_str());
+            let cid = (!target.cid.trim().is_empty()).then_some(target.cid.as_str());
+            let forked = client
+                .fork_session(&target.sid, &cwd, env_id, cid, None)
+                .map_err(|e| format_client_error(&e))?;
+            if forked.session.status.as_deref() == Some("quarantined") {
+                return Err(format!(
+                    "forked session {} is quarantined",
+                    sanitize_single_line(&forked.session.session_id)
+                ));
+            }
+            let labels = SessionLabels::from(&forked.session);
+            let actual_env_id = forked
+                .session
+                .env_id
+                .unwrap_or_else(|| target.env_id.clone());
+            let new_cid = forked
+                .session
+                .root_conversation_id
+                .unwrap_or_else(|| "1".to_string());
+            Ok(Reply::Target(Target {
+                sid: forked.session.session_id,
+                cid: new_cid,
+                cwd: forked.session.cwd,
+                env_id: actual_env_id,
+                labels,
+            }))
         }
     }
 }
@@ -1091,6 +1279,19 @@ fn is_ambiguous_io_error(err: &ClientError) -> bool {
     }
 }
 
+fn format_archive_error(err: &ClientError) -> String {
+    match err {
+        ClientError::HttpStatus {
+            status: 409,
+            message,
+        } if message.contains("session_busy") => {
+            "Session is busy; stop first (s / Esc) or force archive (X / /archive force)"
+                .to_string()
+        }
+        other => format_client_error(other),
+    }
+}
+
 fn format_client_error(err: &ClientError) -> String {
     match err {
         ClientError::HttpStatus {
@@ -1113,9 +1314,14 @@ fn parse_cid(cid: &str) -> Result<u64, String> {
 
 fn sort_sessions_latest_first(sessions: &mut [SessionSummary]) {
     sessions.sort_by(|a, b| {
+        let a_arch = a.effective_archived();
+        let b_arch = b.effective_archived();
         let ta = a.updated_at.or(a.created_at).unwrap_or(0);
         let tb = b.updated_at.or(b.created_at).unwrap_or(0);
-        tb.cmp(&ta).then_with(|| a.session_id.cmp(&b.session_id))
+        a_arch
+            .cmp(&b_arch)
+            .then_with(|| tb.cmp(&ta))
+            .then_with(|| a.session_id.cmp(&b.session_id))
     });
 }
 
@@ -1350,7 +1556,9 @@ mod tests {
             write_json_response(
                 &mut s2,
                 "200 OK",
-                r#"{"models":[{"id":"openai/gpt-5.4","name":"GPT 5.4","provider":"openai"}]}"#,
+                r#"{"models":[{"id":"openai/gpt-5.4","name":"GPT 5.4","provider":"openai"},
+                    {"id":"example-router:vendor/Example-Vision","name":"Example Vision Model","provider":"example-router",
+                     "provider_name":"Example Model Router","unavailable_reason":"API key required"}]}"#,
             );
 
             // 3. Branches
@@ -1393,6 +1601,9 @@ mod tests {
                 assert_eq!(title, "models");
                 assert_eq!(items[0].0, "openai/gpt-5.4");
                 assert!(items[0].1.contains("GPT 5.4"));
+                assert_eq!(items[1].0, "example-router:vendor/Example-Vision");
+                assert!(items[1].1.contains("[Example Model Router]"));
+                assert!(items[1].1.contains("API key required"));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1517,7 +1728,7 @@ mod tests {
             let v1: Value = serde_json::from_str(&b1).unwrap();
             assert_eq!(v1["command"], "configure");
             assert_eq!(v1["conversation_id"], 1);
-            assert_eq!(v1["args"]["model"], "fake:coder");
+            assert_eq!(v1["args"]["model"], "example-router:vendor/Example-Vision");
             assert_eq!(v1["args"]["expected_seq"], 12);
             write_json_response(
                 &mut s1,
@@ -1543,7 +1754,10 @@ mod tests {
             &client,
             &target,
             Some(12),
-            Effect::Configure("model".to_string(), "fake:coder".to_string()),
+            Effect::Configure(
+                "model".to_string(),
+                "example-router:vendor/Example-Vision".to_string(),
+            ),
         )
         .unwrap();
         assert!(matches!(ok_reply, Reply::Receipt(r) if r.seq == Some(13)));
@@ -1739,6 +1953,10 @@ mod tests {
                 status: Some("ok".to_string()),
                 parent: None,
                 role: None,
+                needs_attention: None,
+                archived: false,
+                loaded: None,
+                cwd_exists: None,
             },
             seq: 1,
         };
@@ -1767,6 +1985,10 @@ mod tests {
                 status: Some("ok".to_string()),
                 parent: None,
                 role: None,
+                needs_attention: None,
+                archived: false,
+                loaded: None,
+                cwd_exists: None,
             },
             seq: 1,
         };

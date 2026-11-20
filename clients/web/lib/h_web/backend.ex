@@ -13,6 +13,14 @@ defmodule HWeb.Backend do
   @callback scan_entries(String.t(), term(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback list_models(keyword()) :: [map()]
   @callback execute_command(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  @callback triage_session(String.t(), map(), keyword()) ::
+              {:ok, %{session: map()}} | {:error, term()}
+  @callback stop_session(String.t(), map(), keyword()) ::
+              {:ok, %{session: map()}} | {:error, term()}
+  @callback archive_session(String.t(), map(), keyword()) ::
+              {:ok, %{session: map()}} | {:error, term()}
+  @callback fork_session(String.t(), map(), keyword()) ::
+              {:ok, %{session: map(), seq: non_neg_integer()}} | {:error, term()}
   @callback subscribe_sessions(pid(), keyword()) ::
               {:ok, {:snapshot, non_neg_integer(), binary()}} | {:error, term()}
   @callback unsubscribe_sessions(keyword()) :: :ok
@@ -46,6 +54,18 @@ defmodule HWeb.Backend do
 
   def execute_command(session_id, envelope, opts \\ []),
     do: impl().execute_command(session_id, envelope, opts)
+
+  def triage_session(session_id, params, opts \\ []),
+    do: impl().triage_session(session_id, params, opts)
+
+  def stop_session(session_id, params \\ %{}, opts \\ []),
+    do: impl().stop_session(session_id, params, opts)
+
+  def archive_session(session_id, params \\ %{}, opts \\ []),
+    do: impl().archive_session(session_id, params, opts)
+
+  def fork_session(session_id, params, opts \\ []),
+    do: impl().fork_session(session_id, params, opts)
 
   def subscribe_sessions(subscriber_pid, opts \\ []),
     do: impl().subscribe_sessions(subscriber_pid, opts)

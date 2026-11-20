@@ -39,6 +39,7 @@ defmodule HWeb.MixProject do
       {:phoenix_live_reload, "~> 1.7", only: :dev},
       {:phoenix_html, "~> 4.1"},
       {:jason, "~> 1.4"},
+      {:earmark_parser, "~> 1.4.46"},
       {:lazy_html, ">= 0.1.0", only: :test}
     ]
   end

@@ -132,6 +132,16 @@ class FakeDaemon:
         self._primary_attention: str | None = None
         self._primary_activity_kind: str | None = None
         self._primary_activity_label: str | None = None
+        self._primary_needs_attention: bool | None = None
+        self._primary_archived = False
+        self._primary_loaded = True
+        self._primary_cwd_exists: bool | None = None
+        self._primary_status = "ok"
+
+        self.triage_requests: list[dict[str, Any]] = []
+        self.stop_requests: list[dict[str, Any]] = []
+        self.archive_requests: list[dict[str, Any]] = []
+        self.fork_requests: list[dict[str, Any]] = []
 
         self._next_chunks: list[str] = ["Fake response"]
         self._next_gate: threading.Event | None = None
@@ -311,27 +321,57 @@ class FakeDaemon:
         activity_label: str | None = None,
         queued_count: int = 0,
         status: str = "ok",
+        needs_attention: bool | None = None,
+        archived: bool | None = None,
+        loaded: bool | None = None,
+        cwd_exists: bool | None = None,
         created_at: int | None = None,
         entries: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         now = int(time.time())
         created = created_at if created_at is not None else now
+        resolved_cwd = os.path.abspath(cwd) if env_id == "host" else cwd
+        eff_archived = bool(archived) or status == "archived"
+        eff_attention = (
+            "quarantined"
+            if status == "quarantined"
+            else ("archived" if eff_archived else attention)
+        )
+        eff_needs_attention = (
+            False
+            if eff_archived
+            else (
+                needs_attention
+                if needs_attention is not None
+                else (eff_attention not in ("running", "sleeping", "archived"))
+            )
+        )
+        eff_loaded = loaded if loaded is not None else (not eff_archived)
+        eff_cwd_exists = (
+            cwd_exists
+            if cwd_exists is not None
+            else (os.path.isdir(resolved_cwd) if env_id == "host" else True)
+        )
         wire = {
             "session_id": session_id,
             "title": title,
             "env_id": env_id,
             "harness_id": "coding",
-            "cwd": os.path.abspath(cwd) if env_id == "host" else cwd,
+            "cwd": resolved_cwd,
             "root_conversation_id": "1",
             "created_at": created,
             "updated_at": now,
-            "active": attention in ("running", "sleeping"),
-            "attention": "quarantined" if status == "quarantined" else attention,
+            "active": eff_attention in ("running", "sleeping"),
+            "attention": eff_attention,
             "activity_kind": activity_kind,
             "activity_label": activity_label,
             "queued_count": queued_count,
             "next_wake_at": None,
             "status": status,
+            "needs_attention": eff_needs_attention,
+            "archived": eff_archived,
+            "loaded": eff_loaded,
+            "cwd_exists": eff_cwd_exists,
         }
         with self._lock:
             if session_id == self.session_id:
@@ -341,6 +381,11 @@ class FakeDaemon:
                 self._primary_activity_label = activity_label
                 self._active = wire["active"]
                 self._primary_created_at = created
+                self._primary_status = status
+                self._primary_needs_attention = eff_needs_attention
+                self._primary_archived = eff_archived
+                self._primary_loaded = eff_loaded
+                self._primary_cwd_exists = cwd_exists
                 if entries is not None:
                     self._entries = list(entries)
                 self._broadcast_catalog_upsert_locked(self._wire_session())
@@ -365,13 +410,20 @@ class FakeDaemon:
         activity_kind: str | None = None,
         activity_label: str | None = None,
         queued_count: int | None = None,
+        needs_attention: bool | None = None,
     ) -> None:
         with self._lock:
+            eff_na = (
+                needs_attention
+                if needs_attention is not None
+                else (attention not in ("running", "sleeping", "archived"))
+            )
             if session_id == self.session_id:
                 self._primary_attention = attention
                 self._primary_activity_kind = activity_kind
                 self._primary_activity_label = activity_label
                 self._active = attention in ("running", "sleeping")
+                self._primary_needs_attention = False if self._primary_archived else eff_na
                 self._broadcast_catalog_upsert_locked(self._wire_session())
                 return
             sess = self._extra_sessions.get(session_id)
@@ -381,6 +433,7 @@ class FakeDaemon:
             sess["active"] = attention in ("running", "sleeping")
             sess["activity_kind"] = activity_kind
             sess["activity_label"] = activity_label
+            sess["needs_attention"] = False if sess.get("archived") else eff_na
             if queued_count is not None:
                 sess["queued_count"] = queued_count
             sess["updated_at"] = int(time.time())
@@ -450,6 +503,26 @@ class FakeDaemon:
         activity_kind = self._primary_activity_kind
         if activity_kind is None and attention == "running":
             activity_kind = "generation"
+        eff_archived = self._primary_archived or self._primary_status == "archived"
+        eff_attention = (
+            "quarantined"
+            if self._primary_status == "quarantined"
+            else ("archived" if eff_archived else attention)
+        )
+        eff_needs_attention = (
+            False
+            if eff_archived
+            else (
+                self._primary_needs_attention
+                if self._primary_needs_attention is not None
+                else (attention not in ("running", "sleeping", "archived"))
+            )
+        )
+        eff_cwd_exists = (
+            self._primary_cwd_exists
+            if self._primary_cwd_exists is not None
+            else os.path.isdir(self.cwd)
+        )
         return {
             "session_id": self.session_id,
             "title": self._primary_title,
@@ -460,12 +533,16 @@ class FakeDaemon:
             "created_at": self._primary_created_at,
             "updated_at": now,
             "active": self._active,
-            "attention": attention,
+            "attention": eff_attention,
             "activity_kind": activity_kind,
             "activity_label": self._primary_activity_label,
             "queued_count": len(self._inbox),
             "next_wake_at": None,
-            "status": "ok",
+            "status": self._primary_status,
+            "needs_attention": eff_needs_attention,
+            "archived": eff_archived,
+            "loaded": self._primary_loaded,
+            "cwd_exists": eff_cwd_exists,
         }
 
     def _all_wire_sessions_locked(self) -> list[dict[str, Any]]:
@@ -556,6 +633,7 @@ class FakeDaemon:
         self._primary_attention = "running"
         self._primary_activity_kind = "generation"
         self._primary_activity_label = None
+        self._primary_needs_attention = False
         self._broadcast_catalog_upsert_locked(self._wire_session())
         t = threading.Thread(
             target=self._run_turn_worker,
@@ -616,6 +694,7 @@ class FakeDaemon:
                 self._primary_attention = "idle"
                 self._primary_activity_kind = None
                 self._primary_activity_label = None
+                self._primary_needs_attention = True
                 self._broadcast_catalog_upsert_locked(self._wire_session())
                 self._cond.notify_all()
 
@@ -925,11 +1004,288 @@ class FakeDaemon:
                         daemon.created_sessions.append(wire)
                     self._send_json(200, {"session": wire, "seq": 1})
                     return
-                if path != f"/api/v1/sessions/{daemon.session_id}/commands":
-                    self._send_json(404, {"error": "not found"})
+                if path.startswith("/api/v1/sessions/"):
+                    rest = path[len("/api/v1/sessions/") :]
+                    parts = rest.split("/")
+                    if len(parts) == 2:
+                        sid = urllib.parse.unquote(parts[0])
+                        action = parts[1]
+                        if action == "triage":
+                            self._handle_triage(sid, body)
+                            return
+                        if action == "stop":
+                            self._handle_stop(sid, body)
+                            return
+                        if action == "archive":
+                            self._handle_archive(sid, body)
+                            return
+                        if action == "fork":
+                            self._handle_fork(sid, body)
+                            return
+                        if action == "commands":
+                            self._handle_commands(sid, body)
+                            return
+                self._send_json(404, {"error": "not found"})
+
+            def _handle_triage(self, sid: str, body: dict[str, Any]) -> None:
+                na = body.get("needs_attention")
+                if not isinstance(na, bool):
+                    self._send_json(422, {"error": "needs_attention must be a boolean"})
                     return
                 with daemon._lock:
-                    status, payload = daemon._execute_command_locked(body)
+                    if sid == daemon.session_id:
+                        if daemon._primary_status == "archived":
+                            self._send_json(409, {"error": "session is archived"})
+                            return
+                        daemon._primary_needs_attention = False if daemon._primary_archived else na
+                        wire = daemon._wire_session()
+                    elif sid in daemon._extra_sessions:
+                        sess = daemon._extra_sessions[sid]
+                        if sess.get("status") == "archived":
+                            self._send_json(409, {"error": "session is archived"})
+                            return
+                        sess["needs_attention"] = False if sess.get("archived") else na
+                        sess["updated_at"] = int(time.time())
+                        wire = dict(sess)
+                    else:
+                        self._send_json(404, {"error": "session not found"})
+                        return
+                    daemon.triage_requests.append({"session_id": sid, "needs_attention": na})
+                    daemon._broadcast_catalog_upsert_locked(wire)
+                self._send_json(200, {"session": wire})
+
+            def _handle_stop(self, sid: str, body: dict[str, Any]) -> None:
+                with daemon._lock:
+                    if sid == daemon.session_id:
+                        if daemon._primary_status == "archived":
+                            self._send_json(409, {"error": "session is archived"})
+                            return
+                        daemon._aborted = True
+                        daemon._active = False
+                        if daemon._active_gate is not None:
+                            daemon._active_gate.set()
+                        daemon._docs["live"] = {}
+                        daemon._primary_attention = "idle"
+                        daemon._primary_activity_kind = None
+                        daemon._primary_activity_label = None
+                        daemon._primary_needs_attention = not daemon._primary_archived
+                        wire = daemon._wire_session()
+                    elif sid in daemon._extra_sessions:
+                        sess = daemon._extra_sessions[sid]
+                        if sess.get("status") == "archived":
+                            self._send_json(409, {"error": "session is archived"})
+                            return
+                        sess["active"] = False
+                        sess["attention"] = "idle"
+                        sess["activity_kind"] = None
+                        sess["activity_label"] = None
+                        sess["needs_attention"] = not bool(sess.get("archived"))
+                        sess["updated_at"] = int(time.time())
+                        wire = dict(sess)
+                    else:
+                        self._send_json(404, {"error": "session not found"})
+                        return
+                    daemon.stop_requests.append({"session_id": sid, "reason": body.get("reason")})
+                    daemon._broadcast_catalog_upsert_locked(wire)
+                self._send_json(200, {"session": wire})
+
+            def _handle_archive(self, sid: str, body: dict[str, Any]) -> None:
+                archived = body.get("archived", True)
+                stop = bool(body.get("stop", body.get("force", False)))
+                if not isinstance(archived, bool):
+                    self._send_json(422, {"error": "archived must be a boolean"})
+                    return
+                with daemon._lock:
+                    if sid == daemon.session_id:
+                        busy = daemon._active
+                        if archived and busy and not stop:
+                            self._send_json(409, {"error": "session_busy"})
+                            return
+                        if archived:
+                            if busy:
+                                daemon._aborted = True
+                                daemon._active = False
+                                if daemon._active_gate is not None:
+                                    daemon._active_gate.set()
+                            daemon._primary_archived = True
+                            daemon._primary_needs_attention = False
+                            daemon._primary_loaded = False
+                            daemon._primary_attention = "idle"
+                            daemon._primary_activity_kind = None
+                            daemon._primary_activity_label = None
+                        else:
+                            daemon._primary_archived = False
+                            daemon._primary_needs_attention = True
+                        wire = daemon._wire_session()
+                    elif sid in daemon._extra_sessions:
+                        sess = daemon._extra_sessions[sid]
+                        busy = bool(sess.get("active"))
+                        if archived and busy and not stop:
+                            self._send_json(409, {"error": "session_busy"})
+                            return
+                        if archived:
+                            sess["active"] = False
+                            if sess.get("status") != "quarantined":
+                                sess["attention"] = "archived"
+                            sess["activity_kind"] = None
+                            sess["activity_label"] = None
+                            sess["archived"] = True
+                            sess["needs_attention"] = False
+                            sess["loaded"] = False
+                        else:
+                            if sess.get("status") == "archived":
+                                self._send_json(409, {"error": "session is archived"})
+                                return
+                            sess["archived"] = False
+                            if sess.get("status") != "quarantined":
+                                sess["attention"] = "idle"
+                            sess["needs_attention"] = True
+                        sess["updated_at"] = int(time.time())
+                        wire = dict(sess)
+                    else:
+                        self._send_json(404, {"error": "session not found"})
+                        return
+                    daemon.archive_requests.append(
+                        {"session_id": sid, "archived": archived, "stop": stop}
+                    )
+                    daemon._broadcast_catalog_upsert_locked(wire)
+                self._send_json(200, {"session": wire})
+
+            def _handle_fork(self, sid: str, body: dict[str, Any]) -> None:
+                cwd = body.get("cwd")
+                if not isinstance(cwd, str) or not cwd.startswith("/"):
+                    self._send_json(422, {"error": "cwd must be an absolute path"})
+                    return
+                if not os.path.isdir(cwd):
+                    self._send_json(422, {"error": "workspace directory does not exist"})
+                    return
+                with daemon._lock:
+                    if sid == daemon.session_id:
+                        src_title = daemon._primary_title
+                        src_entries = json.loads(json.dumps(daemon._entries))
+                        src_env = "host"
+                    elif sid in daemon._extra_sessions:
+                        src = daemon._extra_sessions[sid]
+                        src_title = src.get("title")
+                        src_entries = json.loads(json.dumps(daemon._extra_entries.get(sid, [])))
+                        src_env = src.get("env_id") or "host"
+                    else:
+                        self._send_json(404, {"error": "not found"})
+                        return
+                    new_sid = body.get("session_id") or f"fork-{secrets.token_hex(4)}"
+                    env_id = body.get("env_id") or src_env
+                    title = body["title"] if "title" in body else src_title
+                    daemon.fork_requests.append(
+                        {"source_session_id": sid, "new_session_id": new_sid, "cwd": cwd}
+                    )
+                wire = daemon.add_session(
+                    new_sid,
+                    cwd=cwd,
+                    env_id=env_id,
+                    title=title,
+                    attention="idle",
+                    needs_attention=True,
+                    archived=False,
+                    loaded=True,
+                    cwd_exists=True,
+                    entries=src_entries,
+                )
+                self._send_json(200, {"session": wire, "seq": max(1, len(src_entries))})
+
+            def _handle_commands(self, sid: str, body: dict[str, Any]) -> None:
+                with daemon._lock:
+                    if sid == daemon.session_id:
+                        if daemon._primary_status == "archived":
+                            self._send_json(409, {"error": "session is archived"})
+                            return
+                        wire = daemon._wire_session()
+                        if not wire.get("cwd_exists", True) and body.get("command") in (
+                            "submit",
+                            "fork_and_submit",
+                            "user_shell",
+                            "compact",
+                        ):
+                            self._send_json(409, {"error": "cwd_missing"})
+                            return
+                        if daemon._primary_archived:
+                            daemon._primary_archived = False
+                            daemon._primary_loaded = True
+                            daemon._primary_needs_attention = True
+                            daemon._broadcast_catalog_upsert_locked(daemon._wire_session())
+                        status, payload = daemon._execute_command_locked(body)
+                    elif sid in daemon._extra_sessions:
+                        sess = daemon._extra_sessions[sid]
+                        if sess.get("status") == "archived":
+                            self._send_json(409, {"error": "session is archived"})
+                            return
+                        if not sess.get("cwd_exists", True) and body.get("command") in (
+                            "submit",
+                            "fork_and_submit",
+                            "user_shell",
+                            "compact",
+                        ):
+                            self._send_json(409, {"error": "cwd_missing"})
+                            return
+                        if sess.get("archived"):
+                            sess["archived"] = False
+                            sess["loaded"] = True
+                            sess["attention"] = "idle"
+                            sess["needs_attention"] = True
+                            sess["updated_at"] = int(time.time())
+                            daemon._broadcast_catalog_upsert_locked(dict(sess))
+                        # Minimal submit handler for extra/forked sessions in PTY tests
+                        req_id = body.get("request_id", "r")
+                        cmd = body.get("command")
+                        args = body.get("args") or {}
+                        if cmd == "submit" and args.get("type") == "input":
+                            text = extract_content_text(args.get("content"))
+                            entries = daemon._extra_entries.setdefault(sid, [])
+                            seq = daemon._extra_seq.get(sid, 1) + 1
+                            daemon._extra_seq[sid] = seq
+                            next_id = len(entries) + 1
+                            user_entry = {
+                                "id": str(next_id),
+                                "conversation_id": "1",
+                                "seq": seq,
+                                "kind": "user",
+                                "data": {"content": [{"type": "text", "text": text}]},
+                                "created_at": int(time.time()),
+                            }
+                            asst_entry = {
+                                "id": str(next_id + 1),
+                                "conversation_id": "1",
+                                "seq": seq + 1,
+                                "kind": "assistant",
+                                "data": {"content": [{"type": "text", "text": f"Forked reply: {text}"}]},
+                                "created_at": int(time.time()),
+                            }
+                            entries.extend([user_entry, asst_entry])
+                            daemon._extra_seq[sid] = seq + 1
+                            daemon._broadcast_locked(
+                                "commit",
+                                str(seq + 1),
+                                {
+                                    "version": 1,
+                                    "session_id": sid,
+                                    "conversation_id": "1",
+                                    "prev_seq": seq - 1,
+                                    "seq": seq + 1,
+                                    "appended_entries": [user_entry, asst_entry],
+                                    "doc_ops": {"live": [["replace", {}]]},
+                                },
+                            )
+                            status, payload = 200, {
+                                "version": 1,
+                                "request_id": req_id,
+                                "seq": seq + 1,
+                                "submission_id": f"sub-{seq}",
+                                "status": "done",
+                            }
+                        else:
+                            status, payload = 422, {"error": f"unsupported command: {cmd}"}
+                    else:
+                        self._send_json(404, {"error": "not found"})
+                        return
                 self._send_json(status, payload)
 
             def _write_chunk(self, text: str) -> None:

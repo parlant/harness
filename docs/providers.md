@@ -33,6 +33,70 @@ LaunchAgent plist, or `accounts.json`. This is OS-user protection, not a
 keychain or a sandbox for tools running as the same user. Revoke old keys in
 the provider dashboard when rotating them.
 
+## Named OpenAI-compatible providers
+
+The daemon reads **`<data_dir>/openai-compatible.json` at startup**. This is an
+optional, credential-free catalog. It is separate from `providers.json`,
+`accounts.json`, and `extensions.json`; it also works with `--no-extensions`.
+The daemon rejects malformed files instead of switching to another provider.
+
+Start with the version-1 [example catalog](../examples/providers/openai-compatible.json)
+and replace the example endpoint and models with your actual provider details. The `providers` object maps provider IDs to a `name`, HTTPS
+`base_url` (include `/v1` if needed), and a `models` object keyed by exact model
+IDs. The daemon appends `/chat/completions`. Provider IDs are lowercase ASCII
+names (up to 32 characters, starting with a letter, with digits, `-` or `_`
+allowed); stock IDs and their hyphen aliases are reserved. The file must be a
+regular file and not group- or world-writable. Each listed model supports
+Chat Completions SSE and tool calls. The declared output limit caps
+`max_tokens`; `reasoning_effort` is sent only for models marked as supporting
+it. Prices are USD per million tokens and are used for **estimated** usage
+costs, not billing verification.
+
+Models appear in `hi /model` and the daemon catalog even before a key is
+stored. Saving a key does not change the default or the current conversation.
+The canonical identity is `provider:model-id`, including the model ID's exact
+case and any slashes. The daemon uses only the provider's active vault alias;
+it ignores shell keys, `providers.json` credentials, and other providers'
+keys. There is no alternate dispatch on failure or automatic replay of an
+interrupted named-provider attempt. Use `/continue` to make a new attempt
+once the problem is fixed. Removing a provider makes the key profiles inert;
+it does not delete them. A release without named-provider support cannot open
+an API-key vault containing named profiles; plan rollback before adding the
+first named key. Use a new provider ID for a different service or
+trust boundary rather than repointing an ID that has keys saved.
+
+### Web settings
+
+Open **Providers** (`/settings/providers`) from Workspaces, Inbox, or a
+conversation. Owners can add a named endpoint or edit a saved provider's
+name and model catalog. The form uses the exact model IDs as JSON object keys
+and includes an example entry for new providers. The daemon validates the same
+schema as at boot, rejects stale edits, and atomically writes the catalog for
+the next restart. No requests go to the provider when saving. An existing
+provider ID cannot be repointed through the web editor; add a new ID for a
+new endpoint. Stock endpoint configuration and MultiCodex are not edited here.
+
+Use **Keys & accounts** to save or switch a write-only API key profile after
+the provider is registered. In a conversation, **Provider** filters the model
+list; only choosing a **Model** changes the session's stored model ID.
+
+### Configure a named provider
+
+1. Save your catalog to `~/.local/share/h/openai-compatible.json` (or the
+   daemon's configured data directory). If the file already exists, merge
+   your provider under `providers` rather than replacing other entries.
+2. Validate it with `h-daemon --data-dir "$HOME/.local/share/h" --check-config`,
+   then restart the daemon when idle. If upgrading the release, follow
+   [local daemon management](hi/management.md#install-for-use-in-any-project).
+3. In `hi`, run `/key set example-router default` with your actual provider ID
+   and paste the key into the **masked prompt**. Then select the model with
+   `/model`, for example `example-router:vendor/Example-Vision`. If another
+   alias is already active, choose explicitly with `/key use example-router default`.
+
+Do not put the key in the command line, the catalog, or the transcript. No
+restart is needed for key changes. The daemon host must be able to reach the
+configured HTTPS endpoint and trust its TLS certificate.
+
 ## H-owned settings
 
 `providers.json` must be a regular file (not a symlink) with no group or other

@@ -103,6 +103,58 @@ defmodule H.CatalogTest do
     end
   end
 
+  describe "set_triage/3" do
+    test "persists and broadcasts validated tags without changing attention or archive state", %{
+      data_dir: data_dir,
+      table: table,
+      server: server
+    } do
+      pubsub = Module.concat(server, PubSub)
+      start_supervised!({Registry, keys: :duplicate, name: pubsub})
+      opts = [data_dir: data_dir, name: server, table: table, pubsub: pubsub]
+      start_supervised!({Catalog, opts})
+      Registry.register(pubsub, :catalog, nil)
+
+      assert {:ok, %{tags: []}} =
+               Catalog.put_session(server, %{session_id: "tagged", cwd: data_dir, archived: true})
+
+      assert_receive {:catalog_frame, seq, _}
+
+      assert {:error, "expected needs_attention or tags"} =
+               Catalog.set_triage(server, "tagged", %{})
+
+      assert {:error, _} = Catalog.set_triage(server, "tagged", %{tags: ["bad,tag"]})
+      assert {:error, _} = Catalog.set_triage(server, "tagged", %{tags: [42]})
+
+      assert {:error, _} =
+               Catalog.set_triage(server, "tagged", %{tags: List.duplicate("tag", 33)})
+
+      assert %{seq: ^seq} = Catalog.snapshot(server)
+
+      assert {:ok, %{tags: ["ops", "on call"], archived: true, needs_attention: false}} =
+               Catalog.set_triage(server, "tagged", %{"tags" => [" ops ", "on call", "ops"]})
+
+      assert_receive {:catalog_frame, next_seq, json}
+      assert next_seq == seq + 1
+
+      assert %{
+               "type" => "upsert",
+               "session" => %{"tags" => ["ops", "on call"], "loaded" => false}
+             } =
+               JSON.decode!(json)
+
+      stop_supervised!(Catalog)
+      start_supervised!({Catalog, opts})
+      assert {:ok, %{tags: ["ops", "on call"]}} = Catalog.get_session("tagged", table)
+
+      assert {:ok, %{tags: ["ops", "on call"]}} =
+               Catalog.report_runtime(server, "tagged", %{title: "Changed", tags: ["ignored"]})
+
+      assert {:ok, %{tags: [], archived: true, needs_attention: false}} =
+               Catalog.set_triage(server, "tagged", %{tags: []})
+    end
+  end
+
   describe "list_sessions/1" do
     test "returns entries directly from ETS sorted by updated_at descending", %{
       data_dir: data_dir,

@@ -56,6 +56,26 @@ defmodule HWeb.Backend.InVM do
   end
 
   @impl HWeb.Backend
+  def triage_session(session_id, params, opts \\ []) do
+    H.Daemon.triage_session(session_id, params, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
+  def stop_session(session_id, params \\ %{}, opts \\ []) do
+    H.Daemon.stop_session(session_id, params, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
+  def archive_session(session_id, params \\ %{}, opts \\ []) do
+    H.Daemon.archive_session(session_id, params, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
+  def fork_session(session_id, params, opts \\ []) do
+    H.Daemon.fork_session(session_id, params, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
   def subscribe_sessions(subscriber_pid, opts \\ []) do
     resolved = daemon_opts(opts)
 

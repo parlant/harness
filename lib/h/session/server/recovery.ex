@@ -189,6 +189,7 @@ defmodule H.Session.Server.Recovery do
         subagent_watches: %{},
         ephemeral: %{},
         held_leases: MapSet.new(),
+        workspace_waits: %{},
         replay_rings: %{},
         ring_base_seq: %{},
         conv_last_seq: Map.new(Map.keys(conversations), fn cid -> {cid, bootstrap.seq || 0} end),
@@ -263,7 +264,9 @@ defmodule H.Session.Server.Recovery do
       state.tasks
       |> Map.values()
       |> Enum.filter(fn t ->
-        t.status == "running" or (UserShell.unsafe_task?(t) and t.status == "pending")
+        t.status == "running" or
+          (UserShell.unsafe_task?(t) and t.status == "pending" and
+             t.checkpoint["phase"] != "workspace_wait")
       end)
       |> Enum.sort_by(& &1.id)
 
@@ -409,7 +412,15 @@ defmodule H.Session.Server.Recovery do
         waiting_subagent_effects ++ Tools.next_tool_spawn_effects(cid, child_ids, state)
       end)
 
-    inference_effects ++ tool_effects
+    shell_effects =
+      tasks
+      |> Enum.filter(
+        &(&1.kind == "user_shell" and &1.status == "pending" and
+            &1.checkpoint["phase"] == "workspace_wait")
+      )
+      |> Enum.map(&{:spawn_user_shell, &1.checkpoint["conversation_id"], &1.id})
+
+    inference_effects ++ tool_effects ++ shell_effects
   end
 
   def stage_worker_crashed(tid, attempt_id, reason, state) do
@@ -585,7 +596,7 @@ defmodule H.Session.Server.Recovery do
     end
   end
 
-  defp build_docs_map(conversations, raw_docs, default_model) do
+  def build_docs_map(conversations, raw_docs, default_model) do
     Enum.reduce(Map.keys(conversations), %{}, fn cid, acc ->
       conv_docs = %{
         "agent" =>
@@ -645,12 +656,12 @@ defmodule H.Session.Server.Recovery do
     end)
   end
 
-  defp resolve_default_model(model, _provider_mod, _provider_config)
-       when is_binary(model) and model != "" do
+  def resolve_default_model(model, _provider_mod, _provider_config)
+      when is_binary(model) and model != "" do
     model
   end
 
-  defp resolve_default_model(_nil, provider_mod, provider_config) do
+  def resolve_default_model(_nil, provider_mod, provider_config) do
     cond do
       function_exported?(provider_mod, :default_model, 1) ->
         provider_mod.default_model(provider_config)

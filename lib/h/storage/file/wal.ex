@@ -40,6 +40,16 @@ defmodule H.Storage.File.Wal do
     end
   end
 
+  def replay_read_only(fd, state, snapshot_seq) do
+    with {:ok, file_size} <- :file.position(fd, :eof),
+         {:ok, bin} <- read_log_bytes(fd, file_size) do
+      {next_state, _valid_offset, _replayed_commits} =
+        scan_frames(bin, 0, state, snapshot_seq, 0)
+
+      {:ok, next_state}
+    end
+  end
+
   def encode_frame(next_id, accepted_batches) do
     frame = %{
       "v" => @frame_version,

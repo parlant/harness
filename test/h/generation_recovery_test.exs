@@ -270,6 +270,191 @@ defmodule H.GenerationRecoveryTest do
     end
   end
 
+  describe "provider error retries" do
+    test "keeps 429 retries active, explains the error, and increases the durable backoff" do
+      gate2 = make_ref()
+      gate3 = make_ref()
+      error = %{code: "http_429", message: "Monthly spending cap reached", retryable: true}
+
+      %{opts: opts, cwd: cwd, fake: fake} =
+        start_env(
+          [
+            {:error, error},
+            {:gate, [], self(), gate2},
+            {:gate, [], self(), gate3, %{content: [%{type: "text", text: "Recovered"}]}}
+          ],
+          retry_limit: 2,
+          retry_backoff_ms: 200
+        )
+
+      {:ok, _} = Daemon.create_session(%{"session_id" => "s-429", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "s-429",
+          cmd("rate", "submit", "1", %{"type" => "input", "content" => "Work"}),
+          opts
+        )
+
+      retry1 = wait_for_retry("s-429", opts, 1)
+      assert retry1["code"] == "http_429"
+      assert retry1["message"] == error.message
+      assert retry1["delay_ms"] == 200
+      assert retry1["max_attempts"] == 2
+      assert retry1["status"] == "waiting"
+
+      assert {:ok,
+              %{
+                session: %{
+                  active: true,
+                  attention: "retrying",
+                  activity_kind: "retry",
+                  needs_attention: false
+                }
+              }} =
+               Daemon.get_session_detail("s-429", opts)
+
+      assert_receive {:gate_entered, ^gate2, pid2}, 2_000
+
+      assert {:ok, {:snapshot, _, bin}} =
+               Daemon.subscribe_conversation("s-429", "1", self(), nil, opts)
+
+      assert get_in(JSON.decode!(bin), ["docs", "live", "generation", "retry", "status"]) ==
+               "running"
+
+      send(pid2, {:release, gate2, {:error, error}})
+
+      retry2 = wait_for_retry("s-429", opts, 2)
+      assert retry2["delay_ms"] == 400
+      assert retry2["until"] > retry1["until"]
+      assert_receive {:gate_entered, ^gate3, pid3}, 2_000
+      send(pid3, {:release, gate3})
+
+      wait_until(fn ->
+        {:ok, %{session: session}} = Daemon.get_session_detail("s-429", opts)
+        session.attention == "idle" and session.needs_attention
+      end)
+
+      assert {:ok, {:snapshot, _, bin}} =
+               Daemon.subscribe_conversation("s-429", "1", self(), nil, opts)
+
+      refute JSON.decode!(bin)["docs"]["live"]["generation"]
+      assert length(Fake.requests(fake)) == 3
+    end
+
+    test "honors provider delay and restores the same pending retry across reopen" do
+      gate = make_ref()
+      error = %{code: "http_429", message: "Rate limited", retryable: true, retry_after_ms: 500}
+
+      %{opts: opts, cwd: cwd, fake: fake} =
+        start_env(
+          [
+            fn _, _ -> {:error, error} end,
+            {:gate, [], self(), gate, %{content: [%{type: "text", text: "Recovered"}]}}
+          ],
+          retry_backoff_ms: 20
+        )
+
+      {:ok, _} = Daemon.create_session(%{"session_id" => "s-reopen-retry", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "s-reopen-retry",
+          cmd("rate", "submit", "1", %{"type" => "input", "content" => "Work"}),
+          opts
+        )
+
+      retry = wait_for_retry("s-reopen-retry", opts, 1)
+      assert retry["delay_ms"] == 500
+      [sup] = DynamicSupervisor.which_children(opts[:runtime_sup]) |> Enum.map(&elem(&1, 1))
+      :ok = DynamicSupervisor.terminate_child(opts[:runtime_sup], sup)
+
+      assert {:ok, %{session: %{active: true, attention: "retrying", next_wake_at: deadline}}} =
+               Daemon.get_session_detail("s-reopen-retry", opts)
+
+      assert deadline == retry["until"]
+      assert wait_for_retry("s-reopen-retry", opts, 1) == retry
+      assert length(Fake.requests(fake)) == 1
+      assert_receive {:gate_entered, ^gate, pid}, 2_000
+      send(pid, {:release, gate})
+    end
+
+    test "exponential delay is capped" do
+      assert H.Session.Server.Generation.retry_delay_ms(%{retry_backoff_ms: 2_000}, 1) == 2_000
+      assert H.Session.Server.Generation.retry_delay_ms(%{retry_backoff_ms: 2_000}, 2) == 4_000
+      assert H.Session.Server.Generation.retry_delay_ms(%{retry_backoff_ms: 2_000}, 100) == 60_000
+    end
+
+    test "exhausts its retry budget with the provider explanation intact" do
+      error = %{code: "http_429", message: "Monthly spending cap reached", retryable: true}
+
+      %{opts: opts, cwd: cwd, fake: fake} =
+        start_env(List.duplicate({:error, error}, 3), retry_limit: 2, retry_backoff_ms: 10)
+
+      {:ok, _} = Daemon.create_session(%{"session_id" => "s-exhaust", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "s-exhaust",
+          cmd("rate", "submit", "1", %{"type" => "input", "content" => "Work"}),
+          opts
+        )
+
+      failure =
+        wait_until(fn ->
+          {:ok, {:snapshot, _, bin}} =
+            Daemon.subscribe_conversation("s-exhaust", "1", self(), nil, opts)
+
+          get_in(JSON.decode!(bin), ["docs", "live", "run_failure"])
+        end)
+
+      assert failure["message"] =~ error.message
+      assert failure["message"] =~ "Automatic retries exhausted"
+      assert failure["retry_count"] == 2
+
+      assert {:ok, %{session: %{active: false, attention: "error", needs_attention: true}}} =
+               Daemon.get_session_detail("s-exhaust", opts)
+
+      assert length(Fake.requests(fake)) == 3
+    end
+
+    test "abort during backoff prevents another provider dispatch" do
+      %{opts: opts, cwd: cwd, fake: fake} =
+        start_env([{:error, %{code: "http_429", message: "Rate limited", retryable: true}}],
+          retry_backoff_ms: 60_000
+        )
+
+      {:ok, _} = Daemon.create_session(%{"session_id" => "s-abort-retry", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "s-abort-retry",
+          cmd("rate", "submit", "1", %{"type" => "input", "content" => "Work"}),
+          opts
+        )
+
+      wait_for_retry("s-abort-retry", opts, 1)
+      {:ok, _} = Daemon.execute_command("s-abort-retry", cmd("abort", "abort", "1", %{}), opts)
+      [{server, _}] = Registry.lookup(opts[:registry], {:session, "s-abort-retry"})
+      state = :sys.get_state(server)
+      [task] = Map.values(state.tasks)
+      send(server, {:wake_task, task.id})
+
+      assert {:ok, %{session: %{active: false}}} =
+               Daemon.get_session_detail("s-abort-retry", opts)
+
+      assert length(Fake.requests(fake)) == 1
+    end
+  end
+
+  defp wait_for_retry(sid, opts, attempt) do
+    wait_until(fn ->
+      {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation(sid, "1", self(), nil, opts)
+      retry = get_in(JSON.decode!(bin), ["docs", "live", "generation", "retry"])
+      if retry && retry["attempt"] == attempt && retry["status"] == "waiting", do: retry
+    end)
+  end
+
   describe "clean close vs continue edge cases" do
     test "clean close resets running task to pending without charging restarts or retries" do
       gate = make_ref()

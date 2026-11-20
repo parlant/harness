@@ -82,8 +82,8 @@ defmodule HWeb.AccountsLive do
   def render(assigns) do
     ~H"""
     <main id="account-settings" class="workspace-main">
-      <.link navigate={~p"/"}>Workspaces</.link>
-      <h1>Provider accounts</h1>
+      <.link navigate={~p"/settings/providers"}>← Providers</.link>
+      <h1>Provider keys &amp; accounts</h1>
       <h2>API-key profiles</h2>
       <p>Keys are write-only. Saving the first alias selects it for this provider.</p>
       <form id="save-api-key" action={~p"/settings/accounts/keys"} method="post" autocomplete="off">

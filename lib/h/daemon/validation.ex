@@ -103,6 +103,7 @@ defmodule H.Daemon.Validation do
                  {:task_id, :pos_int, required: false, nullable: true}
                ]}, required: false, nullable: true},
              {:role, :string, required: false, nullable: true},
+             {:tags, :session_tags},
              {:agent, :map, required: false},
              {:request_id, :non_empty_string, required: false}
            ]),
@@ -141,6 +142,7 @@ defmodule H.Daemon.Validation do
                  "fork_and_submit",
                  "configure",
                  "abort",
+                 "workspace_wait",
                  "withdraw",
                  "rename",
                  "user_shell",
@@ -237,6 +239,40 @@ defmodule H.Daemon.Validation do
     end
   end
 
+  def validate_fork_session_params(params) when is_map(params) do
+    normalized_params =
+      drop_blank_optional(params, [
+        "session_id",
+        :session_id,
+        "env_id",
+        :env_id,
+        "conversation_id",
+        :conversation_id,
+        "at_entry_id",
+        :at_entry_id
+      ])
+
+    with {:ok, validated} <-
+           Schema.validate_map(normalized_params, [
+             {:session_id, :session_id, required: false},
+             {:env_id, :non_empty_string, required: false},
+             {:cwd, :abs_path, required: true},
+             {:conversation_id, :pos_int, required: false},
+             {:at_entry_id, :pos_int, required: false},
+             {:title, :string, required: false, nullable: true}
+           ]),
+         {:ok, validated} <- normalize_optional_title(validated) do
+      {:ok, validated}
+    else
+      {:error, reason} when is_binary(reason) -> {:error, {:bad_request, reason}}
+      {:error, _} = err -> err
+    end
+  end
+
+  def parse_optional_strict_bool(val, default, field) do
+    parse_strict_bool(val, default, field)
+  end
+
   # Internal command & query validators
 
   defp parse_order(nil), do: {:ok, :desc}
@@ -326,6 +362,14 @@ defmodule H.Daemon.Validation do
       {:instructions, :string, required: false, nullable: true},
       {:tools, {:list, :string}, required: false},
       {:expected_seq, {:int, min: 0}, required: false, nullable: true}
+    ])
+  end
+
+  defp validate_command_args("workspace_wait", raw_args) do
+    Schema.validate_map(raw_args, [
+      {:action, {:enum, ["cancel", "stop_holder"]}, required: true},
+      {:task_id, :pos_int, required: true},
+      {:lease_id, :non_empty_string, required: true}
     ])
   end
 

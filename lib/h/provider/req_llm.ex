@@ -11,7 +11,8 @@ defmodule H.Provider.ReqLLM do
   @behaviour H.Provider
 
   alias H.{Context, Credentials}
-  alias H.Provider.{ReqLLM.Catalog, ReqLLM.CodexPool, Settings, VertexExpress}
+  alias H.Provider.{Compatible, ReqLLM.Catalog, ReqLLM.CodexPool, ReqLLM.CompatibleChat}
+  alias H.Provider.{Settings, VertexExpress}
   alias ReqLLM.{StreamEvent, StreamResponse}
   alias ReqLLM.StreamResponse.MetadataHandle
 
@@ -41,6 +42,13 @@ defmodule H.Provider.ReqLLM do
 
     config = if Map.has_key?(config, :accounts_mode), do: config, else: attempt_config(config)
 
+    case Compatible.provider_for_model(config[:compatible_providers] || %{}, model_spec) do
+      {id, provider, model_id} -> stream_compatible(config, request, id, provider, model_id, emit)
+      nil -> stream_stock(config, request, model_spec, emit)
+    end
+  end
+
+  defp stream_stock(config, request, model_spec, emit) do
     case Catalog.resolve_model(model_spec) do
       {:ok, %LLMDB.Model{provider: :openai_codex} = model}
       when config.accounts_mode == :managed ->
@@ -67,6 +75,63 @@ defmodule H.Provider.ReqLLM do
     end
   end
 
+  defp stream_compatible(config, request, id, provider, model_id, emit) do
+    with %LLMDB.Model{} = model <- provider.models[model_id] || :unknown_model,
+         {:ok, %{api_key: key}} <- H.Accounts.resolve_api_key(config[:accounts], id) do
+      {context, tools} = build_req_llm_inputs(request)
+      limit = model.limits.output
+
+      opts =
+        [
+          named_key: %Credentials.Redacted{value: key},
+          base_url: provider.base_url,
+          receive_timeout: receive_timeout(config)
+        ]
+        |> maybe_put_tools(tools)
+        |> maybe_put_max_tokens(request)
+        |> Keyword.update(:max_tokens, limit, &min(&1, limit))
+
+      opts =
+        if model.capabilities.reasoning.enabled,
+          do: maybe_put_reasoning_effort(opts, request, config),
+          else: opts
+
+      with {:ok, stream} <- CompatibleChat.stream(model, context, opts) do
+        # The fixed codec tag is never the public provider or billing identity.
+        consume_stream(stream, model, config, fn
+          %{type: :start} = event -> emit.(%{event | provider: id, model: model_id})
+          event -> emit.(event)
+        end)
+      else
+        {:error, _} -> {:error, normalize_error(:chat_stream_failed)}
+      end
+    else
+      :unknown_model ->
+        {:error,
+         %{
+           code: "invalid_model",
+           message: "Model is not registered for this provider",
+           retryable: false
+         }}
+
+      :not_configured ->
+        {:error,
+         %{
+           code: "missing_provider_credential",
+           message: "No daemon key for #{id}. Use /key set #{id} <alias>, then /continue.",
+           retryable: false
+         }}
+
+      {:error, _} ->
+        {:error,
+         %{
+           code: "provider_credentials_unavailable",
+           message: "Daemon credential store unavailable",
+           retryable: false
+         }}
+    end
+  end
+
   @impl H.Provider
   def list_models(config) when is_map(config), do: Catalog.list_models(config)
 
@@ -84,7 +149,11 @@ defmodule H.Provider.ReqLLM do
   def attempt_config(config), do: CodexPool.attempt_config(config)
 
   @doc false
-  def dispatch_limit(config, model), do: CodexPool.dispatch_limit(config, model)
+  def dispatch_limit(config, model) do
+    if Compatible.provider_for_model(config[:compatible_providers] || %{}, model),
+      do: 1,
+      else: CodexPool.dispatch_limit(config, model)
+  end
 
   # Request & stream option preparation
 
@@ -102,18 +171,21 @@ defmodule H.Provider.ReqLLM do
     end
   end
 
-  defp build_stream_opts(config, request, model, req_tools, settings) do
-    receive_timeout =
+  defp receive_timeout(config) do
+    Map.get_lazy(config, :receive_timeout, fn ->
       Application.get_env(
         :req_llm,
         :stream_receive_timeout,
         Application.get_env(:req_llm, :receive_timeout, 300_000)
       )
+    end)
+  end
 
+  defp build_stream_opts(config, request, model, req_tools, settings) do
     with {:ok, cred_opts} <- resolve_credential_opts(config, model, settings) do
       opts =
         cred_opts
-        |> Keyword.put(:receive_timeout, Map.get(config, :receive_timeout, receive_timeout))
+        |> Keyword.put(:receive_timeout, receive_timeout(config))
         |> Keyword.put(:max_retries, 0)
         |> Keyword.put(:on_unsupported, Map.get(config, :on_unsupported, :ignore))
         |> maybe_put_tools(req_tools)
@@ -633,6 +705,10 @@ defmodule H.Provider.ReqLLM do
 
   # Error & value normalization
 
+  defp normalize_error(%ReqLLM.Error.API.Stream{cause: {:compatible_http_status, status}}) do
+    %{code: "http_#{status}", message: "Model router returned HTTP #{status}", retryable: false}
+  end
+
   defp normalize_error(%{code: code, message: message, retryable: retryable}) do
     %{
       code: to_string(code),
@@ -650,19 +726,18 @@ defmodule H.Provider.ReqLLM do
   end
 
   defp normalize_error(%ReqLLM.Error.API.Request{status: status, provider_code: pcode} = err) do
-    %{
-      code: to_string(pcode || (status && "http_#{status}") || "api_request_error"),
-      message: Credentials.sanitize(Exception.message(err)),
-      retryable: if(is_boolean(err.retryable), do: err.retryable, else: retryable_status?(status))
-    }
+    http_error(
+      status,
+      pcode,
+      if(status == 429, do: err.reason || Exception.message(err), else: Exception.message(err)),
+      if(is_boolean(err.retryable), do: err.retryable, else: retryable_status?(status)),
+      err.headers
+    )
   end
 
   defp normalize_error(%ReqLLM.Error.API.Response{status: status} = err) do
-    %{
-      code: to_string((status && "http_#{status}") || "api_response_error"),
-      message: Credentials.sanitize(Exception.message(err)),
-      retryable: retryable_status?(status)
-    }
+    code = if status, do: "http_#{status}", else: "api_response_error"
+    http_error(status, code, Exception.message(err), retryable_status?(status), [])
   end
 
   defp normalize_error(%ReqLLM.Error.API.Stream{cause: cause})
@@ -715,6 +790,42 @@ defmodule H.Provider.ReqLLM do
       message: reason |> inspect() |> Credentials.sanitize(),
       retryable: false
     }
+  end
+
+  defp http_error(status, provider_code, message, retryable, headers) do
+    message = Credentials.sanitize(to_string(message))
+
+    message =
+      if status == 429 do
+        "HTTP 429: provider rate limit or quota restriction. " <>
+          message <>
+          " Automatic retries use increasing waits. If a spending cap or quota is exhausted, raise the applicable limit, wait for its reset, or switch provider/project; retries cannot remove the restriction."
+      else
+        message
+      end
+
+    error = %{
+      code: to_string(provider_code || (status && "http_#{status}") || "api_request_error"),
+      message: message,
+      retryable: status == 429 or retryable
+    }
+
+    case retry_after_ms(headers) do
+      nil -> error
+      delay -> Map.put(error, :retry_after_ms, delay)
+    end
+  end
+
+  defp retry_after_ms(headers) do
+    case Req.Response.get_retry_after(Req.Response.new(headers: headers || [])) do
+      milliseconds when is_integer(milliseconds) and milliseconds >= 0 ->
+        min(milliseconds, 86_400_000)
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp retryable_status?(status) when status in [408, 429, 500, 502, 503, 504], do: true

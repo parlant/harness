@@ -27,7 +27,96 @@ defmodule H.Session.Supervisor do
   @doc "Starts the per-session supervisor wrapper."
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
-    GenServer.start_link(__MODULE__, opts)
+    session_id = Keyword.fetch!(opts, :session_id)
+    registry = Keyword.get(opts, :registry, H.Registry)
+
+    gen_opts =
+      if is_atom(registry) and not is_nil(registry) and Process.whereis(registry) != nil do
+        [name: {:via, Registry, {registry, {:session_supervisor, session_id}}}]
+      else
+        []
+      end
+
+    GenServer.start_link(__MODULE__, opts, gen_opts)
+  end
+
+  @doc """
+  Cleanly stops and unloads the per-session supervisor and its children from RAM
+  without quarantining the session in `H.Catalog`.
+  """
+  @spec stop_session(atom(), Supervisor.supervisor(), String.t()) :: :ok
+  def stop_session(registry, runtime_sup, session_id)
+      when is_atom(registry) and is_binary(session_id) do
+    if not is_nil(registry) and Process.whereis(registry) != nil do
+      server_pid =
+        case Registry.lookup(registry, {:session, session_id}) do
+          [{pid, _}] -> pid
+          [] -> nil
+        end
+
+      case Registry.lookup(registry, {:session_supervisor, session_id}) do
+        [{sup_pid, _}] when is_pid(sup_pid) ->
+          sup_ref = Process.monitor(sup_pid)
+          srv_ref = if is_pid(server_pid), do: Process.monitor(server_pid)
+
+          try do
+            DynamicSupervisor.terminate_child(runtime_sup, sup_pid)
+          catch
+            :exit, _ -> :ok
+          end
+
+          receive do
+            {:DOWN, ^sup_ref, :process, ^sup_pid, _} -> :ok
+          after
+            5_500 -> Process.demonitor(sup_ref, [:flush])
+          end
+
+          if srv_ref do
+            receive do
+              {:DOWN, ^srv_ref, :process, ^server_pid, _} -> :ok
+            after
+              1_000 -> Process.demonitor(srv_ref, [:flush])
+            end
+          end
+
+          await_registry_cleanup(registry, session_id, 50)
+
+        [] ->
+          if is_pid(server_pid) and Process.alive?(server_pid) do
+            srv_ref = Process.monitor(server_pid)
+
+            try do
+              H.Session.Server.close(server_pid, :shutdown)
+            catch
+              :exit, _ -> :ok
+            end
+
+            receive do
+              {:DOWN, ^srv_ref, :process, ^server_pid, _} -> :ok
+            after
+              5_500 -> Process.demonitor(srv_ref, [:flush])
+            end
+
+            await_registry_cleanup(registry, session_id, 50)
+          else
+            :ok
+          end
+      end
+    else
+      :ok
+    end
+  end
+
+  defp await_registry_cleanup(_registry, _session_id, 0), do: :ok
+
+  defp await_registry_cleanup(registry, session_id, attempts) do
+    if Registry.lookup(registry, {:session, session_id}) == [] and
+         Registry.lookup(registry, {:session_supervisor, session_id}) == [] do
+      :ok
+    else
+      Process.sleep(5)
+      await_registry_cleanup(registry, session_id, attempts - 1)
+    end
   end
 
   @impl true

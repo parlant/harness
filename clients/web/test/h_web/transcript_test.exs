@@ -37,6 +37,47 @@ defmodule HWeb.TranscriptTest do
     end
   end
 
+  describe "prepend_older_page/3" do
+    test "joins an older assistant tool call to the trailing result and emits one summary on the next reply" do
+      {:ok, [], snapshot} =
+        Transcript.apply_snapshot(Transcript.new(), %{
+          "seq" => 4,
+          "before_entry_id" => "4",
+          "entries" => [
+            %{id: 4, kind: "tool_result", data: %{tool_call_id: "call", content: "tool body"}}
+          ]
+        })
+
+      assert {[message], paged} =
+               Transcript.prepend_older_page(
+                 snapshot,
+                 [
+                   %{
+                     id: 2,
+                     kind: "assistant",
+                     data: %{text: "Checking", tool_calls: [%{id: "call"}]}
+                   }
+                 ],
+                 nil
+               )
+
+      assert message["id"] == "2"
+      assert paged.head_activity == nil
+      assert paged.tail_activity.id == "4"
+
+      assert {:ok, [activity, reply], finished} =
+               Transcript.apply_commit(paged, %{
+                 "seq" => 5,
+                 "appended_entries" => [%{id: 5, kind: "assistant", data: %{text: "Done"}}]
+               })
+
+      assert activity == %{"id" => "activity-4", "activity" => %{count: 1, status: :complete}}
+      assert reply["id"] == "5"
+      assert finished.tail_activity == nil
+      assert finished.reducer.entries == []
+    end
+  end
+
   describe "apply_commit/2 and apply_ephemeral/2" do
     test "applies sequential commits, detects gaps, and patches ephemeral live state without mutating committed_docs" do
       t0 = Transcript.new(session_id: "s1", conversation_id: "1")
