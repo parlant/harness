@@ -1,4 +1,5 @@
 use super::status::StatusLines;
+use super::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde::Deserialize;
 use serde_json::Value;
@@ -465,6 +466,7 @@ fn parse_binding_value(action: &str, value: &Value) -> Result<Vec<KeyCombo>, Str
 pub(super) struct UserConfig {
     pub keys: Preferences,
     pub status: StatusLines,
+    pub theme: Theme,
 }
 
 #[derive(Default, Deserialize)]
@@ -472,6 +474,7 @@ pub(super) struct UserConfig {
 struct UserSettings {
     status_lines: Option<Vec<String>>,
     status_lines_append: Vec<String>,
+    theme: Option<String>,
 }
 
 impl UserConfig {
@@ -490,9 +493,12 @@ impl UserConfig {
         };
         let status = StatusLines::compile(user.status_lines, user.status_lines_append)
             .map_err(|e| format!("{}: {e}", path.display()))?;
+        let theme = Theme::resolve(user.theme.as_deref())
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(Self {
             keys: Preferences::load(&data_dir.join("hi-keybindings.json"))?,
             status,
+            theme,
         })
     }
 }
@@ -831,5 +837,26 @@ mod tests {
         assert!(custom_help
             .iter()
             .any(|line| line.contains("(unbound)") && line.contains("suspend")));
+    }
+
+    #[test]
+    fn user_config_loads_theme_and_rejects_invalid_theme_without_clobbering() {
+        let dir = TempFile::new("theme_dir");
+        let data_dir = dir.path.parent().expect("temp dir");
+        let hi_json = data_dir.join("hi.json");
+
+        fs::write(&hi_json, r#"{ "theme": "light" }"#).unwrap();
+        let cfg = UserConfig::load(data_dir).expect("light theme loads");
+        assert_eq!(cfg.theme.name, "light");
+
+        fs::write(&hi_json, r#"{ "theme": "invalid-theme" }"#).unwrap();
+        let err = UserConfig::load(data_dir)
+            .err()
+            .expect("invalid theme fails");
+        assert!(err.contains("unknown theme"), "unexpected error: {err}");
+
+        fs::write(&hi_json, r#"{ "theme": "plain" }"#).unwrap();
+        let cfg2 = UserConfig::load(data_dir).expect("plain theme loads");
+        assert!(cfg2.theme.is_plain);
     }
 }

@@ -7,10 +7,12 @@ pub mod export;
 pub mod external;
 pub mod files;
 pub(crate) mod login;
+pub mod markdown;
 pub mod picker;
 pub mod preferences;
 pub mod screen;
 mod status;
 pub mod stream;
+pub mod theme;
 
 mod secret;

@@ -1,6 +1,9 @@
+use super::markdown::{diff_line_style, render_markdown_lines, StyledRow, StyledSpan};
+use super::theme::Theme;
 use crate::protocol::TranscriptEntry;
 use crate::render::{sanitize_single_line, sanitize_terminal_text};
 use crate::transcript::TranscriptState;
+use ratatui::style::Style;
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +20,24 @@ const COMPACT_CHARS: usize = 100;
 /// Guarantees no ANSI escape sequences, C0/C1 control characters, `\r`, `\t`, or
 /// embedded `\n` appear in any returned row.
 pub fn rows(state: &TranscriptState, tools_expanded: bool, thinking_expanded: bool) -> Vec<String> {
+    let theme = Theme::plain();
+    styled_rows(state, tools_expanded, thinking_expanded, &theme)
+        .into_iter()
+        .map(|row| row.plain_text())
+        .collect()
+}
+
+/// Renders committed transcript entries, live streaming generation/tools, queued
+/// inbox items, and run/compaction failures into styled, sanitized display rows.
+///
+/// All untrusted text is sanitized before styling so no raw ANSI/control
+/// sequences can appear inside any [`StyledSpan`].
+pub fn styled_rows(
+    state: &TranscriptState,
+    tools_expanded: bool,
+    thinking_expanded: bool,
+    theme: &Theme,
+) -> Vec<StyledRow> {
     let mut out = Vec::new();
 
     if state.has_more {
@@ -26,7 +47,10 @@ pub fn rows(state: &TranscriptState, tools_expanded: bool, thinking_expanded: bo
             .filter(|s| !s.is_empty())
             .map(|id| format!(" (before #{})", sanitize_single_line(id)))
             .unwrap_or_default();
-        out.push(format!("... earlier history available{before}"));
+        out.push(StyledRow::plain(
+            format!("... earlier history available{before}"),
+            theme.history_marker,
+        ));
     }
 
     let mut calls_by_id: HashMap<&str, (&str, &Value)> = HashMap::new();
@@ -62,6 +86,7 @@ pub fn rows(state: &TranscriptState, tools_expanded: bool, thinking_expanded: bo
             &live_ids,
             tools_expanded,
             thinking_expanded,
+            theme,
         );
     }
 
@@ -72,9 +97,10 @@ pub fn rows(state: &TranscriptState, tools_expanded: bool, thinking_expanded: bo
         &live_tools,
         tools_expanded,
         thinking_expanded,
+        theme,
     );
-    render_inbox(&mut out, state);
-    render_failure(&mut out, state);
+    render_inbox(&mut out, state, theme);
+    render_failure(&mut out, state, theme);
 
     out
 }
@@ -89,26 +115,54 @@ fn u64_at(val: &Value, key: &str) -> Option<u64> {
     val.get(key).and_then(Value::as_u64)
 }
 
-fn separate(out: &mut Vec<String>) {
+fn separate(out: &mut Vec<StyledRow>) {
     if !out.is_empty() {
-        out.push(String::new());
+        out.push(StyledRow::plain(String::new(), Style::default()));
     }
 }
 
-fn push_lines(out: &mut Vec<String>, raw: &str, prefix: &str) {
+fn push_lines_styled(out: &mut Vec<StyledRow>, raw: &str, prefix: &str, style: Style) {
     let safe = sanitize_terminal_text(raw).replace('\t', "   ");
     for line in safe.split('\n') {
-        out.push(format!("{prefix}{line}"));
+        out.push(StyledRow::plain(format!("{prefix}{line}"), style));
     }
 }
 
-fn push_preview(out: &mut Vec<String>, raw: &str, max_lines: usize, tail: bool, label: &str) {
+fn push_markdown(out: &mut Vec<StyledRow>, raw: &str, theme: &Theme, base_style: Style) {
+    out.extend(render_markdown_lines(raw, theme, base_style));
+}
+
+fn push_user_lines(out: &mut Vec<StyledRow>, raw: &str, theme: &Theme) {
+    let safe = sanitize_terminal_text(raw).replace('\t', "   ");
+    for line in safe.split('\n') {
+        let mut row = StyledRow::from_spans(vec![
+            StyledSpan::new("▌ ", theme.user_header),
+            StyledSpan::new(line, theme.user_text),
+        ]);
+        if !theme.is_plain && theme.user_text.bg.is_some() {
+            row = row.with_fill(theme.user_text);
+        }
+        out.push(row);
+    }
+}
+
+fn push_preview(
+    out: &mut Vec<StyledRow>,
+    raw: &str,
+    max_lines: usize,
+    tail: bool,
+    label: &str,
+    theme: &Theme,
+) {
     // Pick the rows before sanitizing, and clip before wrapping. A single
     // newline-free stdout line can otherwise dominate the entire redraw.
     let lines = raw.trim_end().lines();
     let omitted = lines.clone().count().saturating_sub(max_lines);
     if tail && omitted > 0 {
-        out.push(format!("  ... ({omitted} earlier lines)"));
+        out.push(StyledRow::plain(
+            format!("  ... ({omitted} earlier lines)"),
+            theme.tool_meta,
+        ));
     }
     for line in lines.skip(if tail { omitted } else { 0 }).take(max_lines) {
         let end = line.floor_char_boundary(OUTPUT_LINE_BYTES);
@@ -118,10 +172,27 @@ fn push_preview(out: &mut Vec<String>, raw: &str, max_lines: usize, tail: bool, 
         } else {
             ""
         };
-        out.push(format!("  {safe}{clipped}"));
+        let style = if safe.starts_with('+') || safe.starts_with('-') || safe.starts_with("@@ ") {
+            let ds = diff_line_style(&safe, theme);
+            if ds == Style::default() {
+                theme.tool_output
+            } else {
+                ds
+            }
+        } else {
+            theme.tool_output
+        };
+        let mut spans = vec![StyledSpan::new(format!("  {safe}"), style)];
+        if !clipped.is_empty() {
+            spans.push(StyledSpan::new(clipped, theme.tool_meta));
+        }
+        out.push(StyledRow::from_spans(spans));
     }
     if !tail && omitted > 0 {
-        out.push(format!("  ... ({omitted} more {label})"));
+        out.push(StyledRow::plain(
+            format!("  ... ({omitted} more {label})"),
+            theme.tool_meta,
+        ));
     }
 }
 
@@ -149,22 +220,47 @@ fn tool_calls_of(data: &Value) -> Vec<(Option<&str>, &str, &Value)> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_entry(
-    out: &mut Vec<String>,
+    out: &mut Vec<StyledRow>,
     entry: &TranscriptEntry,
     calls_by_id: &HashMap<&str, (&str, &Value)>,
     result_ids: &HashSet<&str>,
     live_ids: &HashSet<&str>,
     tools_expanded: bool,
     thinking_expanded: bool,
+    theme: &Theme,
 ) {
     let id = sanitize_single_line(&entry.id);
     let kind = sanitize_single_line(&entry.kind);
 
     match entry.kind.as_str() {
-        "user" | "system" => {
-            out.push(format!("[{kind} #{id}]"));
-            render_blocks(out, &entry.data, tools_expanded, thinking_expanded, false);
+        "user" => {
+            out.push(StyledRow::plain(format!("[user #{id}]"), theme.user_header));
+            render_blocks(
+                out,
+                &entry.data,
+                tools_expanded,
+                thinking_expanded,
+                false,
+                true,
+                theme,
+            );
+        }
+        "system" => {
+            out.push(StyledRow::plain(
+                format!("[system #{id}]"),
+                theme.system_header,
+            ));
+            render_blocks(
+                out,
+                &entry.data,
+                tools_expanded,
+                thinking_expanded,
+                false,
+                false,
+                theme,
+            );
         }
         "assistant" => {
             let aborted = entry.data.get("aborted").and_then(Value::as_bool) == Some(true);
@@ -175,15 +271,46 @@ fn render_entry(
                 (_, Some("error")) => " · error",
                 _ => "",
             };
-            out.push(format!("[assistant #{id}{tag}]"));
-            render_blocks(out, &entry.data, tools_expanded, thinking_expanded, false);
+            let mut spans = vec![StyledSpan::new(
+                format!("[assistant #{id}"),
+                theme.assistant_header,
+            )];
+            if !tag.is_empty() {
+                let tag_style = if aborted || finish == Some("error") || finish == Some("aborted") {
+                    theme.failure_header
+                } else {
+                    theme.tool_running
+                };
+                spans.push(StyledSpan::new(tag, tag_style));
+            }
+            spans.push(StyledSpan::new("]", theme.assistant_header));
+            out.push(StyledRow::from_spans(spans));
+
+            render_blocks(
+                out,
+                &entry.data,
+                tools_expanded,
+                thinking_expanded,
+                false,
+                false,
+                theme,
+            );
 
             if aborted || finish == Some("aborted") {
-                out.push("! Operation aborted".to_string());
+                out.push(StyledRow::plain(
+                    "! Operation aborted",
+                    theme.failure_header,
+                ));
             } else if finish == Some("length") {
-                out.push("! Response was truncated before completion.".to_string());
+                out.push(StyledRow::plain(
+                    "! Response was truncated before completion.",
+                    theme.tool_running,
+                ));
             } else if finish == Some("error") {
-                out.push("! Error: generation failed".to_string());
+                out.push(StyledRow::plain(
+                    "! Error: generation failed",
+                    theme.failure_header,
+                ));
             }
 
             for (cid, name, args) in tool_calls_of(&entry.data) {
@@ -194,16 +321,22 @@ fn render_entry(
                 let id_tag = cid
                     .map(|c| format!(" ({})", sanitize_single_line(c)))
                     .unwrap_or_default();
-                out.push(sanitize_single_line(&format!(
-                    "[tool {summary}{id_tag} · no result]"
-                )));
+                out.push(StyledRow::from_spans(vec![
+                    StyledSpan::new("[tool ", theme.tool_header),
+                    StyledSpan::new(sanitize_single_line(&summary), theme.tool_header),
+                    StyledSpan::new(sanitize_single_line(&id_tag), theme.tool_meta),
+                    StyledSpan::new(" · no result", theme.tool_meta),
+                    StyledSpan::new("]", theme.tool_header),
+                ]));
                 if tools_expanded {
-                    render_expanded_args(out, name, args);
+                    render_expanded_args(out, name, args, theme);
                 }
             }
         }
-        "tool_result" => render_tool_result(out, &id, &entry.data, calls_by_id, tools_expanded),
-        "user_shell" => render_user_shell(out, &id, &entry.data, tools_expanded),
+        "tool_result" => {
+            render_tool_result(out, &id, &entry.data, calls_by_id, tools_expanded, theme)
+        }
+        "user_shell" => render_user_shell(out, &id, &entry.data, tools_expanded, theme),
         "compaction" | "reset" => {
             let body = ["summary", "handoff", "note", "reason", "text"]
                 .iter()
@@ -215,27 +348,44 @@ fn render_entry(
                 .unwrap_or_default();
             let prefix = format!("[{kind} #{id}{toks}]");
             if tools_expanded {
-                out.push(prefix);
+                out.push(StyledRow::plain(prefix, theme.compaction_header));
                 if !body.trim().is_empty() {
-                    push_lines(out, body.trim(), "  ");
+                    push_lines_styled(out, body.trim(), "  ", theme.tool_output);
                 }
             } else {
                 let preview = truncate(&sanitize_single_line(body.trim()), COMPACT_CHARS);
-                out.push(if preview.is_empty() {
-                    prefix
+                if preview.is_empty() {
+                    out.push(StyledRow::plain(prefix, theme.compaction_header));
                 } else {
-                    format!("{prefix} {preview}")
-                });
+                    out.push(StyledRow::from_spans(vec![
+                        StyledSpan::new(prefix, theme.compaction_header),
+                        StyledSpan::new(format!(" {preview}"), theme.tool_meta),
+                    ]));
+                }
             }
         }
         _ => {
-            out.push(format!("[{kind} #{id}]"));
-            if !render_blocks(out, &entry.data, tools_expanded, thinking_expanded, false) {
+            out.push(StyledRow::plain(
+                format!("[{kind} #{id}]"),
+                theme.system_header,
+            ));
+            if !render_blocks(
+                out,
+                &entry.data,
+                tools_expanded,
+                thinking_expanded,
+                false,
+                false,
+                theme,
+            ) {
                 let raw = entry.data.to_string();
                 if tools_expanded {
-                    push_lines(out, &raw, "  ");
+                    push_lines_styled(out, &raw, "  ", theme.tool_output);
                 } else {
-                    out.push(truncate(&sanitize_single_line(&raw), COMPACT_CHARS));
+                    out.push(StyledRow::plain(
+                        truncate(&sanitize_single_line(&raw), COMPACT_CHARS),
+                        theme.tool_meta,
+                    ));
                 }
             }
         }
@@ -243,11 +393,13 @@ fn render_entry(
 }
 
 fn render_blocks(
-    out: &mut Vec<String>,
+    out: &mut Vec<StyledRow>,
     data: &Value,
     tools_expanded: bool,
     thinking_expanded: bool,
     streaming: bool,
+    is_user: bool,
+    theme: &Theme,
 ) -> bool {
     let Some(obj) = data.as_object() else {
         return false;
@@ -255,19 +407,27 @@ fn render_blocks(
     let mut emitted = false;
 
     if let Some(thinking) = str_at(data, "thinking").filter(|s| !s.trim().is_empty()) {
-        render_thinking(out, thinking, streaming, thinking_expanded);
+        render_thinking(out, thinking, streaming, thinking_expanded, theme);
         emitted = true;
     }
 
+    let push_text = |out: &mut Vec<StyledRow>, text: &str| {
+        if is_user {
+            push_user_lines(out, text, theme);
+        } else {
+            push_markdown(out, text, theme, Style::default());
+        }
+    };
+
     match obj.get("content") {
         Some(Value::String(s)) if !s.is_empty() => {
-            push_lines(out, s, "");
+            push_text(out, s);
             emitted = true;
         }
         Some(Value::Array(blocks)) => {
             for block in blocks {
                 if let Some(s) = block.as_str().filter(|s| !s.is_empty()) {
-                    push_lines(out, s, "");
+                    push_text(out, s);
                     emitted = true;
                     continue;
                 }
@@ -277,7 +437,7 @@ fn render_blocks(
                 match btype {
                     "text" => {
                         if let Some(t) = str_at(block, "text") {
-                            push_lines(out, t, "");
+                            push_text(out, t);
                             emitted = true;
                         }
                     }
@@ -285,7 +445,7 @@ fn render_blocks(
                         if let Some(t) = str_at(block, "thinking").or_else(|| str_at(block, "text"))
                         {
                             if !t.trim().is_empty() {
-                                render_thinking(out, t, streaming, thinking_expanded);
+                                render_thinking(out, t, streaming, thinking_expanded, theme);
                                 emitted = true;
                             }
                         }
@@ -297,7 +457,10 @@ fn render_blocks(
                         let size = str_at(block, "data")
                             .map(|d| format!(" ~{} bytes", (d.len() * 3) / 4))
                             .unwrap_or_default();
-                        out.push(format!("[image: {}{size}]", sanitize_single_line(mime)));
+                        out.push(StyledRow::plain(
+                            format!("[image: {}{size}]", sanitize_single_line(mime)),
+                            theme.tool_meta,
+                        ));
                         emitted = true;
                     }
                     other => {
@@ -314,18 +477,25 @@ fn render_blocks(
                             }
                         }
                         if tools_expanded {
-                            out.push(format!("[block {bkind}]"));
-                            push_lines(
+                            out.push(StyledRow::plain(
+                                format!("[block {bkind}]"),
+                                theme.tool_meta,
+                            ));
+                            push_lines_styled(
                                 out,
                                 &serde_json::to_string_pretty(&scrubbed).unwrap_or_default(),
                                 "  ",
+                                theme.tool_output,
                             );
                         } else {
                             let preview = truncate(
                                 &sanitize_single_line(&scrubbed.to_string()),
                                 COMPACT_CHARS,
                             );
-                            out.push(format!("[block {bkind}] {preview}"));
+                            out.push(StyledRow::plain(
+                                format!("[block {bkind}] {preview}"),
+                                theme.tool_meta,
+                            ));
                         }
                         emitted = true;
                     }
@@ -337,41 +507,54 @@ fn render_blocks(
 
     if !emitted {
         if let Some(t) = str_at(data, "text") {
-            push_lines(out, t, "");
+            push_text(out, t);
             emitted = true;
         }
     }
     emitted
 }
 
-fn render_thinking(out: &mut Vec<String>, raw: &str, streaming: bool, expanded: bool) {
+fn render_thinking(
+    out: &mut Vec<StyledRow>,
+    raw: &str,
+    streaming: bool,
+    expanded: bool,
+    theme: &Theme,
+) {
     let safe = sanitize_terminal_text(raw.trim()).replace('\t', "   ");
     let lines: Vec<&str> = safe.split('\n').collect();
     if expanded {
-        out.push(if streaming {
-            "[thinking (streaming)]".into()
-        } else {
-            "[thinking]".into()
-        });
+        out.push(StyledRow::plain(
+            if streaming {
+                "[thinking (streaming)]"
+            } else {
+                "[thinking]"
+            },
+            theme.thinking_header,
+        ));
         for line in lines {
-            out.push(format!("  | {line}"));
+            out.push(StyledRow::plain(format!("  | {line}"), theme.thinking_text));
         }
     } else if streaming {
-        out.push(format!(
-            "[thinking (streaming · {} lines, collapsed)]",
-            lines.len()
+        out.push(StyledRow::plain(
+            format!("[thinking (streaming · {} lines, collapsed)]", lines.len()),
+            theme.thinking_header,
         ));
     } else {
-        out.push(format!("[thinking · {} lines (collapsed)]", lines.len()));
+        out.push(StyledRow::plain(
+            format!("[thinking · {} lines (collapsed)]", lines.len()),
+            theme.thinking_header,
+        ));
     }
 }
 
 fn render_tool_result(
-    out: &mut Vec<String>,
+    out: &mut Vec<StyledRow>,
     id: &str,
     data: &Value,
     calls_by_id: &HashMap<&str, (&str, &Value)>,
     tools_expanded: bool,
+    theme: &Theme,
 ) {
     let paired = str_at(data, "tool_call_id").and_then(|cid| calls_by_id.get(cid).copied());
     let name = str_at(data, "name")
@@ -382,29 +565,49 @@ fn render_tool_result(
     let is_error = data.get("is_error").and_then(Value::as_bool) == Some(true);
     let details = data.get("details").unwrap_or(&empty);
 
-    let mut status = vec![if is_error {
+    let status_text = if is_error {
         match str_at(data, "diagnostic") {
             Some(d) => format!("! ERROR: {}", sanitize_single_line(d)),
             None => "! ERROR".into(),
         }
     } else {
         "ok".into()
-    }];
+    };
+    let status_style = if is_error {
+        theme.tool_error
+    } else {
+        theme.tool_ok
+    };
+
+    let mut header_spans = vec![
+        StyledSpan::new(
+            sanitize_single_line(&format!("[tool #{id} · ")),
+            theme.tool_header,
+        ),
+        StyledSpan::new(sanitize_single_line(&status_text), status_style),
+    ];
     if let Some(badge) = tool_badge(name, is_error, details) {
-        status.push(badge);
+        header_spans.push(StyledSpan::new(
+            sanitize_single_line(&format!(" · {badge}")),
+            theme.tool_meta,
+        ));
     }
     if let Some(ms) = u64_at(data, "duration_ms") {
-        status.push(format_duration(ms));
+        header_spans.push(StyledSpan::new(
+            sanitize_single_line(&format!(" · {}", format_duration(ms))),
+            theme.tool_meta,
+        ));
     }
-
     let summary = tool_summary(name, args, tools_expanded);
-    out.push(sanitize_single_line(&format!(
-        "[tool #{id} · {}] {summary}",
-        status.join(" · ")
-    )));
+    header_spans.push(StyledSpan::new("] ", theme.tool_header));
+    header_spans.push(StyledSpan::new(
+        sanitize_single_line(&summary),
+        theme.tool_header,
+    ));
+    out.push(StyledRow::from_spans(header_spans));
 
     if tools_expanded {
-        render_expanded_args(out, name, args);
+        render_expanded_args(out, name, args, theme);
     }
 
     let mut text_lines = Vec::new();
@@ -428,14 +631,14 @@ fn render_tool_result(
     };
     if !text.trim().is_empty() {
         if tools_expanded {
-            push_preview(out, &text, EXPANDED_OUTPUT_LINES, false, "lines");
+            push_preview(out, &text, EXPANDED_OUTPUT_LINES, false, "lines", theme);
         } else if is_error {
-            push_preview(out, &text, ERROR_PREVIEW_LINES, false, "error lines");
+            push_preview(out, &text, ERROR_PREVIEW_LINES, false, "error lines", theme);
         } else {
             match name {
                 "read" | "write" => {}
-                "bash" => push_preview(out, &text, PREVIEW_LINES, true, "lines"),
-                _ => push_preview(out, &text, PREVIEW_LINES, false, "lines"),
+                "bash" => push_preview(out, &text, PREVIEW_LINES, true, "lines", theme),
+                _ => push_preview(out, &text, PREVIEW_LINES, false, "lines", theme),
             }
         }
     }
@@ -445,7 +648,7 @@ fn render_tool_result(
             "content".into(),
             Value::Array(non_text_blocks),
         )]));
-        render_blocks(out, &synthetic, tools_expanded, false, false);
+        render_blocks(out, &synthetic, tools_expanded, false, false, false, theme);
     }
 
     if tools_expanded
@@ -463,12 +666,21 @@ fn render_tool_result(
             notes.push("more lines available".into());
         }
         if !notes.is_empty() {
-            out.push(format!("  [{}]", notes.join(" · ")));
+            out.push(StyledRow::plain(
+                format!("  [{}]", notes.join(" · ")),
+                theme.tool_meta,
+            ));
         }
     }
 }
 
-fn render_user_shell(out: &mut Vec<String>, id: &str, data: &Value, tools_expanded: bool) {
+fn render_user_shell(
+    out: &mut Vec<StyledRow>,
+    id: &str,
+    data: &Value,
+    tools_expanded: bool,
+    theme: &Theme,
+) {
     let command = str_at(data, "command").unwrap_or("");
     let include = data
         .get("include_in_context")
@@ -480,27 +692,34 @@ fn render_user_shell(out: &mut Vec<String>, id: &str, data: &Value, tools_expand
     let exit_code = data.get("exit_code").and_then(Value::as_i64);
     let diagnostic = str_at(data, "diagnostic");
 
-    let mut header_parts = vec![format!("shell #{id}")];
+    let mut header_spans = vec![StyledSpan::new(format!("[shell #{id}"), theme.shell_header)];
     if !include {
-        header_parts.push("excluded".to_string());
+        header_spans.push(StyledSpan::new(" · excluded", theme.tool_meta));
     }
-    if cancelled {
-        header_parts.push("aborted".to_string());
+    let (status_label, status_style) = if cancelled {
+        (" · aborted".to_string(), theme.tool_running)
     } else if let Some(code) = exit_code {
         if is_error || code != 0 {
-            header_parts.push(format!("! exit {code}"));
+            (format!(" · ! exit {code}"), theme.tool_error)
         } else {
-            header_parts.push("exit 0".to_string());
+            (" · exit 0".to_string(), theme.tool_ok)
         }
     } else if let Some(diag) = diagnostic {
-        header_parts.push(format!("! {}", sanitize_single_line(diag)));
+        (
+            format!(" · ! {}", sanitize_single_line(diag)),
+            theme.tool_error,
+        )
     } else if is_error {
-        header_parts.push("! error".to_string());
+        (" · ! error".to_string(), theme.tool_error)
     } else {
-        header_parts.push("ok".to_string());
-    }
+        (" · ok".to_string(), theme.tool_ok)
+    };
+    header_spans.push(StyledSpan::new(status_label, status_style));
     if let Some(ms) = u64_at(data, "duration_ms") {
-        header_parts.push(format_duration(ms));
+        header_spans.push(StyledSpan::new(
+            format!(" · {}", format_duration(ms)),
+            theme.tool_meta,
+        ));
     }
 
     let cmd_clean = sanitize_single_line(command);
@@ -509,17 +728,18 @@ fn render_user_shell(out: &mut Vec<String>, id: &str, data: &Value, tools_expand
     } else {
         truncate(&cmd_clean, COMPACT_CHARS)
     };
-    out.push(format!(
-        "[{}] {prefix}{cmd_shown}",
-        header_parts.join(" · ")
+    header_spans.push(StyledSpan::new(
+        format!("] {prefix}{cmd_shown}"),
+        theme.shell_header,
     ));
+    out.push(StyledRow::from_spans(header_spans));
 
     let output = str_at(data, "output").unwrap_or("");
     if !output.trim_end().is_empty() {
         if tools_expanded {
-            push_preview(out, output, EXPANDED_OUTPUT_LINES, false, "lines");
+            push_preview(out, output, EXPANDED_OUTPUT_LINES, false, "lines", theme);
         } else {
-            push_preview(out, output, PREVIEW_LINES, true, "lines");
+            push_preview(out, output, PREVIEW_LINES, true, "lines", theme);
         }
     }
 
@@ -533,7 +753,10 @@ fn render_user_shell(out: &mut Vec<String>, id: &str, data: &Value, tools_expand
         if let Some(path) = str_at(data, "full_output_path") {
             notes.push(format!("full output: {}", sanitize_single_line(path)));
         }
-        out.push(format!("  [{}]", notes.join(" · ")));
+        out.push(StyledRow::plain(
+            format!("  [{}]", notes.join(" · ")),
+            theme.tool_meta,
+        ));
     }
 }
 
@@ -620,16 +843,29 @@ fn tool_summary(name: &str, args: &Value, expanded: bool) -> String {
     }
 }
 
-fn render_expanded_args(out: &mut Vec<String>, name: &str, args: &Value) {
+fn render_expanded_args(out: &mut Vec<StyledRow>, name: &str, args: &Value, theme: &Theme) {
     let Some(obj) = args.as_object() else {
         return;
     };
     if name == "edit" {
         if let Some(edits) = obj.get("edits").and_then(Value::as_array) {
             for (idx, edit) in edits.iter().enumerate() {
-                out.push(format!("  hunk #{}:", idx + 1));
-                push_lines(out, str_at(edit, "old_text").unwrap_or(""), "  - ");
-                push_lines(out, str_at(edit, "new_text").unwrap_or(""), "  + ");
+                out.push(StyledRow::plain(
+                    format!("  hunk #{}:", idx + 1),
+                    theme.diff_hunk,
+                ));
+                push_lines_styled(
+                    out,
+                    str_at(edit, "old_text").unwrap_or(""),
+                    "  - ",
+                    theme.diff_remove,
+                );
+                push_lines_styled(
+                    out,
+                    str_at(edit, "new_text").unwrap_or(""),
+                    "  + ",
+                    theme.diff_add,
+                );
             }
         }
         return;
@@ -648,8 +884,11 @@ fn render_expanded_args(out: &mut Vec<String>, name: &str, args: &Value) {
         }
         if name == "write" && k == "content" {
             if let Some(s) = v.as_str() {
-                out.push(format!("  content ({} bytes):", s.len()));
-                push_lines(out, s, "    ");
+                out.push(StyledRow::plain(
+                    format!("  content ({} bytes):", s.len()),
+                    theme.tool_meta,
+                ));
+                push_lines_styled(out, s, "    ", theme.tool_output);
             }
             continue;
         }
@@ -657,7 +896,12 @@ fn render_expanded_args(out: &mut Vec<String>, name: &str, args: &Value) {
             Value::String(s) => s.clone(),
             other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
         };
-        push_lines(out, &val, &format!("  {}: ", sanitize_single_line(k)));
+        push_lines_styled(
+            out,
+            &val,
+            &format!("  {}: ", sanitize_single_line(k)),
+            theme.tool_output,
+        );
     }
 }
 
@@ -714,12 +958,13 @@ fn collect_live_tools<'a>(
 }
 
 fn render_live(
-    out: &mut Vec<String>,
+    out: &mut Vec<StyledRow>,
     state: &TranscriptState,
     calls_by_id: &HashMap<&str, (&str, &Value)>,
     live_tools: &[(String, &Map<String, Value>)],
     tools_expanded: bool,
     thinking_expanded: bool,
+    theme: &Theme,
 ) {
     let Some(live) = state.live_doc() else {
         return;
@@ -732,22 +977,36 @@ fn render_live(
 
     if let Some(gen) = live.get("generation").and_then(Value::as_object) {
         separate(out);
-        out.push(format!("[assistant (live{turn_tag})]"));
+        out.push(StyledRow::from_spans(vec![
+            StyledSpan::new("[assistant ", theme.assistant_header),
+            StyledSpan::new(format!("(live{turn_tag})"), theme.tool_meta),
+            StyledSpan::new("]", theme.assistant_header),
+        ]));
         let msg = gen.get("message").and_then(Value::as_object).unwrap_or(gen);
         let msg_val = Value::Object(msg.clone());
-        let has_body = render_blocks(out, &msg_val, tools_expanded, thinking_expanded, true);
+        let has_body = render_blocks(
+            out,
+            &msg_val,
+            tools_expanded,
+            thinking_expanded,
+            true,
+            false,
+            theme,
+        );
         let tcs = tool_calls_of(&msg_val);
         for (cid, name, args) in &tcs {
             let summary = tool_summary(name, args, tools_expanded);
             let id_tag = cid
                 .map(|c| format!(" ({})", sanitize_single_line(c)))
                 .unwrap_or_default();
-            out.push(sanitize_single_line(&format!(
-                "  -> tool_call {summary}{id_tag}"
-            )));
+            out.push(StyledRow::from_spans(vec![
+                StyledSpan::new("  -> tool_call ", theme.tool_meta),
+                StyledSpan::new(sanitize_single_line(&summary), theme.tool_header),
+                StyledSpan::new(sanitize_single_line(&id_tag), theme.tool_meta),
+            ]));
         }
         if !has_body && tcs.is_empty() {
-            out.push("  ... streaming".to_string());
+            out.push(StyledRow::plain("  ... streaming", theme.tool_meta));
         }
     }
 
@@ -767,17 +1026,22 @@ fn render_live(
             .unwrap_or("pending");
 
         let summary = tool_summary(name, args, tools_expanded);
-        out.push(sanitize_single_line(&format!(
-            "[tool (live · {})] {summary}",
-            sanitize_single_line(status)
-        )));
+        out.push(StyledRow::from_spans(vec![
+            StyledSpan::new("[tool (", theme.tool_header),
+            StyledSpan::new(
+                sanitize_single_line(&format!("live · {status}")),
+                theme.tool_running,
+            ),
+            StyledSpan::new(")] ", theme.tool_header),
+            StyledSpan::new(sanitize_single_line(&summary), theme.tool_header),
+        ]));
 
         let partial = slot.get("output").and_then(Value::as_str).unwrap_or("");
         if !partial.trim_end().is_empty() {
             if tools_expanded {
-                push_preview(out, partial, EXPANDED_OUTPUT_LINES, false, "lines");
+                push_preview(out, partial, EXPANDED_OUTPUT_LINES, false, "lines", theme);
             } else {
-                push_preview(out, partial, PREVIEW_LINES, true, "lines");
+                push_preview(out, partial, PREVIEW_LINES, true, "lines", theme);
             }
         }
     }
@@ -795,21 +1059,29 @@ fn render_live(
             .unwrap_or(true);
         let prefix = if include { "!" } else { "!!" };
         let ctx_tag = if include { "" } else { " · excluded" };
-        out.push(sanitize_single_line(&format!(
-            "[shell (live · {status}{ctx_tag})] {prefix}{cmd}"
-        )));
+        out.push(StyledRow::from_spans(vec![
+            StyledSpan::new("[shell (", theme.shell_header),
+            StyledSpan::new(
+                sanitize_single_line(&format!("live · {status}{ctx_tag}")),
+                theme.tool_running,
+            ),
+            StyledSpan::new(
+                sanitize_single_line(&format!(")] {prefix}{cmd}")),
+                theme.shell_header,
+            ),
+        ]));
         let partial = shell.get("output").and_then(Value::as_str).unwrap_or("");
         if !partial.trim_end().is_empty() {
             if tools_expanded {
-                push_preview(out, partial, EXPANDED_OUTPUT_LINES, false, "lines");
+                push_preview(out, partial, EXPANDED_OUTPUT_LINES, false, "lines", theme);
             } else {
-                push_preview(out, partial, PREVIEW_LINES, true, "lines");
+                push_preview(out, partial, PREVIEW_LINES, true, "lines", theme);
             }
         }
     }
 }
 
-fn render_inbox(out: &mut Vec<String>, state: &TranscriptState) {
+fn render_inbox(out: &mut Vec<StyledRow>, state: &TranscriptState, theme: &Theme) {
     let Some(inbox) = state.docs.get("inbox").and_then(Value::as_array) else {
         return;
     };
@@ -817,23 +1089,30 @@ fn render_inbox(out: &mut Vec<String>, state: &TranscriptState) {
         return;
     }
     separate(out);
-    out.push(format!("[queued ({})]", inbox.len()));
+    out.push(StyledRow::plain(
+        format!("[queued ({})]", inbox.len()),
+        theme.queued_header,
+    ));
     for item in inbox {
         let mode = str_at(item, "when_busy")
             .map(|m| format!("[{}] ", sanitize_single_line(m)))
             .unwrap_or_default();
         let mut lines = Vec::new();
-        render_blocks(&mut lines, item, false, false, false);
+        render_blocks(&mut lines, item, false, false, false, false, theme);
         let preview = if lines.is_empty() {
             truncate(&sanitize_single_line(&item.to_string()), COMPACT_CHARS)
         } else {
-            truncate(&sanitize_single_line(&lines.join(" ")), COMPACT_CHARS)
+            let joined: Vec<String> = lines.iter().map(StyledRow::plain_text).collect();
+            truncate(&sanitize_single_line(&joined.join(" ")), COMPACT_CHARS)
         };
-        out.push(format!("  {mode}{preview}"));
+        out.push(StyledRow::from_spans(vec![
+            StyledSpan::new(format!("  {mode}"), theme.queued_header),
+            StyledSpan::new(preview, theme.tool_output),
+        ]));
     }
 }
 
-fn render_failure(out: &mut Vec<String>, state: &TranscriptState) {
+fn render_failure(out: &mut Vec<StyledRow>, state: &TranscriptState, theme: &Theme) {
     let Some(fail) = state.run_failure() else {
         return;
     };
@@ -845,14 +1124,17 @@ fn render_failure(out: &mut Vec<String>, state: &TranscriptState) {
         .filter(|c| !c.is_empty() && *c != fail.reason)
         .map(|c| format!(" ({})", sanitize_single_line(c)))
         .unwrap_or_default();
-    out.push(format!(
-        "[! {label}: {}{code}]",
-        sanitize_single_line(&fail.reason)
+    out.push(StyledRow::plain(
+        format!("[! {label}: {}{code}]", sanitize_single_line(&fail.reason)),
+        theme.failure_header,
     ));
     if let Some(msg) = fail.message.as_deref().filter(|m| !m.trim().is_empty()) {
-        push_lines(out, msg.trim(), "  ");
+        push_lines_styled(out, msg.trim(), "  ", theme.failure_text);
     }
-    out.push("  Use /continue to resume.".to_string());
+    out.push(StyledRow::plain(
+        "  Use /continue to resume.",
+        theme.tool_meta,
+    ));
 }
 
 #[cfg(test)]
@@ -1377,5 +1659,100 @@ mod tests {
         assert!(final_text.contains("[shell #2 · exit 0 · 120ms] !ls -la"));
         assert!(final_text.contains("  out1\n  out2"));
         assert!(final_text.contains("512 bytes omitted · full output: /tmp/shell.log"));
+    }
+
+    #[test]
+    fn styled_rows_apply_semantic_card_and_markdown_styles() {
+        let mut state = TranscriptState::default();
+        state.apply_snapshot(SnapshotFrame {
+            version: Some(1),
+            session_id: None,
+            conversation_id: None,
+            seq: 3,
+            before_entry_id: None,
+            has_more: Some(false),
+            entries: vec![
+                make_entry("1", "user", json!({"content": "Hello **literal**"})),
+                make_entry(
+                    "2",
+                    "assistant",
+                    json!({
+                        "content": [
+                            {"type": "thinking", "text": "ponder"},
+                            {"type": "text", "text": "# Heading\nUse `code` and **bold**"}
+                        ],
+                        "tool_calls": [
+                            {"id": "t1", "name": "edit", "arguments": {"path": "a.rs", "edits": [{"old_text": "a", "new_text": "b"}]}}
+                        ]
+                    }),
+                ),
+                make_entry(
+                    "3",
+                    "tool_result",
+                    json!({
+                        "tool_call_id": "t1",
+                        "name": "edit",
+                        "content": [{"type": "text", "text": "done"}],
+                        "is_error": false,
+                        "duration_ms": 10
+                    }),
+                ),
+            ],
+            docs: None,
+        });
+
+        let theme = Theme::dark();
+        let srows = styled_rows(&state, true, true, &theme);
+
+        // User header + user text accent bar
+        assert_eq!(srows[0].plain_text(), "[user #1]");
+        assert_eq!(srows[0].spans[0].style, theme.user_header);
+        assert_eq!(srows[1].spans[0].text, "▌ ");
+        assert_eq!(srows[1].spans[0].style, theme.user_header);
+        assert_eq!(srows[1].spans[1].text, "Hello **literal**");
+        assert_eq!(srows[1].spans[1].style, theme.user_text);
+
+        // Assistant header, thinking, markdown heading + inline code/bold
+        let asst = srows
+            .iter()
+            .find(|r| r.plain_text() == "[assistant #2]")
+            .unwrap();
+        assert_eq!(asst.spans[0].style, theme.assistant_header);
+        let think = srows
+            .iter()
+            .find(|r| r.plain_text() == "[thinking]")
+            .unwrap();
+        assert_eq!(think.spans[0].style, theme.thinking_header);
+        let h1 = srows
+            .iter()
+            .find(|r| r.plain_text() == "# Heading")
+            .unwrap();
+        assert_eq!(h1.spans[0].style, theme.md_h1);
+        let inline_line = srows
+            .iter()
+            .find(|r| r.plain_text() == "Use code and bold")
+            .unwrap();
+        assert!(inline_line
+            .spans
+            .iter()
+            .any(|s| s.text == "code" && s.style == theme.md_code_inline));
+        assert!(inline_line
+            .spans
+            .iter()
+            .any(|s| s.text == "bold" && s.style == theme.md_bold));
+
+        // Tool ok badge & edit hunk diff colors
+        let tool_hdr = srows
+            .iter()
+            .find(|r| r.plain_text().starts_with("[tool #3 · ok"))
+            .unwrap();
+        assert!(tool_hdr
+            .spans
+            .iter()
+            .any(|s| s.text == "ok" && s.style == theme.tool_ok));
+        let minus = srows.iter().find(|r| r.plain_text() == "  - a").unwrap();
+        assert_eq!(minus.spans[0].style, theme.diff_remove);
+        let plus = srows.iter().find(|r| r.plain_text() == "  + b").unwrap();
+        assert_eq!(plus.spans[0].style, theme.diff_add);
     }
 }

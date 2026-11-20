@@ -7,6 +7,7 @@ use super::{
     editor::Editor,
     external,
     login::{self, Login},
+    markdown::StyledRow,
     picker::{Choice, Picker},
     preferences::UserConfig,
     screen::{EditorOverlay, Screen},
@@ -162,7 +163,7 @@ struct Ui {
     note: String,
     tools: bool,
     thinking: bool,
-    cached_rows: Vec<String>,
+    cached_rows: Vec<StyledRow>,
     rows_dirty: bool,
     quit: bool,
     restart_ui: Option<PathBuf>,
@@ -349,10 +350,11 @@ impl Ui {
             self.draft.editor.set_width(usize::from(width));
         }
         if self.rows_dirty {
-            self.cached_rows = cards::rows(
+            self.cached_rows = cards::styled_rows(
                 self.historical.as_ref().unwrap_or(&self.state),
                 self.tools,
                 self.thinking,
+                &self.config.theme,
             );
             self.rows_dirty = false;
         }
@@ -375,12 +377,13 @@ impl Ui {
         } else {
             EditorOverlay::None
         };
-        local(screen.draw_with_overlay(
+        local(screen.draw_styled_with_overlay(
             &self.cached_rows,
             self.draft.editor.text(),
             self.draft.editor.cursor(),
             &status,
             overlay,
+            &self.config.theme,
         ))
     }
     fn status_fields(&self) -> StatusFields<'_> {
@@ -1297,6 +1300,7 @@ impl Ui {
                 match candidate {
                     Ok(config) => {
                         self.config = config;
+                        self.rows_dirty = true;
                         self.note = "Hi configuration reloaded".into();
                     }
                     Err(err) => {

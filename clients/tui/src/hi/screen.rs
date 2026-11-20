@@ -1,3 +1,5 @@
+use super::markdown::StyledRow;
+use super::theme::Theme;
 use crate::render::{sanitize_single_line, sanitize_terminal_text};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -17,7 +19,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::io::{self, IsTerminal, Write};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -594,20 +596,39 @@ impl Screen {
         status: &[impl AsRef<str>],
         overlay: EditorOverlay<'_>,
     ) -> io::Result<()> {
+        let theme = Theme::ansi();
+        let styled = rows_from_plain(rows, &theme);
+        self.draw_styled_with_overlay(&styled, editor, cursor, status, overlay, &theme)
+    }
+
+    pub(super) fn draw_styled_with_overlay(
+        &mut self,
+        rows: &[StyledRow],
+        editor: &str,
+        cursor: usize,
+        status: &[impl AsRef<str>],
+        overlay: EditorOverlay<'_>,
+        theme: &Theme,
+    ) -> io::Result<()> {
         match &mut self.mode {
-            ModeState::Fullscreen(fs) => draw_fullscreen(fs, rows, editor, cursor, status, overlay),
-            ModeState::Regular(reg) => draw_regular(reg, rows, editor, cursor, status, overlay),
+            ModeState::Fullscreen(fs) => {
+                draw_fullscreen(fs, rows, editor, cursor, status, overlay, theme)
+            }
+            ModeState::Regular(reg) => {
+                draw_regular(reg, rows, editor, cursor, status, overlay, theme)
+            }
         }
     }
 }
 
 fn draw_fullscreen(
     fs: &mut FullscreenState,
-    rows: &[String],
+    rows: &[StyledRow],
     editor: &str,
     cursor: usize,
     status: &[impl AsRef<str>],
     overlay: EditorOverlay<'_>,
+    theme: &Theme,
 ) -> io::Result<()> {
     let mut next_scroll_state = fs.scroll_state.clone();
     let mut next_editor_scroll = fs.editor_scroll;
@@ -629,7 +650,7 @@ fn draw_fullscreen(
 
         // 1. Transcript rows
         if layout.transcript_height > 0 {
-            let wrapped_rows = wrap_transcript_rows(rows, width);
+            let wrapped_rows = wrap_styled_transcript_rows(rows, width);
             let total_visual = wrapped_rows.len();
             let view_h = layout.transcript_height as usize;
             let max_top = total_visual.saturating_sub(view_h);
@@ -642,6 +663,11 @@ fn draw_fullscreen(
             let buf = frame.buffer_mut();
             for (offset, vline) in wrapped_rows[top..end].iter().enumerate() {
                 let y = area.y + offset as u16;
+                if let Some(fill) = vline.fill_style {
+                    for dx in 0..area.width {
+                        buf[(area.x + dx, y)].set_symbol(" ").set_style(fill);
+                    }
+                }
                 write_segments_to_row(buf, area.x, y, width, &vline.segments, Style::default());
             }
         }
@@ -658,6 +684,7 @@ fn draw_fullscreen(
                 area.y + sep_y,
                 area.width,
                 scrolled_lines,
+                theme,
             );
         }
 
@@ -681,6 +708,7 @@ fn draw_fullscreen(
             area.y + area.height - layout.status_height,
             area.width,
             &status[..layout.status_height as usize],
+            theme,
         );
 
         if let Some(pos) = cursor_pos {
@@ -787,8 +815,15 @@ fn render_option_lines(
     }
 }
 
-fn render_status_lines(buf: &mut Buffer, x: u16, y: u16, width: u16, lines: &[impl AsRef<str>]) {
-    let style = Style::default().add_modifier(Modifier::REVERSED);
+fn render_status_lines(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    lines: &[impl AsRef<str>],
+    theme: &Theme,
+) {
+    let style = theme.status_bar;
     for (i, line) in lines.iter().enumerate() {
         let row = y + i as u16;
         let safe = sanitize_single_line(line.as_ref());
@@ -801,11 +836,12 @@ fn render_status_lines(buf: &mut Buffer, x: u16, y: u16, width: u16, lines: &[im
 
 fn draw_regular(
     reg: &mut RegularState,
-    rows: &[String],
+    rows: &[StyledRow],
     editor: &str,
     cursor: usize,
     status: &[impl AsRef<str>],
     overlay: EditorOverlay<'_>,
+    theme: &Theme,
 ) -> io::Result<()> {
     let (term_w, term_h) = reg.target.size()?;
     if term_w == 0 || term_h == 0 {
@@ -829,9 +865,9 @@ fn draw_regular(
     let max_tail_lines = height.saturating_sub(bottom_h);
 
     // Cache wrapped rows when rows + width are unchanged (e.g. typing in editor)
-    let row_hashes: Vec<u64> = rows.iter().map(|r| hash_str(r)).collect();
+    let row_hashes: Vec<u64> = rows.iter().map(hash_styled_row).collect();
     if reg.cached_width != width || reg.cached_row_hashes != row_hashes {
-        reg.cached_wrapped = wrap_transcript_rows(rows, width);
+        reg.cached_wrapped = wrap_styled_transcript_rows(rows, width);
         reg.cached_row_hashes = row_hashes;
         reg.cached_width = width;
     }
@@ -846,7 +882,8 @@ fn draw_regular(
     let mut newly_flushed_ansi: Vec<String> = Vec::new();
     if prefix_intact {
         for (idx, expected) in reg.flushed_visual_lines.iter().enumerate() {
-            let line_ansi = segments_to_ansi_line(&reg.cached_wrapped[idx].segments);
+            let line_ansi =
+                segments_to_ansi_line(&reg.cached_wrapped[idx].segments, theme.is_plain);
             if &line_ansi != expected {
                 prefix_intact = false;
                 break;
@@ -863,7 +900,7 @@ fn draw_regular(
 
     let flush_from = reg.flushed_visual_lines.len();
     for vrow in &reg.cached_wrapped[flush_from..flush_target] {
-        newly_flushed_ansi.push(segments_to_ansi_line(&vrow.segments));
+        newly_flushed_ansi.push(segments_to_ansi_line(&vrow.segments, theme.is_plain));
     }
 
     let tail = &reg.cached_wrapped[flush_target..];
@@ -874,6 +911,11 @@ fn draw_regular(
     let mut buf = Buffer::empty(area);
 
     for (idx, vrow) in tail.iter().enumerate() {
+        if let Some(fill) = vrow.fill_style {
+            for dx in 0..term_w {
+                buf[(dx, idx as u16)].set_symbol(" ").set_style(fill);
+            }
+        }
         write_segments_to_row(
             &mut buf,
             0,
@@ -886,7 +928,7 @@ fn draw_regular(
 
     let mut cur_y = tail.len() as u16;
     if layout.separator_y.is_some() && (cur_y as usize) < work_h {
-        render_separator(&mut buf, 0, cur_y, term_w, 0);
+        render_separator(&mut buf, 0, cur_y, term_w, 0, theme);
         cur_y += 1;
     }
 
@@ -903,10 +945,10 @@ fn draw_regular(
     );
     cur_y += layout.editor_height;
 
-    render_status_lines(&mut buf, 0, cur_y, term_w, &status[..status_h]);
+    render_status_lines(&mut buf, 0, cur_y, term_w, &status[..status_h], theme);
 
     let new_working_lines: Vec<String> = (0..work_h)
-        .map(|y| buffer_row_to_ansi(&buf, y as u16, term_w))
+        .map(|y| buffer_row_to_ansi(&buf, y as u16, term_w, theme.is_plain))
         .collect();
 
     let mut out = String::new();
@@ -1036,7 +1078,14 @@ fn append_vertical_move(out: &mut String, from_row: usize, to_row: usize) {
     }
 }
 
-fn segments_to_ansi_line(segs: &[RenderSeg]) -> String {
+fn segments_to_ansi_line(segs: &[RenderSeg], plain: bool) -> String {
+    if plain {
+        let mut out = String::new();
+        for seg in segs {
+            out.push_str(&seg.text);
+        }
+        return out;
+    }
     let mut out = String::new();
     let mut active = Style::default();
     for seg in segs {
@@ -1052,7 +1101,7 @@ fn segments_to_ansi_line(segs: &[RenderSeg]) -> String {
     out
 }
 
-fn buffer_row_to_ansi(buf: &Buffer, y: u16, width: u16) -> String {
+fn buffer_row_to_ansi(buf: &Buffer, y: u16, width: u16, plain: bool) -> String {
     let mut end_x = width as usize;
     while end_x > 0 {
         let cell = &buf[(end_x as u16 - 1, y)];
@@ -1069,7 +1118,7 @@ fn buffer_row_to_ansi(buf: &Buffer, y: u16, width: u16) -> String {
     while x < end_x {
         let cell = &buf[(x as u16, y)];
         let style = cell.style();
-        if style != active {
+        if !plain && style != active {
             write_style_transition(&mut out, style);
             active = style;
         }
@@ -1078,7 +1127,7 @@ fn buffer_row_to_ansi(buf: &Buffer, y: u16, width: u16) -> String {
         let w = grapheme_display_width(sym).max(1);
         x += w;
     }
-    if active != Style::default() {
+    if !plain && active != Style::default() {
         out.push_str("\x1b[0m");
     }
     out
@@ -1089,31 +1138,71 @@ fn write_style_transition(out: &mut String, style: Style) {
     if style == Style::default() {
         return;
     }
-    let mut codes: Vec<&str> = Vec::new();
+    let mut codes: Vec<String> = Vec::new();
     if style.add_modifier.contains(Modifier::BOLD) {
-        codes.push("1");
+        codes.push("1".into());
     }
     if style.add_modifier.contains(Modifier::DIM) {
-        codes.push("2");
+        codes.push("2".into());
+    }
+    if style.add_modifier.contains(Modifier::ITALIC) {
+        codes.push("3".into());
+    }
+    if style.add_modifier.contains(Modifier::UNDERLINED) {
+        codes.push("4".into());
     }
     if style.add_modifier.contains(Modifier::REVERSED) {
-        codes.push("7");
+        codes.push("7".into());
+    }
+    if style.add_modifier.contains(Modifier::CROSSED_OUT) {
+        codes.push("9".into());
     }
     if let Some(fg) = style.fg {
-        match fg {
-            Color::Red => codes.push("31"),
-            Color::Green => codes.push("32"),
-            Color::Yellow => codes.push("33"),
-            Color::Cyan => codes.push("36"),
-            Color::Gray => codes.push("37"),
-            Color::DarkGray => codes.push("90"),
-            _ => {}
-        }
+        push_color_codes(&mut codes, fg, false);
+    }
+    if let Some(bg) = style.bg {
+        push_color_codes(&mut codes, bg, true);
     }
     if !codes.is_empty() {
         out.push_str("\x1b[");
         out.push_str(&codes.join(";"));
         out.push('m');
+    }
+}
+
+fn push_color_codes(codes: &mut Vec<String>, color: Color, is_bg: bool) {
+    let base = if is_bg { 40 } else { 30 };
+    let bright = if is_bg { 100 } else { 90 };
+    match color {
+        Color::Reset => codes.push(if is_bg { "49".into() } else { "39".into() }),
+        Color::Black => codes.push(base.to_string()),
+        Color::Red => codes.push((base + 1).to_string()),
+        Color::Green => codes.push((base + 2).to_string()),
+        Color::Yellow => codes.push((base + 3).to_string()),
+        Color::Blue => codes.push((base + 4).to_string()),
+        Color::Magenta => codes.push((base + 5).to_string()),
+        Color::Cyan => codes.push((base + 6).to_string()),
+        Color::Gray => codes.push((base + 7).to_string()),
+        Color::DarkGray => codes.push(bright.to_string()),
+        Color::LightRed => codes.push((bright + 1).to_string()),
+        Color::LightGreen => codes.push((bright + 2).to_string()),
+        Color::LightYellow => codes.push((bright + 3).to_string()),
+        Color::LightBlue => codes.push((bright + 4).to_string()),
+        Color::LightMagenta => codes.push((bright + 5).to_string()),
+        Color::LightCyan => codes.push((bright + 6).to_string()),
+        Color::White => codes.push((bright + 7).to_string()),
+        Color::Indexed(n) => {
+            codes.push(if is_bg { "48".into() } else { "38".into() });
+            codes.push("5".into());
+            codes.push(n.to_string());
+        }
+        Color::Rgb(r, g, b) => {
+            codes.push(if is_bg { "48".into() } else { "38".into() });
+            codes.push("2".into());
+            codes.push(r.to_string());
+            codes.push(g.to_string());
+            codes.push(b.to_string());
+        }
     }
 }
 
@@ -1188,8 +1277,15 @@ fn compute_layout(
     }
 }
 
-fn render_separator(buf: &mut Buffer, x: u16, y: u16, width: u16, scrolled_lines: usize) {
-    let dim = Style::default().add_modifier(Modifier::DIM);
+fn render_separator(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    scrolled_lines: usize,
+    theme: &Theme,
+) {
+    let dim = theme.separator;
     for dx in 0..width {
         buf[(x + dx, y)].set_symbol("─").set_style(dim);
     }
@@ -1198,14 +1294,7 @@ fn render_separator(buf: &mut Buffer, x: u16, y: u16, width: u16, scrolled_lines
         let badge_w = display_str_width(&badge);
         if badge_w <= width as usize {
             let start_x = x + (width - badge_w as u16);
-            write_plain_str_to_row(
-                buf,
-                start_x,
-                y,
-                badge_w,
-                &badge,
-                Style::default().add_modifier(Modifier::BOLD),
-            );
+            write_plain_str_to_row(buf, start_x, y, badge_w, &badge, theme.scroll_badge);
         }
     }
 }
@@ -1226,6 +1315,7 @@ struct WrappedRow {
     row_idx: usize,
     sub_idx: usize,
     segments: Vec<RenderSeg>,
+    fill_style: Option<Style>,
 }
 
 #[derive(Debug, Clone)]
@@ -1239,9 +1329,9 @@ struct EditorLayout {
     cursor_col: usize,
 }
 
-fn hash_str(s: &str) -> u64 {
+fn hash_styled_row(row: &StyledRow) -> u64 {
     let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
+    row.hash_with(&mut hasher);
     hasher.finish()
 }
 
@@ -1401,150 +1491,101 @@ fn wrap_segments(segs: &[RenderSeg], max_width: usize) -> Vec<Vec<RenderSeg>> {
     chunks
 }
 
-#[derive(Default)]
-struct RowStyler {
-    in_fence: bool,
-    in_diff: bool,
+fn rows_from_plain(rows: &[String], theme: &Theme) -> Vec<StyledRow> {
+    let joined = rows
+        .iter()
+        .map(|r| sanitize_terminal_text(r))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    super::markdown::render_markdown_lines(&joined, theme, Style::default())
 }
 
-impl RowStyler {
-    fn style_sanitized_line(&mut self, safe_line: &str) -> Vec<RenderSeg> {
-        let trimmed_start = safe_line.trim_start();
-        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
-            self.in_fence = !self.in_fence;
-            self.in_diff = self.in_fence && trimmed_start.starts_with("```diff");
-            return sanitize_graphemes_with_style(
-                safe_line,
-                Style::default().add_modifier(Modifier::DIM),
-            );
-        }
-
-        if self.in_fence {
-            if self.in_diff {
-                return sanitize_graphemes_with_style(safe_line, diff_line_style(safe_line));
-            }
-            return sanitize_graphemes_with_style(safe_line, Style::default());
-        }
-
-        if safe_line.starts_with("diff --git ")
-            || safe_line.starts_with("--- ")
-            || safe_line.starts_with("+++ ")
-            || (safe_line.starts_with("@@ ") && safe_line.contains(" @@"))
-        {
-            self.in_diff = true;
-            return sanitize_graphemes_with_style(safe_line, diff_line_style(safe_line));
-        }
-
-        if self.in_diff {
-            if safe_line.starts_with('+') || safe_line.starts_with('-') {
-                return sanitize_graphemes_with_style(safe_line, diff_line_style(safe_line));
-            }
-            if safe_line.is_empty() || safe_line.starts_with(' ') {
-                return sanitize_graphemes_with_style(safe_line, Style::default());
-            }
-            self.in_diff = false;
-        }
-
-        if let Some(heading_style) = markdown_heading_style(safe_line) {
-            return sanitize_graphemes_with_style(safe_line, heading_style);
-        }
-
-        if let Some(bullet_byte_idx) = markdown_bullet_index(safe_line) {
-            let mut segs = sanitize_graphemes_with_style(safe_line, Style::default());
-            let mut byte_pos = 0usize;
-            for seg in &mut segs {
-                if byte_pos == bullet_byte_idx {
-                    seg.style = Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD);
-                    break;
-                }
-                byte_pos += if seg.text == TAB_SPACES {
-                    1
-                } else {
-                    seg.text.len()
-                };
-            }
-            return segs;
-        }
-
-        sanitize_graphemes_with_style(safe_line, Style::default())
-    }
-}
-
-fn diff_line_style(line: &str) -> Style {
-    if line.starts_with("@@ ") {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else if line.starts_with("+++ ") {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else if line.starts_with("--- ") {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-    } else if line.starts_with("diff --git ") {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else if line.starts_with('+') {
-        Style::default().fg(Color::Green)
-    } else if line.starts_with('-') {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default()
-    }
-}
-
-fn markdown_heading_style(line: &str) -> Option<Style> {
-    let indent = line.bytes().take_while(|&b| b == b' ').count();
-    if indent > 3 {
-        return None;
-    }
-    let rest = &line[indent..];
-    let hashes = rest.bytes().take_while(|&b| b == b'#').count();
-    if (1..=6).contains(&hashes) && rest.as_bytes().get(hashes) == Some(&b' ') {
-        let style = if hashes <= 2 {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
-        Some(style)
-    } else {
-        None
-    }
-}
-
-fn markdown_bullet_index(line: &str) -> Option<usize> {
-    let indent = line.bytes().take_while(|&b| b == b' ').count();
-    let rest = &line[indent..];
-    if (rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ "))
-        && !rest.starts_with("---")
-    {
-        Some(indent)
-    } else {
-        None
-    }
-}
-
-fn wrap_transcript_rows(rows: &[String], width: usize) -> Vec<WrappedRow> {
+fn wrap_styled_transcript_rows(rows: &[StyledRow], width: usize) -> Vec<WrappedRow> {
     let mut out = Vec::new();
-    let mut styler = RowStyler::default();
-    for (row_idx, raw_row) in rows.iter().enumerate() {
-        let safe = sanitize_terminal_text(raw_row);
-        let mut sub_idx = 0usize;
-        for logical in safe.split('\n') {
-            let segs = styler.style_sanitized_line(logical);
-            for chunk in wrap_segments(&segs, width) {
+    for (row_idx, row) in rows.iter().enumerate() {
+        if let Some(hr_style) = row.hr_style {
+            let rule_w = width.clamp(3, 60);
+            let segs = sanitize_graphemes_with_style(&"─".repeat(rule_w), hr_style);
+            out.push(WrappedRow {
+                row_idx,
+                sub_idx: 0,
+                segments: segs,
+                fill_style: row.fill_style,
+            });
+            continue;
+        }
+
+        let mut segs = Vec::new();
+        for span in &row.spans {
+            segs.extend(sanitize_graphemes_with_style(&span.text, span.style));
+        }
+
+        if row.hang_prefix.is_empty() || width == 0 {
+            for (sub_idx, chunk) in wrap_segments(&segs, width).into_iter().enumerate() {
                 out.push(WrappedRow {
                     row_idx,
                     sub_idx,
                     segments: chunk,
+                    fill_style: row.fill_style,
                 });
-                sub_idx += 1;
             }
+            continue;
+        }
+
+        let mut prefix_segs = Vec::new();
+        for span in &row.hang_prefix {
+            prefix_segs.extend(sanitize_graphemes_with_style(&span.text, span.style));
+        }
+        let prefix_w: usize = prefix_segs.iter().map(|s| s.width).sum();
+        if prefix_w == 0 || prefix_w >= width {
+            for (sub_idx, chunk) in wrap_segments(&segs, width).into_iter().enumerate() {
+                out.push(WrappedRow {
+                    row_idx,
+                    sub_idx,
+                    segments: chunk,
+                    fill_style: row.fill_style,
+                });
+            }
+            continue;
+        }
+
+        let first_chunks = wrap_segments(&segs, width);
+        let first_len = first_chunks.len();
+        if first_len <= 1 {
+            out.push(WrappedRow {
+                row_idx,
+                sub_idx: 0,
+                segments: first_chunks.into_iter().next().unwrap_or_default(),
+                fill_style: row.fill_style,
+            });
+            continue;
+        }
+
+        // First chunk fills full width; remaining segments wrap with `hang_prefix` on continuation lines.
+        let mut iter = first_chunks.into_iter();
+        let first = iter.next().unwrap_or_default();
+        let first_seg_count = first.len();
+        out.push(WrappedRow {
+            row_idx,
+            sub_idx: 0,
+            segments: first,
+            fill_style: row.fill_style,
+        });
+        let rest_segs = &segs[first_seg_count..];
+        let cont_width = width - prefix_w;
+        for (idx, chunk) in wrap_segments(rest_segs, cont_width).into_iter().enumerate() {
+            let mut combined = Vec::with_capacity(prefix_segs.len() + chunk.len());
+            combined.extend(prefix_segs.iter().cloned());
+            combined.extend(chunk);
+            out.push(WrappedRow {
+                row_idx,
+                sub_idx: idx + 1,
+                segments: combined,
+                fill_style: row.fill_style,
+            });
         }
     }
     out
@@ -1552,7 +1593,7 @@ fn wrap_transcript_rows(rows: &[String], width: usize) -> Vec<WrappedRow> {
 
 fn resolve_scroll_top(
     state: &ScrollState,
-    rows: &[String],
+    rows: &[StyledRow],
     wrapped: &[WrappedRow],
     max_top: usize,
 ) -> (usize, ScrollState) {
@@ -1570,7 +1611,7 @@ fn resolve_scroll_top(
 
             let mut base_top = max_top.saturating_sub(*from_bottom);
             if let (Some((r_idx, sub_idx)), Some(expected_hash)) = (top_anchor, anchor_row_hash) {
-                if *r_idx < rows.len() && hash_str(&rows[*r_idx]) == *expected_hash {
+                if *r_idx < rows.len() && hash_styled_row(&rows[*r_idx]) == *expected_hash {
                     if let Some(pos) = wrapped
                         .iter()
                         .position(|w| w.row_idx == *r_idx && w.sub_idx == *sub_idx)
@@ -1592,7 +1633,7 @@ fn resolve_scroll_top(
                     .get(new_top)
                     .and_then(|w| {
                         rows.get(w.row_idx)
-                            .map(|r| (Some((w.row_idx, w.sub_idx)), Some(hash_str(r))))
+                            .map(|r| (Some((w.row_idx, w.sub_idx)), Some(hash_styled_row(r))))
                     })
                     .unwrap_or((None, None));
                 (
@@ -2855,5 +2896,85 @@ mod tests {
         // Row 6: "-old" inside diff is Red; Row 7: "+new" is Green
         assert_eq!(buf[(0, 6)].style().fg, Some(Color::Red));
         assert_eq!(buf[(0, 7)].style().fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn write_style_transition_emits_full_modifiers_indexed_rgb_and_backgrounds() {
+        let mut out = String::new();
+        let style = Style::default()
+            .fg(Color::Rgb(110, 215, 235))
+            .bg(Color::Indexed(236))
+            .add_modifier(
+                Modifier::BOLD
+                    | Modifier::DIM
+                    | Modifier::ITALIC
+                    | Modifier::UNDERLINED
+                    | Modifier::REVERSED
+                    | Modifier::CROSSED_OUT,
+            );
+        write_style_transition(&mut out, style);
+        assert_eq!(out, "\x1b[0m\x1b[1;2;3;4;7;9;38;2;110;215;235;48;5;236m");
+
+        let mut basic = String::new();
+        write_style_transition(
+            &mut basic,
+            Style::default().fg(Color::Blue).bg(Color::LightMagenta),
+        );
+        assert_eq!(basic, "\x1b[0m\x1b[34;105m");
+    }
+
+    #[test]
+    fn plain_theme_suppresses_color_sgr_in_regular_mode_while_preserving_content() {
+        let log = Rc::new(RefCell::new(MockRegularLog {
+            width: 50,
+            height: 8,
+            writes: Vec::new(),
+        }));
+        let mut screen =
+            Screen::with_regular_test_target(Box::new(MockRegularTarget { log: log.clone() }));
+        let theme = Theme::plain();
+        let styled = crate::hi::markdown::render_markdown_lines(
+            "# Heading\n> quote **bold** `code`\n```rust\nfn main() {}\n```",
+            &theme,
+            Style::default(),
+        );
+        screen
+            .draw_styled_with_overlay(&styled, "draft", 5, &["ok"], EditorOverlay::None, &theme)
+            .unwrap();
+
+        let written = log.borrow().writes.concat();
+        assert!(written.contains("# Heading"));
+        assert!(written.contains("│ quote bold code"));
+        assert!(written.contains("fn main() {}"));
+        // Plain theme emits zero foreground/background color SGRs (`38;`, `48;`, `30..37`, `90..97`, etc.)
+        assert!(!written.contains("\x1b[38;"));
+        assert!(!written.contains("\x1b[48;"));
+        assert!(!written.contains(";36m"));
+    }
+
+    #[test]
+    fn dark_and_light_themes_emit_styled_cells_and_hanging_blockquote_wrap() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let mut screen = Screen::with_test_backend(22, 8).unwrap();
+            let styled = crate::hi::markdown::render_markdown_lines(
+                "> alpha beta gamma delta\n- [x] done",
+                &theme,
+                Style::default(),
+            );
+            screen
+                .draw_styled_with_overlay(&styled, "", 0, &["ok"], EditorOverlay::None, &theme)
+                .unwrap();
+
+            let buf = screen.test_backend().buffer();
+            // Line 0 and wrapped continuation line 1 both start with "│ " quote bar
+            assert_eq!(buf[(0, 0)].symbol(), "│");
+            assert_eq!(buf[(0, 0)].style().fg, theme.md_quote_border.fg);
+            assert_eq!(buf[(0, 1)].symbol(), "│");
+            assert_eq!(buf[(0, 1)].style().fg, theme.md_quote_border.fg);
+            // Line 2 has checkbox [x]
+            let row2 = buffer_row_text(buf, 2);
+            assert!(row2.starts_with("- [x] done"), "row2={row2:?}");
+            assert_eq!(buf[(2, 2)].style().fg, theme.tool_ok.fg);
+        }
     }
 }
