@@ -11,10 +11,11 @@ defmodule H.Daemon do
 
   alias H.{
     Catalog,
+    Daemon.Validation,
+    Daemon.Workspace,
     EnvRegistry,
     ExecutionEnv,
     Harness,
-    Schema,
     Session.Server,
     Session.Supervisor
   }
@@ -25,20 +26,6 @@ defmodule H.Daemon do
   @default_catalog H.Catalog
   @default_catalog_table :h_catalog
   @default_workspace_lease H.WorkspaceLease
-
-  @default_discovery_limit 200
-  @max_discovery_limit 500
-  @default_discovery_depth 32
-  @max_discovery_depth 32
-  @max_discovery_bytes 262_144
-  @max_discovery_scanned 20_000
-  @max_discovery_timeout_ms 2_000
-  @max_discovery_query_bytes 512
-
-  @default_read_file_limit 200
-  @max_read_file_limit 2_000
-  @default_read_file_bytes 51_200
-  @max_read_file_bytes 65_536
 
   @doc "Returns the running instance's validated daemon options, or `nil` when not booted."
   @spec instance_options() :: keyword() | nil
@@ -69,71 +56,7 @@ defmodule H.Daemon do
              | {:bad_request, String.t()}}
   def browse_workspace(query_params \\ %{}, opts \\ [])
       when is_map(query_params) and is_list(opts) do
-    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
-    raw_env_id = param_get(query_params, "env_id", :env_id)
-    env_id = if raw_env_id in [nil, ""], do: "host", else: raw_env_id
-    raw_path = param_get(query_params, "path", :path)
-
-    include_hidden =
-      parse_bool_param(param_get(query_params, "include_hidden", :include_hidden), false)
-
-    if not is_binary(env_id) do
-      {:error, {:bad_request, "env_id must be a string"}}
-    else
-      with {:ok, base_env, desc} <- EnvRegistry.fetch_env(env_id, opts),
-           target_path = if(raw_path in [nil, ""], do: desc.default_cwd, else: raw_path),
-           :ok <- ensure_string_path(target_path),
-           {:ok, bound_env} <- bind_browse_cwd(base_env, target_path),
-           canonical_path = ExecutionEnv.cwd(bound_env),
-           {:ok, %{entries: raw_dirs}} <-
-             ExecutionEnv.list_dir(bound_env, canonical_path,
-               only_dirs: true,
-               include_hidden: include_hidden,
-               markers: ExecutionEnv.default_markers(),
-               limit: 500
-             ) do
-        annotated =
-          Catalog.annotate_directories(desc.id, raw_dirs,
-            table: table,
-            parent_path: canonical_path
-          )
-
-        directories =
-          Enum.map(annotated, fn dir ->
-            dir_path = Map.get(dir, :path) || Path.join(canonical_path, dir.name)
-
-            %{
-              name: dir.name,
-              path: dir_path,
-              type: dir.type,
-              markers: Map.get(dir, :markers, []),
-              direct_session_count: Map.get(dir, :direct_session_count, 0),
-              subtree_session_count: Map.get(dir, :subtree_session_count, 0),
-              active_session_count: Map.get(dir, :active_session_count, 0),
-              latest_session: Map.get(dir, :latest_session)
-            }
-          end)
-
-        sessions =
-          desc.id
-          |> Catalog.list_sessions_for_cwd(canonical_path, table: table, subtree: false)
-          |> Enum.map(&wire_session/1)
-
-        parent_path = if canonical_path == "/", do: nil, else: Path.dirname(canonical_path)
-
-        {:ok,
-         %{
-           env_id: desc.id,
-           path: canonical_path,
-           parent_path: parent_path,
-           directories: directories,
-           sessions: sessions
-         }}
-      else
-        {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
-        {:error, _} = err -> err
-      end
-    end
+    Workspace.browse(query_params, opts, &wire_session/1)
   end
 
   @doc """
@@ -153,37 +76,7 @@ defmodule H.Daemon do
   def list_files(query_params \\ %{}, opts \\ [])
 
   def list_files(query_params, opts) when is_map(query_params) and is_list(opts) do
-    with {:ok, params} <- parse_list_files_params(query_params),
-         {:ok, base_env, desc} <- EnvRegistry.fetch_env(params.env_id, opts),
-         {:ok, bound_env} <- bind_workspace_cwd(base_env, params.cwd),
-         canonical_cwd = ExecutionEnv.cwd(bound_env),
-         {:ok, %{entries: entries, truncated: truncated}} <-
-           ExecutionEnv.list_files(bound_env, canonical_cwd,
-             include_hidden: params.include_hidden,
-             include_dirs: params.include_dirs,
-             exclude: params.exclude,
-             query: params.query,
-             limit: params.limit,
-             max_bytes: @max_discovery_bytes,
-             max_depth: params.max_depth,
-             max_scanned: @max_discovery_scanned,
-             timeout_ms: @max_discovery_timeout_ms
-           ) do
-      {:ok,
-       %{
-         env_id: desc.id,
-         cwd: canonical_cwd,
-         entries: entries,
-         truncated: truncated
-       }}
-    else
-      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
-      {:error, :unsupported} -> {:error, :workspace_unavailable}
-      {:error, :enoent} -> {:error, :not_found}
-      {:error, :enotdir} -> {:error, {:bad_request, "cwd is not a directory"}}
-      {:error, :eacces} -> {:error, {:forbidden, "permission denied"}}
-      {:error, _} = err -> err
-    end
+    Workspace.list_files(query_params, opts)
   end
 
   def list_files(_query_params, _opts), do: {:error, {:bad_request, "expected a map"}}
@@ -205,46 +98,7 @@ defmodule H.Daemon do
   def read_file(query_params \\ %{}, opts \\ [])
 
   def read_file(query_params, opts) when is_map(query_params) and is_list(opts) do
-    with {:ok, params} <- parse_read_file_params(query_params),
-         {:ok, base_env, desc} <- EnvRegistry.fetch_env(params.env_id, opts),
-         {:ok, bound_env} <- bind_workspace_cwd(base_env, params.cwd),
-         canonical_cwd = ExecutionEnv.cwd(bound_env),
-         {:ok, resolved_path} <- resolve_target_path(bound_env, params.path),
-         :ok <- verify_lexical_containment(canonical_cwd, resolved_path),
-         {:ok, canonical_root} <- fetch_canonical_root(bound_env, canonical_cwd),
-         :ok <-
-           verify_canonical_containment(bound_env, canonical_cwd, canonical_root, resolved_path),
-         {:ok, result} <-
-           ExecutionEnv.read_file_lines(bound_env, resolved_path,
-             offset: params.offset,
-             limit: params.limit,
-             max_bytes: params.max_bytes,
-             no_follow: true
-           ) do
-      {:ok,
-       %{
-         env_id: desc.id,
-         cwd: canonical_cwd,
-         path: relative_display_path(canonical_cwd, resolved_path),
-         resolved_path: resolved_path,
-         lines: result.lines,
-         start_line: result.start_line,
-         total_lines_read: result.total_lines_read,
-         has_more: result.has_more,
-         truncated_by_bytes: result.truncated_by_bytes
-       }}
-    else
-      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
-      {:error, :symlink_not_followed} -> {:error, {:forbidden, "symlinks are not followed"}}
-      {:error, :enoent} -> {:error, :not_found}
-      {:error, :enotdir} -> {:error, {:bad_request, "parent path is not a directory"}}
-      {:error, :eacces} -> {:error, {:forbidden, "permission denied"}}
-      {:error, :eisdir} -> {:error, {:bad_request, "path is a directory"}}
-      {:error, :not_regular_file} -> {:error, {:bad_request, "path is not a regular file"}}
-      {:error, :binary_file} -> {:error, {:bad_request, "binary or invalid UTF-8 file"}}
-      {:error, :einval} -> {:error, {:bad_request, "invalid path"}}
-      {:error, _} = err -> err
-    end
+    Workspace.read_file(query_params, opts)
   end
 
   def read_file(_query_params, _opts), do: {:error, {:bad_request, "expected a map"}}
@@ -326,9 +180,11 @@ defmodule H.Daemon do
   @spec list_sessions(map(), keyword()) :: {:ok, [map()]} | {:error, {:bad_request, String.t()}}
   def list_sessions(query_params, opts) when is_map(query_params) and is_list(opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
-    raw_env_id = param_get(query_params, "env_id", :env_id)
-    raw_cwd = param_get(query_params, "cwd", :cwd)
-    subtree? = parse_bool_param(param_get(query_params, "subtree", :subtree), false)
+    raw_env_id = Validation.param_get(query_params, "env_id", :env_id)
+    raw_cwd = Validation.param_get(query_params, "cwd", :cwd)
+
+    subtree? =
+      Validation.parse_bool_param(Validation.param_get(query_params, "subtree", :subtree), false)
 
     cond do
       not (is_nil(raw_env_id) or is_binary(raw_env_id)) ->
@@ -392,29 +248,13 @@ defmodule H.Daemon do
   def create_session(_params, _opts), do: {:error, {:bad_request, "expected a map"}}
 
   defp do_create_session(params, opts) do
-    normalized_params = drop_blank_optional(params, ["session_id", :session_id])
-
-    with {:ok, validated} <-
-           Schema.validate_map(normalized_params, [
-             {:session_id, :session_id, required: false},
-             {:env_id, :non_empty_string, required: false},
-             {:harness_id, :non_empty_string, required: false},
-             {:cwd, :abs_path, required: true},
-             {:title, :string, required: false, nullable: true},
-             {:agent, :map, required: false},
-             {:request_id, :non_empty_string, required: false}
-           ]),
-         {:ok, agent_opts} <- validate_optional_agent(Map.get(validated, :agent)),
-         {:ok, validated} <- normalize_optional_title(validated) do
+    with {:ok, validated, agent_opts} <- Validation.validate_create_session_params(params) do
       table = Keyword.get(opts, :catalog_table, @default_catalog_table)
 
       case Map.get(validated, :session_id) && Catalog.get_session(validated.session_id, table) do
         {:ok, existing} -> attach_session(existing, validated, opts)
         _ -> create_new_session(validated, agent_opts || %{}, opts)
       end
-    else
-      {:error, reason} when is_binary(reason) -> {:error, {:bad_request, reason}}
-      {:error, _} = err -> err
     end
   end
 
@@ -422,7 +262,7 @@ defmodule H.Daemon do
     harness_id = Map.get(entry, :harness_id) || "coding"
     env_id = Map.get(entry, :env_id) || "host"
 
-    with :ok <- ensure_not_quarantined(entry),
+    with :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, harness} <- Harness.resolve(harness_id, opts),
          :ok <- match_harness(Map.get(params, :harness_id), harness_id, harness, opts),
          :ok <- match_workspace(env_id, entry.cwd, params, opts) do
@@ -487,7 +327,7 @@ defmodule H.Daemon do
 
   defp bootstrap_agent(harness, env, agent_opts, opts) do
     with {:ok, agent} when is_map(agent) <- harness.bootstrap_agent(env, agent_opts, opts),
-         {:ok, validated} <- validate_optional_agent(agent) do
+         {:ok, validated} <- Validation.validate_optional_agent(agent) do
       {:ok, validated}
     else
       _ -> {:error, :harness_unavailable}
@@ -521,9 +361,9 @@ defmodule H.Daemon do
       when is_binary(session_id) and is_list(opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
 
-    with {:ok, _sid} <- validate_sid_or_not_found(session_id),
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- ensure_not_quarantined(entry),
+         :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, server} <- ensure_session_started(entry, opts, nil),
          {:ok, detail} <- Server.get_detail(server) do
       session_entry =
@@ -550,11 +390,11 @@ defmodule H.Daemon do
       when is_binary(session_id) and is_map(query_params) and is_list(opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
 
-    with {:ok, _sid} <- validate_sid_or_not_found(session_id),
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- ensure_not_quarantined(entry),
-         {:ok, cid} <- parse_cid(conversation_id),
-         {:ok, query} <- parse_scan_query(query_params),
+         :ok <- Validation.ensure_not_quarantined(entry),
+         {:ok, cid} <- Validation.parse_cid(conversation_id),
+         {:ok, query} <- Validation.parse_scan_query(query_params),
          {:ok, server} <- ensure_session_started(entry, opts, nil),
          {:ok, %{items: items, next_cursor: next_cursor}} <-
            Server.scan_entries(server, cid, query) do
@@ -587,11 +427,11 @@ defmodule H.Daemon do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
     pubsub = Keyword.get(opts, :pubsub, @default_pubsub)
 
-    with {:ok, _sid} <- validate_sid_or_not_found(session_id),
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- ensure_not_quarantined(entry),
-         {:ok, cid} <- parse_cid(conversation_id),
-         {:ok, last_event_id} <- parse_last_event_id(last_event_id_or_nil),
+         :ok <- Validation.ensure_not_quarantined(entry),
+         {:ok, cid} <- Validation.parse_cid(conversation_id),
+         {:ok, last_event_id} <- Validation.parse_last_event_id(last_event_id_or_nil),
          {:ok, server} <- ensure_session_started(entry, opts, nil) do
       topic = {:conversation, session_id, cid}
 
@@ -635,10 +475,10 @@ defmodule H.Daemon do
   defp dispatch_command(session_id, raw_envelope, opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
 
-    with {:ok, _sid} <- validate_sid_or_not_found(session_id),
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- ensure_not_quarantined(entry),
-         {:ok, envelope} <- validate_envelope(raw_envelope),
+         :ok <- Validation.ensure_not_quarantined(entry),
+         {:ok, envelope} <- Validation.validate_envelope(raw_envelope),
          {:ok, server} <- ensure_session_started(entry, opts, nil) do
       Server.execute_command(server, envelope)
     end
@@ -797,254 +637,43 @@ defmodule H.Daemon do
     end
   end
 
-  # Boundary Validation
+  defp lookup_active_session_entry(session_id, opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
 
-  defp validate_sid_or_not_found(session_id) do
-    case Schema.validate_session_id(session_id) do
-      {:ok, sid} -> {:ok, sid}
-      {:error, _} -> {:error, :not_found}
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- Validation.ensure_not_quarantined(entry) do
+      {:ok, entry}
     end
   end
 
-  defp ensure_not_quarantined(%{status: "quarantined"} = entry) do
-    {:error, {:quarantined, entry.quarantine_reason || "quarantined"}}
-  end
-
-  defp ensure_not_quarantined(_entry), do: :ok
-
-  defp parse_cid(cid) do
-    case Schema.parse_pos_int(cid) do
-      {:ok, id} -> {:ok, id}
-      {:error, reason} -> {:error, {:bad_request, "conversation_id: #{reason}"}}
+  defp resolve_harness(harness_id, opts) do
+    case Harness.resolve(harness_id, opts) do
+      {:ok, mod} -> {:ok, mod}
+      {:error, :unknown_harness} -> {:error, {:bad_request, "unknown harness: #{harness_id}"}}
     end
   end
 
-  defp parse_last_event_id(nil), do: {:ok, nil}
-  defp parse_last_event_id(""), do: {:ok, nil}
+  defp resolve_session_workspace(env_id, raw_cwd, opts) do
+    case EnvRegistry.resolve_workspace(env_id, raw_cwd, opts) do
+      {:ok, ws} ->
+        {:ok, ws}
 
-  defp parse_last_event_id(val) when is_integer(val) and val >= 0, do: {:ok, val}
+      {:error, :unknown_environment} ->
+        {:error, {:bad_request, "unknown environment: #{env_id}"}}
 
-  defp parse_last_event_id(val) when is_binary(val) do
-    if Regex.match?(~r/^\d+$/, val) do
-      {:ok, String.to_integer(val)}
-    else
-      {:error, {:bad_request, "last_event_id must be a non-negative integer"}}
+      {:error, :enoent} ->
+        {:error, {:bad_request, "working directory does not exist: #{raw_cwd}"}}
+
+      {:error, :enotdir} ->
+        {:error, {:bad_request, "working directory is not a directory: #{raw_cwd}"}}
+
+      {:error, reason} ->
+        {:error, {:bad_request, "invalid workspace: #{inspect(reason)}"}}
     end
   end
 
-  defp parse_last_event_id(_),
-    do: {:error, {:bad_request, "last_event_id must be a non-negative integer"}}
-
-  defp parse_scan_query(params) do
-    with {:ok, order} <- parse_order(param_get(params, "order", :order)),
-         {:ok, cursor} <- parse_optional_pos_int(param_get(params, "cursor", :cursor), "cursor"),
-         {:ok, limit} <- parse_limit(param_get(params, "limit", :limit)) do
-      query =
-        %{order: order, limit: limit}
-        |> maybe_put(:cursor, cursor)
-
-      {:ok, query}
-    end
-  end
-
-  defp parse_order(nil), do: {:ok, :desc}
-  defp parse_order("desc"), do: {:ok, :desc}
-  defp parse_order(:desc), do: {:ok, :desc}
-  defp parse_order("asc"), do: {:ok, :asc}
-  defp parse_order(:asc), do: {:ok, :asc}
-  defp parse_order(_), do: {:error, {:bad_request, "order must be \"asc\" or \"desc\""}}
-
-  defp parse_optional_pos_int(nil, _field), do: {:ok, nil}
-  defp parse_optional_pos_int("", _field), do: {:ok, nil}
-
-  defp parse_optional_pos_int(val, field) do
-    case Schema.parse_pos_int(val) do
-      {:ok, n} -> {:ok, n}
-      {:error, reason} -> {:error, {:bad_request, "#{field}: #{reason}"}}
-    end
-  end
-
-  defp parse_limit(nil), do: {:ok, 50}
-  defp parse_limit(""), do: {:ok, 50}
-
-  defp parse_limit(val) do
-    case Schema.parse_pos_int(val) do
-      {:ok, n} when n >= 1 and n <= 200 -> {:ok, n}
-      {:ok, _} -> {:error, {:bad_request, "limit must be between 1 and 200"}}
-      {:error, reason} -> {:error, {:bad_request, "limit: #{reason}"}}
-    end
-  end
-
-  defp validate_optional_agent(nil), do: {:ok, nil}
-
-  defp validate_optional_agent(agent) when is_map(agent) do
-    Schema.validate_map(agent, [
-      {:model, :string, required: false, nullable: true},
-      {:thinking, :string, required: false, nullable: true},
-      {:system_prompt, :string, required: false, nullable: true},
-      {:instructions, :string, required: false, nullable: true},
-      {:tools, {:list, :string}, required: false}
-    ])
-  end
-
-  defp validate_envelope(raw) do
-    with {:ok, env} <-
-           Schema.validate_map(raw, [
-             {:version, {:literal, 1}, required: true},
-             {:request_id, :non_empty_string, required: true},
-             {:command,
-              {:enum,
-               [
-                 "submit",
-                 "fork",
-                 "fork_and_submit",
-                 "configure",
-                 "abort",
-                 "withdraw",
-                 "rename",
-                 "user_shell",
-                 "compact"
-               ]}, required: true},
-             {:conversation_id, :pos_int, required: true},
-             {:args, :map, default: %{}}
-           ]),
-         {:ok, validated_args} <- validate_command_args(env.command, env.args) do
-      {:ok, %{env | args: validated_args}}
-    else
-      {:error, reason} when is_binary(reason) -> {:error, {:bad_request, reason}}
-    end
-  end
-
-  defp validate_command_args("submit", raw_args) do
-    with {:ok, base} <-
-           Schema.validate_map(raw_args, [
-             {:type, {:enum, ["input", "continue", "write"]}, required: true}
-           ]) do
-      case base.type do
-        "input" ->
-          with {:ok, args} <-
-                 Schema.validate_map(raw_args, [
-                   {:type, {:literal, "input"}, required: true},
-                   {:content, :any, required: true},
-                   {:when_busy, {:enum, ["follow_up", "steer", "reject"]}, default: "follow_up"},
-                   {:when_idle, {:enum, ["start", "reject"]}, default: "start"}
-                 ]),
-               :ok <- validate_content(args.content) do
-            {:ok, args}
-          end
-
-        "continue" ->
-          {:ok, %{type: "continue"}}
-
-        "write" ->
-          Schema.validate_map(raw_args, [
-            {:type, {:literal, "write"}, required: true},
-            {:kind, :non_empty_string, default: "user"},
-            {:content, :any, required: false},
-            {:data, :map, required: false}
-          ])
-      end
-    end
-  end
-
-  defp validate_command_args("fork", raw_args) do
-    Schema.validate_map(raw_args, [
-      {:at_entry_id, :pos_int, required: true}
-    ])
-  end
-
-  defp validate_command_args("fork_and_submit", raw_args) do
-    with {:ok, args} <-
-           Schema.validate_map(raw_args, [
-             {:at_entry_id, :pos_int, required: true},
-             {:content, :any, required: true},
-             {:when_busy, {:enum, ["follow_up", "steer", "reject"]}, default: "follow_up"},
-             {:when_idle, {:enum, ["start", "reject"]}, default: "start"}
-           ]),
-         :ok <- validate_content(args.content) do
-      {:ok, args}
-    end
-  end
-
-  defp validate_command_args("configure", raw_args) do
-    Schema.validate_map(raw_args, [
-      {:model, :string, required: false, nullable: true},
-      {:thinking, :string, required: false, nullable: true},
-      {:system_prompt, :string, required: false, nullable: true},
-      {:instructions, :string, required: false, nullable: true},
-      {:tools, {:list, :string}, required: false},
-      {:expected_seq, {:int, min: 0}, required: false, nullable: true}
-    ])
-  end
-
-  defp validate_command_args("abort", raw_args) do
-    Schema.validate_map(raw_args, [
-      {:task_id, :pos_int, required: false, nullable: true},
-      {:reason, :string, required: false, nullable: true}
-    ])
-  end
-
-  defp validate_command_args("withdraw", raw_args) do
-    with {:ok, args} <-
-           Schema.validate_map(raw_args, [
-             {:submission_ids, {:list, :pos_int}, required: true}
-           ]),
-         :ok <- validate_non_empty_list(args.submission_ids, "submission_ids") do
-      {:ok, %{args | submission_ids: Enum.uniq(args.submission_ids)}}
-    end
-  end
-
-  defp validate_command_args("rename", raw_args) do
-    with {:ok, args} <-
-           Schema.validate_map(raw_args, [
-             {:title, :string, required: true, nullable: true},
-             {:expected_seq, {:int, min: 0}, required: false, nullable: true}
-           ]),
-         {:ok, normalized_title} <- normalize_title_arg(args.title) do
-      {:ok, %{args | title: normalized_title}}
-    end
-  end
-
-  defp validate_command_args("user_shell", raw_args) do
-    H.Session.UserShell.validate_args(raw_args)
-  end
-
-  defp validate_command_args("compact", raw_args) do
-    H.Session.Compaction.validate_args(raw_args)
-  end
-
-  defp normalize_optional_title(%{title: title} = validated) do
-    case normalize_title_arg(title) do
-      {:ok, normalized} -> {:ok, %{validated | title: normalized}}
-      {:error, _} = err -> err
-    end
-  end
-
-  defp normalize_optional_title(validated), do: {:ok, validated}
-
-  defp normalize_title_arg(title) do
-    case Schema.normalize_title(title) do
-      {:ok, normalized} -> {:ok, normalized}
-      {:error, reason} -> {:error, "title: #{reason}"}
-    end
-  end
-
-  defp validate_non_empty_list([_ | _], _field), do: :ok
-  defp validate_non_empty_list([], field), do: {:error, "#{field} must be a non-empty list"}
-
-  defp validate_content(text) when is_binary(text) and byte_size(text) > 0, do: :ok
-
-  defp validate_content(blocks) when is_list(blocks) and blocks != [] do
-    if Enum.all?(blocks, &(is_map(&1) or is_binary(&1))) do
-      :ok
-    else
-      {:error, "content items must be maps or strings"}
-    end
-  end
-
-  defp validate_content(_), do: {:error, "content must be a non-empty string or block list"}
-
-  # Wire formatting
+  # Wire formatting & misc helpers
 
   defp wire_session(entry) do
     %{
@@ -1098,13 +727,6 @@ defmodule H.Daemon do
     }
   end
 
-  defp param_get(map, str_key, atom_key) do
-    case Map.fetch(map, str_key) do
-      {:ok, val} -> val
-      :error -> Map.get(map, atom_key)
-    end
-  end
-
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, val), do: Map.put(map, key, val)
 
@@ -1116,364 +738,6 @@ defmodule H.Daemon do
       {:ok, val} -> Keyword.put(dst, key, val)
       :error -> dst
     end
-  end
-
-  defp resolve_harness(harness_id, opts) do
-    case Harness.resolve(harness_id, opts) do
-      {:ok, mod} -> {:ok, mod}
-      {:error, :unknown_harness} -> {:error, {:bad_request, "unknown harness: #{harness_id}"}}
-    end
-  end
-
-  defp resolve_session_workspace(env_id, raw_cwd, opts) do
-    case EnvRegistry.resolve_workspace(env_id, raw_cwd, opts) do
-      {:ok, ws} ->
-        {:ok, ws}
-
-      {:error, :unknown_environment} ->
-        {:error, {:bad_request, "unknown environment: #{env_id}"}}
-
-      {:error, :enoent} ->
-        {:error, {:bad_request, "working directory does not exist: #{raw_cwd}"}}
-
-      {:error, :enotdir} ->
-        {:error, {:bad_request, "working directory is not a directory: #{raw_cwd}"}}
-
-      {:error, reason} ->
-        {:error, {:bad_request, "invalid workspace: #{inspect(reason)}"}}
-    end
-  end
-
-  defp bind_browse_cwd(base_env, target_path) do
-    case ExecutionEnv.bind_cwd(base_env, target_path) do
-      {:ok, bound} -> {:ok, bound}
-      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
-      {:error, :enoent} -> {:error, :not_found}
-      {:error, :enotdir} -> {:error, {:bad_request, "path is not a directory"}}
-      {:error, reason} -> {:error, {:bad_request, "invalid path: #{inspect(reason)}"}}
-    end
-  end
-
-  defp lookup_active_session_entry(session_id, opts) do
-    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
-
-    with {:ok, _sid} <- validate_sid_or_not_found(session_id),
-         {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- ensure_not_quarantined(entry) do
-      {:ok, entry}
-    end
-  end
-
-  defp parse_list_files_params(params) do
-    with {:ok, env_id} <- parse_required_env_id(param_get(params, "env_id", :env_id)),
-         {:ok, cwd} <- parse_required_abs_cwd(param_get(params, "cwd", :cwd)),
-         {:ok, query} <- parse_optional_query(param_get(params, "query", :query)),
-         {:ok, include_hidden} <-
-           parse_strict_bool(
-             param_get(params, "include_hidden", :include_hidden),
-             false,
-             "include_hidden"
-           ),
-         {:ok, include_dirs} <-
-           parse_strict_bool(
-             param_get(params, "include_dirs", :include_dirs),
-             true,
-             "include_dirs"
-           ),
-         {:ok, exclude} <- parse_exclude_list(param_get(params, "exclude", :exclude)),
-         {:ok, limit} <-
-           parse_bounded_int(
-             param_get(params, "limit", :limit),
-             @default_discovery_limit,
-             1,
-             @max_discovery_limit,
-             "limit"
-           ),
-         {:ok, max_depth} <-
-           parse_bounded_int(
-             param_get(params, "max_depth", :max_depth),
-             @default_discovery_depth,
-             1,
-             @max_discovery_depth,
-             "max_depth"
-           ) do
-      {:ok,
-       %{
-         env_id: env_id,
-         cwd: cwd,
-         query: query,
-         include_hidden: include_hidden,
-         include_dirs: include_dirs,
-         exclude: exclude,
-         limit: limit,
-         max_depth: max_depth
-       }}
-    end
-  end
-
-  defp parse_read_file_params(params) do
-    with {:ok, env_id} <- parse_required_env_id(param_get(params, "env_id", :env_id)),
-         {:ok, cwd} <- parse_required_abs_cwd(param_get(params, "cwd", :cwd)),
-         {:ok, path} <- parse_required_file_path(param_get(params, "path", :path)),
-         {:ok, offset} <-
-           parse_bounded_int(param_get(params, "offset", :offset), 1, 1, 10_000_000, "offset"),
-         {:ok, limit} <-
-           parse_bounded_int(
-             param_get(params, "limit", :limit),
-             @default_read_file_limit,
-             1,
-             @max_read_file_limit,
-             "limit"
-           ),
-         {:ok, max_bytes} <-
-           parse_bounded_int(
-             param_get(params, "max_bytes", :max_bytes),
-             @default_read_file_bytes,
-             1,
-             @max_read_file_bytes,
-             "max_bytes"
-           ) do
-      {:ok,
-       %{
-         env_id: env_id,
-         cwd: cwd,
-         path: path,
-         offset: offset,
-         limit: limit,
-         max_bytes: max_bytes
-       }}
-    end
-  end
-
-  defp parse_required_env_id(val) when is_binary(val) do
-    if String.trim(val) == "" or String.contains?(val, <<0>>) do
-      {:error, {:bad_request, "env_id is required"}}
-    else
-      {:ok, val}
-    end
-  end
-
-  defp parse_required_env_id(_), do: {:error, {:bad_request, "env_id is required"}}
-
-  defp parse_required_abs_cwd(val) when is_binary(val) do
-    if val != "" and String.starts_with?(val, "/") and not String.contains?(val, <<0>>) do
-      {:ok, val}
-    else
-      {:error, {:bad_request, "cwd must be an absolute path"}}
-    end
-  end
-
-  defp parse_required_abs_cwd(_), do: {:error, {:bad_request, "cwd must be an absolute path"}}
-
-  defp parse_required_file_path(val) when is_binary(val) do
-    cond do
-      String.trim(val) == "" ->
-        {:error, {:bad_request, "path is required"}}
-
-      String.contains?(val, <<0>>) ->
-        {:error, {:bad_request, "invalid path"}}
-
-      val == "~" or String.starts_with?(val, "~/") ->
-        {:error, {:forbidden, "path outside workspace"}}
-
-      true ->
-        {:ok, val}
-    end
-  end
-
-  defp parse_required_file_path(_), do: {:error, {:bad_request, "path is required"}}
-
-  defp parse_optional_query(nil), do: {:ok, nil}
-  defp parse_optional_query(""), do: {:ok, nil}
-
-  defp parse_optional_query(val) when is_binary(val) do
-    cond do
-      String.contains?(val, <<0>>) ->
-        {:error, {:bad_request, "query contains invalid bytes"}}
-
-      byte_size(val) > @max_discovery_query_bytes ->
-        {:error, {:bad_request, "query exceeds #{@max_discovery_query_bytes} bytes"}}
-
-      true ->
-        {:ok, val}
-    end
-  end
-
-  defp parse_optional_query(_), do: {:error, {:bad_request, "query must be a string"}}
-
-  defp parse_strict_bool(nil, default, _field), do: {:ok, default}
-  defp parse_strict_bool("", default, _field), do: {:ok, default}
-  defp parse_strict_bool(true, _default, _field), do: {:ok, true}
-  defp parse_strict_bool("true", _default, _field), do: {:ok, true}
-  defp parse_strict_bool("1", _default, _field), do: {:ok, true}
-  defp parse_strict_bool(false, _default, _field), do: {:ok, false}
-  defp parse_strict_bool("false", _default, _field), do: {:ok, false}
-  defp parse_strict_bool("0", _default, _field), do: {:ok, false}
-  defp parse_strict_bool(_, _default, field), do: {:error, {:bad_request, "invalid #{field}"}}
-
-  defp parse_exclude_list(nil), do: {:ok, []}
-  defp parse_exclude_list(""), do: {:ok, []}
-
-  defp parse_exclude_list(val) when is_binary(val) do
-    val
-    |> String.split(",", trim: true)
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-    |> parse_exclude_list()
-  end
-
-  defp parse_exclude_list(items) when is_list(items) do
-    if Enum.all?(items, fn item ->
-         is_binary(item) and item != "" and not String.contains?(item, ["/", <<0>>])
-       end) do
-      {:ok, items}
-    else
-      {:error, {:bad_request, "invalid exclude"}}
-    end
-  end
-
-  defp parse_exclude_list(_), do: {:error, {:bad_request, "invalid exclude"}}
-
-  defp parse_bounded_int(nil, default, _min, _max, _field), do: {:ok, default}
-  defp parse_bounded_int("", default, _min, _max, _field), do: {:ok, default}
-
-  defp parse_bounded_int(val, _default, min, max, field) do
-    case Schema.parse_pos_int(val) do
-      {:ok, n} when n >= min and n <= max -> {:ok, n}
-      {:ok, _} -> {:error, {:bad_request, "#{field} must be between #{min} and #{max}"}}
-      {:error, reason} -> {:error, {:bad_request, "#{field}: #{reason}"}}
-    end
-  end
-
-  defp bind_workspace_cwd(base_env, cwd) do
-    case ExecutionEnv.bind_cwd(base_env, cwd) do
-      {:ok, bound} -> {:ok, bound}
-      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
-      {:error, :enoent} -> {:error, :not_found}
-      {:error, :enotdir} -> {:error, {:bad_request, "cwd is not a directory"}}
-      {:error, :einval} -> {:error, {:bad_request, "invalid cwd"}}
-      {:error, reason} -> {:error, {:bad_request, "invalid cwd: #{inspect(reason)}"}}
-    end
-  end
-
-  defp resolve_target_path(env, path) do
-    case ExecutionEnv.resolve_path(env, path) do
-      {:ok, resolved} -> {:ok, resolved}
-      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
-      {:error, :einval} -> {:error, {:bad_request, "invalid path"}}
-      {:error, reason} -> {:error, {:bad_request, "invalid path: #{inspect(reason)}"}}
-    end
-  end
-
-  defp verify_lexical_containment(canonical_cwd, resolved_path) do
-    cond do
-      resolved_path == canonical_cwd -> {:error, {:bad_request, "path is a directory"}}
-      within_workspace?(canonical_cwd, resolved_path) -> :ok
-      true -> {:error, {:forbidden, "path outside workspace"}}
-    end
-  end
-
-  defp fetch_canonical_root(env, canonical_cwd) do
-    case ExecutionEnv.canonical_path(env, ".") do
-      {:ok, root} -> {:ok, root}
-      {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
-      {:error, _} -> {:ok, canonical_cwd}
-    end
-  end
-
-  defp verify_canonical_containment(env, canonical_cwd, canonical_root, resolved_path) do
-    case ExecutionEnv.canonical_path(env, resolved_path) do
-      {:ok, real_target} ->
-        cond do
-          real_target == canonical_root -> {:error, {:bad_request, "path is a directory"}}
-          within_workspace?(canonical_root, real_target) -> :ok
-          true -> {:error, {:forbidden, "path outside workspace"}}
-        end
-
-      {:error, :enoent} ->
-        verify_ancestor_containment(
-          env,
-          canonical_cwd,
-          canonical_root,
-          Path.dirname(resolved_path)
-        )
-
-      {:error, :eloop} ->
-        {:error, {:forbidden, "symlink loop detected"}}
-
-      {:error, :eacces} ->
-        {:error, {:forbidden, "permission denied"}}
-
-      {:error, {:agent_down, _}} ->
-        {:error, :workspace_unavailable}
-
-      {:error, _reason} ->
-        :ok
-    end
-  end
-
-  defp verify_ancestor_containment(env, canonical_cwd, canonical_root, dir) do
-    if not within_workspace?(canonical_cwd, dir) do
-      {:error, {:forbidden, "path outside workspace"}}
-    else
-      case ExecutionEnv.canonical_path(env, dir) do
-        {:ok, real_dir} ->
-          if within_workspace?(canonical_root, real_dir) do
-            :ok
-          else
-            {:error, {:forbidden, "path outside workspace"}}
-          end
-
-        {:error, :enoent} when dir != canonical_cwd ->
-          verify_ancestor_containment(env, canonical_cwd, canonical_root, Path.dirname(dir))
-
-        {:error, :eloop} ->
-          {:error, {:forbidden, "symlink loop detected"}}
-
-        {:error, :eacces} ->
-          {:error, {:forbidden, "permission denied"}}
-
-        {:error, {:agent_down, _}} ->
-          {:error, :workspace_unavailable}
-
-        {:error, _reason} ->
-          :ok
-      end
-    end
-  end
-
-  defp within_workspace?(root, target) do
-    normalized_root = if root == "/", do: "/", else: String.trim_trailing(root, "/")
-
-    cond do
-      normalized_root == "/" -> String.starts_with?(target, "/")
-      target == normalized_root -> true
-      true -> String.starts_with?(target, normalized_root <> "/")
-    end
-  end
-
-  defp relative_display_path("/", resolved_path), do: String.trim_leading(resolved_path, "/")
-
-  defp relative_display_path(canonical_cwd, resolved_path) do
-    prefix = String.trim_trailing(canonical_cwd, "/") <> "/"
-    String.replace_prefix(resolved_path, prefix, "")
-  end
-
-  defp ensure_string_path(p) when is_binary(p), do: :ok
-  defp ensure_string_path(_), do: {:error, {:bad_request, "path must be a string"}}
-
-  defp parse_bool_param(true, _default), do: true
-  defp parse_bool_param("true", _default), do: true
-  defp parse_bool_param("1", _default), do: true
-  defp parse_bool_param(false, _default), do: false
-  defp parse_bool_param("false", _default), do: false
-  defp parse_bool_param("0", _default), do: false
-  defp parse_bool_param(_, default), do: default
-
-  defp drop_blank_optional(map, keys) do
-    Enum.reduce(keys, map, fn k, acc ->
-      if Map.get(acc, k) in [nil, ""], do: Map.delete(acc, k), else: acc
-    end)
   end
 
   defp mint_session_id(cwd, table) do

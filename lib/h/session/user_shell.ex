@@ -11,12 +11,11 @@ defmodule H.Session.UserShell do
 
   require Logger
 
-  alias H.{Document, ExecutionEnv, Schema, Storage, Submission, Task, WorkspaceLease}
+  alias H.{Document, ExecutionEnv, Schema, Storage, Submission, Task}
   alias H.Session.LiveOutput
+  alias H.Session.Server.{State, Stream, Submissions}
 
   @default_timeout_ms 120_000
-  @max_replay_ring 64
-  @max_recent_submissions 256
 
   @doc "Validates external `user_shell` command arguments."
   @spec validate_args(term()) :: {:ok, map()} | {:error, String.t()}
@@ -31,16 +30,7 @@ defmodule H.Session.UserShell do
   @doc "Returns `true` if a `generation`, `user_shell`, or `compaction` run is active in `cid`."
   @spec busy?(map(), pos_integer()) :: boolean()
   def busy?(state, cid) when is_map(state) and is_integer(cid) do
-    live = get_in(state, [:docs, cid, "live"]) || %{}
-
-    Map.get(live, "run") != nil or
-      Map.get(live, "user_shell") != nil or
-      Map.get(live, "compaction") != nil or
-      Enum.any?(Map.get(state, :tasks, %{}), fn {_id, t} ->
-        t.kind in ["generation", "user_shell", "compaction"] and
-          t.owner == {:conversation, cid} and
-          t.status != "terminal"
-      end)
+    State.conversation_busy?(state, cid)
   end
 
   @doc "Returns `true` for unsafe `user_shell` tasks that must never replay on recovery."
@@ -135,8 +125,8 @@ defmodule H.Session.UserShell do
 
         state =
           state
-          |> put_task(task)
-          |> put_doc(cid, "live", next_live)
+          |> State.put_task(task)
+          |> State.put_doc(cid, "live", next_live)
 
         writes = [
           {:check, {:unique_request_id, req_id, fp}},
@@ -170,8 +160,7 @@ defmodule H.Session.UserShell do
     case Map.get(state.tasks, task_id) do
       %{kind: "user_shell", status: "pending"} = task ->
         now = System.system_time(:millisecond)
-        cp = task.checkpoint
-        command = cp["command"]
+        command = task.checkpoint["command"]
 
         case validate_bound_env(state.execution_env) do
           {:error, reason} ->
@@ -185,13 +174,13 @@ defmodule H.Session.UserShell do
             )
 
           {:ok, env} ->
-            case acquire_lease(cid, env, state) do
+            case State.acquire_lease(cid, state, env) do
               {:error, {:workspace_busy, holder_key}} ->
                 commit_immediate_failure(
                   cid,
                   task,
                   "workspace_busy",
-                  "Workspace #{workspace_cwd(env, state)} is currently busy with mutating work by #{inspect(holder_key)}.",
+                  "Workspace #{State.workspace_cwd(env, state)} is currently busy with mutating work by #{inspect(holder_key)}.",
                   state,
                   now
                 )
@@ -210,8 +199,8 @@ defmodule H.Session.UserShell do
 
                 state =
                   state
-                  |> put_task(running_task)
-                  |> put_doc(cid, "live", live)
+                  |> State.put_task(running_task)
+                  |> State.put_doc(cid, "live", live)
 
                 case Storage.commit(state.store, [
                        [
@@ -224,7 +213,7 @@ defmodule H.Session.UserShell do
                       "Session #{state.session_id} user_shell intent commit failed: #{inspect(io_err)}"
                     )
 
-                    state = release_lease(cid, env, state)
+                    state = State.release_lease(cid, state, env)
                     send(self(), {:stop_storage_failed, io_err})
                     %{state | storage_failed: true}
 
@@ -232,7 +221,7 @@ defmodule H.Session.UserShell do
                     state = %{state | store: committed_store, seq: batch_seq}
 
                     state =
-                      broadcast_commit_frame(state, cid, batch_seq, [], %{
+                      Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
                         "live" => [["set", ["user_shell", "status"], "running"]]
                       })
 
@@ -319,41 +308,13 @@ defmodule H.Session.UserShell do
 
   @doc "Buffers streamed `user_shell` output chunks into ephemeral `live` state."
   @spec handle_output(map(), pos_integer(), pos_integer(), term()) :: map()
-  def handle_output(state, cid, _tid, chunk) when is_binary(chunk) and chunk != "" do
-    eph = get_or_init_ephemeral(state, cid)
-    prev_out = Map.get(eph, :user_shell_output) || user_shell_live_output(state, cid)
-    next_out = prev_out <> chunk
-
-    next_eph =
-      %{
-        eph
-        | user_shell_output: next_out,
-          dirty: true,
-          pending_ops: eph.pending_ops ++ [["append_text", ["user_shell", "output"], chunk]]
-      }
-      |> arm_ephemeral_timers(cid, state.ephemeral_interval_ms, state.persist_within_ms)
-
-    %{state | ephemeral: Map.put(state.ephemeral, cid, next_eph)}
+  def handle_output(state, cid, tid, chunk) do
+    Stream.handle_user_shell_output(state, cid, tid, chunk)
   end
-
-  def handle_output(state, _cid, _tid, _chunk), do: state
 
   @doc "Merges buffered ephemeral `user_shell` output into `live`."
   @spec merge_ephemeral(map(), map() | nil) :: map()
-  def merge_ephemeral(live, nil), do: live
-
-  def merge_ephemeral(%{"user_shell" => shell_live} = live, eph)
-      when is_map(shell_live) and is_map(eph) do
-    case Map.get(eph, :user_shell_output) do
-      output when is_binary(output) ->
-        put_in(live, ["user_shell", "output"], output)
-
-      _ ->
-        live
-    end
-  end
-
-  def merge_ephemeral(live, _eph), do: live
+  def merge_ephemeral(live, eph), do: Stream.merge_user_shell_ephemeral(live, eph)
 
   @doc "Stages completion of a `user_shell` worker result."
   @spec stage_done(
@@ -383,7 +344,7 @@ defmodule H.Session.UserShell do
 
         eph = Map.get(state.ephemeral, cid)
         live = merge_ephemeral(state.docs[cid]["live"], eph)
-        state = clear_ephemeral_for_conv(state, cid)
+        state = Stream.clear_ephemeral_for_conv(state, cid)
 
         partial_fallback = get_in(live, ["user_shell", "output"]) || ""
 
@@ -399,8 +360,8 @@ defmodule H.Session.UserShell do
         {:ok, entry_id, store} = Storage.mint_id(state.store)
         state = %{state | store: store}
 
-        entry = build_entry_record(entry_id, cid, "user_shell", entry_data, now)
-        state = record_entry_in_conv(state, cid, entry_id)
+        entry = State.build_entry(entry_id, cid, "user_shell", entry_data, now)
+        state = State.record_entry(state, cid, entry_id)
 
         {settled_task, sub_mode, sub_val} =
           if entry_data["cancelled"] do
@@ -435,14 +396,14 @@ defmodule H.Session.UserShell do
           end
 
         sub_ids = shell_task.checkpoint["submission_ids"] || []
-        {sub_writes, state} = settle_submissions(sub_ids, sub_mode, sub_val, state, now)
+        {sub_writes, state} = Submissions.settle(sub_ids, sub_mode, sub_val, state, now)
 
         next_live = Map.delete(live, "user_shell")
 
         state =
           state
-          |> put_task(settled_task)
-          |> put_doc(cid, "live", next_live)
+          |> State.put_task(settled_task)
+          |> State.put_doc(cid, "live", next_live)
 
         writes =
           [{:append_entry, entry}, {:put_task, settled_task}] ++
@@ -488,7 +449,7 @@ defmodule H.Session.UserShell do
         cid = shell_task.checkpoint["conversation_id"]
         eph = Map.get(state.ephemeral, cid)
         live = merge_ephemeral(state.docs[cid]["live"], eph)
-        state = clear_ephemeral_for_conv(state, cid)
+        state = Stream.clear_ephemeral_for_conv(state, cid)
 
         {writes, state} = settle_interrupted(shell_task, live, state, now)
         next_live = state.docs[cid]["live"]
@@ -525,7 +486,7 @@ defmodule H.Session.UserShell do
   def stage_abort(shell_task, cid, reason, state, now) do
     eph = Map.get(state.ephemeral, cid)
     live = merge_ephemeral(state.docs[cid]["live"], eph)
-    state = clear_ephemeral_for_conv(state, cid)
+    state = Stream.clear_ephemeral_for_conv(state, cid)
 
     command = shell_task.checkpoint["command"]
     include_in_context = shell_task.checkpoint["include_in_context"] == true
@@ -548,8 +509,8 @@ defmodule H.Session.UserShell do
       "duration_ms" => nil
     }
 
-    entry = build_entry_record(entry_id, cid, "user_shell", entry_data, now)
-    state = record_entry_in_conv(state, cid, entry_id)
+    entry = State.build_entry(entry_id, cid, "user_shell", entry_data, now)
+    state = State.record_entry(state, cid, entry_id)
 
     aborted_task = %{
       Task.abort(shell_task, reason, now)
@@ -557,14 +518,14 @@ defmodule H.Session.UserShell do
     }
 
     sub_ids = shell_task.checkpoint["submission_ids"] || []
-    {sub_writes, state} = settle_submissions(sub_ids, :unanswered, reason, state, now)
+    {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, reason, state, now)
 
     next_live = Map.delete(live, "user_shell")
 
     state =
       state
-      |> put_task(aborted_task)
-      |> put_doc(cid, "live", next_live)
+      |> State.put_task(aborted_task)
+      |> State.put_doc(cid, "live", next_live)
 
     writes =
       [{:append_entry, entry}, {:put_task, aborted_task}] ++
@@ -622,8 +583,8 @@ defmodule H.Session.UserShell do
       "duration_ms" => nil
     }
 
-    entry = build_entry_record(entry_id, cid, "user_shell", entry_data, now)
-    state = record_entry_in_conv(state, cid, entry_id)
+    entry = State.build_entry(entry_id, cid, "user_shell", entry_data, now)
+    state = State.record_entry(state, cid, entry_id)
 
     done_task =
       Task.complete(
@@ -633,14 +594,14 @@ defmodule H.Session.UserShell do
       )
 
     sub_ids = shell_task.checkpoint["submission_ids"] || []
-    {sub_writes, state} = settle_submissions(sub_ids, :unanswered, "interrupted", state, now)
+    {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, "interrupted", state, now)
 
     next_live = Map.delete(live, "user_shell")
 
     state =
       state
-      |> put_task(done_task)
-      |> put_doc(cid, "live", next_live)
+      |> State.put_task(done_task)
+      |> State.put_doc(cid, "live", next_live)
 
     writes =
       [{:append_entry, entry}, {:put_task, done_task}] ++
@@ -651,11 +612,9 @@ defmodule H.Session.UserShell do
   end
 
   defp commit_immediate_failure(cid, task, reason, message, state, now) do
-    done_task =
-      Task.complete(task, %{"status" => "failed", "reason" => reason}, now)
-
+    done_task = Task.complete(task, %{"status" => "failed", "reason" => reason}, now)
     sub_ids = task.checkpoint["submission_ids"] || []
-    {sub_writes, state} = settle_submissions(sub_ids, :unanswered, reason, state, now)
+    {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, reason, state, now)
 
     next_live =
       (state.docs[cid]["live"] || %{})
@@ -664,8 +623,8 @@ defmodule H.Session.UserShell do
 
     state =
       state
-      |> put_task(done_task)
-      |> put_doc(cid, "live", next_live)
+      |> State.put_task(done_task)
+      |> State.put_doc(cid, "live", next_live)
 
     writes =
       [{:put_task, done_task}] ++
@@ -676,7 +635,7 @@ defmodule H.Session.UserShell do
       {:ok, %{seqs: [batch_seq]}, committed_store} ->
         state = %{state | store: committed_store, seq: batch_seq}
 
-        broadcast_commit_frame(state, cid, batch_seq, [], %{
+        Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
           "live" => [["replace", next_live]]
         })
 
@@ -769,210 +728,12 @@ defmodule H.Session.UserShell do
   defp validate_bound_env({mod, _env_state} = env) when is_atom(mod), do: {:ok, env}
   defp validate_bound_env(_), do: {:error, "missing_execution_env"}
 
-  defp workspace_cwd(env, state) do
-    Map.get(state, :cwd) || ExecutionEnv.cwd(env)
-  end
-
-  defp acquire_lease(cid, env, state) do
-    lease_server = Map.get(state, :workspace_lease)
-
-    if not is_nil(lease_server) and GenServer.whereis(lease_server) != nil do
-      env_id = Map.get(state, :env_id) || ExecutionEnv.env_id(env)
-      cwd = workspace_cwd(env, state)
-      ws_key = {env_id, cwd}
-      holder_key = {state.session_id, cid}
-
-      case WorkspaceLease.acquire(lease_server, ws_key, holder_key, self()) do
-        :ok ->
-          held = Map.get(state, :held_leases, MapSet.new())
-          {:ok, Map.put(state, :held_leases, MapSet.put(held, cid))}
-
-        {:error, _} = err ->
-          err
-      end
-    else
-      {:ok, state}
-    end
-  end
-
-  defp release_lease(cid, env, state) do
-    lease_server = Map.get(state, :workspace_lease)
-    held = Map.get(state, :held_leases, MapSet.new())
-
-    if MapSet.member?(held, cid) and not is_nil(lease_server) and
-         GenServer.whereis(lease_server) != nil do
-      env_id = Map.get(state, :env_id) || ExecutionEnv.env_id(env)
-      cwd = workspace_cwd(env, state)
-      WorkspaceLease.release(lease_server, {env_id, cwd}, {state.session_id, cid})
-      %{state | held_leases: MapSet.delete(held, cid)}
-    else
-      state
-    end
-  end
-
-  defp get_or_init_ephemeral(state, cid) do
-    case Map.get(state.ephemeral, cid) do
-      nil ->
-        live_msg = get_in(state.docs[cid]["live"], ["generation", "message"]) || %{}
-
-        %{
-          thinking: Map.get(live_msg, "thinking", ""),
-          text: Map.get(live_msg, "text", ""),
-          tool_calls: %{},
-          tool_order: [],
-          tool_outputs: %{},
-          user_shell_output: nil,
-          dirty: false,
-          pending_ops: [],
-          emit_timer: nil,
-          flush_timer: nil
-        }
-
-      eph ->
-        eph
-    end
-  end
-
-  defp user_shell_live_output(state, cid) do
-    get_in(state.docs, [cid, "live", "user_shell", "output"]) || ""
-  end
-
-  defp arm_ephemeral_timers(eph, cid, emit_ms, flush_ms) do
-    eph =
-      if is_nil(eph.emit_timer) do
-        ref = Process.send_after(self(), {:emit_ephemeral, cid}, emit_ms)
-        %{eph | emit_timer: ref}
-      else
-        eph
-      end
-
-    if is_nil(eph.flush_timer) do
-      ref = Process.send_after(self(), {:flush_live, cid}, flush_ms)
-      %{eph | flush_timer: ref}
-    else
-      eph
-    end
-  end
-
-  defp clear_ephemeral_for_conv(state, cid) do
-    case Map.pop(state.ephemeral, cid) do
-      {nil, _} ->
-        state
-
-      {eph, rest} ->
-        if eph.emit_timer, do: Process.cancel_timer(eph.emit_timer)
-        if eph.flush_timer, do: Process.cancel_timer(eph.flush_timer)
-        %{state | ephemeral: rest}
-    end
-  end
-
-  defp broadcast_commit_frame(state, cid, batch_seq, wire_entries, doc_ops) do
-    prev_conv_seq = Map.get(state.conv_last_seq, cid, 0)
-
-    frame = %{
-      "version" => 1,
-      "session_id" => state.session_id,
-      "conversation_id" => to_string(cid),
-      "prev_seq" => prev_conv_seq,
-      "seq" => batch_seq,
-      "appended_entries" => wire_entries,
-      "doc_ops" => doc_ops
-    }
-
-    commit_bin = IO.iodata_to_binary(JSON.encode_to_iodata!(frame))
-
-    if pubsub = Map.get(state, :pubsub) do
-      Registry.dispatch(pubsub, {:conversation, state.session_id, cid}, fn entries ->
-        for {pid, _val} <- entries, do: send(pid, {:commit_frame, batch_seq, commit_bin})
-      end)
-    end
-
-    ring = Map.get(state.replay_rings, cid, []) ++ [{batch_seq, commit_bin}]
-
-    {ring, ring_base_seq} =
-      if length(ring) > @max_replay_ring do
-        [{evicted_seq, _} | trimmed] = ring
-        {trimmed, Map.put(state.ring_base_seq, cid, evicted_seq)}
-      else
-        {ring, Map.put_new(state.ring_base_seq, cid, prev_conv_seq)}
-      end
-
-    %{
-      state
-      | replay_rings: Map.put(state.replay_rings, cid, ring),
-        ring_base_seq: ring_base_seq,
-        conv_last_seq: Map.put(state.conv_last_seq, cid, batch_seq)
-    }
-  end
-
-  defp settle_submissions([], _mode, _val, state, _now), do: {[], state}
-
-  defp settle_submissions(sub_ids, mode, val, state, now) do
-    by_id =
-      Map.new(state.recent_submissions, fn {_rid, s} -> {s.id, s} end)
-
-    Enum.reduce(sub_ids, {[], state}, fn sid, {acc_w, acc_s} ->
-      case Map.get(by_id, sid) do
-        nil ->
-          {acc_w, acc_s}
-
-        sub ->
-          updated =
-            case mode do
-              :done -> Submission.mark_done(sub, val, now)
-              :unanswered -> Submission.mark_unanswered(sub, val, now)
-            end
-
-          next_cache = cache_submission(acc_s.recent_submissions, updated)
-          {acc_w ++ [{:put_submission, updated}], %{acc_s | recent_submissions: next_cache}}
-      end
-    end)
-  end
-
-  defp cache_submission(recent, sub) do
-    updated = Map.put(recent, sub.request_id, sub)
-
-    if map_size(updated) > @max_recent_submissions do
-      updated
-      |> Enum.sort_by(fn {_k, v} -> v.updated_at || 0 end, :desc)
-      |> Enum.take(@max_recent_submissions)
-      |> Map.new()
-    else
-      updated
-    end
-  end
-
-  defp put_task(state, task) do
-    %{state | tasks: Map.put(state.tasks, task.id, task)}
-  end
-
-  defp put_doc(state, cid, kind, value) do
-    conv_docs = state.docs |> Map.get(cid, %{}) |> Map.put(kind, value)
-    %{state | docs: Map.put(state.docs, cid, conv_docs)}
-  end
-
   defp put_user_shell_status(live, status) when is_map(live) do
     if is_map(Map.get(live, "user_shell")) do
       put_in(live, ["user_shell", "status"], status)
     else
       live
     end
-  end
-
-  defp record_entry_in_conv(state, cid, entry_id) do
-    conv = Map.fetch!(state.conversations, cid)
-    updated_conv = %{conv | entry_ids: [entry_id | conv.entry_ids]}
-    %{state | conversations: Map.put(state.conversations, cid, updated_conv)}
-  end
-
-  defp build_entry_record(id, cid, kind, data, now) do
-    %{
-      id: id,
-      conversation_id: cid,
-      kind: kind,
-      data: data,
-      created_at: now
-    }
   end
 
   defp maybe_put_kw(opts, _key, nil), do: opts
