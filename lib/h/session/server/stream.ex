@@ -264,7 +264,11 @@ defmodule H.Session.Server.Stream do
 
   def apply_committed_batches([staged | rest_s], [batch_seq | rest_q], state) do
     state = %{state | seq: batch_seq}
-    state = Submissions.cache(state, staged.submissions, batch_seq)
+
+    committed_subs =
+      extract_written_submissions(staged.writes, staged.submissions)
+
+    state = Submissions.cache(state, committed_subs, batch_seq)
 
     state =
       Enum.reduce(staged.conv_events, state, fn {cid, ev}, acc_state ->
@@ -272,7 +276,64 @@ defmodule H.Session.Server.Stream do
         broadcast_commit_frame(acc_state, cid, batch_seq, wire_entries, ev.doc_ops)
       end)
 
+    state = broadcast_settled_submissions(state, staged.writes, batch_seq)
+
     apply_committed_batches(rest_s, rest_q, state)
+  end
+
+  def broadcast_settled_submissions(state, writes, batch_seq) when is_list(writes) do
+    settled_subs =
+      Enum.flat_map(writes, fn
+        {:put_submission, %{status: status} = sub}
+        when status in ["done", "unanswered", "withdrawn"] ->
+          [sub]
+
+        _ ->
+          []
+      end)
+
+    if settled_subs == [] do
+      state
+    else
+      appended_by_id =
+        Enum.reduce(writes, %{}, fn
+          {:append_entry, entry}, acc -> Map.put(acc, entry.id, entry)
+          _, acc -> acc
+        end)
+
+      Enum.reduce(settled_subs, state, fn sub, acc_state ->
+        {outcome, next_state} =
+          build_submission_outcome(acc_state, sub, batch_seq, appended_by_id)
+
+        dispatch_submission_settled(Map.get(next_state, :pubsub), outcome)
+        next_state
+      end)
+    end
+  end
+
+  def build_submission_outcome(state, sub, fallback_seq \\ nil, entry_cache \\ %{}) do
+    {answer_text, next_state} =
+      if sub.status == "done" and is_integer(sub.answer_entry_id) do
+        load_assistant_answer_text(state, sub.answer_entry_id, entry_cache)
+      else
+        {nil, state}
+      end
+
+    outcome = %{
+      session_id: next_state.session_id,
+      conversation_id: sub.conversation_id,
+      submission_id: sub.id,
+      request_id: sub.request_id,
+      kind: sub.kind,
+      status: sub.status,
+      entry_id: sub.entry_id,
+      answer_entry_id: sub.answer_entry_id,
+      answer_text: answer_text,
+      reason: sub.reason,
+      seq: fallback_seq || sub.seq || next_state.seq
+    }
+
+    {outcome, next_state}
   end
 
   def reply_committed_batches([], []), do: :ok
@@ -380,6 +441,72 @@ defmodule H.Session.Server.Stream do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp extract_written_submissions(writes, fallback_subs) do
+    written =
+      Enum.flat_map(writes, fn
+        {:put_submission, sub} -> [sub]
+        _ -> []
+      end)
+
+    if written == [], do: fallback_subs, else: written
+  end
+
+  defp load_assistant_answer_text(state, entry_id, entry_cache) do
+    case Map.fetch(entry_cache, entry_id) do
+      {:ok, entry} ->
+        {extract_assistant_text(entry), state}
+
+      :error ->
+        case Storage.get_entry(state.store, entry_id) do
+          {:ok, nil, next_store} ->
+            {nil, %{state | store: next_store}}
+
+          {:ok, entry, next_store} ->
+            {extract_assistant_text(entry), %{state | store: next_store}}
+        end
+    end
+  end
+
+  defp extract_assistant_text(%{kind: "assistant", data: data}) when is_map(data) do
+    blocks = Map.get(data, "content", Map.get(data, :content, []))
+
+    if is_list(blocks) do
+      blocks
+      |> Enum.flat_map(fn
+        %{"type" => "text", "text" => text} when is_binary(text) -> [text]
+        %{type: "text", text: text} when is_binary(text) -> [text]
+        _ -> []
+      end)
+      |> Enum.join("")
+    else
+      nil
+    end
+  end
+
+  defp extract_assistant_text(_), do: nil
+
+  defp dispatch_submission_settled(nil, _outcome), do: :ok
+
+  defp dispatch_submission_settled(pubsub, outcome) do
+    if Process.whereis(pubsub) != nil do
+      msg = {:submission_settled, outcome}
+
+      topics = [
+        {:submission, outcome.session_id, outcome.request_id},
+        {:submission_id, outcome.session_id, outcome.submission_id},
+        {:session_signals, outcome.session_id}
+      ]
+
+      Enum.each(topics, fn topic ->
+        Registry.dispatch(pubsub, topic, fn entries ->
+          for {pid, _val} <- entries, do: send(pid, msg)
+        end)
+      end)
+    end
+
+    :ok
   end
 
   defp dispatch_pubsub(nil, _sid, _cid, _msg), do: :ok

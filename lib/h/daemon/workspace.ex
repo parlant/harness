@@ -24,6 +24,12 @@ defmodule H.Daemon.Workspace do
         false
       )
 
+    include_subsessions =
+      Validation.parse_bool_param(
+        Validation.param_get(query_params, "include_subsessions", :include_subsessions),
+        Keyword.get(opts, :include_subsessions, false)
+      )
+
     if not is_binary(env_id) do
       {:error, {:bad_request, "env_id must be a string"}}
     else
@@ -42,7 +48,8 @@ defmodule H.Daemon.Workspace do
         annotated =
           Catalog.annotate_directories(desc.id, raw_dirs,
             table: table,
-            parent_path: canonical_path
+            parent_path: canonical_path,
+            include_subsessions: include_subsessions
           )
 
         directories =
@@ -63,7 +70,11 @@ defmodule H.Daemon.Workspace do
 
         sessions =
           desc.id
-          |> Catalog.list_sessions_for_cwd(canonical_path, table: table, subtree: false)
+          |> Catalog.list_sessions_for_cwd(canonical_path,
+            table: table,
+            subtree: false,
+            include_subsessions: include_subsessions
+          )
           |> Enum.map(wire_session_fn)
 
         parent_path = if canonical_path == "/", do: nil, else: Path.dirname(canonical_path)

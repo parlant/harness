@@ -51,6 +51,19 @@ defmodule H.Session.Server do
     GenServer.call(server, {:snapshot_or_replay, cid, last_event_id})
   end
 
+  @spec get_submission_outcome(GenServer.server(), String.t()) ::
+          {:ok, map()} | {:error, :not_found}
+  def get_submission_outcome(server, request_id) when is_binary(request_id) do
+    GenServer.call(server, {:get_submission_outcome, request_id})
+  end
+
+  @spec verify_visible_entry(GenServer.server(), pos_integer(), pos_integer()) ::
+          {:ok, map()} | {:error, :not_found | :entry_not_visible}
+  def verify_visible_entry(server, cid, entry_id)
+      when is_integer(cid) and is_integer(entry_id) do
+    GenServer.call(server, {:verify_visible_entry, cid, entry_id})
+  end
+
   @spec execute_command(GenServer.server(), map()) :: {:ok, map()} | {:error, term()}
   def execute_command(server, cmd) when is_map(cmd) do
     GenServer.call(server, {:command, cmd}, 30_000)
@@ -128,6 +141,31 @@ defmodule H.Session.Server do
       case Stream.snapshot_or_replay(state, cid, last_event_id) do
         {:ok, payload, next_state} -> {:reply, {:ok, payload}, next_state}
         {:error, reason} -> {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:get_submission_outcome, request_id}, _from, state) do
+    case Submissions.lookup(state, request_id) do
+      {:not_found, next_state} ->
+        {:reply, {:error, :not_found}, next_state}
+
+      {:ok, sub, next_state} ->
+        {outcome, final_state} = Stream.build_submission_outcome(next_state, sub)
+        {:reply, {:ok, outcome}, final_state}
+    end
+  end
+
+  def handle_call({:verify_visible_entry, cid, entry_id}, _from, state) do
+    if Map.has_key?(state.conversations, cid) do
+      case State.verify_visible_entry(state, cid, entry_id) do
+        {:ok, entry, next_state} ->
+          {:reply, {:ok, entry}, next_state}
+
+        {:error, :entry_not_visible, next_state} ->
+          {:reply, {:error, :entry_not_visible}, next_state}
       end
     else
       {:reply, {:error, :not_found}, state}

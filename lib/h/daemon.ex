@@ -26,6 +26,8 @@ defmodule H.Daemon do
   @default_catalog H.Catalog
   @default_catalog_table :h_catalog
   @default_workspace_lease H.WorkspaceLease
+  @default_max_subagent_depth_hard 8
+  @terminal_submission_statuses ["done", "unanswered", "withdrawn"]
 
   @doc "Returns the running instance's validated daemon options, or `nil` when not booted."
   @spec instance_options() :: keyword() | nil
@@ -176,7 +178,7 @@ defmodule H.Daemon do
     |> Enum.map(&wire_session/1)
   end
 
-  @doc "Lists sessions filtered by `env_id`, `cwd`, and optional `subtree`."
+  @doc "Lists sessions filtered by `env_id`, `cwd`, `subtree`, and `include_subsessions`."
   @spec list_sessions(map(), keyword()) :: {:ok, [map()]} | {:error, {:bad_request, String.t()}}
   def list_sessions(query_params, opts) when is_map(query_params) and is_list(opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)
@@ -185,6 +187,12 @@ defmodule H.Daemon do
 
     subtree? =
       Validation.parse_bool_param(Validation.param_get(query_params, "subtree", :subtree), false)
+
+    include_subsessions? =
+      Validation.parse_bool_param(
+        Validation.param_get(query_params, "include_subsessions", :include_subsessions),
+        true
+      )
 
     cond do
       not (is_nil(raw_env_id) or is_binary(raw_env_id)) ->
@@ -210,7 +218,11 @@ defmodule H.Daemon do
 
         sessions =
           env_id
-          |> Catalog.list_sessions_for_cwd(canonical_cwd, table: table, subtree: subtree?)
+          |> Catalog.list_sessions_for_cwd(canonical_cwd,
+            table: table,
+            subtree: subtree?,
+            include_subsessions: include_subsessions?
+          )
           |> Enum.map(&wire_session/1)
 
         {:ok, sessions}
@@ -219,13 +231,22 @@ defmodule H.Daemon do
         sessions =
           table
           |> Catalog.list_sessions()
-          |> Enum.filter(&((&1.env_id || "host") == raw_env_id))
+          |> Enum.filter(fn entry ->
+            (entry.env_id || "host") == raw_env_id and
+              (include_subsessions? or Catalog.root_session?(entry))
+          end)
           |> Enum.map(&wire_session/1)
 
         {:ok, sessions}
 
       true ->
-        {:ok, list_sessions(opts)}
+        sessions =
+          table
+          |> Catalog.list_sessions()
+          |> Enum.filter(&(include_subsessions? or Catalog.root_session?(&1)))
+          |> Enum.map(&wire_session/1)
+
+        {:ok, sessions}
     end
   end
 
@@ -265,11 +286,47 @@ defmodule H.Daemon do
     with :ok <- Validation.ensure_not_quarantined(entry),
          {:ok, harness} <- Harness.resolve(harness_id, opts),
          :ok <- match_harness(Map.get(params, :harness_id), harness_id, harness, opts),
-         :ok <- match_workspace(env_id, entry.cwd, params, opts) do
+         :ok <- match_workspace(env_id, entry.cwd, params, opts),
+         :ok <- match_parent(params, Map.get(entry, :parent)) do
       session_result(entry, opts, nil)
     else
       {:error, :unknown_harness} -> {:error, :harness_unavailable}
       {:error, _} = error -> error
+    end
+  end
+
+  defp match_parent(params, recorded_parent) do
+    if not Map.has_key?(params, :parent) do
+      :ok
+    else
+      case {Map.get(params, :parent), recorded_parent} do
+        {nil, nil} ->
+          :ok
+
+        {nil, _non_nil} ->
+          {:error, {:conflict, "session already exists with different parent"}}
+
+        {_req_parent, nil} ->
+          {:error, {:conflict, "session already exists with different parent"}}
+
+        {req_parent, rec_parent} ->
+          same_sid? = req_parent.session_id == rec_parent.session_id
+
+          same_cid? =
+            is_nil(Map.get(req_parent, :conversation_id)) or
+              req_parent.conversation_id == rec_parent.conversation_id
+
+          same_entry? =
+            not Map.has_key?(req_parent, :at_entry_id) or
+              is_nil(Map.get(req_parent, :at_entry_id)) or
+              req_parent.at_entry_id == rec_parent.at_entry_id
+
+          if same_sid? and same_cid? and same_entry? do
+            :ok
+          else
+            {:error, {:conflict, "session already exists with different parent"}}
+          end
+      end
     end
   end
 
@@ -301,27 +358,127 @@ defmodule H.Daemon do
   end
 
   defp create_new_session(params, agent_opts, opts) do
+    catalog = Keyword.get(opts, :catalog, @default_catalog)
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
     with {:ok, harness} <- resolve_harness(Map.get(params, :harness_id, "coding"), opts),
          {:ok, ws} <-
            resolve_session_workspace(Map.get(params, :env_id, "host"), params.cwd, opts),
+         candidate_sid = Map.get(params, :session_id) || mint_session_id(ws.cwd, table),
+         {:ok, resolved_parent, resolved_role} <-
+           resolve_parent_lineage(candidate_sid, params, table, opts),
          {:ok, bootstrapped} <- bootstrap_agent(harness, ws.env, agent_opts, opts) do
-      catalog = Keyword.get(opts, :catalog, @default_catalog)
-      table = Keyword.get(opts, :catalog_table, @default_catalog_table)
-
       attrs =
         %{
-          session_id: Map.get(params, :session_id) || mint_session_id(ws.cwd, table),
+          session_id: candidate_sid,
           env_id: ws.env_id,
           harness_id: harness.id(),
           cwd: ws.cwd
         }
         |> maybe_put(:title, Map.get(params, :title))
+        |> maybe_put(:parent, resolved_parent)
+        |> maybe_put(:role, resolved_role)
 
       case Catalog.insert_session(catalog, attrs) do
         {:ok, entry} -> session_result(entry, opts, bootstrapped)
         {:existing, entry} -> attach_session(entry, params, opts)
         {:error, _} = error -> error
       end
+    end
+  end
+
+  defp resolve_parent_lineage(candidate_sid, params, table, opts) do
+    case Map.get(params, :parent) do
+      nil ->
+        {:ok, nil, Map.get(params, :role)}
+
+      %{session_id: ^candidate_sid} ->
+        {:error, {:bad_request, "session cannot be its own parent"}}
+
+      parent_req ->
+        max_depth = Keyword.get(opts, :max_subagent_depth_hard, @default_max_subagent_depth_hard)
+
+        case Catalog.get_session(parent_req.session_id, table) do
+          {:error, :not_found} ->
+            {:error, {:bad_request, "parent session not found: #{parent_req.session_id}"}}
+
+          {:ok, parent_entry} ->
+            depth = (get_in(parent_entry, [:parent, :depth]) || 0) + 1
+
+            if depth > max_depth do
+              {:error, {:bad_request, "subsession depth limit exceeded"}}
+            else
+              parent_cid =
+                Map.get(parent_req, :conversation_id) ||
+                  Map.get(parent_entry, :root_conversation_id) || 1
+
+              with {:ok, at_entry_id} <-
+                     resolve_parent_step(
+                       parent_entry,
+                       parent_cid,
+                       Map.get(parent_req, :at_entry_id),
+                       opts
+                     ) do
+                resolved_parent = %{
+                  session_id: parent_entry.session_id,
+                  conversation_id: parent_cid,
+                  at_entry_id: at_entry_id,
+                  task_id: Map.get(parent_req, :task_id),
+                  depth: depth
+                }
+
+                resolved_role =
+                  if Map.has_key?(params, :role) and not is_nil(Map.get(params, :role)) do
+                    Map.get(params, :role)
+                  else
+                    if Map.has_key?(params, :role), do: Map.get(params, :role), else: "subagent"
+                  end
+
+                {:ok, resolved_parent, resolved_role}
+              end
+            end
+        end
+    end
+  end
+
+  defp resolve_parent_step(parent_entry, parent_cid, requested_at_entry_id, opts) do
+    case Validation.ensure_not_quarantined(parent_entry) do
+      {:error, _} ->
+        {:ok, requested_at_entry_id}
+
+      :ok ->
+        case ensure_session_started(parent_entry, opts, nil) do
+          {:ok, server} ->
+            if is_nil(requested_at_entry_id) do
+              case Server.scan_entries(server, parent_cid, %{order: :desc, limit: 1}) do
+                {:ok, %{items: [latest | _]}} ->
+                  {:ok, latest.id}
+
+                {:ok, %{items: []}} ->
+                  {:ok, nil}
+
+                {:error, :not_found} ->
+                  {:error, {:bad_request, "parent conversation not found: #{parent_cid}"}}
+
+                {:error, _} ->
+                  {:ok, nil}
+              end
+            else
+              case Server.verify_visible_entry(server, parent_cid, requested_at_entry_id) do
+                {:ok, _entry} ->
+                  {:ok, requested_at_entry_id}
+
+                {:error, :not_found} ->
+                  {:error, {:bad_request, "parent conversation not found: #{parent_cid}"}}
+
+                {:error, :entry_not_visible} ->
+                  {:error, {:bad_request, "parent at_entry_id not visible"}}
+              end
+            end
+
+          {:error, _} ->
+            {:ok, requested_at_entry_id}
+        end
     end
   end
 
@@ -509,6 +666,111 @@ defmodule H.Daemon do
     end
   end
 
+  @doc """
+  Looks up the durable outcome/status of a submission by `request_id`.
+  """
+  @spec get_submission(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, :not_found | {:bad_request, String.t()} | term()}
+  def get_submission(session_id, request_id, opts \\ [])
+      when is_binary(session_id) and is_list(opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         :ok <- validate_request_id(request_id),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- Validation.ensure_not_quarantined(entry),
+         {:ok, server} <- ensure_session_started(entry, opts, nil) do
+      Server.get_submission_outcome(server, request_id)
+    end
+  end
+
+  @doc """
+  Race-free submission settlement watcher.
+
+  Registers `subscriber_pid` (when `subscriber_pid == self()`) on `H.PubSub` topic
+  `{:submission, session_id, request_id}` *before* querying `H.Session.Server`.
+
+    * Returns `{:ok, {:settled, outcome}}` immediately (and unregisters any new
+      registration) if the submission is already terminal (`"done"`, `"unanswered"`,
+      `"withdrawn"`).
+    * Returns `{:ok, {:pending, outcome}}` while keeping the registration active so
+      `subscriber_pid` deterministically receives `{:submission_settled, outcome}`
+      after the durable commit succeeds.
+  """
+  @spec watch_submission(String.t(), String.t(), pid(), keyword()) ::
+          {:ok, {:settled, map()} | {:pending, map()}}
+          | {:error, :not_found | {:bad_request, String.t()} | term()}
+  def watch_submission(session_id, request_id, subscriber_pid \\ self(), opts \\ [])
+      when is_binary(session_id) and is_pid(subscriber_pid) and is_list(opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+    pubsub = Keyword.get(opts, :pubsub, @default_pubsub)
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         :ok <- validate_request_id(request_id),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- Validation.ensure_not_quarantined(entry),
+         {:ok, server} <- ensure_session_started(entry, opts, nil) do
+      topic = {:submission, session_id, request_id}
+
+      can_register? =
+        subscriber_pid == self() and not is_nil(pubsub) and Process.whereis(pubsub) != nil
+
+      already_registered? = can_register? and topic in Registry.keys(pubsub, self())
+      newly_registered? = can_register? and not already_registered?
+
+      if newly_registered? do
+        Registry.register(pubsub, topic, nil)
+      end
+
+      case Server.get_submission_outcome(server, request_id) do
+        {:ok, %{status: status} = outcome} when status in @terminal_submission_statuses ->
+          if newly_registered?, do: Registry.unregister(pubsub, topic)
+          {:ok, {:settled, outcome}}
+
+        {:ok, pending_outcome} ->
+          {:ok, {:pending, pending_outcome}}
+
+        {:error, reason} ->
+          if newly_registered?, do: Registry.unregister(pubsub, topic)
+          {:error, reason}
+      end
+    end
+  end
+
+  @doc """
+  Unregisters `self()` from `H.PubSub` topic `{:submission, session_id, request_id}`.
+  """
+  @spec unwatch_submission(String.t(), String.t(), keyword()) :: :ok
+  def unwatch_submission(session_id, request_id, opts \\ [])
+      when is_binary(session_id) and is_binary(request_id) and is_list(opts) do
+    pubsub = Keyword.get(opts, :pubsub, @default_pubsub)
+
+    if not is_nil(pubsub) and Process.whereis(pubsub) != nil do
+      Registry.unregister(pubsub, {:submission, session_id, request_id})
+    end
+
+    :ok
+  end
+
+  @doc "Formats a submission outcome map into its JSON wire representation."
+  @spec wire_submission_outcome(map()) :: map()
+  def wire_submission_outcome(outcome) when is_map(outcome) do
+    %{
+      session_id: outcome.session_id,
+      conversation_id: to_string(outcome.conversation_id),
+      submission_id: to_string(outcome.submission_id),
+      request_id: outcome.request_id,
+      kind: outcome.kind,
+      status: outcome.status,
+      entry_id: if(outcome.entry_id, do: to_string(outcome.entry_id), else: nil),
+      answer_entry_id:
+        if(outcome.answer_entry_id, do: to_string(outcome.answer_entry_id), else: nil),
+      answer_text: outcome.answer_text,
+      reason: outcome.reason,
+      seq: outcome.seq
+    }
+  end
+
   @doc "Validates and dispatches a command envelope to `H.Session.Server`."
   @spec execute_command(String.t(), map(), keyword()) ::
           {:ok, map()}
@@ -656,6 +918,8 @@ defmodule H.Daemon do
           env_id: env_id,
           cwd: entry.cwd,
           title: entry.title,
+          parent: Map.get(entry, :parent),
+          role: Map.get(entry, :role),
           registry: registry,
           pubsub: pubsub,
           catalog: catalog,
@@ -688,6 +952,17 @@ defmodule H.Daemon do
       _ -> {:error, :workspace_unavailable}
     end
   end
+
+  defp validate_request_id(req_id) when is_binary(req_id) do
+    if byte_size(String.trim(req_id)) > 0 do
+      :ok
+    else
+      {:error, {:bad_request, "request_id must be a non-empty string"}}
+    end
+  end
+
+  defp validate_request_id(_),
+    do: {:error, {:bad_request, "request_id must be a non-empty string"}}
 
   defp lookup_active_session_entry(session_id, opts) do
     table = Keyword.get(opts, :catalog_table, @default_catalog_table)

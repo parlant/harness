@@ -39,6 +39,7 @@ defmodule H.Catalog do
   @valid_attentions ["idle", "running", "sleeping", "error", "quarantined"]
   @valid_activity_kinds ["generation", "tool", "user_shell", "compaction", "retry"]
   @max_activity_label_length 120
+  @max_role_length 64
 
   @doc """
   Starts the catalog process.
@@ -55,6 +56,12 @@ defmodule H.Catalog do
     gen_opts = if name = Keyword.get(opts, :name, __MODULE__), do: [name: name], else: []
     GenServer.start_link(__MODULE__, opts, gen_opts)
   end
+
+  @doc """
+  Returns `true` when the catalog entry represents a root session (`parent == nil`).
+  """
+  @spec root_session?(map()) :: boolean()
+  def root_session?(entry) when is_map(entry), do: is_nil(Map.get(entry, :parent))
 
   @doc """
   Formats a catalog entry into the wire-level `SessionSummary` map shared by
@@ -78,6 +85,8 @@ defmodule H.Catalog do
       harness_id: Map.get(entry, :harness_id) || "coding",
       cwd: entry.cwd,
       root_conversation_id: to_string(Map.get(entry, :root_conversation_id) || 1),
+      parent: wire_parent(Map.get(entry, :parent)),
+      role: Map.get(entry, :role),
       created_at: entry.created_at,
       updated_at: entry.updated_at,
       active: Map.get(entry, :active) == true,
@@ -138,12 +147,14 @@ defmodule H.Catalog do
   Options:
     * `:table` - ETS table name (default `:h_catalog`)
     * `:subtree` - include sessions in descendant subdirectories (default `false`)
+    * `:include_subsessions` - include sessions with a non-nil `parent` (default `true`)
   """
   @spec list_sessions_for_cwd(String.t() | nil, String.t(), keyword()) :: [map()]
   def list_sessions_for_cwd(env_id, cwd, opts \\ [])
       when (is_binary(env_id) or is_nil(env_id)) and is_binary(cwd) and is_list(opts) do
     table = Keyword.get(opts, :table, @default_table)
     subtree? = Keyword.get(opts, :subtree, false)
+    include_subsessions? = Keyword.get(opts, :include_subsessions, true)
     target_env = normalize_env_id(env_id)
     target_cwd = normalize_query_cwd(target_env, cwd)
 
@@ -153,7 +164,8 @@ defmodule H.Catalog do
       entry_env = normalize_env_id(Map.get(entry, :env_id))
       entry_cwd = normalize_query_cwd(target_env, entry.cwd)
 
-      if entry_env == target_env and cwd_matches?(entry_cwd, target_cwd, subtree?) do
+      if entry_env == target_env and cwd_matches?(entry_cwd, target_cwd, subtree?) and
+           (include_subsessions? or root_session?(entry)) do
         [entry | acc]
       else
         acc
@@ -167,11 +179,12 @@ defmodule H.Catalog do
 
   Each directory map is enriched with `direct_session_count`, `subtree_session_count`,
   `active_session_count`, and `latest_session` (matching atom vs. string key style of
-  each input directory map).
+  each input directory map). Subsessions (`parent != nil`) are excluded by default.
 
   Options:
     * `:table` - ETS table name (default `:h_catalog`)
     * `:parent_path` - optional base path used when a directory map only provides `:name` / `"name"`
+    * `:include_subsessions` - include subsessions in directory counts/recency (default `false`)
   """
   @spec annotate_directories(String.t() | nil, [map()], keyword()) :: [map()]
   def annotate_directories(env_id, dir_entries, opts \\ [])
@@ -181,6 +194,7 @@ defmodule H.Catalog do
     else
       table = Keyword.get(opts, :table, @default_table)
       parent_path = Keyword.get(opts, :parent_path)
+      include_subsessions? = Keyword.get(opts, :include_subsessions, false)
       target_env = normalize_env_id(env_id)
 
       resolved_dirs = Enum.map(dir_entries, &resolve_dir_path(&1, target_env, parent_path))
@@ -190,7 +204,7 @@ defmodule H.Catalog do
         |> Enum.reject(&is_nil/1)
         |> MapSet.new()
 
-      stats_by_path = build_dir_stats(table, target_env, wanted_paths)
+      stats_by_path = build_dir_stats(table, target_env, wanted_paths, include_subsessions?)
 
       Enum.zip_with(dir_entries, resolved_dirs, fn dir, dir_path ->
         stats = Map.get(stats_by_path, dir_path, empty_dir_stats())
@@ -400,6 +414,16 @@ defmodule H.Catalog do
              {:harness_id, :non_empty_string, required: false, default: "coding"},
              {:cwd, :string, required: true},
              {:title, :string, required: false, nullable: true},
+             {:parent,
+              {:map,
+               [
+                 {:session_id, :session_id, required: true},
+                 {:conversation_id, :pos_int, required: false, default: 1},
+                 {:at_entry_id, :pos_int, required: false, nullable: true, default: nil},
+                 {:task_id, :pos_int, required: false, nullable: true, default: nil},
+                 {:depth, :pos_int, required: false, default: 1}
+               ]}, required: false, nullable: true},
+             {:role, :string, required: false, nullable: true},
              {:root_conversation_id, :pos_int, required: false},
              {:created_at, :int, required: false},
              {:updated_at, :int, required: false},
@@ -414,8 +438,10 @@ defmodule H.Catalog do
              {:pending_edits, {:list, :any}, required: false},
              {:applied_edit_rev, :int, required: false}
            ]),
+         :ok <- validate_parent_not_self(base),
          {:ok, normalized_cwd} <- validate_and_normalize_cwd(base.env_id, base.cwd),
-         {:ok, normalized_base} <- normalize_optional_title(base) do
+         {:ok, normalized_base} <- normalize_optional_title(base),
+         {:ok, normalized_base} <- normalize_optional_role(normalized_base) do
       normalized_base =
         if Map.has_key?(normalized_base, :activity_label) do
           %{
@@ -429,6 +455,42 @@ defmodule H.Catalog do
       {:ok, %{normalized_base | cwd: normalized_cwd}}
     end
   end
+
+  defp validate_parent_not_self(%{session_id: sid, parent: %{session_id: sid}}),
+    do: {:error, "parent: cannot reference self"}
+
+  defp validate_parent_not_self(_), do: :ok
+
+  defp normalize_optional_role(%{role: role} = map) do
+    case normalize_role(role) do
+      {:ok, normalized} -> {:ok, %{map | role: normalized}}
+      {:error, reason} -> {:error, "role: #{reason}"}
+    end
+  end
+
+  defp normalize_optional_role(map), do: {:ok, map}
+
+  defp normalize_role(nil), do: {:ok, nil}
+
+  defp normalize_role(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" ->
+        {:ok, nil}
+
+      String.contains?(value, <<0>>) or Regex.match?(~r/[\x00-\x1F\x7F]/u, value) ->
+        {:error, "must not contain control characters"}
+
+      String.length(trimmed) > @max_role_length ->
+        {:error, "must be at most #{@max_role_length} characters"}
+
+      true ->
+        {:ok, trimmed}
+    end
+  end
+
+  defp normalize_role(_), do: {:error, "must be a string"}
 
   defp normalize_optional_title(%{title: title} = map) do
     case Schema.normalize_title(title) do
@@ -449,6 +511,8 @@ defmodule H.Catalog do
       cwd: validated.cwd,
       harness_id: Map.get(validated, :harness_id, "coding"),
       root_conversation_id: Map.get(validated, :root_conversation_id, 1),
+      parent: Map.get(validated, :parent, nil),
+      role: Map.get(validated, :role, nil),
       created_at: Map.get(validated, :created_at, now),
       updated_at: Map.get(validated, :updated_at, now),
       active: Map.get(validated, :active, false),
@@ -466,8 +530,15 @@ defmodule H.Catalog do
   end
 
   defp build_entry(existing, validated, now) do
+    # `parent` and `role` are immutable once written on an existing entry.
+    mutable_updates =
+      validated
+      |> Map.drop([:parent, :role])
+
     existing
-    |> Map.merge(validated)
+    |> Map.put_new(:parent, nil)
+    |> Map.put_new(:role, nil)
+    |> Map.merge(mutable_updates)
     |> enforce_status_attention()
     |> then(fn entry ->
       if Map.has_key?(validated, :updated_at), do: entry, else: %{entry | updated_at: now}
@@ -640,6 +711,8 @@ defmodule H.Catalog do
       cwd: Map.fetch!(raw, "cwd"),
       harness_id: non_empty_or_default(Map.get(raw, "harness_id"), "coding"),
       root_conversation_id: Map.get(raw, "root_conversation_id", 1),
+      parent: decode_parent(Map.get(raw, "parent")),
+      role: decode_role(Map.get(raw, "role")),
       created_at: Map.fetch!(raw, "created_at"),
       updated_at: Map.fetch!(raw, "updated_at"),
       active: Map.get(raw, "active", false),
@@ -652,6 +725,73 @@ defmodule H.Catalog do
       quarantine_reason: Map.get(raw, "quarantine_reason"),
       pending_edits: Map.get(raw, "pending_edits", []),
       applied_edit_rev: Map.get(raw, "applied_edit_rev", 0)
+    }
+  end
+
+  defp decode_parent(nil), do: nil
+
+  defp decode_parent(raw) when is_map(raw) do
+    case Schema.validate_session_id(Map.get(raw, "session_id")) do
+      {:ok, sid} ->
+        %{
+          session_id: sid,
+          conversation_id: decode_pos_int(Map.get(raw, "conversation_id"), 1),
+          at_entry_id: decode_optional_pos_int(Map.get(raw, "at_entry_id")),
+          task_id: decode_optional_pos_int(Map.get(raw, "task_id")),
+          depth: decode_pos_int(Map.get(raw, "depth"), 1)
+        }
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  defp decode_parent(_), do: nil
+
+  defp decode_pos_int(val, default) do
+    case Schema.parse_pos_int(val) do
+      {:ok, n} -> n
+      {:error, _} -> default
+    end
+  end
+
+  defp decode_optional_pos_int(nil), do: nil
+
+  defp decode_optional_pos_int(val) do
+    case Schema.parse_pos_int(val) do
+      {:ok, n} -> n
+      {:error, _} -> nil
+    end
+  end
+
+  defp decode_role(val) do
+    case normalize_role(val) do
+      {:ok, role} -> role
+      {:error, _} -> nil
+    end
+  end
+
+  defp wire_parent(nil), do: nil
+
+  defp wire_parent(p) when is_map(p) do
+    %{
+      session_id: p.session_id,
+      conversation_id: to_string(p.conversation_id || 1),
+      at_entry_id: if(p.at_entry_id, do: to_string(p.at_entry_id), else: nil),
+      task_id: if(p.task_id, do: to_string(p.task_id), else: nil),
+      depth: p.depth || 1
+    }
+  end
+
+  defp wire_parent_string_keys(nil), do: nil
+
+  defp wire_parent_string_keys(p) when is_map(p) do
+    %{
+      "session_id" => p.session_id,
+      "conversation_id" => to_string(p.conversation_id || 1),
+      "at_entry_id" => if(p.at_entry_id, do: to_string(p.at_entry_id), else: nil),
+      "task_id" => if(p.task_id, do: to_string(p.task_id), else: nil),
+      "depth" => p.depth || 1
     }
   end
 
@@ -737,11 +877,12 @@ defmodule H.Catalog do
     normalize_query_cwd(env_id, joined)
   end
 
-  defp build_dir_stats(table, target_env, wanted_paths) do
+  defp build_dir_stats(table, target_env, wanted_paths, include_subsessions?) do
     table
     |> :ets.tab2list()
     |> Enum.reduce(%{}, fn {_id, entry}, acc ->
-      if normalize_env_id(Map.get(entry, :env_id)) == target_env do
+      if normalize_env_id(Map.get(entry, :env_id)) == target_env and
+           (include_subsessions? or root_session?(entry)) do
         accumulate_session_stats(acc, entry, target_env, wanted_paths)
       else
         acc
@@ -835,6 +976,8 @@ defmodule H.Catalog do
               "session_id" => s.session_id,
               "title" => s.title,
               "cwd" => s.cwd,
+              "parent" => wire_parent_string_keys(Map.get(s, :parent)),
+              "role" => Map.get(s, :role),
               "updated_at" => s.updated_at,
               "active" => s.active == true,
               "attention" => normalize_attention(Map.get(s, :attention), status),
@@ -864,6 +1007,8 @@ defmodule H.Catalog do
               session_id: s.session_id,
               title: s.title,
               cwd: s.cwd,
+              parent: wire_parent(Map.get(s, :parent)),
+              role: Map.get(s, :role),
               updated_at: s.updated_at,
               active: s.active == true,
               attention: normalize_attention(Map.get(s, :attention), status),

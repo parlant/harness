@@ -7,9 +7,12 @@ defmodule H.Storage.Engine do
 
   @session_meta_keys %{
     "session_id" => :session_id,
+    "env_id" => :env_id,
     "cwd" => :cwd,
     "title" => :title,
     "title_explicit" => :title_explicit,
+    "parent" => :parent,
+    "role" => :role,
     "root_conversation_id" => :root_conversation_id,
     "incarnation" => :incarnation,
     "clean_close" => :clean_close,
@@ -18,6 +21,14 @@ defmodule H.Storage.Engine do
     "active" => :active,
     "next_wake_at" => :next_wake_at,
     "status" => :status
+  }
+
+  @session_parent_keys %{
+    "session_id" => :session_id,
+    "conversation_id" => :conversation_id,
+    "at_entry_id" => :at_entry_id,
+    "task_id" => :task_id,
+    "depth" => :depth
   }
 
   @conversation_keys %{
@@ -149,7 +160,18 @@ defmodule H.Storage.Engine do
 
   # Normalization & JSON-safe record helpers
 
-  def normalize_session_meta(meta), do: normalize_map(meta, @session_meta_keys)
+  def normalize_session_meta(meta) do
+    base = normalize_map(meta, @session_meta_keys)
+
+    case Map.fetch(base, :parent) do
+      {:ok, p} when is_map(p) ->
+        Map.put(base, :parent, normalize_map(p, @session_parent_keys))
+
+      _ ->
+        base
+    end
+  end
+
   def normalize_entry(entry), do: normalize_map(entry, @entry_keys)
 
   def normalize_submission(sub) do

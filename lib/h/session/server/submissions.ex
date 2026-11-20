@@ -232,10 +232,19 @@ defmodule H.Session.Server.Submissions do
   defp trim_cache(updated) when map_size(updated) <= @max_recent_submissions, do: updated
 
   defp trim_cache(updated) do
-    updated
-    |> Enum.sort_by(fn {_k, v} -> v.updated_at || 0 end, :desc)
-    |> Enum.take(@max_recent_submissions)
-    |> Map.new()
+    {active, terminal} =
+      Enum.split_with(updated, fn {_k, v} ->
+        v.status not in ["done", "unanswered", "withdrawn"]
+      end)
+
+    remaining_slots = max(0, @max_recent_submissions - length(active))
+
+    kept_terminal =
+      terminal
+      |> Enum.sort_by(fn {_k, v} -> v.updated_at || 0 end, :desc)
+      |> Enum.take(remaining_slots)
+
+    Map.new(active ++ kept_terminal)
   end
 
   defp extract_prompt_title(blocks) when is_list(blocks) do

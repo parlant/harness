@@ -236,6 +236,24 @@ defmodule H.HTTP.Router do
     end
   end
 
+  get "/api/v1/sessions/:sid/submissions/:request_id" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :get_submission, [sid, request_id, daemon_opts]) do
+      {:ok, outcome} ->
+        send_json(conn, 200, H.Daemon.wire_submission_outcome(outcome))
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
   get "/api/v1/sessions/:sid/conversations/:cid/entries" do
     conn = fetch_query_params(conn)
     {daemon, daemon_opts} = daemon_config(conn)

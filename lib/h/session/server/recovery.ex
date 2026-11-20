@@ -65,6 +65,20 @@ defmodule H.Session.Server.Recovery do
       title_explicit =
         Map.get(meta, :title_explicit, Map.get(meta, "title_explicit", false)) == true
 
+      parent =
+        cond do
+          Map.has_key?(meta, :parent) -> Map.get(meta, :parent)
+          Map.has_key?(meta, "parent") -> Map.get(meta, "parent")
+          true -> Keyword.get(opts, :parent)
+        end
+
+      role =
+        cond do
+          Map.has_key?(meta, :role) -> Map.get(meta, :role)
+          Map.has_key?(meta, "role") -> Map.get(meta, "role")
+          true -> Keyword.get(opts, :role)
+        end
+
       prev_clean = Map.get(meta, :clean_close, Map.get(meta, "clean_close"))
       prev_inc = Map.get(meta, :incarnation, Map.get(meta, "incarnation", 0)) || 0
       incarnation = prev_inc + 1
@@ -109,12 +123,16 @@ defmodule H.Session.Server.Recovery do
           |> Map.delete("title")
           |> Map.delete("title_explicit")
           |> Map.delete("env_id")
+          |> Map.delete("parent")
+          |> Map.delete("role")
           |> Map.merge(%{
             session_id: session_id,
             env_id: env_id,
             cwd: cwd,
             title: initial_title,
             title_explicit: title_explicit,
+            parent: parent,
+            role: role,
             incarnation: incarnation,
             clean_close: false
           }),
@@ -176,6 +194,9 @@ defmodule H.Session.Server.Recovery do
               conv_last_seq: conv_last_seq,
               ring_base_seq: conv_last_seq
           }
+
+          final_state =
+            Stream.broadcast_settled_submissions(final_state, recovery_writes, batch_seq)
 
           {:ok, final_state, recovery_effects}
 

@@ -635,9 +635,12 @@ defmodule H.Session.UserShell do
       {:ok, %{seqs: [batch_seq]}, committed_store} ->
         state = %{state | store: committed_store, seq: batch_seq}
 
-        Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
-          "live" => [["replace", next_live]]
-        })
+        state =
+          Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
+            "live" => [["replace", next_live]]
+          })
+
+        Stream.broadcast_settled_submissions(state, writes, batch_seq)
 
       {:error, io_err} ->
         send(self(), {:stop_storage_failed, io_err})

@@ -94,11 +94,21 @@ defmodule H.Daemon.Validation do
              {:harness_id, :non_empty_string, required: false},
              {:cwd, :abs_path, required: true},
              {:title, :string, required: false, nullable: true},
+             {:parent,
+              {:map,
+               [
+                 {:session_id, :session_id, required: true},
+                 {:conversation_id, :pos_int, required: false},
+                 {:at_entry_id, :pos_int, required: false, nullable: true},
+                 {:task_id, :pos_int, required: false, nullable: true}
+               ]}, required: false, nullable: true},
+             {:role, :string, required: false, nullable: true},
              {:agent, :map, required: false},
              {:request_id, :non_empty_string, required: false}
            ]),
          {:ok, agent_opts} <- validate_optional_agent(Map.get(validated, :agent)),
-         {:ok, validated} <- normalize_optional_title(validated) do
+         {:ok, validated} <- normalize_optional_title(validated),
+         {:ok, validated} <- normalize_optional_role(validated) do
       {:ok, validated, agent_opts}
     else
       {:error, reason} when is_binary(reason) -> {:error, {:bad_request, reason}}
@@ -354,6 +364,28 @@ defmodule H.Daemon.Validation do
   defp validate_command_args("compact", raw_args) do
     H.Session.Compaction.validate_args(raw_args)
   end
+
+  defp normalize_optional_role(%{role: nil} = validated), do: {:ok, validated}
+
+  defp normalize_optional_role(%{role: role} = validated) when is_binary(role) do
+    trimmed = String.trim(role)
+
+    cond do
+      trimmed == "" ->
+        {:ok, %{validated | role: nil}}
+
+      String.contains?(role, <<0>>) or Regex.match?(~r/[\x00-\x1F\x7F]/u, role) ->
+        {:error, "role: must not contain control characters"}
+
+      String.length(trimmed) > 64 ->
+        {:error, "role: must be at most 64 characters"}
+
+      true ->
+        {:ok, %{validated | role: trimmed}}
+    end
+  end
+
+  defp normalize_optional_role(validated), do: {:ok, validated}
 
   defp normalize_optional_title(%{title: title} = validated) do
     case normalize_title_arg(title) do
