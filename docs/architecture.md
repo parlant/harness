@@ -44,6 +44,11 @@ one active alias; the optional path-loaded [MultiCodex](extensions/providers.md)
 package owns quota polling and account preferences. The adapter alone
 authorizes a second dispatch.
 
+Named Chat Completions providers are startup data, not extensions. The
+validated catalog supplies the route and limits, while the account service
+alone stores and resolves the active API-key profile. Both generation and
+compaction commit a one-dispatch, no-auto-resume policy for these routes.
+
 ## Planned shutdown
 
 The standalone launcher accepts an owner-authenticated, idle-only shutdown.

@@ -54,6 +54,7 @@ defmodule H.Daemon.Runtime do
 
   def start_link(opts) do
     with {:ok, opts, extension_children} <- H.Extensions.load(opts),
+         {:ok, opts} <- H.Provider.Compatible.load(opts),
          {:ok, opts, account_children} <- H.Accounts.boot(opts) do
       Supervisor.start_link(__MODULE__, {opts, account_children ++ extension_children})
     end

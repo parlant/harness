@@ -14,6 +14,7 @@ defmodule H.Daemon.CLI do
         with {:ok, addresses} <- H.Daemon.Network.load(dir),
              result when result in [:ok, :disabled] <- web(:configure, addresses),
              {:ok, opts, _} <- H.Extensions.load(Keyword.put(opts, :data_dir, dir)),
+             {:ok, opts} <- H.Provider.Compatible.load(opts),
              {:ok, _, _} <- H.Accounts.boot(opts) do
           IO.puts("H startup configuration OK (no services started)")
         else

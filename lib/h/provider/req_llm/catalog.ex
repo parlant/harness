@@ -5,7 +5,7 @@ defmodule H.Provider.ReqLLM.Catalog do
   """
 
   alias H.Credentials
-  alias H.Provider.{CodexModels, GeminiModels, Settings}
+  alias H.Provider.{CodexModels, Compatible, GeminiModels, Settings}
 
   @default_providers [:openai, :openai_codex, :anthropic, :google_vertex, :google, :deepseek]
 
@@ -47,6 +47,10 @@ defmodule H.Provider.ReqLLM.Catalog do
   }
 
   def list_models(config) when is_map(config) do
+    stock_models(config) ++ compatible_models(config)
+  end
+
+  defp stock_models(config) do
     case Map.get(config, :models) do
       list when is_list(list) ->
         list
@@ -67,18 +71,27 @@ defmodule H.Provider.ReqLLM.Catalog do
         model
 
       _ ->
-        case Enum.find(list_models(config), &(not Map.has_key?(&1, :unavailable_reason))) do
+        case Enum.find(stock_models(config), &(not Map.has_key?(&1, :unavailable_reason))) do
           %{id: id} -> id
           nil -> "openai:gpt-5.4"
         end
     end
   end
 
-  def context_window(model_spec, _config \\ %{}) do
-    case resolve_model(model_spec) do
-      {:ok, %LLMDB.Model{limits: %{context: window}}} -> window
-      _ -> nil
-    end
+  def context_window(model_spec, config \\ %{}) do
+    model =
+      case Compatible.provider_for_model(config[:compatible_providers] || %{}, model_spec) do
+        {_, provider, id} ->
+          provider.models[id]
+
+        nil ->
+          case resolve_model(model_spec) do
+            {:ok, model} -> model
+            _ -> nil
+          end
+      end
+
+    get_nested(model, [:limits, :context])
   end
 
   def resolve_model(nil), do: {:error, {:invalid_model, "model is required"}}
@@ -148,6 +161,31 @@ defmodule H.Provider.ReqLLM.Catalog do
     %{model | limits: limits}
   end
 
+  defp compatible_models(config) do
+    selected = config[:provider]
+    stored = if config[:accounts], do: H.Accounts.key_providers(config.accounts), else: []
+    stored = if is_list(stored), do: stored, else: []
+
+    for {id, provider} <- Enum.sort(config[:compatible_providers] || %{}),
+        is_nil(selected) or selected == id,
+        {_id, model} <- Enum.sort(provider.models) do
+      entry =
+        model
+        |> project_model()
+        |> Map.merge(%{
+          id: "#{id}:#{model.id}",
+          provider: id,
+          provider_name: provider.name,
+          supports_images: :image in model.modalities.input,
+          price_per_million_tokens: model.cost
+        })
+
+      if id in stored,
+        do: entry,
+        else: Map.put(entry, :unavailable_reason, "API key required (/key set #{id} <alias>)")
+    end
+  end
+
   defp fetch_curated_models(config, settings) do
     models =
       config
@@ -195,7 +233,12 @@ defmodule H.Provider.ReqLLM.Catalog do
         cred_opts = Keyword.put(Map.get(config, :credentials_opts, []), :settings, settings)
 
         stored = if config[:accounts], do: H.Accounts.key_providers(config.accounts), else: []
-        stored = if is_list(stored), do: Enum.map(stored, &normalize_provider_name/1), else: []
+
+        stored =
+          if is_list(stored),
+            do: Enum.flat_map(stored, fn id -> List.wrap(normalize_provider_name(id)) end),
+            else: []
+
         configured = Enum.uniq(Credentials.configured_providers(cred_opts) ++ stored)
 
         cond do

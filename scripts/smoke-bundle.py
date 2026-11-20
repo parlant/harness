@@ -34,6 +34,9 @@ def smoke(source):
         accounts = data / "accounts.json"
         extensions = data / "extensions.json"
         network = data / "network.json"
+        compatible = data / "openai-compatible.json"
+        router_catalog = Path(__file__).resolve().parents[1] / "examples/providers/openai-compatible.json"
+        router_model = "example-router:vendor/Example-Vision"
         addresses = ["127.0.0.1"]
         second_ip = os.environ.get("H_SMOKE_BIND_ADDRESS") or ("127.0.0.2" if sys.platform == "linux" else None)
         if second_ip:
@@ -149,6 +152,11 @@ def smoke(source):
                 assert refused.returncode != 0 and "network_config" in refused.stderr
                 assert old.poll() is None
                 network.write_text(json.dumps({"bind_addresses": addresses}))
+                compatible.write_text("malformed")
+                refused = run(hi, "daemon", "restart", "--port", "0", check=False)
+                assert refused.returncode != 0 and "invalid_openai_compatible_json" in refused.stderr
+                assert old.poll() is None
+                shutil.copyfile(router_catalog, compatible)
 
                 replacement = launch("restart")
                 ready(replacement)
@@ -181,6 +189,11 @@ def smoke(source):
                 models_by_id = {model["id"]: model for model in api("models")["models"]}
                 assert models_by_id["google:gemini-4-neon"]["context_window"] == 1_048_576
                 assert models_by_id["google:gemini-4-neon"]["max_output_tokens"] == 65_536
+                assert "unavailable_reason" in models_by_id[router_model]
+                saved = api("provider-keys/set", {"provider": "example-router", "source": "work", "api_key": fixture_key})
+                assert fixture_key not in json.dumps(saved)
+                named_models = [model for model in api("models")["models"] if model["provider"] == "example-router"]
+                assert len(named_models) == 2 and all("unavailable_reason" not in model for model in named_models)
                 for alias in ("personal", "work"):
                     run(hi, "account", "add", alias)
 
@@ -191,7 +204,9 @@ def smoke(source):
                 assert "personal\tnot_signed_in (stock active)" in run(hi, "account", "list").stdout
                 profiles = api("provider-keys")
                 assert {"active": "work", "provider": "openai", "sources": ["personal", "work"]} in profiles["providers"]
+                assert {"active": "work", "provider": "example-router", "sources": ["work"]} in profiles["providers"]
                 assert fixture_key not in json.dumps(profiles)
+                assert any(model["id"] == router_model for model in api("models")["models"])
                 entries = api(f"sessions/upgrade-smoke/conversations/{cid}/entries")["items"]
                 assert len(entries) == 1 and "survives planned restart" in json.dumps(entries)
                 # Host commands should use the original PATH, not the bundled Erlang toolchain.
@@ -228,7 +243,7 @@ def smoke(source):
 
         assert "not running" in run(hi, "daemon", "status", check=False).stderr
         assert extensions.read_text() == "malformed"
-    print("Bundle passed relocation, no-toolchain boot, authenticated web inbox, host PATH isolation, account/session persistence, extension startup/bypass, and guarded restart/shutdown.")
+    print("Bundle passed relocation, no-toolchain boot, authenticated web inbox, host PATH isolation, named provider config and profile persistence, account/session persistence, extension startup/bypass, and guarded restart/shutdown.")
 
 
 if __name__ == "__main__":

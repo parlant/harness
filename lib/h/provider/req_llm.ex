@@ -11,7 +11,8 @@ defmodule H.Provider.ReqLLM do
   @behaviour H.Provider
 
   alias H.{Context, Credentials}
-  alias H.Provider.{ReqLLM.Catalog, ReqLLM.CodexPool, Settings, VertexExpress}
+  alias H.Provider.{Compatible, ReqLLM.Catalog, ReqLLM.CodexPool, ReqLLM.CompatibleChat}
+  alias H.Provider.{Settings, VertexExpress}
   alias ReqLLM.{StreamEvent, StreamResponse}
   alias ReqLLM.StreamResponse.MetadataHandle
 
@@ -41,6 +42,13 @@ defmodule H.Provider.ReqLLM do
 
     config = if Map.has_key?(config, :accounts_mode), do: config, else: attempt_config(config)
 
+    case Compatible.provider_for_model(config[:compatible_providers] || %{}, model_spec) do
+      {id, provider, model_id} -> stream_compatible(config, request, id, provider, model_id, emit)
+      nil -> stream_stock(config, request, model_spec, emit)
+    end
+  end
+
+  defp stream_stock(config, request, model_spec, emit) do
     case Catalog.resolve_model(model_spec) do
       {:ok, %LLMDB.Model{provider: :openai_codex} = model}
       when config.accounts_mode == :managed ->
@@ -67,6 +75,63 @@ defmodule H.Provider.ReqLLM do
     end
   end
 
+  defp stream_compatible(config, request, id, provider, model_id, emit) do
+    with %LLMDB.Model{} = model <- provider.models[model_id] || :unknown_model,
+         {:ok, %{api_key: key}} <- H.Accounts.resolve_api_key(config[:accounts], id) do
+      {context, tools} = build_req_llm_inputs(request)
+      limit = model.limits.output
+
+      opts =
+        [
+          named_key: %Credentials.Redacted{value: key},
+          base_url: provider.base_url,
+          receive_timeout: receive_timeout(config)
+        ]
+        |> maybe_put_tools(tools)
+        |> maybe_put_max_tokens(request)
+        |> Keyword.update(:max_tokens, limit, &min(&1, limit))
+
+      opts =
+        if model.capabilities.reasoning.enabled,
+          do: maybe_put_reasoning_effort(opts, request, config),
+          else: opts
+
+      with {:ok, stream} <- CompatibleChat.stream(model, context, opts) do
+        # The fixed codec tag is never the public provider or billing identity.
+        consume_stream(stream, model, config, fn
+          %{type: :start} = event -> emit.(%{event | provider: id, model: model_id})
+          event -> emit.(event)
+        end)
+      else
+        {:error, _} -> {:error, normalize_error(:chat_stream_failed)}
+      end
+    else
+      :unknown_model ->
+        {:error,
+         %{
+           code: "invalid_model",
+           message: "Model is not registered for this provider",
+           retryable: false
+         }}
+
+      :not_configured ->
+        {:error,
+         %{
+           code: "missing_provider_credential",
+           message: "No daemon key for #{id}. Use /key set #{id} <alias>, then /continue.",
+           retryable: false
+         }}
+
+      {:error, _} ->
+        {:error,
+         %{
+           code: "provider_credentials_unavailable",
+           message: "Daemon credential store unavailable",
+           retryable: false
+         }}
+    end
+  end
+
   @impl H.Provider
   def list_models(config) when is_map(config), do: Catalog.list_models(config)
 
@@ -84,7 +149,11 @@ defmodule H.Provider.ReqLLM do
   def attempt_config(config), do: CodexPool.attempt_config(config)
 
   @doc false
-  def dispatch_limit(config, model), do: CodexPool.dispatch_limit(config, model)
+  def dispatch_limit(config, model) do
+    if Compatible.provider_for_model(config[:compatible_providers] || %{}, model),
+      do: 1,
+      else: CodexPool.dispatch_limit(config, model)
+  end
 
   # Request & stream option preparation
 
@@ -102,18 +171,21 @@ defmodule H.Provider.ReqLLM do
     end
   end
 
-  defp build_stream_opts(config, request, model, req_tools, settings) do
-    receive_timeout =
+  defp receive_timeout(config) do
+    Map.get_lazy(config, :receive_timeout, fn ->
       Application.get_env(
         :req_llm,
         :stream_receive_timeout,
         Application.get_env(:req_llm, :receive_timeout, 300_000)
       )
+    end)
+  end
 
+  defp build_stream_opts(config, request, model, req_tools, settings) do
     with {:ok, cred_opts} <- resolve_credential_opts(config, model, settings) do
       opts =
         cred_opts
-        |> Keyword.put(:receive_timeout, Map.get(config, :receive_timeout, receive_timeout))
+        |> Keyword.put(:receive_timeout, receive_timeout(config))
         |> Keyword.put(:max_retries, 0)
         |> Keyword.put(:on_unsupported, Map.get(config, :on_unsupported, :ignore))
         |> maybe_put_tools(req_tools)
@@ -632,6 +704,10 @@ defmodule H.Provider.ReqLLM do
   end
 
   # Error & value normalization
+
+  defp normalize_error(%ReqLLM.Error.API.Stream{cause: {:compatible_http_status, status}}) do
+    %{code: "http_#{status}", message: "Model router returned HTTP #{status}", retryable: false}
+  end
 
   defp normalize_error(%{code: code, message: message, retryable: retryable}) do
     %{

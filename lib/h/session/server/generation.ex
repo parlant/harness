@@ -37,7 +37,8 @@ defmodule H.Session.Server.Generation do
                state.cwd,
                state.auto_compaction,
                state.compaction_keep_recent_chars,
-               state.provider_mod
+               state.provider_mod,
+               state.provider_config
              ) do
           nil ->
             start_generation_attempt(cid, gen_task, state, request)

@@ -13,7 +13,7 @@
 | Method and path | Request / response |
 |---|---|
 | `POST /daemon/shutdown` | Owner idle-only stop for launcher-managed standalone instances. `{}` → `202` `{"state":"stopping"}`. `409` if busy or unsupported. Mutations are fenced after acceptance. |
-| `GET /models` | `models` from the configured provider. |
+| `GET /models` | `models` from the configured adapter. Named Chat Completions entries use the exact `provider:model-id` and also include `provider_name`, `supports_images`, and `price_per_million_tokens`. Missing stored keys are indicated by `unavailable_reason`. |
 | `GET /provider-keys` | Lists supported API-key providers, alias names and active alias. Never returns a key. |
 | `POST /provider-keys/set` | Owner write-only body `{provider,source,api_key}`. Saves or replaces an alias; the first one is active. No provider call. |
 | `POST /provider-keys/use` | Body `{provider,source}` persists the active alias for the next request. |

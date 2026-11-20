@@ -942,7 +942,7 @@ defmodule H.Daemon do
       data_dir = Keyword.get(opts, :data_dir) || Application.get_env(:harness, :data_dir)
 
       opts
-      |> Keyword.take([:accounts, :codex_account_policy])
+      |> Keyword.take([:accounts, :codex_account_policy, :compatible_providers])
       |> Map.new()
       |> then(&Map.merge(config, &1))
       |> Map.put(:data_dir, data_dir)

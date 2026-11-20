@@ -2650,6 +2650,51 @@ mod tests {
     }
 
     #[test]
+    fn named_router_uses_masked_key_prompt_and_sends_only_to_provider_key_endpoint() {
+        let (server, client) = TestServer::bind("router-key");
+        let secret = "fixture-router-key";
+        let listener = server.listener.try_clone().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (header, body) = read_http_request(&mut stream);
+            let (mut stream, header, body) = if header.starts_with("GET ") {
+                drop(stream);
+                let (mut stream, _) = listener.accept().unwrap();
+                let (header, body) = read_http_request(&mut stream);
+                (stream, header, body)
+            } else {
+                (stream, header, body)
+            };
+            assert!(header.starts_with("POST /api/v1/provider-keys/set HTTP/1.1"));
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap(),
+                json!({"provider": "example-router", "source": "work", "api_key": secret})
+            );
+            write_json_response(
+                &mut stream,
+                "200 OK",
+                r#"{"provider":"example-router","active":"work"}"#,
+            );
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "s", "1");
+        ui.command("/key set example-router work");
+        let prompt = ui.secret.as_mut().expect("masked key prompt");
+        prompt.paste(secret);
+        assert!(prompt
+            .lines()
+            .join(" ")
+            .contains(&format!("Key: {}", "*".repeat(secret.len()))));
+        assert!(!prompt.lines().join(" ").contains(secret));
+        ui.secret_key(KeyEvent::new(KeyCode::Enter, Mod::NONE));
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.secret.is_none());
+        assert!(ui.note.contains("Saved example-router key work"));
+        assert!(!ui.note.contains(secret));
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn predecessor_fork_and_edit_uses_fork_and_submit_without_duplicating_or_rewinding() {
         let (srv, client) = TestServer::bind("predecessor-fork");
         let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));

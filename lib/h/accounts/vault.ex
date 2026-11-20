@@ -89,7 +89,8 @@ defmodule H.Accounts.Vault do
 
   # A bounded, atomically replaced file keeps key material and each provider's
   # selection together. Unlike a Codex grant, API keys do not rotate on use.
-  @key_limit 150_000
+  @key_limit 500_000
+  @max_key_providers 13
 
   def read_api_keys({dir, uid}) do
     path = Path.join(dir, "api-keys.json")
@@ -112,20 +113,23 @@ defmodule H.Accounts.Vault do
     with {:ok, %File.Stat{type: :directory, uid: ^uid, mode: mode}} <- File.lstat(dir),
          true <- (mode &&& 0o777) == 0o700,
          allowed when allowed in [:ok, {:error, :enoent}] <- check_file(path, uid, @key_limit),
-         :ok <-
-           H.Accounts.File.replace(dir, path, JSON.encode!(%{version: 1, providers: profiles})) do
+         true <- map_size(profiles) <= @max_key_providers,
+         body = JSON.encode!(%{version: 1, providers: profiles}),
+         true <- byte_size(body) <= @key_limit,
+         :ok <- H.Accounts.File.replace(dir, path, body) do
       :ok
     else
       _ -> {:error, :credential_store_unavailable}
     end
   end
 
-  defp decode_profiles(profiles) when is_map(profiles) and map_size(profiles) <= 5 do
+  defp decode_profiles(profiles)
+       when is_map(profiles) and map_size(profiles) <= @max_key_providers do
     Enum.reduce_while(profiles, {:ok, %{}}, fn
       {provider, %{"active" => active, "keys" => keys} = profile}, {:ok, acc}
       when map_size(profile) == 2 and is_map(keys) and map_size(keys) in 1..8 and
              is_map_key(keys, active) ->
-        if H.Credentials.api_key_provider?(provider) and
+        if Config.valid_source?(provider) and
              Enum.all?(keys, fn {name, key} -> Config.valid_source?(name) and api_key?(key) end) do
           {:cont, {:ok, Map.put(acc, provider, %{active: active, keys: keys})}}
         else

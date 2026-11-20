@@ -20,7 +20,14 @@ defmodule H.Accounts do
 
     with {:ok, sources, active} <- Config.read(dir) do
       {:ok, Keyword.put(opts, :accounts, __MODULE__),
-       [{__MODULE__, data_dir: dir, sources: sources, active: active, name: __MODULE__}]}
+       [
+         {__MODULE__,
+          data_dir: dir,
+          sources: sources,
+          active: active,
+          name: __MODULE__,
+          named_key_providers: Map.keys(opts[:compatible_providers] || %{})}
+       ]}
     end
   end
 
@@ -44,8 +51,11 @@ defmodule H.Accounts do
   end
 
   @doc false
-  def key_providers(server) when is_atom(server),
-    do: :ets.lookup_element(server, :key_providers, 2, [])
+  def key_providers(server) when is_atom(server) do
+    :ets.lookup_element(server, :key_providers, 2, [])
+  rescue
+    ArgumentError -> []
+  end
 
   def key_providers(server), do: call(server, :key_providers)
 
@@ -56,7 +66,7 @@ defmodule H.Accounts do
         %{"provider" => provider, "source" => source, "api_key" => key} = params
       )
       when map_size(params) == 3 do
-    if H.Credentials.api_key_provider?(provider) and Config.valid_source?(source) and
+    if Config.valid_source?(provider) and Config.valid_source?(source) and
          Vault.api_key?(key) do
       call(server, {:put_api_key, provider, source, %H.Credentials.Redacted{value: key}})
     else
@@ -68,7 +78,7 @@ defmodule H.Accounts do
 
   def use_api_key(server, %{"provider" => provider, "source" => source} = params)
       when map_size(params) == 2 do
-    if H.Credentials.api_key_provider?(provider) and Config.valid_source?(source),
+    if Config.valid_source?(provider) and Config.valid_source?(source),
       do: call(server, {:use_api_key, provider, source}),
       else: {:error, :invalid_api_key_profile}
   end
@@ -76,7 +86,11 @@ defmodule H.Accounts do
   def use_api_key(_server, _params), do: {:error, :invalid_api_key_profile}
 
   @doc false
-  def resolve_api_key(server, provider), do: call(server, {:api_key, Atom.to_string(provider)})
+  def resolve_api_key(server, provider) when is_atom(provider),
+    do: resolve_api_key(server, Atom.to_string(provider))
+
+  def resolve_api_key(server, provider) when is_binary(provider),
+    do: call(server, {:api_key, provider})
 
   @doc false
   def codex_status(server, sources), do: call(server, {:codex_status, sources})
@@ -148,6 +162,9 @@ defmodule H.Accounts do
 
     dir = Keyword.fetch!(opts, :data_dir)
 
+    providers =
+      Enum.sort(H.Credentials.api_key_providers() ++ Keyword.get(opts, :named_key_providers, []))
+
     result =
       with {:ok, vault, credentials} <- Vault.open(dir, sources),
            {:ok, keys} <- Vault.read_api_keys(vault),
@@ -170,6 +187,7 @@ defmodule H.Accounts do
            vault: vault,
            credentials: credentials,
            keys: keys,
+           key_providers: providers,
            http: Keyword.get(opts, :http, &Req.post/1),
            ttl: Keyword.get(opts, :login_ttl, @login_ttl),
            poll_cap: Keyword.get(opts, :test_poll_cap, 120_000),
@@ -214,7 +232,7 @@ defmodule H.Accounts do
 
   def handle_call(:api_keys, _from, state) do
     providers =
-      for provider <- H.Credentials.api_key_providers() do
+      for provider <- state.key_providers do
         %{keys: keys, active: active} = Map.get(state.keys, provider, %{keys: %{}, active: nil})
         %{provider: provider, active: active, sources: Enum.sort(Map.keys(keys))}
       end
@@ -224,9 +242,9 @@ defmodule H.Accounts do
 
   def handle_call({:api_key, provider}, _from, state) do
     result =
-      case state.keys[provider] do
+      case provider in state.key_providers && state.keys[provider] do
         %{active: source, keys: keys} -> {:ok, %{api_key: Map.fetch!(keys, source)}}
-        nil -> :not_configured
+        _ -> :not_configured
       end
 
     {:reply, result, state}
@@ -239,15 +257,23 @@ defmodule H.Accounts do
       ) do
     profile = Map.get(state.keys, provider, %{active: source, keys: %{}})
 
-    if map_size(profile.keys) < 8 or Map.has_key?(profile.keys, source) do
-      persist_keys(state, provider, put_in(profile.keys[source], key))
-    else
-      {:reply, {:error, :too_many_account_sources}, state}
+    cond do
+      provider not in state.key_providers ->
+        {:reply, {:error, :invalid_api_key_profile}, state}
+
+      map_size(profile.keys) < 8 or Map.has_key?(profile.keys, source) ->
+        persist_keys(state, provider, put_in(profile.keys[source], key))
+
+      true ->
+        {:reply, {:error, :too_many_account_sources}, state}
     end
   end
 
   def handle_call({:use_api_key, provider, source}, _from, state) do
-    case state.keys[provider] do
+    case provider in state.key_providers && state.keys[provider] do
+      false ->
+        {:reply, {:error, :invalid_api_key_profile}, state}
+
       %{keys: keys} = profile when is_map_key(keys, source) ->
         persist_keys(state, provider, %{profile | active: source})
 

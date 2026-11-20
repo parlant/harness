@@ -78,7 +78,9 @@ defmodule H.Session.Compaction do
     do: raise(ArgumentError, "auto_compaction must be a map of scoped thresholds")
 
   @doc "Returns a safe cut when the projected request exceeds its scoped token budget."
-  def auto_boundary(entries, %{model: model} = request, cwd, limits, keep_chars, adapter)
+  def auto_boundary(entries, request, cwd, limits, keep_chars, adapter, config \\ %{})
+
+  def auto_boundary(entries, %{model: model} = request, cwd, limits, keep_chars, adapter, config)
       when is_binary(model) do
     [provider | _] = String.split(model, ":", parts: 2)
 
@@ -86,7 +88,7 @@ defmodule H.Session.Compaction do
       Enum.find_value(
         [{:cwd, cwd, model}, {:cwd, cwd}, {:model, model}, {:provider, provider}, :default],
         &Map.get(limits, &1)
-      ) || model_threshold(adapter, model)
+      ) || model_threshold(adapter, model, config)
 
     # Estimate a single provider-visible request, not cumulative usage or raw history.
     if is_integer(limit) and limit > 0 and
@@ -99,10 +101,10 @@ defmodule H.Session.Compaction do
     end
   end
 
-  def auto_boundary(_, _, _, _, _, _), do: nil
+  def auto_boundary(_, _, _, _, _, _, _), do: nil
 
-  defp model_threshold(H.Provider.ReqLLM, model) do
-    case H.Provider.ReqLLM.context_window(model) do
+  defp model_threshold(H.Provider.ReqLLM, model, config) do
+    case H.Provider.ReqLLM.context_window(model, config) do
       window when is_integer(window) and window > 0 ->
         window - min(16_384, div(window, 2))
 
@@ -111,7 +113,7 @@ defmodule H.Session.Compaction do
     end
   end
 
-  defp model_threshold(_, _), do: 96_000
+  defp model_threshold(_, _, _), do: 96_000
 
   @doc "Validates external `compact` command arguments."
   @spec validate_args(term()) :: {:ok, map()} | {:error, String.t()}

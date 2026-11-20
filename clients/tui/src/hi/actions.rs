@@ -357,10 +357,16 @@ pub fn execute(
                         .map(|n| format!(" ({})", sanitize_single_line(n)))
                         .unwrap_or_default();
                     let provider_part = m
-                        .provider
+                        .provider_name
                         .as_deref()
                         .map(str::trim)
                         .filter(|p| !p.is_empty())
+                        .or_else(|| {
+                            m.provider
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|p| !p.is_empty())
+                        })
                         .map(|p| format!(" [{}]", sanitize_single_line(p)))
                         .unwrap_or_default();
                     let unavailable = m
@@ -1474,7 +1480,9 @@ mod tests {
             write_json_response(
                 &mut s2,
                 "200 OK",
-                r#"{"models":[{"id":"openai/gpt-5.4","name":"GPT 5.4","provider":"openai"}]}"#,
+                r#"{"models":[{"id":"openai/gpt-5.4","name":"GPT 5.4","provider":"openai"},
+                    {"id":"example-router:vendor/Example-Vision","name":"Example Vision Model","provider":"example-router",
+                     "provider_name":"Example Model Router","unavailable_reason":"API key required"}]}"#,
             );
 
             // 3. Branches
@@ -1517,6 +1525,9 @@ mod tests {
                 assert_eq!(title, "models");
                 assert_eq!(items[0].0, "openai/gpt-5.4");
                 assert!(items[0].1.contains("GPT 5.4"));
+                assert_eq!(items[1].0, "example-router:vendor/Example-Vision");
+                assert!(items[1].1.contains("[Example Model Router]"));
+                assert!(items[1].1.contains("API key required"));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1641,7 +1652,7 @@ mod tests {
             let v1: Value = serde_json::from_str(&b1).unwrap();
             assert_eq!(v1["command"], "configure");
             assert_eq!(v1["conversation_id"], 1);
-            assert_eq!(v1["args"]["model"], "fake:coder");
+            assert_eq!(v1["args"]["model"], "example-router:vendor/Example-Vision");
             assert_eq!(v1["args"]["expected_seq"], 12);
             write_json_response(
                 &mut s1,
@@ -1667,7 +1678,10 @@ mod tests {
             &client,
             &target,
             Some(12),
-            Effect::Configure("model".to_string(), "fake:coder".to_string()),
+            Effect::Configure(
+                "model".to_string(),
+                "example-router:vendor/Example-Vision".to_string(),
+            ),
         )
         .unwrap();
         assert!(matches!(ok_reply, Reply::Receipt(r) if r.seq == Some(13)));
