@@ -101,6 +101,54 @@ defmodule HWeb.MultiSurfaceSyncTest do
       html =~ "Hello from Rust TUI" and
         html =~ "Synced reply from interactive hi!"
     end)
+
+    # 4. Spawn a step-anchored subsession via Rust `hi --parent <sid> --title ... -p ...`
+    #    and verify HWeb `/inbox` exempts it by default, then nests it hierarchically when toggled!
+    Fake.push_step(
+      fake,
+      {:reply, [%{type: :text_delta, text: "Subagent report ready!", metadata: %{}}],
+       %{
+         content: [%{type: "text", text: "Subagent report ready!"}],
+         finish_reason: "stop"
+       }}
+    )
+
+    worktree_dir = Path.join(projects_dir, "sync-sub-worktree")
+    File.mkdir_p!(worktree_dir)
+
+    {sub_out, 0} =
+      System.cmd(
+        hi_bin,
+        [
+          "--data-dir",
+          data_dir,
+          "--session",
+          "sync-child-1",
+          "--parent",
+          sid,
+          "--title",
+          "Explore Lane",
+          "--model",
+          "fake:coder",
+          "--thinking",
+          "high",
+          "--print",
+          "Inspect sync-repo"
+        ],
+        cd: worktree_dir,
+        env: [{"H_DAEMON_URL", nil}]
+      )
+
+    assert sub_out =~ "Subagent report ready!"
+
+    {:ok, inbox_view, inbox_html} = live(conn, "/inbox")
+    assert inbox_html =~ sid
+    refute inbox_html =~ "Explore Lane"
+    refute inbox_html =~ "sync-sub-worktree"
+
+    toggled_html = inbox_view |> element("#inbox-filter-subsessions") |> render_click()
+    assert toggled_html =~ "Explore Lane"
+    assert toggled_html =~ "sync-child-1"
   end
 
   defp wait_until(fun, timeout_ms \\ 3_000) do

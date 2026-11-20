@@ -13,6 +13,7 @@
 | 7 · Terminal | Rust `hi` attaches, resumes, streams and submits in fullscreen, regular scrollback, or headless `-p` print mode. | [CLI](../clients/tui/src/cli.rs) · [cross-client test](../clients/web/test/h_web/live/multi_surface_sync_test.exs) |
 | Local management | First-run device login and shared account settings from `hi` or Phoenix. `hi` can run a prebuilt launcher or register a per-user macOS service. A native build bundles the standalone daemon, runtime, `hi`, and a disabled-by-default MultiCodex artifact. | [Management commands](hi/management.md) |
 | 8 · Remote prototype | In-VM agent and execution adapter with fences and heartbeat leases. Not a deployed remote service. | [Agent tests](../test/h/remote_agent_test.exs) · [adapter tests](../test/h/execution_env_remote_test.exs) |
+| Subagents & signals | Step-anchored subsession `parent` lineage, durable `H.PubSub` submission settlement signals, zero-worker parked `subagent` tool (`wait`, `start`, `await`, `steer`, `abort`), CLI delegation flags, and root-first inbox hierarchy. | [Design](architecture/subagents.md) · [tool tests](../test/h/subagent_tool_test.exs) · [recovery tests](../test/h/subagent_recovery_test.exs) |
 
 ## Active vertical slice — hi replaces pi
 
@@ -36,5 +37,5 @@ See the [grouped implementation steps and ownership boundaries](hi/build.md). St
 - **Web:** an HTTP backend if Phoenix needs to run outside the daemon VM.
 - **Remote transport:** choose an authenticated transport, deploy a separate agent, and verify disconnect, lease expiry and ambiguous unsafe effects across an actual network boundary.
 - **Slice 9 — long-running sessions:** automate append-only compaction and handoff. `H.Context` already interprets `compaction` and `reset` entries; that is not a summarization worker or a client command.
-- **Slice 9 — suspendable work:** subagent joins, durable external signals, parked tools, approval gates and a wake scheduler. Existing generation retries and tool tasks are not a general workflow engine.
+- **Slice 9 — suspendable work:** durable external signals, general parked tools, approval gates and a wake scheduler beyond the implemented `subagent` submission-settlement park/wake path. Existing generation retries, tool tasks, and subagent joins are not a general workflow engine.
 - **Slice 9 — relational storage:** an optional `H.Storage.SQLite` backend behind the existing storage conformance suite. No database dependency is required today.

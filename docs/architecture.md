@@ -1,6 +1,6 @@
 # Architecture
 
-For startup path extensions, managed accounts, and proposed hooks, see [Extensions](extensions.md). For multi-session work delegation and proposed subagent primitives, see [Subagents](architecture/subagents.md).
+For startup path extensions, managed accounts, and proposed hooks, see [Extensions](extensions.md). For step-anchored subsession delegation, settlement signals, and the `subagent` tool, see [Subagents](architecture/subagents.md).
 
 The engine is the root Mix application (`:harness`, `H.*`). It owns session state and runs work even when no client is attached. Phoenix is a separate Mix application; the terminal client is a separate Rust binary. Neither is required to run the engine.
 
@@ -8,7 +8,7 @@ The engine is the root Mix application (`:harness`, `H.*`). It owns session stat
 
 | Structure | What it answers |
 |---|---|
-| `H.Session`, `H.Conversation`, `H.Entry` | Which immutable entries are visible here? A fork inherits its parent's visible prefix through a selected entry. |
+| `H.Session`, `H.Conversation`, `H.Entry` | Which immutable entries are visible here? A fork inherits its parent's visible prefix through a selected entry; a spawned subsession starts a fresh root conversation anchored immutably to its parent session's launch entry (`Catalog.parent`). |
 | `H.Task` ownership | Which run owns this work? A generation can own tool calls; forking history does not copy or cancel them. |
 | OTP supervision | Which live processes stop or restart together? A temporary `H.Session.Supervisor` wraps a per-session `:one_for_all` supervisor for the coordinator and its task supervisor. Repeated failures can quarantine one session. |
 | Client cursor | Which session, branch and page is this client displaying? Navigation is not a mutation of shared history. |
@@ -57,7 +57,7 @@ effects.
 
 ## Workspace boundary
 
-`H.EnvRegistry` resolves an environment for browsing or binds it to a session's working directory. The catalog and mutating-tool leases distinguish workspaces by `{env_id, cwd}`. `H.Harness.Coding` supplies `read`, `write`, `edit`, `bash` and `search_history` and discovers ancestor `AGENTS.md` files through `H.ExecutionEnv` unless instructions are overridden. `H.ExecutionEnv.Host` operates with the host user's access; a lease coordinates writers, **not** filesystem confinement. `Local` is a compatibility wrapper.
+`H.EnvRegistry` resolves an environment for browsing or binds it to a session's working directory. The catalog and mutating-tool leases distinguish workspaces by `{env_id, cwd}`. `H.Harness.Coding` supplies `read`, `write`, `edit`, `bash`, `search_history`, and depth-gated `subagent` delegation (holding zero worker processes while parked on `H.PubSub` submission-settlement signals) and discovers ancestor `AGENTS.md` files through `H.ExecutionEnv` unless instructions are overridden. `H.ExecutionEnv.Host` operates with the host user's access; a lease coordinates writers, **not** filesystem confinement. `Local` is a compatibility wrapper.
 
 `H.ExecutionEnv.Remote` delegates to `H.RemoteAgent`. The implementation exercises stale-attempt fencing, lease renewal, expiry and process-group cleanup **in the same VM**. It is not an authenticated transport to another machine.
 

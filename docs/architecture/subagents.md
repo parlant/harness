@@ -1,6 +1,6 @@
 # Subagents, Subsessions, and Inter-Session Signals
 
-This design refines multi-lane delegation across the H daemon (`:harness`), terminal client (`hi`), and Phoenix web app (`HWeb`). It separates **what exists today** from **the concrete design and implementation plan** for spawned subsessions, inter-session settlement signals, parked delegation tools, and calm root-first inbox/attention surfaces.
+This document describes the **implemented** architecture across the H daemon (`:harness`), terminal client (`hi`), and Phoenix web app (`HWeb`) for step-anchored spawned subsessions, inter-session settlement signals, coordinator-parked `subagent` delegation, and calm root-first inbox/attention surfaces, along with the field reflections that motivated it.
 
 ---
 
