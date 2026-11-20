@@ -285,6 +285,15 @@ pub struct InboxRendered {
     pub selected_row: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct InboxRowItem<'a> {
+    pub session: &'a SessionSummary,
+    pub depth: usize,
+    pub is_last: bool,
+    pub parent_cwd: Option<&'a str>,
+    pub orphan_parent_sid: Option<&'a str>,
+}
+
 /// Pure view model for the multi-session Inbox browser.
 #[derive(Debug)]
 pub struct InboxState {
@@ -294,6 +303,7 @@ pub struct InboxState {
     launch_env_id: String,
     launch_cwd: String,
     home_dir: Option<String>,
+    show_subsessions: bool,
     pub online: bool,
     pub loaded: bool,
     spinner_frame: usize,
@@ -323,11 +333,31 @@ impl InboxState {
             launch_env_id,
             launch_cwd,
             home_dir,
+            show_subsessions: false,
             online: false,
             loaded: false,
             spinner_frame: 0,
             last_tick: Instant::now(),
         }
+    }
+
+    pub fn set_show_subsessions(&mut self, enabled: bool) {
+        self.show_subsessions = enabled;
+        self.reconcile_selection();
+    }
+
+    pub fn toggle_subsessions(&mut self) -> bool {
+        self.show_subsessions = !self.show_subsessions;
+        self.reconcile_selection();
+        self.show_subsessions
+    }
+
+    pub fn show_subsessions(&self) -> bool {
+        self.show_subsessions
+    }
+
+    pub fn subsession_count(&self) -> usize {
+        self.sessions.values().filter(|s| s.is_subsession()).count()
     }
 
     pub fn apply(&mut self, update: CatalogUpdate) -> Option<String> {
@@ -351,7 +381,7 @@ impl InboxState {
                 }
                 self.newly_idle.retain(|sid| {
                     next.get(sid)
-                        .is_some_and(|s| s.effective_attention() == "idle")
+                        .is_some_and(|s| !s.is_subsession() && s.effective_attention() == "idle")
                 });
                 self.sessions = next;
                 self.loaded = true;
@@ -385,9 +415,9 @@ impl InboxState {
     }
 
     pub fn has_processing_sessions(&self) -> bool {
-        self.sessions
-            .values()
-            .any(|s| s.effective_attention() == "running")
+        self.sessions.values().any(|s| {
+            (self.show_subsessions || !s.is_subsession()) && s.effective_attention() == "running"
+        })
     }
 
     /// Advances the spinner animation when any session is running.
@@ -437,66 +467,112 @@ impl InboxState {
 
     /// Returns groups sorted deterministically:
     /// 1. Launch workspace first (if present), then lexicographically by `(env_id, cwd)`.
-    /// 2. Sessions within each group sorted deterministically by `(created_at asc, session_id asc)`
+    /// 2. Root sessions within each group sorted deterministically by `(created_at asc, session_id asc)`
     ///    so rows do not jump when `updated_at` changes during live activity.
+    /// 3. When `show_subsessions` is `false`, subsessions are excluded. When `true`, child
+    ///    subsessions are nested directly beneath their parent inside the parent's workspace group
+    ///    (even across different cwds), and orphan subsessions fall back to their own workspace group.
     pub fn grouped_sessions(&self) -> Vec<((String, String), Vec<&SessionSummary>)> {
+        self.grouped_rows()
+            .into_iter()
+            .map(|(k, rows)| (k, rows.into_iter().map(|r| r.session).collect()))
+            .collect()
+    }
+
+    pub fn grouped_rows(&self) -> Vec<((String, String), Vec<InboxRowItem<'_>>)> {
         let mut by_root: BTreeMap<(String, String), Vec<&SessionSummary>> = BTreeMap::new();
+        let mut children_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
+
         for session in self.sessions.values() {
-            let env_id = session
-                .env_id
-                .as_deref()
-                .filter(|e| !e.trim().is_empty())
-                .unwrap_or("host")
-                .to_string();
-            by_root
-                .entry((env_id, session.cwd.clone()))
-                .or_default()
-                .push(session);
+            if let Some(parent) = session.parent.as_ref() {
+                if !self.show_subsessions {
+                    continue;
+                }
+                if self.sessions.contains_key(parent.session_id.as_str())
+                    && parent.session_id != session.session_id
+                {
+                    children_by_parent
+                        .entry(parent.session_id.as_str())
+                        .or_default()
+                        .push(session);
+                } else {
+                    let env_id = session_env_id(session);
+                    by_root
+                        .entry((env_id, session.cwd.clone()))
+                        .or_default()
+                        .push(session);
+                }
+            } else {
+                let env_id = session_env_id(session);
+                by_root
+                    .entry((env_id, session.cwd.clone()))
+                    .or_default()
+                    .push(session);
+            }
         }
 
-        let mut groups: Vec<((String, String), Vec<&SessionSummary>)> =
+        for list in children_by_parent.values_mut() {
+            sort_sessions_deterministically(list);
+        }
+
+        let mut raw_groups: Vec<((String, String), Vec<&SessionSummary>)> =
             by_root.into_iter().collect();
         let launch_key = (self.launch_env_id.clone(), self.launch_cwd.clone());
-        groups.sort_by(|(ka, _), (kb, _)| {
+        raw_groups.sort_by(|(ka, _), (kb, _)| {
             let a_launch = ka == &launch_key;
             let b_launch = kb == &launch_key;
             b_launch.cmp(&a_launch).then_with(|| ka.cmp(kb))
         });
 
-        for (_, list) in &mut groups {
-            list.sort_by(|a, b| {
-                a.created_at
-                    .unwrap_or(0)
-                    .cmp(&b.created_at.unwrap_or(0))
-                    .then_with(|| a.session_id.cmp(&b.session_id))
-            });
+        let mut out = Vec::with_capacity(raw_groups.len());
+        for (key, mut roots) in raw_groups {
+            sort_sessions_deterministically(&mut roots);
+            let mut rows = Vec::new();
+            let root_count = roots.len();
+            let mut visited = HashSet::new();
+            for (idx, root) in roots.into_iter().enumerate() {
+                let is_last = idx + 1 == root_count;
+                let orphan_parent_sid = root.parent.as_ref().map(|p| p.session_id.as_str());
+                rows.push(InboxRowItem {
+                    session: root,
+                    depth: 0,
+                    is_last,
+                    parent_cwd: None,
+                    orphan_parent_sid,
+                });
+                visited.insert(root.session_id.as_str());
+                if self.show_subsessions {
+                    append_children(&mut rows, root, 1, &children_by_parent, &mut visited);
+                }
+            }
+            out.push((key, rows));
         }
 
-        groups
+        out
     }
 
     pub fn ordered_session_ids(&self) -> Vec<String> {
-        self.grouped_sessions()
+        self.grouped_rows()
             .into_iter()
-            .flat_map(|(_, list)| list.into_iter().map(|s| s.session_id.clone()))
+            .flat_map(|(_, list)| list.into_iter().map(|r| r.session.session_id.clone()))
             .collect()
     }
 
     fn reconcile_selection(&mut self) {
+        let ordered = self.ordered_session_ids();
         if self
             .selected_id
             .as_deref()
-            .is_some_and(|sid| self.sessions.contains_key(sid))
+            .is_some_and(|sid| ordered.iter().any(|id| id == sid))
         {
             return;
         }
-        let ordered = self.ordered_session_ids();
         self.selected_id = ordered
             .iter()
             .find(|sid| {
                 self.sessions
                     .get(sid.as_str())
-                    .is_some_and(|s| needs_attention(s.effective_attention()))
+                    .is_some_and(|s| !s.is_subsession() && needs_attention(s.effective_attention()))
             })
             .cloned()
             .or_else(|| ordered.into_iter().next());
@@ -521,8 +597,9 @@ impl InboxState {
         self.selected_id = Some(ordered[next_idx].clone());
     }
 
-    /// Cycles selection across sessions needing user attention (non-processing:
-    /// idle, error, quarantined), skipping actively processing (`running`/`sleeping`) sessions.
+    /// Cycles selection across root sessions needing user attention (non-processing:
+    /// idle, error, quarantined), skipping subsessions and actively processing
+    /// (`running`/`sleeping`) sessions.
     pub fn cycle_attention(&mut self, forward: bool) -> bool {
         let ordered = self.ordered_session_ids();
         let candidates: Vec<(usize, &String)> = ordered
@@ -531,7 +608,7 @@ impl InboxState {
             .filter(|(_, sid)| {
                 self.sessions
                     .get(sid.as_str())
-                    .is_some_and(|s| needs_attention(s.effective_attention()))
+                    .is_some_and(|s| !s.is_subsession() && needs_attention(s.effective_attention()))
             })
             .collect();
         if candidates.is_empty() {
@@ -578,6 +655,9 @@ impl InboxState {
         let mut idle = 0usize;
         let mut running = 0usize;
         for session in self.sessions.values() {
+            if session.is_subsession() {
+                continue;
+            }
             total += 1;
             match session.effective_attention() {
                 "error" | "quarantined" => errors += 1,
@@ -594,8 +674,9 @@ impl InboxState {
         let mut selected_row = None;
 
         let (total, errors, idle, running) = self.counts();
+        let sub_count = self.subsession_count();
         let mut header_spans = vec![StyledSpan::new("Inbox", theme.inbox_dir)];
-        let summary = if !self.loaded {
+        let mut summary = if !self.loaded {
             "  loading sessions…".to_string()
         } else if total == 0 {
             "  no sessions".to_string()
@@ -612,14 +693,31 @@ impl InboxState {
             }
             format!("  {total} sessions ({})", parts.join(" · "))
         };
+        if self.loaded && sub_count > 0 {
+            let noun = if sub_count == 1 {
+                "subsession"
+            } else {
+                "subsessions"
+            };
+            let state = if self.show_subsessions {
+                "shown"
+            } else {
+                "hidden"
+            };
+            summary.push_str(&format!(" · {sub_count} {noun} ({state})"));
+        }
         header_spans.push(StyledSpan::new(summary, theme.tool_meta));
         rows.push(StyledRow::from_spans(header_spans));
         rows.push(StyledRow::plain(String::new(), Style::default()));
 
-        let groups = self.grouped_sessions();
+        let groups = self.grouped_rows();
         if groups.is_empty() {
             let msg = if self.loaded {
-                "No sessions yet. Press n to start a new session in this workspace."
+                if sub_count > 0 && !self.show_subsessions {
+                    "No root sessions yet. Press s to show subsessions or n to start a new session."
+                } else {
+                    "No sessions yet. Press n to start a new session in this workspace."
+                }
             } else {
                 "Connecting to daemon catalog…"
             };
@@ -637,14 +735,13 @@ impl InboxState {
                 StyledSpan::new(sanitize_single_line(&dir_label), theme.inbox_dir),
             ]));
 
-            let group_len = list.len();
-            for (idx, session) in list.into_iter().enumerate() {
-                let is_last = idx + 1 == group_len;
-                let is_selected = self.selected_id.as_deref() == Some(session.session_id.as_str());
+            for item in list {
+                let is_selected =
+                    self.selected_id.as_deref() == Some(item.session.session_id.as_str());
                 if is_selected {
                     selected_row = Some(rows.len());
                 }
-                rows.push(self.render_session_row(session, is_last, is_selected, theme));
+                rows.push(self.render_session_row(&item, is_selected, theme));
             }
         }
 
@@ -653,17 +750,30 @@ impl InboxState {
 
     fn render_session_row(
         &self,
-        session: &SessionSummary,
-        is_last: bool,
+        item: &InboxRowItem<'_>,
         is_selected: bool,
         theme: &Theme,
     ) -> StyledRow {
+        let session = item.session;
         let attention = session.effective_attention();
-        let is_newly_idle = attention == "idle" && self.newly_idle.contains(&session.session_id);
+        let is_newly_idle = !session.is_subsession()
+            && attention == "idle"
+            && self.newly_idle.contains(&session.session_id);
         let processing = is_processing_attention(attention);
 
         let cursor_prefix = if is_selected { "> " } else { "  " };
-        let connector = if is_last { "└─ " } else { "├─ " };
+        let connector = if item.depth == 0 {
+            if item.is_last {
+                "└─ ".to_string()
+            } else {
+                "├─ ".to_string()
+            }
+        } else {
+            let indent = "   ".repeat(item.depth);
+            let branch = if item.is_last { "└─ " } else { "├─ " };
+            let arrow = if theme.is_plain { "> " } else { "↳ " };
+            format!("{indent}{branch}{arrow}")
+        };
 
         let (glyph, glyph_style) = match attention {
             "error" | "quarantined" => ("!".to_string(), theme.tool_error),
@@ -764,6 +874,12 @@ impl InboxState {
             }
         };
 
+        let meta_style = if is_selected {
+            base_sel
+        } else {
+            theme.tool_meta
+        };
+
         let indicator_style = if is_selected {
             base_sel.patch(glyph_style)
         } else {
@@ -777,6 +893,38 @@ impl InboxState {
             StyledSpan::new(" ", base_sel),
             StyledSpan::new(display_name, title_style),
         ];
+
+        if let Some(orphan_parent) = item.orphan_parent_sid {
+            let arrow = if theme.is_plain { "-> " } else { "↳ " };
+            spans.push(StyledSpan::new(
+                format!("  [{arrow}{}]", sanitize_single_line(orphan_parent)),
+                meta_style,
+            ));
+        }
+
+        if let Some(at_entry) = session
+            .parent
+            .as_ref()
+            .and_then(|p| p.at_entry_id.as_deref())
+            .filter(|e| !e.trim().is_empty())
+        {
+            spans.push(StyledSpan::new(
+                format!("  @#{}", sanitize_single_line(at_entry)),
+                meta_style,
+            ));
+        }
+
+        if let Some(parent_cwd) = item.parent_cwd {
+            if session.cwd != parent_cwd {
+                let env_id = session_env_id(session);
+                let short_cwd =
+                    format_workspace_root(&env_id, &session.cwd, self.home_dir.as_deref());
+                spans.push(StyledSpan::new(
+                    format!("  [cwd: {}]", sanitize_single_line(&short_cwd)),
+                    meta_style,
+                ));
+            }
+        }
 
         if !detail.is_empty() {
             spans.push(StyledSpan::new(format!("  {detail}"), detail_style));
@@ -805,8 +953,9 @@ impl InboxState {
 
     pub fn status_line(&self, note: &str) -> String {
         let conn = if self.online { "online" } else { "offline" };
-        let mut line =
-            String::from("Inbox · j/k move · Tab next idle · Enter open · n new · q/Ctrl-D quit");
+        let mut line = String::from(
+            "Inbox · j/k move · Tab next idle · Enter open · n new · s subsessions · q/Ctrl-D quit",
+        );
         if !note.trim().is_empty() {
             line.push_str(" · ");
             line.push_str(&sanitize_single_line(note));
@@ -817,11 +966,64 @@ impl InboxState {
     }
 }
 
+fn session_env_id(session: &SessionSummary) -> String {
+    session
+        .env_id
+        .as_deref()
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or("host")
+        .to_string()
+}
+
+fn sort_sessions_deterministically(list: &mut [&SessionSummary]) {
+    list.sort_by(|a, b| {
+        a.created_at
+            .unwrap_or(0)
+            .cmp(&b.created_at.unwrap_or(0))
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+}
+
+fn append_children<'a>(
+    rows: &mut Vec<InboxRowItem<'a>>,
+    parent: &'a SessionSummary,
+    depth: usize,
+    children_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
+    visited: &mut HashSet<&'a str>,
+) {
+    let Some(children) = children_by_parent.get(parent.session_id.as_str()) else {
+        return;
+    };
+    let unvisited: Vec<&'a SessionSummary> = children
+        .iter()
+        .copied()
+        .filter(|c| !visited.contains(c.session_id.as_str()))
+        .collect();
+    let child_count = unvisited.len();
+    for (idx, child) in unvisited.into_iter().enumerate() {
+        if !visited.insert(child.session_id.as_str()) {
+            continue;
+        }
+        rows.push(InboxRowItem {
+            session: child,
+            depth,
+            is_last: idx + 1 == child_count,
+            parent_cwd: Some(parent.cwd.as_str()),
+            orphan_parent_sid: None,
+        });
+        append_children(rows, child, depth + 1, children_by_parent, visited);
+    }
+}
+
 fn track_transition(
     newly_idle: &mut HashSet<String>,
     prev: &SessionSummary,
     next: &SessionSummary,
 ) {
+    if next.is_subsession() {
+        newly_idle.remove(&next.session_id);
+        return;
+    }
     let prev_att = prev.effective_attention();
     let next_att = next.effective_attention();
     if is_processing_attention(prev_att) && next_att == "idle" {
@@ -936,6 +1138,8 @@ mod tests {
                 }
                 .to_string(),
             ),
+            parent: None,
+            role: None,
         }
     }
 
@@ -1344,5 +1548,208 @@ mod tests {
         drop(sub);
         let _ = server.join();
         let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn subsessions_hidden_by_default_and_exempt_from_counts_tab_and_newly_idle() {
+        let mut inbox = InboxState::with_home(
+            "host".into(),
+            "/Users/alice/repo".into(),
+            None,
+            Some("/Users/alice".into()),
+        );
+        inbox.apply(CatalogUpdate::Online);
+
+        let root_run = make_session(
+            "root-run",
+            "/Users/alice/repo",
+            "host",
+            Some("Coordinator"),
+            "running",
+            Some("tool"),
+            Some("subagent"),
+            10,
+        );
+        let root_idle = make_session(
+            "root-idle",
+            "/Users/alice/repo",
+            "host",
+            Some("Other Root"),
+            "idle",
+            None,
+            None,
+            20,
+        );
+        let mut sub_running = make_session(
+            "sub-1",
+            "/private/tmp/wt-1",
+            "host",
+            Some("Lane 1"),
+            "running",
+            Some("tool"),
+            Some("bash"),
+            15,
+        );
+        sub_running.parent = Some(crate::protocol::SessionParent {
+            session_id: "root-run".into(),
+            conversation_id: Some("1".into()),
+            at_entry_id: Some("42".into()),
+            task_id: Some("43".into()),
+            depth: Some(1),
+        });
+        sub_running.role = Some("subagent".into());
+
+        let mut sub_err = make_session(
+            "sub-err",
+            "/private/tmp/wt-2",
+            "host",
+            Some("Failed Lane"),
+            "error",
+            None,
+            Some("tool_error"),
+            16,
+        );
+        sub_err.parent = Some(crate::protocol::SessionParent {
+            session_id: "root-run".into(),
+            conversation_id: Some("1".into()),
+            at_entry_id: Some("42".into()),
+            task_id: None,
+            depth: Some(1),
+        });
+        sub_err.role = Some("subagent".into());
+
+        inbox.apply(CatalogUpdate::Snapshot(vec![
+            root_run,
+            root_idle,
+            sub_running.clone(),
+            sub_err,
+        ]));
+
+        // Default: subsessions hidden
+        assert!(!inbox.show_subsessions());
+        assert_eq!(inbox.subsession_count(), 2);
+        // Counts only count root sessions: 2 total, 0 errors, 1 idle, 1 running
+        assert_eq!(inbox.counts(), (2, 0, 1, 1));
+        assert_eq!(inbox.ordered_session_ids(), vec!["root-run", "root-idle"]);
+        assert_eq!(inbox.selected_id(), Some("root-idle"));
+
+        // Subsession transitioning from running -> idle must NOT be marked newly_idle
+        let mut sub_done = sub_running;
+        sub_done.attention = Some("idle".into());
+        sub_done.active = false;
+        inbox.apply(CatalogUpdate::Upsert(Box::new(sub_done)));
+
+        // Header shows hidden subsessions count; status line mentions `s subsessions`
+        let hidden_text: String = inbox
+            .render(&Theme::dark())
+            .rows
+            .iter()
+            .map(StyledRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            hidden_text.contains("2 subsessions (hidden)"),
+            "{hidden_text}"
+        );
+        assert!(!hidden_text.contains("Lane 1"), "{hidden_text}");
+        assert!(!hidden_text.contains("/private/tmp/wt-1"), "{hidden_text}");
+        assert!(inbox.status_line("").contains("s subsessions"));
+
+        // Toggle subsessions ON -> hierarchical rendering under root-run even with different cwd!
+        assert!(inbox.toggle_subsessions());
+        assert!(inbox.show_subsessions());
+        // Counts STILL only count root sessions
+        assert_eq!(inbox.counts(), (2, 0, 1, 1));
+        // Order: root-run -> sub-1 -> sub-err -> root-idle (all inside ~/repo group!)
+        assert_eq!(
+            inbox.ordered_session_ids(),
+            vec!["root-run", "sub-1", "sub-err", "root-idle"]
+        );
+
+        // Tab (`cycle_attention`) skips sub-1 (idle) and sub-err (error), landing only on root-idle!
+        assert!(inbox.cycle_attention(true));
+        assert_eq!(inbox.selected_id(), Some("root-idle"));
+        assert!(inbox.cycle_attention(false));
+        assert_eq!(inbox.selected_id(), Some("root-idle"));
+
+        // j/k CAN navigate through visible subsessions
+        inbox.move_selection(1);
+        assert_eq!(inbox.selected_id(), Some("root-run"));
+        inbox.move_selection(1);
+        assert_eq!(inbox.selected_id(), Some("sub-1"));
+        inbox.move_selection(1);
+        assert_eq!(inbox.selected_id(), Some("sub-err"));
+
+        // Rendered output nests sub-1 and sub-err under root-run with ↳, @#42, and [cwd: /private/tmp/...]
+        // And sub-1 uses ○ (idle), NOT ● (newly_idle)!
+        let shown_text: String = inbox
+            .render(&Theme::dark())
+            .rows
+            .iter()
+            .map(StyledRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(shown_text.contains("2 subsessions (shown)"), "{shown_text}");
+        assert!(
+            shown_text.contains("   ├─ ↳ ○ Lane 1 (sub-1)  @#42  [cwd: /private/tmp/wt-1]  idle"),
+            "{shown_text}"
+        );
+        assert!(!shown_text.contains("● Lane 1"), "{shown_text}");
+        assert!(
+            shown_text.contains("   └─ ↳ ! Failed Lane (sub-err)  @#42  [cwd: /private/tmp/wt-2]"),
+            "{shown_text}"
+        );
+        // No top-level /private/tmp/wt-1 workspace header group was created
+        assert_eq!(inbox.grouped_rows().len(), 1);
+
+        // Toggling subsessions back OFF while a subsession is selected reconciles back to a root session
+        assert!(!inbox.toggle_subsessions());
+        assert_eq!(inbox.selected_id(), Some("root-idle"));
+    }
+
+    #[test]
+    fn orphan_subsession_renders_in_own_workspace_group_with_parent_badge() {
+        let mut inbox = InboxState::with_home("host".into(), "/work/main".into(), None, None);
+        inbox.apply(CatalogUpdate::Online);
+        inbox.set_show_subsessions(true);
+
+        let mut orphan = make_session(
+            "sub-orphan",
+            "/private/tmp/wt-orphan",
+            "host",
+            Some("Detached Worker"),
+            "idle",
+            None,
+            None,
+            50,
+        );
+        orphan.parent = Some(crate::protocol::SessionParent {
+            session_id: "deleted-parent".into(),
+            conversation_id: Some("1".into()),
+            at_entry_id: Some("7".into()),
+            task_id: None,
+            depth: Some(1),
+        });
+        orphan.role = Some("subagent".into());
+
+        inbox.apply(CatalogUpdate::Snapshot(vec![orphan]));
+        assert_eq!(inbox.counts(), (0, 0, 0, 0));
+        assert_eq!(inbox.subsession_count(), 1);
+        assert_eq!(inbox.ordered_session_ids(), vec!["sub-orphan"]);
+        // Tab never selects orphan subsession
+        assert!(!inbox.cycle_attention(true));
+
+        let rendered: String = inbox
+            .render(&Theme::dark())
+            .rows
+            .iter()
+            .map(StyledRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("/private/tmp/wt-orphan"), "{rendered}");
+        assert!(
+            rendered.contains("Detached Worker (sub-orphan)  [↳ deleted-parent]  @#7"),
+            "{rendered}"
+        );
     }
 }

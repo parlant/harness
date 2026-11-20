@@ -491,6 +491,7 @@ mod tests {
                 title: Some("Title".into()),
                 status: Some("ok".into()),
                 harness_id: Some("coding".into()),
+                parent: None,
             },
         }
     }

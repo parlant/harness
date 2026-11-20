@@ -2,7 +2,7 @@ use crate::cli::generate_request_id;
 use crate::client::{ClientError, DaemonClient};
 use crate::protocol::{
     CommandEnvelope, CommandReceipt, CreateSessionRequest, CreateSessionResponse,
-    EntriesPageResponse, SessionSummary,
+    EntriesPageResponse, SessionParent, SessionSummary,
 };
 use crate::render::sanitize_single_line;
 use serde_json::{json, Map, Value};
@@ -27,6 +27,7 @@ pub struct SessionLabels {
     pub title: Option<String>,
     pub status: Option<String>,
     pub harness_id: Option<String>,
+    pub parent: Option<SessionParent>,
 }
 
 impl From<&SessionSummary> for SessionLabels {
@@ -35,6 +36,7 @@ impl From<&SessionSummary> for SessionLabels {
             title: session.title.clone(),
             status: session.status.clone(),
             harness_id: session.harness_id.clone(),
+            parent: session.parent.clone(),
         }
     }
 }
@@ -54,6 +56,10 @@ pub enum Effect {
     Branches,
     Earlier(String),
     Attach(String),
+    AttachConversation {
+        sid: String,
+        cid: Option<String>,
+    },
     New,
     NewIn {
         env_id: String,
@@ -176,6 +182,7 @@ pub fn execute(
             .map_err(|e| format_client_error(&e))?;
 
             sort_sessions_latest_first(&mut sessions);
+            sessions.sort_by_key(|s| s.is_subsession());
 
             let choices = sessions
                 .into_iter()
@@ -195,8 +202,16 @@ pub fn execute(
                     } else {
                         "idle"
                     };
+                    let role_badge = if s.is_subsession() {
+                        format!(
+                            " [{}]",
+                            sanitize_single_line(s.role.as_deref().unwrap_or("subagent"))
+                        )
+                    } else {
+                        String::new()
+                    };
                     let label = format!(
-                        "{marker}{} — {title} [{status}]",
+                        "{marker}{} — {title} [{status}]{role_badge}",
                         sanitize_single_line(&s.session_id)
                     );
                     (s.session_id, label)
@@ -399,37 +414,10 @@ pub fn execute(
             Ok(Reply::Page(page))
         }
 
-        Effect::Attach(sid) => {
-            if sid.trim().is_empty() {
-                return Err("cannot attach: missing session_id".to_string());
-            }
-            let detail = client
-                .get_session_detail(&sid)
-                .map_err(|e| format_client_error(&e))?;
-            if detail.session.status.as_deref() == Some("quarantined") {
-                return Err(format!(
-                    "session {} is quarantined",
-                    sanitize_single_line(&detail.session.session_id)
-                ));
-            }
-            let cid = detail
-                .session
-                .root_conversation_id
-                .clone()
-                .or_else(|| detail.conversations.first().map(|c| c.id.clone()))
-                .unwrap_or_else(|| "1".to_string());
-            let env_id = detail
-                .session
-                .env_id
-                .clone()
-                .unwrap_or_else(|| "host".to_string());
-            Ok(Reply::Target(Target {
-                labels: SessionLabels::from(&detail.session),
-                sid: detail.session.session_id,
-                cid,
-                cwd: detail.session.cwd,
-                env_id,
-            }))
+        Effect::Attach(sid) => attach_session_target(client, &sid, None),
+
+        Effect::AttachConversation { sid, cid } => {
+            attach_session_target(client, &sid, cid.as_deref())
         }
 
         Effect::New => create_new_session(client, target),
@@ -752,6 +740,48 @@ pub fn execute(
     }
 }
 
+fn attach_session_target(
+    client: &DaemonClient,
+    sid: &str,
+    preferred_cid: Option<&str>,
+) -> Result<Reply, String> {
+    if sid.trim().is_empty() {
+        return Err("cannot attach: missing session_id".to_string());
+    }
+    let detail = client
+        .get_session_detail(sid)
+        .map_err(|e| format_client_error(&e))?;
+    if detail.session.status.as_deref() == Some("quarantined") {
+        return Err(format!(
+            "session {} is quarantined",
+            sanitize_single_line(&detail.session.session_id)
+        ));
+    }
+    let preferred = preferred_cid
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .filter(|c| {
+            detail.conversations.is_empty() || detail.conversations.iter().any(|conv| conv.id == *c)
+        })
+        .map(str::to_string);
+    let cid = preferred
+        .or_else(|| detail.session.root_conversation_id.clone())
+        .or_else(|| detail.conversations.first().map(|c| c.id.clone()))
+        .unwrap_or_else(|| "1".to_string());
+    let env_id = detail
+        .session
+        .env_id
+        .clone()
+        .unwrap_or_else(|| "host".to_string());
+    Ok(Reply::Target(Target {
+        labels: SessionLabels::from(&detail.session),
+        sid: detail.session.session_id,
+        cid,
+        cwd: detail.session.cwd,
+        env_id,
+    }))
+}
+
 fn create_new_session(client: &DaemonClient, target: &Target) -> Result<Reply, String> {
     if target.cwd.trim().is_empty() {
         return Err("cannot create session: missing cwd".to_string());
@@ -770,6 +800,8 @@ fn create_new_session(client: &DaemonClient, target: &Target) -> Result<Reply, S
         session_id: Some(stable_sid.clone()),
         title: None,
         agent: None,
+        parent: None,
+        role: None,
     };
 
     let created = create_session_with_retry(client, &req)?;
@@ -1705,6 +1737,8 @@ mod tests {
                 queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
+                parent: None,
+                role: None,
             },
             seq: 1,
         };
@@ -1731,6 +1765,8 @@ mod tests {
                 queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
+                parent: None,
+                role: None,
             },
             seq: 1,
         };
@@ -2231,6 +2267,72 @@ mod tests {
         )
         .unwrap_err();
         assert!(r2.contains("conflict"), "err={r2}");
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn sessions_menu_sorts_roots_before_subsessions_with_badge_and_attach_conversation_switches_branch(
+    ) {
+        let (sock_path, listener, client) = bind_test_socket("subsession-actions");
+
+        let handle = thread::spawn(move || {
+            // 1. GET /api/v1/sessions
+            let (mut s1, _) = listener.accept().unwrap();
+            let (h1, _) = read_http_request(&mut s1);
+            assert!(h1.starts_with("GET /api/v1/sessions?"));
+            write_json_response(
+                &mut s1,
+                "200 OK",
+                r#"{"sessions":[
+                    {"session_id":"sub-new","title":"Worker","env_id":"host","cwd":"/tmp/proj","updated_at":900,"active":false,"parent":{"session_id":"root-1","conversation_id":"2","at_entry_id":"10","depth":1},"role":"subagent"},
+                    {"session_id":"root-1","title":"Main","env_id":"host","cwd":"/tmp/proj","updated_at":500,"active":false}
+                ]}"#,
+            );
+
+            // 2. GET /api/v1/sessions/root-1 for AttachConversation { sid: "root-1", cid: Some("2") }
+            let (mut s2, _) = listener.accept().unwrap();
+            let (h2, _) = read_http_request(&mut s2);
+            assert!(h2.starts_with("GET /api/v1/sessions/root-1 HTTP/1.1"));
+            write_json_response(
+                &mut s2,
+                "200 OK",
+                r#"{"session":{"session_id":"root-1","title":"Main","env_id":"host","cwd":"/tmp/proj","root_conversation_id":"1","status":"ok"},"conversations":[{"id":"1"},{"id":"2"}],"tasks":[]}"#,
+            );
+        });
+
+        let target = test_target();
+        match execute(&client, &target, None, Effect::Sessions).unwrap() {
+            Reply::Menu(title, choices) => {
+                assert_eq!(title, "sessions");
+                assert_eq!(choices.len(), 2);
+                assert_eq!(choices[0].0, "root-1");
+                assert!(!choices[0].1.contains("[subagent]"));
+                assert_eq!(choices[1].0, "sub-new");
+                assert!(choices[1].1.contains("[subagent]"));
+            }
+            other => panic!("expected sessions menu, got {other:?}"),
+        }
+
+        match execute(
+            &client,
+            &target,
+            None,
+            Effect::AttachConversation {
+                sid: "root-1".into(),
+                cid: Some("2".into()),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Target(t) => {
+                assert_eq!(t.sid, "root-1");
+                assert_eq!(t.cid, "2");
+                assert_eq!(t.labels.title.as_deref(), Some("Main"));
+            }
+            other => panic!("expected target reply, got {other:?}"),
+        }
 
         handle.join().unwrap();
         let _ = std::fs::remove_file(&sock_path);

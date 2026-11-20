@@ -1359,6 +1359,8 @@ mod tests {
                 session_id: None,
                 title: None,
                 agent: None,
+                parent: None,
+                role: None,
             })
             .unwrap();
         assert_eq!(created.seq, 1);

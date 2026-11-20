@@ -4,10 +4,11 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use client::{ClientError, DaemonClient};
 use config::{resolve_config, ConfigError};
 use protocol::{
-    CommandEnvelope, CommandReceipt, CreateSessionRequest, ServerFrame, SessionSummary,
-    TranscriptEntry, WhenBusy, WhenIdle,
+    CommandEnvelope, CommandReceipt, CreateSessionRequest, ServerFrame, SessionParent,
+    SessionSummary, TranscriptEntry, WhenBusy, WhenIdle,
 };
 use render::{extract_entry_text, sanitize_terminal_text};
+use serde_json::{Map, Value};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, IsTerminal, Read, Write};
@@ -41,6 +42,10 @@ struct InboxCli {
     /// Default execution environment ID for new sessions created from the inbox
     #[arg(long = "env", value_name = "ID", default_value = "host")]
     env_id: String,
+
+    /// Show hierarchical subsessions nested beneath their parent sessions on startup
+    #[arg(long)]
+    subsessions: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -81,6 +86,30 @@ struct Cli {
     /// List and resume a session for the current working directory
     #[arg(short = 'r', long = "resume")]
     resume: bool,
+
+    /// Model ID to configure on the session (e.g. provider:model)
+    #[arg(long, value_name = "MODEL")]
+    model: Option<String>,
+
+    /// Thinking level to configure on the session (e.g. off, minimal, low, medium, high)
+    #[arg(long, value_name = "LEVEL")]
+    thinking: Option<String>,
+
+    /// Session display title
+    #[arg(long, value_name = "TITLE")]
+    title: Option<String>,
+
+    /// Parent session ID when spawning a subsession
+    #[arg(long, value_name = "SESSION_ID")]
+    parent: Option<String>,
+
+    /// Parent conversation ID when spawning a subsession
+    #[arg(long = "parent-conversation", value_name = "CID", requires = "parent")]
+    parent_conversation: Option<u64>,
+
+    /// Parent entry ID anchor when spawning a subsession
+    #[arg(long = "parent-entry", value_name = "ENTRY_ID", requires = "parent")]
+    parent_entry: Option<u64>,
 
     /// Headless print mode: submit prompt, stream assistant text to stdout, and exit
     #[arg(
@@ -174,6 +203,7 @@ fn run_inbox_cli(cli: InboxCli) -> Result<(), AppError> {
         cwd,
         &cfg.data_dir,
         cli.tui_mode == "regular",
+        cli.subsessions,
         reexec,
     )
     .map_err(AppError::Message)
@@ -194,6 +224,8 @@ fn run(cli: Cli) -> Result<(), AppError> {
     let client = DaemonClient::new(cfg.target, cfg.token);
     let cwd = current_cwd_string()?;
 
+    let create_opts = SessionCreateOptions::from_cli(&cli);
+
     let interactive = cli.print_prompt.is_none()
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
@@ -207,7 +239,9 @@ fn run(cli: Cli) -> Result<(), AppError> {
                     "Conversation is not in that session".into(),
                 ));
             }
-            target_from_detail(detail, cid)
+            let target = target_from_detail(detail, cid);
+            apply_attached_overrides(&client, &target, &create_opts)?;
+            target
         } else {
             resolve_session_for_run(
                 &client,
@@ -215,6 +249,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
                 &cwd,
                 cli.session.as_deref(),
                 cli.continue_latest || cli.resume,
+                &create_opts,
             )?
         };
         let reexec = crate::hi::app::RestartOrigin {
@@ -257,6 +292,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
             &cwd,
             cli.session.as_deref(),
             cli.continue_latest,
+            &create_opts,
         )?;
         return run_headless_prompt(
             &client,
@@ -298,6 +334,77 @@ struct AttachedTarget {
     labels: crate::hi::actions::SessionLabels,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SessionCreateOptions {
+    model: Option<String>,
+    thinking: Option<String>,
+    title: Option<String>,
+    parent: Option<SessionParent>,
+}
+
+impl SessionCreateOptions {
+    fn from_cli(cli: &Cli) -> Self {
+        let model = cli
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let thinking = cli
+            .thinking
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let title = cli
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let parent = cli
+            .parent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|sid| SessionParent {
+                session_id: sid.to_string(),
+                conversation_id: cli.parent_conversation.map(|cid| cid.to_string()),
+                at_entry_id: cli.parent_entry.map(|eid| eid.to_string()),
+                task_id: None,
+                depth: None,
+            });
+        Self {
+            model,
+            thinking,
+            title,
+            parent,
+        }
+    }
+
+    fn has_creation_flags(&self) -> bool {
+        self.model.is_some()
+            || self.thinking.is_some()
+            || self.title.is_some()
+            || self.parent.is_some()
+    }
+
+    fn agent_value(&self) -> Option<Value> {
+        let mut map = Map::new();
+        if let Some(m) = self.model.as_ref() {
+            map.insert("model".to_string(), Value::String(m.clone()));
+        }
+        if let Some(t) = self.thinking.as_ref() {
+            map.insert("thinking".to_string(), Value::String(t.clone()));
+        }
+        (!map.is_empty()).then_some(Value::Object(map))
+    }
+
+    fn role(&self) -> Option<String> {
+        self.parent.as_ref().map(|_| "subagent".to_string())
+    }
+}
+
 fn list_cwd_sessions_sorted(
     client: &DaemonClient,
     env_id: &str,
@@ -319,8 +426,9 @@ fn sort_sessions_latest_first(sessions: &mut [SessionSummary]) {
 fn pick_latest_session(sessions: &[SessionSummary]) -> Option<&SessionSummary> {
     sessions
         .iter()
+        .filter(|s| s.is_root_session())
         .find(|s| s.status.as_deref() != Some("quarantined"))
-        .or_else(|| sessions.first())
+        .or_else(|| sessions.iter().find(|s| s.is_root_session()))
 }
 
 fn resolve_session_for_run(
@@ -329,15 +437,57 @@ fn resolve_session_for_run(
     cwd: &str,
     explicit_sid: Option<&str>,
     continue_latest: bool,
+    opts: &SessionCreateOptions,
 ) -> Result<AttachedTarget, AppError> {
     if let Some(sid) = explicit_sid {
-        return attach_named_session(client, sid);
+        return match attach_named_session(client, sid) {
+            Ok(target) => {
+                apply_attached_overrides(client, &target, opts)?;
+                Ok(target)
+            }
+            Err(AppError::Client(ClientError::HttpStatus { status: 404, .. }))
+                if opts.has_creation_flags() =>
+            {
+                create_session_with_options(client, env_id, cwd, Some(sid.to_string()), opts)
+            }
+            Err(err) => Err(err),
+        };
     }
     if continue_latest {
         let sessions = list_cwd_sessions_sorted(client, env_id, cwd)?;
-        return continue_or_create_session(client, env_id, cwd, &sessions);
+        return continue_or_create_session(client, env_id, cwd, &sessions, opts);
     }
-    create_auto_session(client, env_id, cwd)
+    create_auto_session(client, env_id, cwd, opts)
+}
+
+fn apply_attached_overrides(
+    client: &DaemonClient,
+    target: &AttachedTarget,
+    opts: &SessionCreateOptions,
+) -> Result<(), AppError> {
+    if opts.model.is_none() && opts.thinking.is_none() && opts.title.is_none() {
+        return Ok(());
+    }
+    let cid_num: u64 = target.conversation_id.parse().map_err(|_| {
+        AppError::Message(format!(
+            "invalid conversation_id: {}",
+            target.conversation_id
+        ))
+    })?;
+    if opts.model.is_some() || opts.thinking.is_some() {
+        let env = CommandEnvelope::configure(
+            generate_request_id(),
+            cid_num,
+            opts.model.as_deref(),
+            opts.thinking.as_deref(),
+        );
+        post_command_with_retry(client, &target.session_id, &env)?;
+    }
+    if let Some(title) = opts.title.as_deref() {
+        let env = CommandEnvelope::rename(generate_request_id(), cid_num, Some(title));
+        post_command_with_retry(client, &target.session_id, &env)?;
+    }
+    Ok(())
 }
 
 fn attach_named_session(client: &DaemonClient, sid: &str) -> Result<AttachedTarget, AppError> {
@@ -366,36 +516,52 @@ fn continue_or_create_session(
     env_id: &str,
     cwd: &str,
     sorted_sessions: &[SessionSummary],
+    opts: &SessionCreateOptions,
 ) -> Result<AttachedTarget, AppError> {
     if let Some(latest) = pick_latest_session(sorted_sessions) {
         let cid = latest
             .root_conversation_id
             .clone()
             .unwrap_or_else(|| "1".to_string());
-        return Ok(AttachedTarget {
+        let target = AttachedTarget {
             labels: latest.into(),
             session_id: latest.session_id.clone(),
             conversation_id: cid,
             cwd: latest.cwd.clone(),
             env_id: latest.env_id.clone().unwrap_or_else(|| env_id.to_string()),
-        });
+        };
+        apply_attached_overrides(client, &target, opts)?;
+        return Ok(target);
     }
-    create_auto_session(client, env_id, cwd)
+    create_auto_session(client, env_id, cwd, opts)
 }
 
 fn create_auto_session(
     client: &DaemonClient,
     env_id: &str,
     cwd: &str,
+    opts: &SessionCreateOptions,
+) -> Result<AttachedTarget, AppError> {
+    create_session_with_options(client, env_id, cwd, Some(generate_request_id()), opts)
+}
+
+fn create_session_with_options(
+    client: &DaemonClient,
+    env_id: &str,
+    cwd: &str,
+    session_id: Option<String>,
+    opts: &SessionCreateOptions,
 ) -> Result<AttachedTarget, AppError> {
     let req = CreateSessionRequest {
         version: 1,
         request_id: generate_request_id(),
         env_id: env_id.to_string(),
         cwd: cwd.to_string(),
-        session_id: Some(generate_request_id()),
-        title: None,
-        agent: None,
+        session_id,
+        title: opts.title.clone(),
+        agent: opts.agent_value(),
+        parent: opts.parent.clone(),
+        role: opts.role(),
     };
     let created = client.create_session(&req)?;
     let labels = (&created.session).into();
@@ -754,6 +920,8 @@ mod tests {
                 queued_count: 0,
                 next_wake_at: None,
                 status: Some("ok".to_string()),
+                parent: None,
+                role: None,
             },
             SessionSummary {
                 session_id: "quar".to_string(),
@@ -771,6 +939,8 @@ mod tests {
                 queued_count: 0,
                 next_wake_at: None,
                 status: Some("quarantined".to_string()),
+                parent: None,
+                role: None,
             },
         ];
         sort_sessions_latest_first(&mut sessions);
@@ -835,5 +1005,381 @@ mod tests {
 
         handle.join().unwrap();
         let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn cli_parses_delegation_and_inbox_subsessions_flags() {
+        let cli = Cli::try_parse_from([
+            "hi",
+            "--model",
+            "google:gemini-4-neon",
+            "--thinking",
+            "high",
+            "--title",
+            "Worker Lane",
+            "--parent",
+            "coord-1",
+            "--parent-conversation",
+            "2",
+            "--parent-entry",
+            "42",
+            "-p",
+            "implement feature",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.model.as_deref(), Some("google:gemini-4-neon"));
+        assert_eq!(cli.thinking.as_deref(), Some("high"));
+        assert_eq!(cli.title.as_deref(), Some("Worker Lane"));
+        assert_eq!(cli.parent.as_deref(), Some("coord-1"));
+        assert_eq!(cli.parent_conversation, Some(2));
+        assert_eq!(cli.parent_entry, Some(42));
+        assert_eq!(cli.print_prompt.as_deref(), Some("implement feature"));
+
+        let opts = SessionCreateOptions::from_cli(&cli);
+        assert!(opts.has_creation_flags());
+        assert_eq!(opts.role().as_deref(), Some("subagent"));
+        assert_eq!(
+            opts.agent_value(),
+            Some(serde_json::json!({"model": "google:gemini-4-neon", "thinking": "high"}))
+        );
+        assert_eq!(
+            opts.parent,
+            Some(SessionParent {
+                session_id: "coord-1".to_string(),
+                conversation_id: Some("2".to_string()),
+                at_entry_id: Some("42".to_string()),
+                task_id: None,
+                depth: None,
+            })
+        );
+
+        // --parent-conversation and --parent-entry require --parent
+        assert!(Cli::try_parse_from(["hi", "--parent-conversation", "2"]).is_err());
+        assert!(Cli::try_parse_from(["hi", "--parent-entry", "42"]).is_err());
+
+        // hi inbox --subsessions
+        let inbox_default = InboxCli::try_parse_from(["hi"]).unwrap();
+        assert!(!inbox_default.subsessions);
+        let inbox_sub = InboxCli::try_parse_from(["hi", "--subsessions"]).unwrap();
+        assert!(inbox_sub.subsessions);
+    }
+
+    #[test]
+    fn pick_latest_session_skips_subsessions() {
+        let mut sessions = vec![
+            SessionSummary {
+                session_id: "root-old".to_string(),
+                title: Some("Root".to_string()),
+                env_id: Some("host".to_string()),
+                harness_id: None,
+                cwd: "/tmp/p".to_string(),
+                root_conversation_id: Some("1".to_string()),
+                created_at: Some(100),
+                updated_at: Some(100),
+                active: false,
+                attention: None,
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
+                next_wake_at: None,
+                status: Some("ok".to_string()),
+                parent: None,
+                role: None,
+            },
+            SessionSummary {
+                session_id: "sub-newer".to_string(),
+                title: Some("Subagent".to_string()),
+                env_id: Some("host".to_string()),
+                harness_id: None,
+                cwd: "/tmp/p".to_string(),
+                root_conversation_id: Some("1".to_string()),
+                created_at: Some(300),
+                updated_at: Some(300),
+                active: false,
+                attention: None,
+                activity_kind: None,
+                activity_label: None,
+                queued_count: 0,
+                next_wake_at: None,
+                status: Some("ok".to_string()),
+                parent: Some(SessionParent {
+                    session_id: "root-old".to_string(),
+                    conversation_id: Some("1".to_string()),
+                    at_entry_id: Some("10".to_string()),
+                    task_id: None,
+                    depth: Some(1),
+                }),
+                role: Some("subagent".to_string()),
+            },
+        ];
+        sort_sessions_latest_first(&mut sessions);
+        assert_eq!(sessions[0].session_id, "sub-newer");
+        assert_eq!(
+            pick_latest_session(&sessions).unwrap().session_id,
+            "root-old"
+        );
+
+        // When only subsessions exist, pick_latest_session returns None (so hi -c starts a root session)
+        let only_subs = vec![sessions[0].clone()];
+        assert!(pick_latest_session(&only_subs).is_none());
+    }
+
+    #[test]
+    fn resolve_session_creates_with_agent_title_parent_and_named_fallback() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock_path = PathBuf::from(format!("/private/tmp/h-cli-create-{nanos}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let captured_srv = std::sync::Arc::clone(&captured);
+
+        let handle = thread::spawn(move || {
+            let read_req = |sock: &mut std::os::unix::net::UnixStream| -> (String, String) {
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                let mut header_end = None;
+                let mut content_len = 0usize;
+                loop {
+                    let n = sock.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    if header_end.is_none() {
+                        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            header_end = Some(pos + 4);
+                            let headers = String::from_utf8_lossy(&raw[..pos]);
+                            for line in headers.lines() {
+                                if let Some((k, v)) = line.split_once(':') {
+                                    if k.eq_ignore_ascii_case("content-length") {
+                                        content_len = v.trim().parse().unwrap_or(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(end) = header_end {
+                        if raw.len() >= end + content_len {
+                            break;
+                        }
+                    }
+                }
+                let end = header_end.unwrap_or(raw.len());
+                let head = String::from_utf8_lossy(&raw[..end]).to_string();
+                let body = String::from_utf8_lossy(&raw[end..]).to_string();
+                (head, body)
+            };
+
+            // 1. Auto session create with model/thinking/title/parent
+            let (mut s1, _) = listener.accept().unwrap();
+            let (h1, b1) = read_req(&mut s1);
+            let req_line1 = h1.lines().next().unwrap_or("").to_string();
+            let body_json1: Value = serde_json::from_str(&b1).unwrap();
+            captured_srv
+                .lock()
+                .unwrap()
+                .push((req_line1, body_json1.clone()));
+            let resp1 = serde_json::json!({
+                "seq": 1,
+                "session": {
+                    "session_id": body_json1["session_id"],
+                    "title": body_json1["title"],
+                    "env_id": "host",
+                    "cwd": "/tmp/wt-1",
+                    "root_conversation_id": "1",
+                    "active": false,
+                    "parent": body_json1["parent"],
+                    "role": "subagent"
+                }
+            })
+            .to_string();
+            write!(
+                s1,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{resp1}",
+                resp1.len()
+            )
+            .unwrap();
+            s1.flush().unwrap();
+
+            // 2. Named session -s sub-named with creation flags: GET returns 404 -> POST creates it
+            let (mut s2, _) = listener.accept().unwrap();
+            let (h2, _) = read_req(&mut s2);
+            assert!(h2.starts_with("GET /api/v1/sessions/sub-named HTTP/1.1"));
+            let not_found = r#"{"error":"not_found"}"#;
+            write!(
+                s2,
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{not_found}",
+                not_found.len()
+            )
+            .unwrap();
+            s2.flush().unwrap();
+
+            let (mut s3, _) = listener.accept().unwrap();
+            let (h3, b3) = read_req(&mut s3);
+            let req_line3 = h3.lines().next().unwrap_or("").to_string();
+            let body_json3: Value = serde_json::from_str(&b3).unwrap();
+            captured_srv.lock().unwrap().push((req_line3, body_json3));
+            let resp3 = r#"{"seq":1,"session":{"session_id":"sub-named","title":"Named Sub","env_id":"host","cwd":"/tmp/wt-1","root_conversation_id":"1","active":false,"parent":{"session_id":"coord-1","conversation_id":"1","at_entry_id":"42","depth":1},"role":"subagent"}}"#;
+            write!(
+                s3,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{resp3}",
+                resp3.len()
+            )
+            .unwrap();
+            s3.flush().unwrap();
+
+            // 3. Unknown named session WITHOUT creation flags still fails with 404
+            let (mut s4, _) = listener.accept().unwrap();
+            let (h4, _) = read_req(&mut s4);
+            assert!(h4.starts_with("GET /api/v1/sessions/missing-sid HTTP/1.1"));
+            write!(
+                s4,
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{not_found}",
+                not_found.len()
+            )
+            .unwrap();
+            s4.flush().unwrap();
+
+            // 4. Existing named session WITH --model/--thinking/--title sends configure + rename
+            let (mut s5, _) = listener.accept().unwrap();
+            let (h5, _) = read_req(&mut s5);
+            assert!(h5.starts_with("GET /api/v1/sessions/existing HTTP/1.1"));
+            let detail = r#"{"session":{"session_id":"existing","env_id":"host","cwd":"/tmp/wt-1","root_conversation_id":"1","active":false},"conversations":[{"id":"1"}],"tasks":[]}"#;
+            write!(
+                s5,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{detail}",
+                detail.len()
+            )
+            .unwrap();
+            s5.flush().unwrap();
+
+            let (mut s6, _) = listener.accept().unwrap();
+            let (h6, b6) = read_req(&mut s6);
+            captured_srv.lock().unwrap().push((
+                h6.lines().next().unwrap_or("").to_string(),
+                serde_json::from_str(&b6).unwrap(),
+            ));
+            let r6 = r#"{"version":1,"request_id":"r6","seq":2,"status":"ok"}"#;
+            write!(
+                s6,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r6}",
+                r6.len()
+            )
+            .unwrap();
+            s6.flush().unwrap();
+
+            let (mut s7, _) = listener.accept().unwrap();
+            let (h7, b7) = read_req(&mut s7);
+            captured_srv.lock().unwrap().push((
+                h7.lines().next().unwrap_or("").to_string(),
+                serde_json::from_str(&b7).unwrap(),
+            ));
+            let r7 = r#"{"version":1,"request_id":"r7","seq":3,"status":"ok"}"#;
+            write!(
+                s7,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{r7}",
+                r7.len()
+            )
+            .unwrap();
+            s7.flush().unwrap();
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::UnixSocket(sock_path.clone()),
+            SecretToken::new("tok-cli").unwrap(),
+        );
+
+        let opts = SessionCreateOptions {
+            model: Some("google:gemini-4-neon".to_string()),
+            thinking: Some("high".to_string()),
+            title: Some("Worker".to_string()),
+            parent: Some(SessionParent {
+                session_id: "coord-1".to_string(),
+                conversation_id: Some("1".to_string()),
+                at_entry_id: Some("42".to_string()),
+                task_id: None,
+                depth: None,
+            }),
+        };
+
+        let t1 = resolve_session_for_run(&client, "host", "/tmp/wt-1", None, false, &opts).unwrap();
+        assert_eq!(t1.labels.title.as_deref(), Some("Worker"));
+        assert_eq!(
+            t1.labels.parent.as_ref().map(|p| p.session_id.as_str()),
+            Some("coord-1")
+        );
+
+        let named_opts = SessionCreateOptions {
+            title: Some("Named Sub".to_string()),
+            parent: opts.parent.clone(),
+            ..SessionCreateOptions::default()
+        };
+        let t2 = resolve_session_for_run(
+            &client,
+            "host",
+            "/tmp/wt-1",
+            Some("sub-named"),
+            false,
+            &named_opts,
+        )
+        .unwrap();
+        assert_eq!(t2.session_id, "sub-named");
+
+        let err = resolve_session_for_run(
+            &client,
+            "host",
+            "/tmp/wt-1",
+            Some("missing-sid"),
+            false,
+            &SessionCreateOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Client(ClientError::HttpStatus { status: 404, .. })
+        ));
+
+        let t4 =
+            resolve_session_for_run(&client, "host", "/tmp/wt-1", Some("existing"), false, &opts)
+                .unwrap();
+        assert_eq!(t4.session_id, "existing");
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 4);
+        assert_eq!(reqs[0].0, "POST /api/v1/sessions HTTP/1.1");
+        assert_eq!(reqs[0].1["title"], "Worker");
+        assert_eq!(reqs[0].1["agent"]["model"], "google:gemini-4-neon");
+        assert_eq!(reqs[0].1["agent"]["thinking"], "high");
+        assert_eq!(reqs[0].1["parent"]["session_id"], "coord-1");
+        assert_eq!(reqs[0].1["parent"]["conversation_id"], "1");
+        assert_eq!(reqs[0].1["parent"]["at_entry_id"], "42");
+        assert_eq!(reqs[0].1["role"], "subagent");
+
+        assert_eq!(reqs[1].0, "POST /api/v1/sessions HTTP/1.1");
+        assert_eq!(reqs[1].1["session_id"], "sub-named");
+        assert_eq!(reqs[1].1["role"], "subagent");
+
+        assert_eq!(
+            reqs[2].0,
+            "POST /api/v1/sessions/existing/commands HTTP/1.1"
+        );
+        assert_eq!(reqs[2].1["command"], "configure");
+        assert_eq!(reqs[2].1["args"]["model"], "google:gemini-4-neon");
+        assert_eq!(reqs[2].1["args"]["thinking"], "high");
+
+        assert_eq!(
+            reqs[3].0,
+            "POST /api/v1/sessions/existing/commands HTTP/1.1"
+        );
+        assert_eq!(reqs[3].1["command"], "rename");
+        assert_eq!(reqs[3].1["args"]["title"], "Worker");
     }
 }

@@ -38,6 +38,7 @@ use std::{
 const COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Workspace sessions"),
     ("/inbox", "Browse all sessions across workspaces"),
+    ("/parent", "Jump to parent session"),
     ("/new", "New session"),
     ("/name", "Show or rename session title"),
     ("/tree", "Conversations and branch history"),
@@ -244,11 +245,13 @@ pub fn run_inbox(
     cwd: String,
     data_dir: &Path,
     regular: bool,
+    show_subsessions: bool,
     origin: RestartOrigin,
 ) -> Result<(), String> {
     let config = UserConfig::load(data_dir)?;
     let catalog_sub = CatalogSubscription::start(client.clone());
-    let inbox_state = InboxState::new(env_id.clone(), cwd.clone(), None);
+    let mut inbox_state = InboxState::new(env_id.clone(), cwd.clone(), None);
+    inbox_state.set_show_subsessions(show_subsessions);
     let placeholder_target = Target {
         sid: String::new(),
         cid: "1".to_string(),
@@ -575,6 +578,14 @@ impl Ui {
                 let (env_id, cwd) = inbox.state.new_session_workspace();
                 self.note = "Creating new session…".into();
                 self.start(Effect::NewIn { env_id, cwd }, None);
+            }
+            KeyCode::Char('s' | 'S') if !k.modifiers.intersects(Mod::CONTROL | Mod::ALT) => {
+                let shown = inbox.state.toggle_subsessions();
+                self.note = if shown {
+                    "Subsessions: shown".into()
+                } else {
+                    "Subsessions: hidden".into()
+                };
             }
             _ => {}
         }
@@ -1354,6 +1365,9 @@ impl Ui {
                 }
             }
             _ => match k.code {
+                KeyCode::Char('p' | 'P') if k.modifiers == Mod::ALT => {
+                    self.jump_to_parent();
+                }
                 KeyCode::PageUp => screen.scroll(10),
                 KeyCode::PageDown => screen.scroll(-10),
                 KeyCode::End if k.modifiers == Mod::CONTROL => screen.bottom(),
@@ -1591,6 +1605,7 @@ impl Ui {
                 self.rows_dirty = true;
             }
             "/inbox" => self.enter_inbox(),
+            "/parent" => self.jump_to_parent(),
             "/resume" | "/sessions" => self.start(Effect::Sessions, None),
             "/new" => {
                 self.pending_root_fork = None;
@@ -1780,6 +1795,23 @@ impl Ui {
     }
     fn attach(&mut self, path: &str) {
         self.start(Effect::AttachFile(path.to_owned()), None);
+    }
+    fn jump_to_parent(&mut self) {
+        if let Some(parent) = self.target.labels.parent.clone() {
+            self.note = format!(
+                "Opening parent {}…",
+                sanitize_single_line(&parent.session_id)
+            );
+            self.start(
+                Effect::AttachConversation {
+                    sid: parent.session_id,
+                    cid: parent.conversation_id,
+                },
+                None,
+            );
+        } else {
+            self.note = "Current session has no parent session".into();
+        }
     }
     fn copy(&mut self) {
         use base64::Engine;
@@ -3639,6 +3671,8 @@ mod tests {
                         queued_count: 0,
                         next_wake_at: None,
                         status: Some("ok".into()),
+                        parent: None,
+                        role: None,
                     },
                     crate::protocol::SessionSummary {
                         session_id: "sess-run".into(),
@@ -3656,6 +3690,8 @@ mod tests {
                         queued_count: 0,
                         next_wake_at: None,
                         status: Some("ok".into()),
+                        parent: None,
+                        role: None,
                     },
                     crate::protocol::SessionSummary {
                         session_id: "sess-2".into(),
@@ -3673,6 +3709,8 @@ mod tests {
                         queued_count: 0,
                         next_wake_at: None,
                         status: Some("ok".into()),
+                        parent: None,
+                        role: None,
                     },
                     crate::protocol::SessionSummary {
                         session_id: "sess-q".into(),
@@ -3690,6 +3728,8 @@ mod tests {
                         queued_count: 0,
                         next_wake_at: None,
                         status: Some("quarantined".into()),
+                        parent: None,
+                        role: None,
                     },
                 ]));
             assert_eq!(inbox.state.selected_id(), Some("sess-1"));
@@ -3744,6 +3784,89 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         drop(ui);
         drop(ui_direct);
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn inbox_s_toggles_subsessions_and_parent_command_and_alt_p_jump_to_parent_conversation() {
+        let (srv, client) = TestServer::bind("app-parent-subsessions");
+        let listener = srv.listener.try_clone().unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let (head, _body) = read_http_request(&mut stream);
+                        if head.starts_with("GET /api/v1/sessions/parent-1 ") {
+                            let body = r#"{"session":{"session_id":"parent-1","title":"Parent Root","env_id":"host","cwd":"/tmp/proj","root_conversation_id":"1","active":false,"status":"ok"},"conversations":[{"id":"1"},{"id":"2"}],"tasks":[]}"#;
+                            write_json_response(&mut stream, "200 OK", body);
+                        } else {
+                            write_json_response(&mut stream, "200 OK", r#"{"sessions":[]}"#);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // 1. Root session: /parent and Alt+P show clear note when no parent exists
+        let (mut ui, mut screen) = make_ui(client.clone(), "root-1", "1");
+        ui.command("/parent");
+        assert_eq!(ui.note, "Current session has no parent session");
+        ui.note.clear();
+        ui.key(KeyEvent::new(KeyCode::Char('p'), Mod::ALT), &mut screen);
+        assert_eq!(ui.note, "Current session has no parent session");
+
+        // 2. Subsession: /parent jumps to parent session & conversation #2
+        ui.target.sid = "sub-1".into();
+        ui.target.cid = "1".into();
+        ui.target.labels.parent = Some(crate::protocol::SessionParent {
+            session_id: "parent-1".into(),
+            conversation_id: Some("2".into()),
+            at_entry_id: Some("10".into()),
+            task_id: None,
+            depth: Some(1),
+        });
+        ui.command("/parent");
+        wait_job_complete(&mut ui, &mut screen);
+        assert_eq!(ui.target.sid, "parent-1");
+        assert_eq!(ui.target.cid, "2");
+        assert!(ui.target.labels.parent.is_none());
+
+        // 3. Alt+P from subsession also jumps to parent session & conversation #2
+        ui.target.sid = "sub-2".into();
+        ui.target.cid = "1".into();
+        ui.target.labels.parent = Some(crate::protocol::SessionParent {
+            session_id: "parent-1".into(),
+            conversation_id: Some("2".into()),
+            at_entry_id: None,
+            task_id: None,
+            depth: Some(1),
+        });
+        ui.key(KeyEvent::new(KeyCode::Char('p'), Mod::ALT), &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+        assert_eq!(ui.target.sid, "parent-1");
+        assert_eq!(ui.target.cid, "2");
+
+        // 4. In inbox mode, `s` toggles show_subsessions and sets clear note
+        ui.enter_inbox();
+        assert!(!ui.inbox.as_ref().unwrap().state.show_subsessions());
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('s'), Mod::NONE));
+        assert!(ui.inbox.as_ref().unwrap().state.show_subsessions());
+        assert_eq!(ui.note, "Subsessions: shown");
+        ui.inbox_key(KeyEvent::new(KeyCode::Char('s'), Mod::NONE));
+        assert!(!ui.inbox.as_ref().unwrap().state.show_subsessions());
+        assert_eq!(ui.note, "Subsessions: hidden");
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(ui);
         let _ = handle.join();
     }
 }

@@ -783,6 +783,23 @@ fn tool_badge(name: &str, is_error: bool, d: &Value) -> Option<String> {
             .filter(|c| *c != 0 || is_error)
             .map(|c| format!("exit {c}")),
         "search_history" => u64_at(d, "count").map(|n| format!("{n} match(es)")),
+        "subagent" => {
+            let mut parts = Vec::new();
+            if let Some(child_sid) = str_at(d, "child_session_id") {
+                parts.push(format!("session {}", sanitize_single_line(child_sid)));
+            }
+            if let Some(status) = str_at(d, "status") {
+                parts.push(sanitize_single_line(status));
+            }
+            if let Some(at_entry) = d.get("at_entry_id").and_then(|v| match v {
+                Value::String(s) if !s.trim().is_empty() => Some(sanitize_single_line(s)),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            }) {
+                parts.push(format!("@#{at_entry}"));
+            }
+            (!parts.is_empty()).then(|| parts.join(" · "))
+        }
         _ => None,
     }
 }
@@ -826,6 +843,37 @@ fn tool_summary(name: &str, args: &Value, expanded: bool) -> String {
                 COMPACT_CHARS
             )
         ),
+        "subagent" => {
+            let mode = sanitize_single_line(str_at(args, "mode").unwrap_or("wait"));
+            let target = str_at(args, "title")
+                .or_else(|| str_at(args, "session_id"))
+                .or_else(|| str_at(args, "prompt"))
+                .map(sanitize_single_line)
+                .map(|s| {
+                    if expanded {
+                        s
+                    } else {
+                        truncate(&s, COMPACT_CHARS)
+                    }
+                });
+            let mut parts = vec![sname, mode];
+            if let Some(t) = target.filter(|s| !s.is_empty()) {
+                parts.push(t);
+            }
+            if args.get("read_only").and_then(Value::as_bool) == Some(true) {
+                parts.push("[read-only]".to_string());
+            }
+            if let Some(cwd) = str_at(args, "cwd") {
+                let clean_cwd = sanitize_single_line(cwd);
+                let shown_cwd = if expanded {
+                    clean_cwd
+                } else {
+                    truncate(&clean_cwd, 48)
+                };
+                parts.push(format!("[cwd: {shown_cwd}]"));
+            }
+            parts.join(" ")
+        }
         _ if obj.is_empty() || expanded => sname,
         _ => {
             let pairs: Vec<String> = obj
@@ -1026,15 +1074,31 @@ fn render_live(
             .unwrap_or("pending");
 
         let summary = tool_summary(name, args, tools_expanded);
-        out.push(StyledRow::from_spans(vec![
+        let mut live_spans = vec![
             StyledSpan::new("[tool (", theme.tool_header),
             StyledSpan::new(
                 sanitize_single_line(&format!("live · {status}")),
                 theme.tool_running,
             ),
-            StyledSpan::new(")] ", theme.tool_header),
-            StyledSpan::new(sanitize_single_line(&summary), theme.tool_header),
-        ]));
+        ];
+        if name == "subagent" {
+            if let Some(child_sid) = slot
+                .get("child_session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                live_spans.push(StyledSpan::new(
+                    sanitize_single_line(&format!(" · session {child_sid}")),
+                    theme.tool_meta,
+                ));
+            }
+        }
+        live_spans.push(StyledSpan::new(")] ", theme.tool_header));
+        live_spans.push(StyledSpan::new(
+            sanitize_single_line(&summary),
+            theme.tool_header,
+        ));
+        out.push(StyledRow::from_spans(live_spans));
 
         let partial = slot.get("output").and_then(Value::as_str).unwrap_or("");
         if !partial.trim_end().is_empty() {
@@ -1758,5 +1822,123 @@ mod tests {
         assert_eq!(minus.spans[0].style, theme.diff_remove);
         let plus = srows.iter().find(|r| r.plain_text() == "  + b").unwrap();
         assert_eq!(plus.spans[0].style, theme.diff_add);
+    }
+
+    #[test]
+    fn subagent_tool_call_live_waiting_and_result_cards_render_cleanly() {
+        let mut state = TranscriptState::default();
+        state.apply_snapshot(SnapshotFrame {
+            version: Some(1),
+            session_id: Some("coord-1".to_string()),
+            conversation_id: Some("1".to_string()),
+            seq: 5,
+            before_entry_id: None,
+            has_more: Some(false),
+            entries: vec![
+                make_entry(
+                    "1",
+                    "assistant",
+                    json!({
+                        "content": [{"type": "text", "text": "Delegating work."}],
+                        "tool_calls": [
+                            {
+                                "id": "call-live",
+                                "name": "subagent",
+                                "arguments": {
+                                    "mode": "wait",
+                                    "title": "Explore\x1b[31m\nRepo",
+                                    "prompt": "Find auth routes",
+                                    "read_only": true,
+                                    "cwd": "/private/tmp/wt-1"
+                                }
+                            },
+                            {
+                                "id": "call-done",
+                                "name": "subagent",
+                                "arguments": {
+                                    "mode": "start",
+                                    "session_id": "sub-existing",
+                                    "prompt": "Check tests"
+                                }
+                            },
+                            {
+                                "id": "call-orphan",
+                                "name": "subagent",
+                                "arguments": {
+                                    "prompt": "Inspect\tbuild\nscript"
+                                }
+                            }
+                        ]
+                    }),
+                ),
+                make_entry(
+                    "2",
+                    "tool_result",
+                    json!({
+                        "tool_call_id": "call-done",
+                        "name": "subagent",
+                        "content": [{"type": "text", "text": "All 12 tests passed."}],
+                        "is_error": false,
+                        "duration_ms": 1500,
+                        "details": {
+                            "child_session_id": "sub-child-99\x1b[32m",
+                            "status": "done",
+                            "at_entry_id": "1"
+                        }
+                    }),
+                ),
+            ],
+            docs: Some(json!({
+                "live": {
+                    "tools": {
+                        "call-live": {
+                            "id": "call-live",
+                            "name": "subagent",
+                            "status": "waiting",
+                            "child_session_id": "sub-live-77"
+                        }
+                    }
+                }
+            })),
+        });
+
+        let plain = rows(&state, false, false);
+        assert_clean_rows(&plain);
+        let text = plain.join("\n");
+
+        // Orphan call without result renders clean summary (not raw JSON)
+        assert!(
+            text.contains(r"[tool subagent wait Inspect\tbuild\nscript (call-orphan) · no result]"),
+            "{text}"
+        );
+
+        // Live waiting subagent shows `live · waiting` and `session sub-live-77` with flags
+        assert!(
+            text.contains(
+                r"[tool (live · waiting · session sub-live-77)] subagent wait Explore\x1b[31m\nRepo [read-only] [cwd: /private/tmp/wt-1]"
+            ),
+            "{text}"
+        );
+
+        // Completed tool_result shows sanitized child_session_id, status, and at_entry_id badge
+        assert!(
+            text.contains(
+                r"[tool #2 · ok · session sub-child-99\x1b[32m · done · @#1 · 1.5s] subagent start sub-existing"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("  All 12 tests passed."), "{text}");
+
+        // Live waiting badge uses theme.tool_running
+        let theme = Theme::dark();
+        let srows = styled_rows(&state, false, false, &theme);
+        let live_row = srows
+            .iter()
+            .find(|r| r.plain_text().contains("sub-live-77"))
+            .unwrap();
+        assert!(live_row
+            .spans
+            .iter()
+            .any(|s| s.text == "live · waiting" && s.style == theme.tool_running));
     }
 }

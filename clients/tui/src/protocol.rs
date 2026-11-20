@@ -82,6 +82,31 @@ pub struct ModelsResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SessionParent {
+    pub session_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_string_or_u64"
+    )]
+    pub conversation_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_string_or_u64"
+    )]
+    pub at_entry_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_string_or_u64"
+    )]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionSummary {
     pub session_id: String,
     #[serde(default)]
@@ -111,9 +136,21 @@ pub struct SessionSummary {
     pub next_wake_at: Option<i64>,
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionParent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 impl SessionSummary {
+    pub fn is_subsession(&self) -> bool {
+        self.parent.is_some()
+    }
+
+    pub fn is_root_session(&self) -> bool {
+        self.parent.is_none()
+    }
+
     /// Returns the effective attention state for this session, falling back
     /// cleanly for older/minimal payloads that omit `attention`.
     pub fn effective_attention(&self) -> &str {
@@ -179,6 +216,10 @@ pub struct CreateSessionRequest {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionParent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -379,6 +420,27 @@ impl CommandEnvelope {
             version: 1,
             request_id: request_id.into(),
             command: "configure".to_string(),
+            conversation_id,
+            args: Value::Object(args),
+        }
+    }
+    pub fn rename(
+        request_id: impl Into<String>,
+        conversation_id: u64,
+        title: Option<&str>,
+    ) -> Self {
+        let mut args = Map::new();
+        args.insert(
+            "title".to_string(),
+            match title {
+                Some(t) => Value::String(t.to_string()),
+                None => Value::Null,
+            },
+        );
+        Self {
+            version: 1,
+            request_id: request_id.into(),
+            command: "rename".to_string(),
             conversation_id,
             args: Value::Object(args),
         }
@@ -962,5 +1024,100 @@ mod tests {
             }) => assert_eq!(session_id, "s1"),
             other => panic!("expected removed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_parent_and_role_round_trip_and_backward_compat() {
+        // Omitted / null parent and role deserialize cleanly as root sessions
+        let root_omitted: SessionSummary =
+            serde_json::from_str(r#"{"session_id":"root-1","cwd":"/tmp/a"}"#).unwrap();
+        assert!(root_omitted.is_root_session());
+        assert!(!root_omitted.is_subsession());
+        assert_eq!(root_omitted.parent, None);
+        assert_eq!(root_omitted.role, None);
+
+        let root_null: SessionSummary = serde_json::from_str(
+            r#"{"session_id":"root-2","cwd":"/tmp/a","parent":null,"role":null}"#,
+        )
+        .unwrap();
+        assert!(root_null.is_root_session());
+        assert_eq!(root_null.parent, None);
+
+        // Numeric and string IDs inside SessionParent both deserialize cleanly
+        let sub_numeric: SessionSummary = serde_json::from_str(
+            r#"{
+                "session_id": "sub-1",
+                "cwd": "/private/tmp/wt-1",
+                "parent": {
+                    "session_id": "root-1",
+                    "conversation_id": 2,
+                    "at_entry_id": 42,
+                    "task_id": 43,
+                    "depth": 1
+                },
+                "role": "subagent"
+            }"#,
+        )
+        .unwrap();
+        assert!(sub_numeric.is_subsession());
+        assert!(!sub_numeric.is_root_session());
+        assert_eq!(sub_numeric.role.as_deref(), Some("subagent"));
+        assert_eq!(
+            sub_numeric.parent,
+            Some(SessionParent {
+                session_id: "root-1".to_string(),
+                conversation_id: Some("2".to_string()),
+                at_entry_id: Some("42".to_string()),
+                task_id: Some("43".to_string()),
+                depth: Some(1),
+            })
+        );
+
+        let sub_string_json = serde_json::to_string(&sub_numeric).unwrap();
+        let sub_roundtrip: SessionSummary = serde_json::from_str(&sub_string_json).unwrap();
+        assert_eq!(sub_roundtrip, sub_numeric);
+
+        // CreateSessionRequest serializes parent & role when present, omits when None
+        let req_with_parent = CreateSessionRequest {
+            version: 1,
+            request_id: "req-sub".to_string(),
+            env_id: "host".to_string(),
+            cwd: "/private/tmp/wt-1".to_string(),
+            session_id: Some("sub-1".to_string()),
+            title: Some("Worker".to_string()),
+            agent: Some(serde_json::json!({"model": "google:gemini-4-neon", "thinking": "high"})),
+            parent: Some(SessionParent {
+                session_id: "root-1".to_string(),
+                conversation_id: Some("1".to_string()),
+                at_entry_id: Some("42".to_string()),
+                task_id: None,
+                depth: None,
+            }),
+            role: Some("subagent".to_string()),
+        };
+        let req_val = serde_json::to_value(&req_with_parent).unwrap();
+        assert_eq!(req_val["parent"]["session_id"], "root-1");
+        assert_eq!(req_val["parent"]["conversation_id"], "1");
+        assert_eq!(req_val["parent"]["at_entry_id"], "42");
+        assert!(req_val["parent"].get("task_id").is_none());
+        assert!(req_val["parent"].get("depth").is_none());
+        assert_eq!(req_val["role"], "subagent");
+        let req_back: CreateSessionRequest = serde_json::from_value(req_val).unwrap();
+        assert_eq!(req_back, req_with_parent);
+
+        let req_root = CreateSessionRequest {
+            version: 1,
+            request_id: "req-root".to_string(),
+            env_id: "host".to_string(),
+            cwd: "/tmp/a".to_string(),
+            session_id: None,
+            title: None,
+            agent: None,
+            parent: None,
+            role: None,
+        };
+        let root_val = serde_json::to_value(&req_root).unwrap();
+        assert!(root_val.get("parent").is_none());
+        assert!(root_val.get("role").is_none());
     }
 }
