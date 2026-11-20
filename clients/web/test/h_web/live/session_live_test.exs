@@ -521,7 +521,9 @@ defmodule HWeb.SessionLiveTest do
       )
 
     holder = {holder_sid, String.to_integer(holder_cid)}
-    :ok = H.WorkspaceLease.acquire(opts[:workspace_lease], {"host", cwd}, holder, self())
+    {:ok, canonical_cwd} = H.ExecutionEnv.canonical_path(H.ExecutionEnv.Host.new(cwd), cwd)
+    lease_key = {"host", canonical_cwd}
+    :ok = H.WorkspaceLease.acquire(opts[:workspace_lease], lease_key, holder, self())
 
     for call <- ["first", "second"] do
       Fake.push_step(
@@ -571,8 +573,8 @@ defmodule HWeb.SessionLiveTest do
     view |> form("#composer-form", %{content: "Second attempt"}) |> render_submit()
     wait_until(fn -> has_element?(view, "#workspace-wait") end)
     view |> element("#stop-holder-btn") |> render_click()
-    assert_receive {:stop_workspace_holder, {"host", ^cwd}, ^holder, _}
-    :ok = H.WorkspaceLease.release(opts[:workspace_lease], {"host", cwd}, holder)
+    assert_receive {:stop_workspace_holder, ^lease_key, ^holder, _}
+    :ok = H.WorkspaceLease.release(opts[:workspace_lease], lease_key, holder)
     wait_until(fn -> render(view) =~ "Finished waiting" end)
     refute has_element?(view, "#workspace-wait")
 
