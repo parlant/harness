@@ -21,12 +21,13 @@ defmodule H do
   end
 
   @doc """
-  Starts the local `H` daemon (binding both loopback TCP and `<data_dir>/api.sock`
-  plus `<data_dir>/daemon.json`) and prints the API base URL.
+  Starts the `H` daemon with TCP and `<data_dir>/api.sock`, publishes
+  `<data_dir>/daemon.json`, and prints the bound API URLs.
 
   Options:
     * `:data_dir` - storage root directory (default `"~/.local/share/h"`)
-    * `:port` - loopback HTTP port (default `4100`)
+    * `:port` - HTTP port (default `4100`)
+    * `:bind_addresses` - IPv4 tuples (default from `<data_dir>/network.json`, or loopback)
     * `:api_socket` - bind local Unix domain socket (default `true`)
     * `:provider` - `H.Provider` module (default `H.Provider.ReqLLM`)
     * `:provider_config` - map forwarded to provider (default `%{}`)
@@ -39,6 +40,7 @@ defmodule H do
           {:ok,
            %{
              url: String.t(),
+             urls: [String.t()],
              port: non_neg_integer(),
              api_socket: nil | String.t(),
              data_dir: String.t()
@@ -56,13 +58,21 @@ defmodule H do
       |> Keyword.put(:http_port, Keyword.get(opts, :port, 4100))
       |> Keyword.put_new(:api_socket, true)
 
-    with :ok <- ensure_standalone_application(),
+    network =
+      case Keyword.fetch(opts, :bind_addresses) do
+        {:ok, addresses} -> {:ok, addresses}
+        :error -> H.Daemon.Network.load(data_dir)
+      end
+
+    with {:ok, addresses} <- network,
+         instance_opts = Keyword.put(instance_opts, :bind_addresses, addresses),
+         :ok <- ensure_standalone_application(),
          {:ok, _pid} <- start_instance(instance_opts) do
-      {:ok, {_ip, port}} = ThousandIsland.listener_info(H.Daemon.HTTP)
+      [{port, url} | _] = endpoints = H.Daemon.Runtime.http_endpoints(instance_opts)
+      urls = Enum.map(endpoints, &elem(&1, 1))
       socket = if instance_opts[:api_socket], do: api_socket_path(data_dir)
-      url = "http://127.0.0.1:#{port}"
-      IO.puts("H daemon API listening at #{url}/api/v1")
-      {:ok, %{url: url, port: port, api_socket: socket, data_dir: data_dir}}
+      Enum.each(urls, &IO.puts("H daemon API listening at #{&1}/api/v1"))
+      {:ok, %{url: url, urls: urls, port: port, api_socket: socket, data_dir: data_dir}}
     end
   end
 
@@ -87,19 +97,16 @@ defmodule H do
   end
 
   @doc false
-  @spec write_daemon_manifest!(String.t(), nil | non_neg_integer(), nil | String.t()) :: :ok
-  def write_daemon_manifest!(data_dir, bound_port, sock_path) do
+  @spec write_daemon_manifest!(String.t(), [String.t()], nil | String.t()) :: :ok
+  def write_daemon_manifest!(data_dir, urls, sock_path) do
     manifest_path = Path.join(data_dir, "daemon.json")
     tmp_path = "#{manifest_path}.tmp.#{System.unique_integer([:positive])}"
 
     payload = %{
       "version" => 1,
       "pid" => String.to_integer(System.pid()),
-      "http_url" =>
-        if(is_integer(bound_port) and bound_port > 0,
-          do: "http://127.0.0.1:#{bound_port}",
-          else: nil
-        ),
+      "http_url" => List.first(urls),
+      "http_urls" => urls,
       "api_socket" => sock_path
     }
 

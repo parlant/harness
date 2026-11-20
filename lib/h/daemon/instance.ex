@@ -75,13 +75,18 @@ defmodule H.Daemon.Runtime do
 
     tcp =
       if port = opts[:http_port] do
-        [
-          {Bandit,
-           plug: {H.HTTP.Router, router},
-           ip: {127, 0, 0, 1},
-           port: port,
-           thousand_island_options: [supervisor_options: [name: H.Daemon.HTTP]]}
-        ]
+        for {ip, index} <- Enum.with_index(opts[:bind_addresses] || [{127, 0, 0, 1}]) do
+          name = http_listener(index)
+
+          Supervisor.child_spec(
+            {Bandit,
+             plug: {H.HTTP.Router, Keyword.put(router, :bind_address, ip)},
+             ip: ip,
+             port: port,
+             thousand_island_options: [supervisor_options: [name: name]]},
+            id: name
+          )
+        end
       else
         []
       end
@@ -124,15 +129,27 @@ defmodule H.Daemon.Runtime do
 
   @doc false
   def publish_manifest(opts, socket) do
-    port =
-      if opts[:http_port] do
-        {:ok, {_ip, port}} = ThousandIsland.listener_info(H.Daemon.HTTP)
-        port
-      end
-
-    H.write_daemon_manifest!(opts[:data_dir], port, socket)
+    urls = Enum.map(http_endpoints(opts), &elem(&1, 1))
+    H.write_daemon_manifest!(opts[:data_dir], urls, socket)
     :ignore
   end
+
+  def http_endpoints(opts) do
+    if opts[:http_port] do
+      opts[:bind_addresses]
+      |> Kernel.||([{127, 0, 0, 1}])
+      |> Enum.with_index()
+      |> Enum.map(fn {_, index} ->
+        {:ok, {ip, port}} = ThousandIsland.listener_info(http_listener(index))
+        {port, "http://#{:inet.ntoa(ip)}:#{port}"}
+      end)
+    else
+      []
+    end
+  end
+
+  defp http_listener(0), do: H.Daemon.HTTP
+  defp http_listener(index), do: {:global, {H.Daemon.HTTP, index}}
 end
 
 defmodule H.Daemon.Boot do

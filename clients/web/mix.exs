@@ -10,7 +10,8 @@ defmodule HWeb.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
-      listeners: [Phoenix.CodeReloader]
+      listeners: [Phoenix.CodeReloader],
+      releases: [harness: [include_erts: true, rel_templates_path: "../../rel"]]
     ]
   end
 

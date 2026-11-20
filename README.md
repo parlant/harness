@@ -49,13 +49,18 @@ hi daemon start --launcher "$PWD/bin/h-daemon"    # foreground, from a built che
 For a standalone bundle with the runtime included:
 
 ```sh
-mix h.bundle                   # refreshes the tested bundle at dist/harness
+mix h.build --release          # refreshes the tested bundle at dist/harness
 dist/harness/bin/hi daemon start
 ```
 
-For daily use from any project, run `mix h.install --service` after building
-with `mix h.bundle` and stopping any manually started daemon. For later
-updates, run `mix h.bundle && mix h.install`; no bundle path is needed.
+The bundled daemon also serves the owner-authenticated web inbox at
+<http://127.0.0.1:4200/inbox>. Sign in with your store's `auth.token`.
+
+For daily use from any project, run `mix h.local --service` for first-time
+service setup after stopping any manually started daemon. For later updates,
+run `mix h.local` to build, smoke-test, and install. If the bundle is already
+built, run `mix h.install` alone. `mix h.bundle` is equivalent to
+`mix h.build --release`.
 The installer puts `hi` in
 `~/.bin` by default; use `--bin-dir` to choose another directory on `PATH`.
 This installs a versioned bundle and a per-user macOS service. `hi` resolves

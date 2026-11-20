@@ -1,57 +1,63 @@
 defmodule Mix.Tasks.H.Build do
   use Mix.Task
 
-  @shortdoc "Builds the daemon, Phoenix, and terminal clients without starting them"
+  @shortdoc "Builds all clients; --release publishes a tested installable bundle"
 
   @impl true
   def run(args) do
     case OptionParser.parse(args, strict: [release: :boolean, output: :string]) do
       {opts, [], []} ->
-        daemon_build = Mix.Project.build_path()
-        web_env = "dev"
-        root = File.cwd!()
-        mix = System.find_executable("mix") || Mix.raise("mix is not on PATH")
-        cargo = System.find_executable("cargo") || Mix.raise("cargo is not on PATH")
-
-        run!(mix, ["deps.get", "--check-locked"], root, [])
-        run!(mix, ["compile", "--warnings-as-errors"], root, [])
-
-        web = Path.join(root, "clients/web")
-        web_build = Path.join([daemon_build, "h-web", web_env])
-
-        web_env_vars = [
-          {"MIX_ENV", web_env},
-          {"MIX_BUILD_PATH", web_build},
-          {"MIX_DEPS_PATH", nil}
-        ]
-
-        run!(mix, ["deps.get", "--check-locked"], web, web_env_vars)
-        run!(mix, ["compile", "--warnings-as-errors"], web, web_env_vars)
-
-        profile = if opts[:release], do: ["--release"], else: []
-
-        target =
-          Path.expand(opts[:output] || System.get_env("CARGO_TARGET_DIR") || "clients/tui/target")
-
-        run!(
-          cargo,
-          ["build", "--locked", "--bin", "hi"] ++ profile,
-          Path.join(root, "clients/tui"),
-          [
-            {"CARGO_TARGET_DIR", target}
-          ]
-        )
-
-        Mix.shell().info("Run Phoenix against the same store (stop standalone first):
-  cd clients/web && MIX_BUILD_PATH=#{inspect(web_build)} mix phx.server")
-
-        Mix.shell().info(
-          "Daemon BEAMs: #{daemon_build}\nPhoenix BEAMs: #{web_build}\nTerminal binary: #{Path.join([target, if(opts[:release], do: "release", else: "debug"), "hi"])}"
-        )
+        if opts[:release] do
+          Mix.Tasks.H.Bundle.run(if opts[:output], do: [opts[:output]], else: [])
+        else
+          build_dev(opts)
+        end
 
       _ ->
-        Mix.raise("usage: mix h.build [--release] [--output CARGO_TARGET_DIR]")
+        Mix.raise("usage: mix h.build [--release] [--output DIR]")
     end
+  end
+
+  defp build_dev(opts) do
+    daemon_build = Mix.Project.build_path()
+    web_env = "dev"
+    root = File.cwd!()
+    mix = System.find_executable("mix") || Mix.raise("mix is not on PATH")
+    cargo = System.find_executable("cargo") || Mix.raise("cargo is not on PATH")
+
+    run!(mix, ["deps.get", "--check-locked"], root, [])
+    run!(mix, ["compile", "--warnings-as-errors"], root, [])
+
+    web = Path.join(root, "clients/web")
+    web_build = Path.join([daemon_build, "h-web", web_env])
+
+    web_env_vars = [
+      {"MIX_ENV", web_env},
+      {"MIX_BUILD_PATH", web_build},
+      {"MIX_DEPS_PATH", nil}
+    ]
+
+    run!(mix, ["deps.get", "--check-locked"], web, web_env_vars)
+    run!(mix, ["compile", "--warnings-as-errors"], web, web_env_vars)
+
+    target =
+      Path.expand(opts[:output] || System.get_env("CARGO_TARGET_DIR") || "clients/tui/target")
+
+    run!(
+      cargo,
+      ["build", "--locked", "--bin", "hi"],
+      Path.join(root, "clients/tui"),
+      [
+        {"CARGO_TARGET_DIR", target}
+      ]
+    )
+
+    Mix.shell().info("Run Phoenix against the same store (stop standalone first):
+  cd clients/web && MIX_BUILD_PATH=#{inspect(web_build)} mix phx.server")
+
+    Mix.shell().info(
+      "Daemon BEAMs: #{daemon_build}\nPhoenix BEAMs: #{web_build}\nTerminal binary: #{Path.join([target, "debug", "hi"])}"
+    )
   end
 
   defp run!(program, args, cwd, env) do

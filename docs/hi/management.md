@@ -42,8 +42,7 @@ From the checkout, install a **tested** bundle once (stop any manually started
 or embedded daemon first, after its work finishes):
 
 ```sh
-mix h.bundle
-mix h.install --service
+mix h.local --service
 hi daemon status
 ```
 
@@ -58,13 +57,17 @@ login or `hi daemon start-service`. No `sudo` or auto-build on attach. Run
 and start manually. A custom `--data-dir` selects the service's store; use the
 matching `H_DATA_DIR` or `--data-dir` in other terminals.
 
-To upgrade from the checkout without picking a new path:
+To build, smoke-test, and install an upgrade from the checkout:
 
 ```sh
-mix h.bundle && mix h.install
+mix h.local
 ```
 
-`mix h.bundle` builds and tests a candidate, then atomically updates the
+This runs `mix h.build --release` and then `mix h.install` only if the
+build and smoke test pass. It accepts `--service`, `--data-dir`, and
+`--bin-dir` as install options.
+
+`mix h.build --release` (also `mix h.bundle`) builds and tests a candidate, then atomically updates the
 `dist/harness` symlink. A failed build or smoke test leaves the previous
 candidate selected. If an older build left a real directory at `dist/harness`,
 move it aside once it is no longer in use. Older candidates remain under
@@ -97,10 +100,10 @@ mix h.bundle   # build, smoke-test, and refresh dist/harness
 mix h.restart  # restart from dist/harness in a separate pane after the turn finishes
 ```
 
-`mix h.build --release` puts the terminal binary in `target/release` rather
-than `target/debug`. It prints the output paths and the Phoenix dev command.
-Phoenix embeds its daemon; stop the standalone daemon first or give Phoenix a
-separate `H_DATA_DIR`. The standalone bundle does not include Phoenix.
+`mix h.build` prints the debug binary path and the Phoenix dev command.
+Its `--output` option selects the Cargo target directory; with `--release`
+it instead selects a new bundle directory. Phoenix dev embeds its own daemon;
+stop the bundled daemon first or use a separate `H_DATA_DIR`.
 
 You can run the build tasks from a session working on H. **Do not run the
 foreground restart from a session tool:** the tool itself is unfinished work
@@ -155,8 +158,34 @@ on the daemon launcher's `PATH`.
 The release also ships the optional `extensions/multicodex` artifact. It is
 **not auto-enabled**; point your existing extension entry at that directory
 if you want to use the bundled copy. No accounts, credentials, session files,
-or local configuration travel with the bundle. Phoenix is still a separate
-application; this bundle provides the standalone daemon and `hi` terminal client.
+or local configuration travel with the bundle.
+
+The bundled daemon starts Phoenix in the same VM and serves the web inbox at
+<http://127.0.0.1:4200/inbox> with the same sessions as `hi`. Sign in using
+`<data_dir>/auth.token`; the browser session expires on daemon restart. Set
+`H_WEB_PORT` in the launcher's environment to change the port or `H_WEB=0`
+to disable the web listener. If running the dev server with a different
+store, use a separate browser profile (cookies are not scoped by port).
+
+### Bind API and web to additional addresses
+
+The launcher reads `<data_dir>/network.json` on startup. For example:
+
+```json
+{"bind_addresses": ["127.0.0.1", "10.10.10.4"]}
+```
+
+Without this file both services bind only `127.0.0.1`. Entries must be
+unique literal IPv4 addresses assigned to the host, not hostnames or
+wildcards. Each address gets the API (port `4100` by default) and, in the
+bundle, the web inbox (port `4200` by default). Restart to apply changes.
+An unavailable address prevents startup; bring up the interface or remove
+its address first. `hi` still uses the local Unix socket by default and
+restricts its HTTP connections to loopback.
+
+These listeners use plain HTTP and the owner token grants access to sessions
+and host tools. Bind non-loopback addresses only on a trusted, encrypted
+network such as a private VPN; don't expose these ports to the internet.
 
 For a source checkout without the bundle, use `hi daemon start --launcher
 "$PWD/bin/h-daemon"` after `mix compile`.

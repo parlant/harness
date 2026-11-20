@@ -4,7 +4,7 @@ defmodule H.Auth do
   ETS table and `<data_dir>/auth.token` (`0600`).
 
   Provides constant-time token/cookie verification via `Plug.Crypto.secure_compare/2`
-  and strict loopback `Host` / `Origin` checks against DNS rebinding and CSRF.
+  and strict `Host` / `Origin` checks against DNS rebinding and CSRF.
   """
 
   use GenServer
@@ -78,8 +78,8 @@ defmodule H.Auth do
   def verify_cookie(_cookie_candidate, _table), do: false
 
   @doc """
-  Validates the HTTP `Host` header against strict loopback literals
-  (`127.0.0.1:<port>` or `[::1]:<port>`). Pass `allow_localhost: true`
+  Validates the HTTP `Host` header against the listener's literal `:bind_address`
+  (defaults to loopback literals when omitted). Pass `allow_localhost: true`
   to additionally allow `localhost:<port>`.
   """
   @spec allowed_host?(term(), pos_integer(), keyword()) :: boolean()
@@ -87,34 +87,25 @@ defmodule H.Auth do
 
   def allowed_host?(host_header, port, opts)
       when is_binary(host_header) and is_integer(port) and port > 0 and is_list(opts) do
-    allowed =
-      ["127.0.0.1:#{port}", "[::1]:#{port}"] ++
-        if(Keyword.get(opts, :allow_localhost, false), do: ["localhost:#{port}"], else: [])
+    hosts =
+      case opts[:bind_address] do
+        nil -> ["127.0.0.1", "[::1]"]
+        ip -> [to_string(:inet.ntoa(ip))]
+      end
 
-    host_header in allowed
+    hosts = if opts[:allow_localhost], do: ["localhost" | hosts], else: hosts
+    Enum.any?(hosts, &(host_header == "#{&1}:#{port}"))
   end
 
   def allowed_host?(_host_header, _port, _opts), do: false
 
   @doc """
-  Validates the HTTP `Origin` header against strict loopback HTTP origins
-  (`http://127.0.0.1:<port>` or `http://[::1]:<port>`). Pass `allow_localhost: true`
-  to additionally allow `http://localhost:<port>`.
+  Validates the HTTP `Origin` as an HTTP URL using the same host policy as `allowed_host?/3`.
   """
   @spec allowed_origin?(term(), pos_integer(), keyword()) :: boolean()
   def allowed_origin?(origin_header, port, opts \\ [])
 
-  def allowed_origin?(origin_header, port, opts)
-      when is_binary(origin_header) and is_integer(port) and port > 0 and is_list(opts) do
-    allowed =
-      ["http://127.0.0.1:#{port}", "http://[::1]:#{port}"] ++
-        if(Keyword.get(opts, :allow_localhost, false),
-          do: ["http://localhost:#{port}"],
-          else: []
-        )
-
-    origin_header in allowed
-  end
+  def allowed_origin?("http://" <> host, port, opts), do: allowed_host?(host, port, opts)
 
   def allowed_origin?(_origin_header, _port, _opts), do: false
 

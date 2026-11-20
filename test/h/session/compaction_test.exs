@@ -352,6 +352,7 @@ defmodule H.Session.CompactionTest do
       assert req.model == "fake:chat"
       assert req.thinking == nil
       assert req.tools == []
+      assert req.max_tokens == 16_384
       assert [%{role: "system"}, %{role: "user", content: [%{text: prompt}]}] = req.messages
 
       assert prompt =~ "<conversation>\n[User]: visible follow-up\n</conversation>"
@@ -377,7 +378,7 @@ defmodule H.Session.CompactionTest do
           {:expect,
            fn req ->
              assert req.model == "fake:chat"
-             assert req.thinking == "medium"
+             assert req.thinking == "low"
              assert req.tools == []
              [_, %{role: "user", content: [%{text: prompt}]}] = req.messages
              assert prompt =~ "User instructions: Highlight lib/x.ex"

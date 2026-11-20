@@ -1,10 +1,14 @@
 import Config
 
-if config_env() != :test and System.get_env("PHX_SERVER") do
+# The combined release is booted explicitly by H.Daemon.CLI. Do not start a
+# second embedded daemon or require deployment secrets for its eval commands.
+standalone? = System.get_env("RELEASE_NAME") == "harness"
+
+if not standalone? and config_env() != :test and System.get_env("PHX_SERVER") do
   config :harness_web, HWeb.Endpoint, server: true
 end
 
-if config_env() != :test do
+if not standalone? and config_env() != :test do
   data_dir =
     (System.get_env("H_DATA_DIR") || "~/.local/share/h")
     |> Path.expand()
@@ -16,12 +20,12 @@ if config_env() != :test do
     no_extensions: System.get_env("H_NO_EXTENSIONS") == "1"
 end
 
-if config_env() == :dev do
+if not standalone? and config_env() == :dev do
   config :harness_web, HWeb.Endpoint,
     http: [ip: {127, 0, 0, 1}, port: String.to_integer(System.get_env("PORT", "4000"))]
 end
 
-if config_env() == :prod do
+if not standalone? and config_env() == :prod do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
       raise """

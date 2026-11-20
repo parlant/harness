@@ -104,14 +104,19 @@ Unavailable fields print as empty; the labels around them don't disappear automa
 
 `activity`, model, thinking level, queue and usage follow the live conversation even while browsing earlier entries. `session_title`, `session_status`, and `harness_id` come from the session metadata `hi` last read on attach/create or a metadata-fetching switch. `/name` also refreshes or changes the local title; updates to catalog metadata from another client aren't streamed in the conversation feed. Use `activity`, not `session_status`, to distinguish an active turn from an idle one.
 
-## What the inherited line shows
-
-The template system keeps the previous built-in layout for now. A typical idle line is:
+## What the inherited lines show
 
 ```text
-Ready · /help · online · [seq 42 · idle · openai:gpt-5.2-codex (medium)] · demo:1 · /work/project
+~/work/project (main)                                              idle
+Ready · /help · [seq 42 · openai:gpt-5.2-codex (medium)] · demo:1
 ```
 
-From left to right: the latest local message and help hint; a shell preview if a user shell command is active; the connection; then the committed sequence, run activity, model and thinking level. The bracket also shows the queue count when nonzero and input/output token totals and cost when available. `pending`, `attachment`, and `fork-edit #entry@predecessor` are local indicators that appear only when relevant. The final fields are the session/conversation IDs and the session's working directory. At narrow widths, fields on the right can disappear; they aren't dropped from the state. The built-in template is in [`status.rs`](../../clients/tui/src/hi/status.rs).
+The first line shows the short session working directory and optional Git
+branch, with activity right-aligned. Connection state appears only when
+offline (e.g. `idle (offline)`). The second line keeps local messages, shell
+preview, sequence, model, thinking level, and session/conversation IDs. Queue,
+usage, and draft indicators appear when relevant. At narrow widths, fields on
+the right can be clipped. Custom `status_lines` still replaces both rows.
+The built-in templates are in [`status.rs`](../../clients/tui/src/hi/status.rs).
 
 For proposed data from optional daemon packages, see [one opt-in status projection](../extensions/clients.md#proposed-one-opt-in-status-projection). For possible local executable configuration, see [Dynamic configuration in `hi`](dynamic-config.md). Neither is enabled today.

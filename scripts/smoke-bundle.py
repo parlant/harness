@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Exercise a relocated release with no build tools, on a disposable store."""
 
+import html
+import http.cookiejar
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -22,18 +27,24 @@ def smoke(source):
         data.mkdir(mode=0o700)
         home = root / "home"
         home.mkdir(mode=0o700)
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "H_DATA_DIR": str(data), "ERL_FLAGS": "+S 2:2"}
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "H_DATA_DIR": str(data), "ERL_FLAGS": "+S 2:2", "H_WEB_PORT": "0"}
         hi = bundle / "bin/hi"
         launcher = bundle / "bin/h-daemon"
         manifest = data / "daemon.json"
         accounts = data / "accounts.json"
         extensions = data / "extensions.json"
+        network = data / "network.json"
+        addresses = ["127.0.0.1"]
+        second_ip = os.environ.get("H_SMOKE_BIND_ADDRESS") or ("127.0.0.2" if sys.platform == "linux" else None)
+        if second_ip:
+            addresses.append(second_ip)
+        http_client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-        def api(path, body=None):
-            url = json.loads(manifest.read_text())["http_url"] + "/api/v1/" + path
+        def api(path, body=None, base=None):
+            url = (base or json.loads(manifest.read_text())["http_url"]) + "/api/v1/" + path
             token = (data / "auth.token").read_text().strip()
             request = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(), headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with http_client.open(request, timeout=5) as response:
                 return json.load(response)
 
         def run(*args, check=True):
@@ -44,6 +55,31 @@ def smoke(source):
         assert "not running" in run(hi, "daemon", "status", check=False).stderr
         # Crypto and the native trust store must actually load off the bundled runtime.
         run(bundle / "bin/harness", "eval", 'false = Node.alive?(); <<_::256>> = :crypto.hash(:sha256, "bundle"); [_ | _] = :public_key.cacerts_get()')
+
+        def reject(url, status, headers=None, body=None):
+            try:
+                http_client.open(urllib.request.Request(url, data=body, headers=headers or {}), timeout=5)
+            except urllib.error.HTTPError as err:
+                assert err.code == status, (url, err.code, status)
+            else:
+                raise AssertionError(f"Expected HTTP {status} from {url}")
+
+        def check_web(ip):
+            boot = (root / "boot.log").read_text()
+            web = re.findall(rf"H web listening at (http://{re.escape(ip)}:\d+)/inbox", boot)[-1]
+            reject(web + "/login", 421, {"Host": "unconfigured.invalid:4200"})
+            browser = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            with browser.open(web + "/inbox", timeout=5) as response:
+                assert response.url == web + "/login"
+                login = response.read().decode()
+            csrf = html.unescape(re.search(r'name="_csrf_token"\s+value="([^"]+)"', login)[1])
+            form = urllib.parse.urlencode({"_csrf_token": csrf, "token": (data / "auth.token").read_text().strip()}).encode()
+            with browser.open(web + "/login", form, timeout=5) as response:
+                assert "/login" not in response.url
+            with browser.open(web + "/inbox", timeout=5) as response:
+                assert 'data-session-id="upgrade-smoke"' in response.read().decode()
+            with browser.open(web + "/assets/app.js", timeout=5) as response:
+                assert response.status == 200
 
         children = []
         with (root / "boot.log").open("w+") as log:
@@ -79,6 +115,8 @@ def smoke(source):
                     "version": 1, "request_id": "before-restart", "conversation_id": cid, "command": "submit",
                     "args": {"type": "write", "content": "survives planned restart"},
                 })
+                assert len(json.loads(manifest.read_text())["http_urls"]) == 1
+                check_web("127.0.0.1")
                 # Both accounts are unsigned; the extension cannot contact OpenAI.
                 config = json.dumps({"version": 1, "extensions": [{"path": str(bundle / "extensions/multicodex"), "settings": {"sources": ["personal", "work"]}}]})
                 extensions.write_text("malformed")
@@ -86,10 +124,23 @@ def smoke(source):
                 assert refused.returncode != 0 and "nothing was stopped" in refused.stderr
                 assert old.poll() is None
                 extensions.write_text(config)
+                network.write_text(json.dumps({"bind_addresses": ["0.0.0.0"]}))
+                refused = run(hi, "daemon", "restart", "--port", "0", check=False)
+                assert refused.returncode != 0 and "network_config" in refused.stderr
+                assert old.poll() is None
+                network.write_text(json.dumps({"bind_addresses": addresses}))
 
                 replacement = launch("restart")
                 ready(replacement)
                 assert old.wait(timeout=5) == 0
+                urls = json.loads(manifest.read_text())["http_urls"]
+                assert [urllib.parse.urlsplit(url).hostname for url in urls] == addresses
+                for ip, url in zip(addresses, urls):
+                    assert api("environments", base=url)["environments"]
+                    reject(url + "/api/v1/environments", 401)
+                    reject(url + "/api/v1/environments", 421, {"Host": "unconfigured.invalid:4100"})
+                    reject(url + "/api/v1/auth/session", 403, {"Origin": "http://unconfigured.invalid:4100"}, b"{}")
+                    check_web(ip)
                 assert not accounts.exists()
                 codex_models = {
                     model["id"]: model for model in api("models")["models"]
@@ -150,7 +201,7 @@ def smoke(source):
 
         assert "not running" in run(hi, "daemon", "status", check=False).stderr
         assert extensions.read_text() == "malformed"
-    print("Bundle passed relocation, no-toolchain boot, host PATH isolation, account/session persistence, extension startup/bypass, and guarded restart/shutdown.")
+    print("Bundle passed relocation, no-toolchain boot, authenticated web inbox, host PATH isolation, account/session persistence, extension startup/bypass, and guarded restart/shutdown.")
 
 
 if __name__ == "__main__":

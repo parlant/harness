@@ -1,12 +1,12 @@
 # Local daemon API v1
 
-`H.serve()` serves only the daemon API on loopback TCP and, by default, `<data_dir>/api.sock`. These are daemon routes, not the Phoenix site's login or LiveView routes.
+`H.serve()` serves the daemon API on TCP (loopback by default; see [bind settings](hi/management.md#bind-api-and-web-to-additional-addresses)) and `<data_dir>/api.sock` by default. These are daemon routes, not the Phoenix site's login or LiveView routes.
 
 ## Authentication
 
-- On TCP, send `Host: 127.0.0.1:<port>` or `[::1]:<port>`; other hosts are rejected with `421` by default. Unix-socket requests need a nonempty `Host` and still require API authentication.
+- On TCP, send `Host: <bound IPv4 address>:<port>` (normally `127.0.0.1:4100`). Other hosts are rejected with `421`. Unix-socket requests need a nonempty `Host` and still require API authentication.
 - CLI: send `Authorization: Bearer <owner token>` from `<data_dir>/auth.token`. Send JSON bodies as `Content-Type: application/json`.
-- Browser: `POST /api/v1/auth/session` with `{"token":"..."}` as JSON. A supplied `Origin` must be allowed. Success sets `h_owner` (`HttpOnly; SameSite=Strict; Path=/api`). Cookie-authenticated mutations require both an allowed loopback `Origin` and JSON content type. The JSON parser's length limit is 4,000,000 bytes.
+- Browser: `POST /api/v1/auth/session` with `{"token":"..."}` as JSON. A supplied `Origin` must be allowed. Success sets `h_owner` (`HttpOnly; SameSite=Strict; Path=/api`). Cookie-authenticated mutations require both the listener's exact HTTP `Origin` and JSON content type. The JSON parser's length limit is 4,000,000 bytes.
 
 ## Routes (under `/api/v1`)
 
@@ -69,7 +69,7 @@ H.serve(auto_compaction: %{
 })
 ```
 
-Exact cwd + qualified model wins, then cwd, model, provider, `:default`, and finally the built-in threshold. Use positive integer token counts, or `:off` at any scope. Changing the threshold does not change the provider's actual context window. A successful automatic summary commits a boundary and resumes the original input; queued follow-ups still wait. No `/continue` or second prompt needed. If there is no safe prefix to summarize, the daemon attempts the original request instead of looping. Failed or aborted summarization does not discard history or start another turn. Automatic failures carry `automatic: true` in `live.compaction_failure`, so clients can distinguish a paused prompt from a failed `/compact`. Manual `/compact` remains available.
+Exact cwd + qualified model wins, then cwd, model, provider, `:default`, and finally the built-in threshold. Use positive integer token counts, or `:off` at any scope. Changing the threshold does not change the provider's actual context window. A successful automatic summary commits a boundary and resumes the original input; queued follow-ups still wait. No `/continue` or second prompt needed. If there is no safe prefix to summarize, the daemon attempts the original request instead of looping. Failed or aborted summarization does not discard history or start another turn. Automatic failures carry `automatic: true` in `live.compaction_failure`, so clients can distinguish a paused prompt from a failed `/compact`. Manual `/compact` remains available. A failed manual compaction leaves the transcript intact; retry `/compact` with a fresh request, optionally with instructions for a shorter summary. `/continue` resumes an unanswered turn, not a partial summary.
 
 There is no built-in tool-round cap. An optional future extension could enforce a round, cost, or elapsed-time budget to bound unattended work or catch a looping model. That is separate from context management. Without that policy a model that keeps calling tools may keep spending until you abort it.
 

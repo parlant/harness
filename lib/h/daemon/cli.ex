@@ -11,7 +11,9 @@ defmodule H.Daemon.CLI do
       {:ok, [{:check_config, true} | opts]} ->
         dir = Path.expand(opts[:data_dir] || System.get_env("H_DATA_DIR") || "~/.local/share/h")
 
-        with {:ok, opts, _} <- H.Extensions.load(Keyword.put(opts, :data_dir, dir)),
+        with {:ok, addresses} <- H.Daemon.Network.load(dir),
+             result when result in [:ok, :disabled] <- web(:configure, addresses),
+             {:ok, opts, _} <- H.Extensions.load(Keyword.put(opts, :data_dir, dir)),
              {:ok, _, _} <- H.Accounts.boot(opts) do
           IO.puts("H startup configuration OK (no services started)")
         else
@@ -21,19 +23,24 @@ defmodule H.Daemon.CLI do
         end
 
       {:ok, opts} ->
-        case H.serve(Keyword.put(opts, :shutdown_owner, self())) do
-          {:ok, _} ->
-            ref = Process.monitor(H.Daemon.Instance)
+        dir = Path.expand(opts[:data_dir] || System.get_env("H_DATA_DIR") || "~/.local/share/h")
 
-            receive do
-              :shutdown_when_idle ->
-                :ok = Supervisor.terminate_child(H.Supervisor, H.Daemon.Instance)
-                System.stop(0)
+        with {:ok, addresses} <- H.Daemon.Network.load(dir),
+             :ok <- web(:start, addresses),
+             {:ok, _} <-
+               H.serve(opts ++ [data_dir: dir, bind_addresses: addresses, shutdown_owner: self()]) do
+          ref = Process.monitor(H.Daemon.Instance)
 
-              {:DOWN, ^ref, :process, _, _} ->
-                System.stop(1)
-            end
+          receive do
+            :shutdown_when_idle ->
+              Application.stop(:harness_web)
+              :ok = Supervisor.terminate_child(H.Supervisor, H.Daemon.Instance)
+              System.stop(0)
 
+            {:DOWN, ^ref, :process, _, _} ->
+              System.stop(1)
+          end
+        else
           {:error, reason} ->
             IO.puts(
               :stderr,
@@ -47,6 +54,13 @@ defmodule H.Daemon.CLI do
         IO.puts(:stderr, @usage)
         System.halt(2)
     end
+  end
+
+  # Core-only checkouts still run without Phoenix on their code path.
+  defp web(action, addresses) do
+    if Code.ensure_loaded?(HWeb.Standalone),
+      do: apply(HWeb.Standalone, action, [addresses]),
+      else: :ok
   end
 
   def parse(args) when args in [["-h"], ["--help"]], do: :help

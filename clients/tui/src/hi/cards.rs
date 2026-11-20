@@ -1132,7 +1132,11 @@ fn render_failure(out: &mut Vec<StyledRow>, state: &TranscriptState, theme: &The
         push_lines_styled(out, msg.trim(), "  ", theme.failure_text);
     }
     out.push(StyledRow::plain(
-        "  Use /continue to resume.",
+        if fail.is_compaction && !fail.automatic {
+            "  History preserved. Use /compact to retry."
+        } else {
+            "  Use /continue to resume."
+        },
         theme.tool_meta,
     ));
 }
@@ -1488,7 +1492,7 @@ mod tests {
         assert!(text.contains("[tool write x.txt (orphan_1) · no result]"));
         assert!(text.contains("  ... (2 earlier lines)\n  c\n  d\n  e\n  f\n  g"));
         assert!(text.contains("[queued (1)]\n  [follow_up] next"));
-        assert!(text.contains("[! Compaction failed: context_too_large (413)]\n  Exceeded\n  Use /continue to resume."));
+        assert!(text.contains("[! Compaction failed: context_too_large (413)]\n  Exceeded\n  History preserved. Use /compact to retry."));
 
         let expanded = rows(&state, true, true).join("\n");
         assert_clean_rows(&rows(&state, true, true));

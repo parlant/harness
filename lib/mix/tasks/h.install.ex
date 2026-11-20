@@ -8,12 +8,14 @@ defmodule Mix.Tasks.H.Install do
     python =
       System.find_executable("python3") || Mix.raise("python3 is required for local installation")
 
-    case System.cmd(python, ["-B", "scripts/install-bundle.py" | args],
-           into: IO.stream(:stdio, :line),
-           stderr_to_stdout: true
-         ) do
-      {_, 0} -> :ok
-      {_, code} -> Mix.raise("Bundle installation exited with status #{code}")
+    {output, code} =
+      System.cmd(python, ["-u", "-B", "scripts/install-bundle.py" | args], stderr_to_stdout: true)
+
+    case {code, String.trim_trailing(output)} do
+      {0, ""} -> :ok
+      {0, details} -> Mix.shell().info(details)
+      {code, ""} -> Mix.raise("Bundle installation exited with status #{code}")
+      {code, details} -> Mix.raise("Bundle installation exited with status #{code}:\n#{details}")
     end
   end
 end

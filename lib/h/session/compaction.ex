@@ -14,13 +14,13 @@ defmodule H.Session.Compaction do
   alias H.{Context, Schema}
 
   @default_keep_recent_chars 20_000
-  @default_max_summary_tokens 4_096
+  @default_max_summary_tokens 16_384
   @tool_result_max_chars 2_000
 
   @summarization_system_prompt """
   You are a context summarization assistant. Read the conversation history and produce a concise structured checkpoint summary so another assistant can continue the work.
 
-  Do NOT continue the conversation, answer open questions in the transcript, or call tools. Output ONLY the summary.\
+  Do NOT continue the conversation, answer open questions in the transcript, or call tools. Output ONLY the summary. Aim for at most 2,000 words; prioritize facts needed to continue.\
   """
 
   @summarization_prompt """
@@ -646,7 +646,7 @@ defmodule H.Session.Compaction do
   defp summarization_thinking(agent) do
     case fetch(agent, :thinking) do
       val when val in [nil, "", "off", :off, "none", :none] -> nil
-      val -> val
+      _ -> "low"
     end
   end
 

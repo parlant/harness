@@ -14,14 +14,19 @@ use std::{
 };
 use unicode_width::UnicodeWidthStr;
 
-const DEFAULT_LINE: &str = concat!(
+const WORKSPACE_LINE: &str = concat!(
+    "{{ align(cwd_short ~ (' (' ~ git_branch ~ ')' if git_branch else ''), ",
+    "activity ~ (' (' ~ connection ~ ')' if not online and connection else '')) }}",
+);
+
+const DETAILS_LINE: &str = concat!(
     "{{ note }}{% if shell_active %} · shell {{ shell_prefix }}{{ shell_preview }} ({{ shell_status }}){% endif %}",
-    " · {{ connection }} · [seq {{ seq if seq is not none else '-' }} · {{ activity }} · {{ model }} ({{ thinking }})",
+    " · [seq {{ seq if seq is not none else '-' }} · {{ model }} ({{ thinking }})",
     "{% if queued %} · queued {{ queued }}{% endif %}",
     "{% if has_usage %} · tokens {{ input_tokens }}/{{ output_tokens }}{% if cost > 0 %} (${{ '%.4f'|format(cost) }}){% endif %}{% endif %}]",
     "{% if pending %} · pending{% endif %}{% if attachments %} · attachment{% endif %}",
     "{% if fork_entry_id %} · fork-edit #{{ fork_entry_id }}@{{ fork_predecessor_id }}{% endif %}",
-    " · {{ session_id }}:{{ conversation_id }} · {{ cwd }}",
+    " · {{ session_id }}:{{ conversation_id }}",
 );
 
 #[derive(Default, Serialize)]
@@ -345,7 +350,7 @@ impl StatusLines {
             }
         });
         let fields = Value::from_serialize(StatusFields::default());
-        let base = base.unwrap_or_else(|| vec![DEFAULT_LINE.into()]);
+        let base = base.unwrap_or_else(|| vec![WORKSPACE_LINE.into(), DETAILS_LINE.into()]);
         let mut names = Vec::with_capacity(base.len() + append.len());
         let mut needs_branch = false;
         let mut needs_context = false;
@@ -598,15 +603,20 @@ mod tests {
     }
 
     #[test]
-    fn default_is_compatible_and_can_be_extended() {
+    fn default_shows_workspace_and_activity_first_and_can_be_extended() {
         let target = target();
         let mut state = TranscriptState::default();
         let mut fields = StatusFields::from_session(&target, &state);
         fields.note = "Connecting · /help";
         fields.connection = "offline";
-        assert_eq!(StatusLines::default().render(&fields), [
-            "Connecting · /help · offline · [seq - · idle · default (medium)] · demo:3 · /remote/工作",
-        ]);
+        fields.width = 32;
+        assert_eq!(
+            StatusLines::default().render(&fields),
+            [
+                "/remote/工作      idle (offline)",
+                "Connecting · /help · [seq - · default (medium)] · demo:3",
+            ]
+        );
 
         state.seq = Some(42);
         state.docs = json!({
@@ -621,6 +631,10 @@ mod tests {
         let mut fields = StatusFields::from_session(&target, &state);
         fields.note = "Ready · /help";
         fields.connection = "online";
+        fields.online = true;
+        fields.cwd_short = "~/work";
+        fields.git_branch = Some("main");
+        fields.width = 24;
         fields.pending = true;
         fields.attachments = 2;
         fields.fork_entry_id = Some("12");
@@ -628,7 +642,8 @@ mod tests {
         let status =
             StatusLines::compile(None, vec!["{{ provider }} · {{ model_name }}".into()]).unwrap();
         assert_eq!(status.render(&fields), [
-            "Ready · /help · shell !!echo hi (running) · online · [seq 42 · busy · openrouter:vendor/model (high) · queued 1 · tokens 123/456 ($0.9877)] · pending · attachment · fork-edit #12@11 · demo:3 · /remote/工作",
+            "~/work (main)       busy",
+            "Ready · /help · shell !!echo hi (running) · [seq 42 · openrouter:vendor/model (high) · queued 1 · tokens 123/456 ($0.9877)] · pending · attachment · fork-edit #12@11 · demo:3",
             "openrouter · vendor/model",
         ]);
     }

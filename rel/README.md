@@ -19,6 +19,13 @@ Run `bin/hi` from the project directory using its full path, or add the bundle's
 default. Use the same directory to retain your existing sessions, settings and
 credentials, and stop any other daemon using that directory before starting.
 
+The same daemon serves the web inbox at <http://127.0.0.1:4200/inbox>.
+Sign in with `<data_dir>/auth.token`. Set `H_WEB_PORT` to choose another
+port, or `H_WEB=0` to run without the web listener. To bind both services
+to specific addresses, set `{"bind_addresses":["127.0.0.1","10.10.10.4"]}` in
+`<data_dir>/network.json` and restart. Use non-loopback addresses only on
+trusted, encrypted networks; these listeners serve plain HTTP.
+
 On macOS, `bin/hi daemon install-service` installs a per-user LaunchAgent. Move
 the bundle to a stable path before installing the service. `daemon restart-service` and
 `daemon uninstall-service` manage that job. The job starts at login and after

@@ -922,7 +922,8 @@ defmodule H.CompactionIntegrationTest do
         start_daemon_env([
           {:reply, [], %{content: [%{type: "text", text: "Reply 1"}]}},
           {:reply, [], %{content: [%{type: "text", text: String.duplicate("Reply 2 ", 15)}]}},
-          {:reply, [], %{content: [%{type: "text", text: "partial"}], finish_reason: "length"}}
+          {:reply, [], %{content: [%{type: "text", text: "partial"}], finish_reason: "length"}},
+          {:reply, [], %{content: [%{type: "text", text: "Recovered checkpoint"}]}}
         ])
 
       {:ok, _} = Daemon.create_session(%{"session_id" => "s-fail", "cwd" => cwd}, opts)
@@ -973,6 +974,26 @@ defmodule H.CompactionIntegrationTest do
       assert retry_receipt.status == "unanswered"
       assert retry_receipt.reason == "truncated_summary"
       assert length(Fake.requests(fake)) == 3
+
+      # A fresh /compact retries from the intact history, not the partial summary.
+      assert {:ok, %{status: "placed"}} =
+               Daemon.execute_command(
+                 "s-fail",
+                 cmd("cmp-recover", "compact", "1", %{"expected_seq" => snap["seq"]}),
+                 opts
+               )
+
+      recovered =
+        wait_until(fn ->
+          {:ok, %{items: after_items}} =
+            Daemon.scan_entries("s-fail", "1", %{"order" => "asc"}, opts)
+
+          if List.last(after_items).kind == "compaction", do: after_items
+        end)
+
+      assert Enum.take(recovered, 4) == items
+      assert List.last(recovered).data["summary"] == "Recovered checkpoint"
+      assert List.last(Fake.requests(fake)).max_tokens == 16_384
     end
 
     test "abort cancels active compaction, keeps compaction_failure, and fences late worker result" do

@@ -1,6 +1,6 @@
 defmodule H.HTTP.SecurityPlug do
   @moduledoc """
-  Loopback HTTP security boundary:
+  HTTP security boundary:
 
     * Rejects DNS rebinding via strict `Host` allowlist (`421`).
     * Handles `POST /api/v1/auth/session` owner-token to `HttpOnly; SameSite=Strict` cookie exchange.
@@ -25,14 +25,13 @@ defmodule H.HTTP.SecurityPlug do
 
   @impl true
   def call(conn, opts) do
-    allow_localhost = Keyword.get(opts, :allow_localhost, false)
     unix_socket? = unix_socket_conn?(conn, opts)
     port = effective_port(conn, opts)
 
-    with :ok <- check_host(conn, port, allow_localhost, unix_socket?) do
+    with :ok <- check_host(conn, port, opts, unix_socket?) do
       conn
       |> put_resp_header("x-content-type-options", "nosniff")
-      |> enforce_route_security(opts, port, allow_localhost)
+      |> enforce_route_security(opts, port)
     else
       {:error, status, msg} -> send_json_halt(conn, status, %{"error" => msg})
     end
@@ -52,13 +51,14 @@ defmodule H.HTTP.SecurityPlug do
   end
 
   defp effective_port(conn, opts) do
-    case Keyword.get(opts, :port) do
-      p when is_integer(p) and p > 0 -> p
+    case {opts[:port], opts[:bind_address]} do
+      {p, _} when is_integer(p) and p > 0 -> p
+      {0, ip} when not is_nil(ip) -> get_sock_data(conn).port
       _ -> conn.port
     end
   end
 
-  defp check_host(conn, _port, _allow_localhost, true) do
+  defp check_host(conn, _port, _opts, true) do
     case get_req_header(conn, "host") do
       [host] when is_binary(host) ->
         if String.trim(host) != "" do
@@ -72,10 +72,10 @@ defmodule H.HTTP.SecurityPlug do
     end
   end
 
-  defp check_host(conn, port, allow_localhost, false) do
+  defp check_host(conn, port, opts, false) do
     case get_req_header(conn, "host") do
       [host] ->
-        if H.Auth.allowed_host?(host, port, allow_localhost: allow_localhost) do
+        if H.Auth.allowed_host?(host, port, opts) do
           :ok
         else
           {:error, 421, "invalid host header"}
@@ -89,13 +89,12 @@ defmodule H.HTTP.SecurityPlug do
   defp enforce_route_security(
          %Plug.Conn{method: "POST", path_info: ["api", "v1", "auth", "session"]} = conn,
          opts,
-         port,
-         allow_localhost
+         port
        ) do
     auth_server = Keyword.get(opts, :auth_server, H.Auth)
     auth_table = Keyword.get(opts, :auth_table, :h_auth)
 
-    with :ok <- check_optional_origin(conn, port, allow_localhost),
+    with :ok <- check_optional_origin(conn, port, opts),
          :ok <- require_json_content_type(conn),
          {:ok, conn} <- parse_json_body(conn) do
       case H.Auth.create_browser_session(conn.body_params["token"], auth_server, auth_table) do
@@ -119,19 +118,18 @@ defmodule H.HTTP.SecurityPlug do
   defp enforce_route_security(
          %Plug.Conn{path_info: ["api", "v1" | _]} = conn,
          opts,
-         port,
-         allow_localhost
+         port
        ) do
     auth_table = Keyword.get(opts, :auth_table, :h_auth)
 
     if bearer_authorized?(conn, auth_table) do
       enforce_bearer_body(conn)
     else
-      enforce_cookie_auth(conn, auth_table, port, allow_localhost)
+      enforce_cookie_auth(conn, auth_table, port, opts)
     end
   end
 
-  defp enforce_route_security(conn, _opts, _port, _allow_localhost), do: conn
+  defp enforce_route_security(conn, _opts, _port), do: conn
 
   defp enforce_bearer_body(%Plug.Conn{method: method} = conn) when method in @mutating_methods do
     case get_req_header(conn, "content-type") do
@@ -171,7 +169,7 @@ defmodule H.HTTP.SecurityPlug do
     end
   end
 
-  defp enforce_cookie_auth(conn, auth_table, port, allow_localhost) do
+  defp enforce_cookie_auth(conn, auth_table, port, opts) do
     conn = fetch_cookies(conn)
     cookie = conn.req_cookies["h_owner"]
 
@@ -183,7 +181,7 @@ defmodule H.HTTP.SecurityPlug do
         conn
 
       conn.method in @mutating_methods ->
-        with :ok <- require_allowed_origin(conn, port, allow_localhost),
+        with :ok <- require_allowed_origin(conn, port, opts),
              :ok <- require_json_content_type(conn),
              {:ok, conn} <- parse_json_body(conn) do
           conn
@@ -212,23 +210,23 @@ defmodule H.HTTP.SecurityPlug do
     end
   end
 
-  defp check_optional_origin(conn, port, allow_localhost) do
+  defp check_optional_origin(conn, port, opts) do
     case get_req_header(conn, "origin") do
       [] -> :ok
-      [origin] -> validate_origin(origin, port, allow_localhost)
+      [origin] -> validate_origin(origin, port, opts)
       _ -> {:error, 403, "forbidden origin"}
     end
   end
 
-  defp require_allowed_origin(conn, port, allow_localhost) do
+  defp require_allowed_origin(conn, port, opts) do
     case get_req_header(conn, "origin") do
-      [origin] -> validate_origin(origin, port, allow_localhost)
+      [origin] -> validate_origin(origin, port, opts)
       _ -> {:error, 403, "forbidden origin"}
     end
   end
 
-  defp validate_origin(origin, port, allow_localhost) do
-    if H.Auth.allowed_origin?(origin, port, allow_localhost: allow_localhost) do
+  defp validate_origin(origin, port, opts) do
+    if H.Auth.allowed_origin?(origin, port, opts) do
       :ok
     else
       {:error, 403, "forbidden origin"}

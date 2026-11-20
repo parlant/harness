@@ -14,7 +14,7 @@ defmodule HWeb.Application do
     ]
 
     opts = [strategy: :one_for_one, name: HWeb.Supervisor]
-    Supervisor.start_link(children, opts)
+    Supervisor.start_link(children ++ HWeb.Standalone.listeners(), opts)
   end
 
   @impl true

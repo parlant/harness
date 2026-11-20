@@ -148,7 +148,7 @@ defmodule H.Session.Server.Recovery do
         restart_limit: Keyword.get(opts, :restart_limit, @default_restart_limit),
         auto_compaction: Keyword.get(opts, :auto_compaction, %{}),
         compaction_keep_recent_chars: Keyword.get(opts, :compaction_keep_recent_chars, 20_000),
-        compaction_max_tokens: Keyword.get(opts, :compaction_max_tokens, 4_096)
+        compaction_max_tokens: Keyword.get(opts, :compaction_max_tokens, 16_384)
       }
 
       base_meta_write = {:put_session_meta, state.session_meta}

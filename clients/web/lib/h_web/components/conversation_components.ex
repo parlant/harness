@@ -145,7 +145,11 @@ defmodule HWeb.ConversationComponents do
           <strong>{@failure_label}:</strong>
           <span>{format_failure(@failure)}</span>
         </div>
+        <p :if={@failure_label == "Compaction failed"}>
+          History preserved. Retry with <code>/compact</code> in hi.
+        </p>
         <button
+          :if={@failure_label != "Compaction failed"}
           id="continue-run-btn"
           type="button"
           class="btn btn-sm btn-primary"

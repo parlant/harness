@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build a native, relocatable hi + H daemon bundle; never installs or starts it.
+# Build a native, relocatable hi + H daemon + web bundle; never installs or starts it.
 set -eu
 if [ "$#" != 1 ]; then
   echo 'Usage: scripts/build-bundle.sh /path/to/new/bundle' >&2
@@ -31,7 +31,13 @@ export MIX_ENV=prod MIX_BUILD_PATH="$work/mix" CARGO_TARGET_DIR="$work/cargo"
 cd "$root"
 mix deps.get --only prod --check-locked
 mix compile --warnings-as-errors
-mix release harness --path "$stage/otp"
+# Phoenix is the release host; its path dependency includes the same H core.
+(cd clients/web
+  export MIX_BUILD_PATH="$work/web" MIX_DEPS_PATH="$root/clients/web/deps"
+  mix deps.get --only prod --check-locked
+  mix compile --warnings-as-errors
+  mix release harness --path "$stage/otp"
+)
 cargo build --locked --release --manifest-path clients/tui/Cargo.toml --bin hi
 install -m 755 "$CARGO_TARGET_DIR/release/hi" "$stage/otp/bin/hi"
 install -m 755 rel/h-daemon "$stage/otp/bin/h-daemon"
