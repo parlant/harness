@@ -57,10 +57,19 @@ A `200` receipt acknowledges the command, not a completed model reply. It includ
 | `compact` | Required `expected_seq`, optional `instructions`. Accepts an idle, compactable conversation; the receipt is not a completed summary. On success the daemon appends a compaction marker with the summary and retained boundary. Failure does not discard the previous context. |
 | `rename` | `title` sets the session display name; optional session-wide `expected_seq` rejects stale writes. |
 | `user_shell` | `command`, boolean `include_in_context`, and required `expected_seq`. Requires an idle conversation. Runs in the bound environment after intent is committed, under the workspace lease. Interrupted unsafe commands are not replayed. Excluded commands and results stay out of model history and `search_history`. |
+| `workspace_wait` | `action: "cancel"` or `"stop_holder"`, plus `task_id` and opaque `lease_id` from `live.workspace_wait`. Cancel aborts the waiting conversation's active run; stop-holder requests cancellation of the holding conversation and prioritizes this waiter for handoff after cleanup. Stale stop targets return `409` `"stale_workspace_wait"`. Idempotent by request ID. |
 | `abort` | Abort active generation or user-shell work in the conversation, optionally with `reason`. Although validation accepts `task_id`, the handler does **not** narrow cancellation to that task. |
 | `withdraw` | `submission_ids`: non-empty array of queued submission IDs to withdraw atomically from the conversation's `inbox`. All-or-conflict (`409` `"submission_not_queued"` if any ID is missing, already consumed, already withdrawn, or belongs to another conversation). Receipt returns `status: "done"` and `withdrawn`: array of withdrawn inbox items (`submission_id`, `request_id`, `when_busy`, `content`) in original `inbox` order; idempotent retries return the stored `withdrawn` array. |
 
 If a session's bound working directory no longer exists (`cwd_exists: false`), read endpoints (`GET /sessions/:sid`, `GET /sessions/:sid/conversations/:cid/entries`, `GET /sessions/:sid/conversations/:cid/events`) and management commands (`abort`, `withdraw`, `rename`, `configure`, `fork`, `submit/write`) remain available, while work-starting commands (`submit/input`, `submit/continue`, `fork_and_submit`, `user_shell`, `compact`) return `409` `{"error":"cwd_missing"}`. Use `POST /sessions/:sid/fork` to continue the conversation in an existing working directory.
+
+## Workspace mutation waits
+
+Mutating tools (including every `bash` call) and user-shell commands automatically queue when another conversation holds the session's `{env_id, cwd}` lease. Admission is FIFO, with a reserved handoff signalled by the daemon on release or owner exit; no retry polling or model round is needed. Non-mutating tools do not wait. Shell `cd` and `git -C` arguments do not change the session's lease key.
+
+While queued, `live.workspace_wait` contains `task_id`, `holder_session_id`, `holder_conversation_id`, and an opaque `lease_id`. Tool or user-shell live status is `"waiting"`; no execution attempt has started. Holder changes update the wait document. It disappears when execution starts or the wait is cancelled. Pending persisted workspace waits can rejoin the queue after restart; interrupted **running** unsafe commands are still never replayed.
+
+Both clients offer **Cancel wait** and **Stop holder and acquire**. hi opens an action picker on entering a wait; `/workspace` reopens it. Dismissing the picker keeps waiting. Cancelling does not stop the holder. Stop-holder targets that specific lease, not an arbitrary session or a later command; it never clears a live lock underneath a worker. The owner commits cancellation and stops its work before releasing. The receipt acknowledges the request, not completion of cleanup or acquisition.
 
 ## Automatic compaction and continuation
 

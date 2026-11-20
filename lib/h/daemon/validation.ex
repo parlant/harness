@@ -131,6 +131,7 @@ defmodule H.Daemon.Validation do
                  "fork_and_submit",
                  "configure",
                  "abort",
+                 "workspace_wait",
                  "withdraw",
                  "rename",
                  "user_shell",
@@ -350,6 +351,14 @@ defmodule H.Daemon.Validation do
       {:instructions, :string, required: false, nullable: true},
       {:tools, {:list, :string}, required: false},
       {:expected_seq, {:int, min: 0}, required: false, nullable: true}
+    ])
+  end
+
+  defp validate_command_args("workspace_wait", raw_args) do
+    Schema.validate_map(raw_args, [
+      {:action, {:enum, ["cancel", "stop_holder"]}, required: true},
+      {:task_id, :pos_int, required: true},
+      {:lease_id, :non_empty_string, required: true}
     ])
   end
 

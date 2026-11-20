@@ -20,7 +20,7 @@ use crate::{
     client::{ClientError, DaemonClient},
     protocol::{CommandEnvelope, ServerFrame, WhenBusy, WhenIdle},
     render::{extract_entry_text, sanitize_single_line},
-    transcript::{CommitOutcome, TranscriptState},
+    transcript::{CommitOutcome, TranscriptState, WorkspaceWaitInfo},
 };
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers as Mod, MouseEventKind,
@@ -72,6 +72,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/follow-up", "Queue follow-up"),
     ("/dequeue", "Withdraw queued prompts"),
     ("/abort", "Interrupt this conversation"),
+    ("/workspace", "Workspace wait actions"),
     ("/continue", "Continue conversation"),
     ("/compact", "Compact conversation history"),
     ("/tools", "Toggle tool details"),
@@ -117,6 +118,7 @@ enum PickerKind {
     Commands,
     ClientFiles,
     WorkspaceFiles,
+    WorkspaceWait,
     Search,
     Info,
 }
@@ -125,6 +127,7 @@ struct PickerState {
     kind: PickerKind,
     picker: Picker,
     scope: Option<(String, String)>,
+    workspace_wait: Option<WorkspaceWaitInfo>,
 }
 
 struct ForkEdit {
@@ -785,6 +788,7 @@ impl Ui {
                 self.note = msg;
             }
             Update::Frame(f) => {
+                let previous_wait = self.state.workspace_wait();
                 match f {
                     ServerFrame::Snapshot(s) => {
                         self.state.apply_snapshot(s);
@@ -824,8 +828,45 @@ impl Ui {
                     self.state.before_entry_id = self.state.entries.first().map(|e| e.id.clone());
                     self.state.has_more = true;
                 }
+                let wait = self.state.workspace_wait();
+                if wait != previous_wait {
+                    if wait.is_some()
+                        && self.picker.is_none()
+                        && self.login.is_none()
+                        && self.secret.is_none()
+                    {
+                        self.workspace_wait_menu();
+                    } else if self
+                        .picker
+                        .as_ref()
+                        .is_some_and(|p| p.kind == PickerKind::WorkspaceWait)
+                    {
+                        self.picker = None;
+                        if wait.is_some() {
+                            self.workspace_wait_menu();
+                        }
+                    }
+                }
                 self.rows_dirty |= self.historical.is_none();
             }
+        }
+    }
+    fn workspace_wait_menu(&mut self) {
+        if let Some(wait) = self.state.workspace_wait() {
+            self.scoped_menu(
+                PickerKind::WorkspaceWait,
+                &format!(
+                    "Workspace held by {}:{}",
+                    wait.holder_session_id, wait.holder_conversation_id
+                ),
+                vec![
+                    ("cancel".into(), "Cancel wait".into()),
+                    ("stop_holder".into(), "Stop holder and acquire".into()),
+                ],
+            );
+            self.picker.as_mut().unwrap().workspace_wait = Some(wait);
+        } else {
+            self.note = "Not waiting for a workspace".into();
         }
     }
     fn menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
@@ -834,6 +875,7 @@ impl Ui {
             kind,
             picker: Picker::new(title, choices),
             scope: None,
+            workspace_wait: None,
         });
     }
     fn scoped_menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
@@ -842,6 +884,7 @@ impl Ui {
             kind,
             picker: Picker::new(title, choices),
             scope: Some((self.target.sid.clone(), self.target.cid.clone())),
+            workspace_wait: None,
         });
     }
     fn current_view(&self) -> &TranscriptState {
@@ -2035,6 +2078,7 @@ impl Ui {
             }
             "/envs" => self.start(Effect::Environments, None),
             "/abort" => self.start(Effect::Abort, None),
+            "/workspace" => self.workspace_wait_menu(),
             "/continue" => {
                 if self.check_writable_workspace(false) {
                     self.start(Effect::Continue, None);
@@ -2170,6 +2214,7 @@ impl Ui {
         let choice = state.picker.key(key);
         let kind = state.kind;
         let scope = state.scope.clone();
+        let workspace_wait = state.workspace_wait.clone();
         match choice {
             Choice::Stay => {}
             Choice::Cancel => {
@@ -2191,6 +2236,18 @@ impl Ui {
                     }
                 }
                 match kind {
+                    PickerKind::WorkspaceWait => {
+                        if let Some(wait) = workspace_wait {
+                            self.start(
+                                Effect::WorkspaceWait {
+                                    action: id,
+                                    task_id: wait.task_id,
+                                    lease_id: wait.lease_id,
+                                },
+                                None,
+                            );
+                        }
+                    }
                     PickerKind::Models => self.start(Effect::Configure("model".into(), id), None),
                     PickerKind::Thinking => {
                         self.start(Effect::Configure("thinking".into(), id), None)
@@ -3114,6 +3171,7 @@ mod tests {
         ui.picker = Some(PickerState {
             kind: PickerKind::Fork,
             picker: Picker::new("fork", vec![("12".into(), "#12 second".into())]),
+            workspace_wait: None,
             scope: Some(("sess-1".into(), "1".into())),
         });
         press_enter(&mut ui, &mut screen);
@@ -3679,6 +3737,70 @@ mod tests {
         assert!(ui.note.contains("503"), "note={}", ui.note);
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn workspace_wait_picker_sends_fenced_actions_and_closes_on_resume() {
+        let (srv, client) = TestServer::bind("workspace-wait");
+        let listener = srv.listener.try_clone().unwrap();
+        let handle = thread::spawn(move || {
+            let mut commands = Vec::new();
+            while commands.len() < 2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, body) = read_http_request(&mut stream);
+                if head.starts_with("POST /api/v1/sessions/sess-1/commands ") {
+                    let command: Value = serde_json::from_str(&body).unwrap();
+                    write_json_response(&mut stream, "200 OK", &json!({
+                        "version": 1, "request_id": command["request_id"], "seq": 12, "status": "done"
+                    }).to_string());
+                    commands.push(command);
+                } else {
+                    write_json_response(&mut stream, "404 Not Found", "{}");
+                }
+            }
+            commands
+        });
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        let snapshot = |seq, wait: Value| {
+            ServerFrame::Snapshot(SnapshotFrame {
+                version: Some(1),
+                session_id: Some("sess-1".into()),
+                conversation_id: Some("1".into()),
+                seq,
+                before_entry_id: None,
+                has_more: Some(false),
+                entries: vec![],
+                docs: Some(
+                    json!({"live": {"run": {}, "workspace_wait": wait}, "agent": {}, "inbox": []}),
+                ),
+            })
+        };
+        let wait = json!({"task_id": "42", "lease_id": "lease-a", "holder_session_id": "holder", "holder_conversation_id": "2"});
+        ui.update(Update::Frame(snapshot(10, wait.clone())));
+        assert_eq!(ui.picker.as_ref().unwrap().kind, PickerKind::WorkspaceWait);
+        let lines = ui.picker.as_ref().unwrap().picker.lines().join("\n");
+        assert!(lines.contains("Cancel wait"));
+        assert!(lines.contains("Stop holder and acquire"));
+        let rows = cards::rows(&ui.state, false, false).join("\n");
+        assert!(rows.contains("held by holder:2"));
+        press_enter(&mut ui, &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+
+        ui.workspace_wait_menu();
+        ui.pick_key(KeyEvent::new(KeyCode::Down, Mod::NONE), &mut screen);
+        press_enter(&mut ui, &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+        ui.workspace_wait_menu();
+        ui.update(Update::Frame(snapshot(13, Value::Null)));
+        assert!(ui.picker.is_none(), "stale actions close after resume");
+        let commands = handle.join().unwrap();
+        for (command, action) in commands.iter().zip(["cancel", "stop_holder"]) {
+            assert_eq!(command["command"], "workspace_wait");
+            assert_eq!(
+                command["args"],
+                json!({"action": action, "task_id": "42", "lease_id": "lease-a"})
+            );
+        }
     }
 
     #[test]

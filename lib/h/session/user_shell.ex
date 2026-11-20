@@ -13,7 +13,7 @@ defmodule H.Session.UserShell do
 
   alias H.{Document, ExecutionEnv, Schema, Storage, Submission, Task}
   alias H.Session.LiveOutput
-  alias H.Session.Server.{State, Stream, Submissions}
+  alias H.Session.Server.{State, Stream, Submissions, WorkspaceWait}
 
   @default_timeout_ms 120_000
 
@@ -174,16 +174,9 @@ defmodule H.Session.UserShell do
             )
 
           {:ok, env} ->
-            case State.acquire_lease(cid, state, env) do
-              {:error, {:workspace_busy, holder_key}} ->
-                commit_immediate_failure(
-                  cid,
-                  task,
-                  "workspace_busy",
-                  "Workspace #{State.workspace_cwd(env, state)} is currently busy with mutating work by #{inspect(holder_key)}.",
-                  state,
-                  now
-                )
+            case WorkspaceWait.acquire(cid, task, state) do
+              {:waiting, state} ->
+                state
 
               {:ok, state} ->
                 {:ok, attempt_id, store} = Storage.mint_id(state.store)
@@ -222,7 +215,7 @@ defmodule H.Session.UserShell do
 
                     state =
                       Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
-                        "live" => [["set", ["user_shell", "status"], "running"]]
+                        "live" => [["replace", live]]
                       })
 
                     server_pid = self()
@@ -259,6 +252,7 @@ defmodule H.Session.UserShell do
 
                     {:ok, worker_pid} =
                       Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
+                        Process.flag(:trap_exit, true)
                         t0 = System.monotonic_time(:millisecond)
                         res = ExecutionEnv.exec(env, {:shell, command}, exec_opts)
                         dur = max(0, System.monotonic_time(:millisecond) - t0)
@@ -536,10 +530,6 @@ defmodule H.Session.UserShell do
       state.workers
       |> Enum.filter(fn {_aid, w} -> w.task_id == shell_task.id end)
       |> Enum.map(fn {aid, w} ->
-        if Map.get(w, :abort_ref) && is_pid(w.pid) && Process.alive?(w.pid) do
-          send(w.pid, {:abort_exec, w.abort_ref})
-        end
-
         {:kill_worker, aid, w.pid, w.monitor_ref}
       end)
 
@@ -619,6 +609,7 @@ defmodule H.Session.UserShell do
     next_live =
       (state.docs[cid]["live"] || %{})
       |> Map.delete("user_shell")
+      |> Map.delete("workspace_wait")
       |> Map.put("run_failure", %{"reason" => reason, "message" => message})
 
     state =
@@ -634,6 +625,7 @@ defmodule H.Session.UserShell do
     case Storage.commit(state.store, [writes]) do
       {:ok, %{seqs: [batch_seq]}, committed_store} ->
         state = %{state | store: committed_store, seq: batch_seq}
+        state = State.release_lease(cid, state)
 
         Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
           "live" => [["replace", next_live]]

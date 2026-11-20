@@ -358,6 +358,16 @@ defmodule HWeb.SessionLive do
     end
   end
 
+  def handle_event("workspace_wait", params, socket) do
+    args = Map.take(params, ["action", "task_id", "lease_id"])
+    envelope = build_envelope(socket, "workspace_wait", args, params["request_id"])
+
+    case Backend.execute_command(socket.assigns.session_id, envelope) do
+      {:ok, _receipt} -> {:noreply, assign(socket, :error_banner, nil)}
+      {:error, reason} -> {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
   def handle_event("configure", params, socket) do
     args =
       %{}

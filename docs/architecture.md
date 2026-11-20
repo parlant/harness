@@ -59,6 +59,8 @@ effects.
 
 `H.EnvRegistry` resolves an environment for browsing or binds it to a session's working directory. The catalog and mutating-tool leases distinguish workspaces by `{env_id, cwd}`. `H.Harness.Coding` supplies `read`, `write`, `edit`, `bash` and `search_history` and discovers ancestor `AGENTS.md` files through `H.ExecutionEnv` unless instructions are overridden. `H.ExecutionEnv.Host` operates with the host user's access; a lease coordinates writers, **not** filesystem confinement. `Local` is a compatibility wrapper.
 
+Mutating tools and user-shell commands queue at `H.WorkspaceLease` when another conversation owns the workspace. The manager monitors waiters and reserves the next lease before signalling its session coordinator; the coordinator stays responsive while waiting. A persisted `workspace_wait` checkpoint has no execution attempt and can safely requeue after restart. Client actions can cancel the waiting run or request cancellation of the specific current holder, with a lease-generation token fencing stale stop requests. Stop-holder prioritizes that waiter but does not revoke the lease: the owning coordinator commits cancellation, stops its workers, and releases normally. Running unsafe effects retain the interruption policy above.
+
 `H.ExecutionEnv.Remote` delegates to `H.RemoteAgent`. The implementation exercises stale-attempt fencing, lease renewal, expiry and process-group cleanup **in the same VM**. It is not an authenticated transport to another machine.
 
 ## Client boundary

@@ -102,9 +102,13 @@ def smoke(bundle):
         spec.loader.exec_module(module)
         commands = []
         busy = True
+        launchd_error = False
 
         def fake_run(argv, _env, timeout=20):
-            action = "--check-config" if "--check-config" in argv else argv[-1]
+            if argv[0] == "/bin/launchctl":
+                action = "print"
+            else:
+                action = "--check-config" if "--check-config" in argv else argv[-1]
             commands.append(action)
             if action == "status":
                 return subprocess.CompletedProcess(argv, 0, "Running: fixture", "")
@@ -112,8 +116,17 @@ def smoke(bundle):
                 assert current.resolve(strict=True) == second
                 if busy:
                     return subprocess.CompletedProcess(argv, 1, "", "Daemon is busy")
+            if action == "print":
+                assert argv == ["/bin/launchctl", "print", f"gui/{os.getuid()}/fake"]
+                assert current.resolve(strict=True) == second
+                if launchd_error:
+                    return subprocess.CompletedProcess(argv, 113, "", "Could not find service")
+                # API and lock are already gone, but launchd still tracks the VM.
+                state = "running" if commands.count("print") == 1 else "not running"
+                return subprocess.CompletedProcess(argv, 0, f"job = {{\n\tstate = {state}\n}}\n", "")
             if action == "start-service":
                 assert current.resolve(strict=True) == initial
+                assert commands[-3:] == ["print", "print", "start-service"]
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         with (
@@ -127,13 +140,24 @@ def smoke(bundle):
             assert commands == ["--check-config", "status", "check-service", "stop"]
             commands.clear()
             busy = False
+            with patch.object(module.time, "monotonic", side_effect=[0, 0, 13]):
+                assert module.main() == 1
+            assert current.resolve(strict=True) == second
+            assert commands == ["--check-config", "status", "check-service", "stop", "print"]
+            commands.clear()
+            launchd_error = True
+            assert module.main() == 1
+            assert current.resolve(strict=True) == second
+            assert commands == ["--check-config", "status", "check-service", "stop", "print"]
+            commands.clear()
+            launchd_error = False
             assert module.main() == 0
             assert current.resolve(strict=True) == initial
-            assert commands[-3:] == ["stop", "start-service", "status"]
+            assert commands == ["--check-config", "status", "check-service", "stop", "print", "print", "start-service", "status"]
 
         # No installer runs launchctl unless service registration was explicit.
         assert not (home / "Library/LaunchAgents").exists()
-    print("Install passed default and explicit bundle paths, PATH resolution, copy/activation/rollback, conflict and live-daemon refusal, and simulated guarded service handoff.")
+    print("Install passed default and explicit bundle paths, PATH resolution, copy/activation/rollback, conflict and live-daemon refusal, and simulated guarded service handoff with delayed VM exit and shutdown failures.")
 
 
 if __name__ == "__main__":

@@ -593,7 +593,7 @@ defmodule H.UserShellIntegrationTest do
         if status == "running", do: true, else: nil
       end)
 
-      # s-host-2 at same {"host", remote_cwd} hits workspace_busy without spawning
+      # s-host-2 waits at the same {"host", remote_cwd} without spawning
       marker = Path.join(remote_cwd, "should_not_exist.txt")
 
       {:ok, _} =
@@ -611,8 +611,7 @@ defmodule H.UserShellIntegrationTest do
         {:ok, {:snapshot, _, bin}} =
           Daemon.subscribe_conversation("s-host-2", "1", self(), nil, base_opts)
 
-        reason = JSON.decode!(bin) |> get_in(["docs", "live", "run_failure", "reason"])
-        if reason == "workspace_busy", do: true, else: nil
+        JSON.decode!(bin) |> get_in(["docs", "live", "workspace_wait"])
       end)
 
       refute File.exists?(marker)
@@ -641,10 +640,191 @@ defmodule H.UserShellIntegrationTest do
 
       wait_until(fn ->
         {:ok, %{items: items}} =
+          Daemon.scan_entries("s-host-2", "1", %{"order" => "asc"}, base_opts)
+
+        if length(items) == 1, do: items, else: nil
+      end)
+
+      assert File.exists?(marker)
+
+      wait_until(fn ->
+        {:ok, %{items: items}} =
           Daemon.scan_entries("s-host-1", "1", %{"order" => "asc"}, base_opts)
 
         if length(items) == 1, do: items, else: nil
       end)
+    end
+
+    test "cancel wait removes queued work without stopping the holder" do
+      %{opts: opts, cwd: cwd, lease: lease} = start_daemon_env()
+      :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"holder", 1}, self())
+      {:ok, %{seq: seq}} = Daemon.create_session(%{"session_id" => "waiter", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "waiter",
+          cmd("wait", "user_shell", "1", %{
+            "command" => "printf ran > marker",
+            "include_in_context" => true,
+            "expected_seq" => seq
+          }),
+          opts
+        )
+
+      wait =
+        wait_until(fn ->
+          {:ok, {:snapshot, _, bin}} =
+            Daemon.subscribe_conversation("waiter", "1", self(), nil, opts)
+
+          JSON.decode!(bin)["docs"]["live"]["workspace_wait"]
+        end)
+
+      args = %{"action" => "cancel", "task_id" => wait["task_id"], "lease_id" => wait["lease_id"]}
+      replacement = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(replacement, :kill) end)
+      :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"holder", 1}, replacement)
+
+      wait_until(fn ->
+        {:ok, {:snapshot, _, bin}} =
+          Daemon.subscribe_conversation("waiter", "1", self(), nil, opts)
+
+        JSON.decode!(bin)["docs"]["live"]["workspace_wait"]["lease_id"] != wait["lease_id"]
+      end)
+
+      {:ok, receipt} =
+        Daemon.execute_command("waiter", cmd("cancel", "workspace_wait", "1", args), opts)
+
+      assert {:ok, ^receipt} =
+               Daemon.execute_command("waiter", cmd("cancel", "workspace_wait", "1", args), opts)
+
+      assert {:error, {:workspace_busy, {"holder", 1}}} =
+               WorkspaceLease.acquire(lease, {"host", cwd}, {"probe", 1}, self())
+
+      :ok = WorkspaceLease.release(lease, {"host", cwd}, {"holder", 1})
+      {:ok, {:snapshot, _, bin}} = Daemon.subscribe_conversation("waiter", "1", self(), nil, opts)
+      snap = JSON.decode!(bin)
+      refute snap["docs"]["live"]["workspace_wait"]
+      assert hd(snap["entries"])["data"]["diagnostic"] == "aborted"
+      refute File.exists?(Path.join(cwd, "marker"))
+      assert :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"probe", 1}, self())
+    end
+
+    test "stop holder and acquire waits for process-group cleanup and rejects stale actions" do
+      %{opts: opts, cwd: cwd} = start_daemon_env([], ephemeral_interval_ms: 5)
+
+      {:ok, %{seq: owner_seq}} =
+        Daemon.create_session(%{"session_id" => "holder", "cwd" => cwd}, opts)
+
+      {:ok, %{seq: seq}} = Daemon.create_session(%{"session_id" => "waiter", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "holder",
+          cmd("hold", "user_shell", "1", %{
+            "command" => "sleep 120 & echo child_pid=$!; wait",
+            "include_in_context" => true,
+            "expected_seq" => owner_seq
+          }),
+          opts
+        )
+
+      child_pid =
+        wait_until(fn ->
+          {:ok, {:snapshot, _, bin}} =
+            Daemon.subscribe_conversation("holder", "1", self(), nil, opts)
+
+          out = JSON.decode!(bin)["docs"]["live"]["user_shell"]["output"] || ""
+
+          case Regex.run(~r/child_pid=(\d+)/, out) do
+            [_, pid] -> pid
+            nil -> nil
+          end
+        end)
+
+      command =
+        "if kill -0 #{child_pid} 2>/dev/null; then printf overlap; else printf acquired; fi"
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "waiter",
+          cmd("wait", "user_shell", "1", %{
+            "command" => command,
+            "include_in_context" => true,
+            "expected_seq" => seq
+          }),
+          opts
+        )
+
+      wait =
+        wait_until(fn ->
+          {:ok, {:snapshot, _, bin}} =
+            Daemon.subscribe_conversation("waiter", "1", self(), nil, opts)
+
+          JSON.decode!(bin)["docs"]["live"]["workspace_wait"]
+        end)
+
+      args = %{
+        "action" => "stop_holder",
+        "task_id" => wait["task_id"],
+        "lease_id" => wait["lease_id"]
+      }
+
+      {:ok, receipt} =
+        Daemon.execute_command("waiter", cmd("take", "workspace_wait", "1", args), opts)
+
+      result =
+        wait_until(fn ->
+          {:ok, %{items: items}} = Daemon.scan_entries("waiter", "1", %{"order" => "asc"}, opts)
+          List.first(items)
+        end)
+
+      assert result.data["output"] == "acquired"
+
+      {:ok, %{items: [holder_result]}} =
+        Daemon.scan_entries("holder", "1", %{"order" => "asc"}, opts)
+
+      assert holder_result.data["diagnostic"] == "aborted"
+
+      assert {:ok, ^receipt} =
+               Daemon.execute_command("waiter", cmd("take", "workspace_wait", "1", args), opts)
+
+      assert {:error, {:conflict, "stale_workspace_wait"}} =
+               Daemon.execute_command("waiter", cmd("stale", "workspace_wait", "1", args), opts)
+    end
+
+    test "pending lease wait resumes after coordinator restart without replaying an execution" do
+      %{opts: opts, cwd: cwd, lease: lease} = start_daemon_env()
+      :ok = WorkspaceLease.acquire(lease, {"host", cwd}, {"holder", 1}, self())
+      {:ok, %{seq: seq}} = Daemon.create_session(%{"session_id" => "waiter", "cwd" => cwd}, opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          "waiter",
+          cmd("wait", "user_shell", "1", %{
+            "command" => "printf tick >> count",
+            "include_in_context" => true,
+            "expected_seq" => seq
+          }),
+          opts
+        )
+
+      wait_until(fn ->
+        {:ok, {:snapshot, _, bin}} =
+          Daemon.subscribe_conversation("waiter", "1", self(), nil, opts)
+
+        JSON.decode!(bin)["docs"]["live"]["workspace_wait"]
+      end)
+
+      :ok = H.Session.Supervisor.stop_session(opts[:registry], opts[:runtime_sup], "waiter")
+      {:ok, _} = Daemon.get_session_detail("waiter", opts)
+      :ok = WorkspaceLease.release(lease, {"host", cwd}, {"holder", 1})
+
+      wait_until(fn ->
+        {:ok, %{items: items}} = Daemon.scan_entries("waiter", "1", %{"order" => "asc"}, opts)
+        List.first(items)
+      end)
+
+      assert File.read!(Path.join(cwd, "count")) == "tick"
     end
 
     test "abort command cancels running user_shell, captures partial output, reaps PGID, and releases lease" do
