@@ -20,8 +20,44 @@ export const PaneSplitter = {
       if (width) { e.preventDefault(); resize(width); save(); }
     };
     this.restore = () => resize(this.width);
+
+    // On narrow screens the browser is a drawer, not a second scrolling row.
+    const toggle = document.getElementById(el.dataset.drawer);
+    if (!toggle) return;
+    const sidebar = document.getElementById(toggle.getAttribute("aria-controls"));
+    const narrow = matchMedia("(max-width: 860px)");
+    const controller = this.drawerEvents = new AbortController();
+    const {signal} = controller;
+    let open = false;
+    const render = () => {
+      const showing = narrow.matches && open;
+      pane.toggleAttribute("data-drawer-open", showing);
+      toggle.setAttribute("aria-expanded", String(showing));
+    };
+    const setOpen = (value, returnFocus = false) => {
+      open = value;
+      render();
+      if (value && narrow.matches) sidebar.querySelector("button")?.focus({preventScroll: true});
+      else if (returnFocus) toggle.focus({preventScroll: true});
+    };
+    toggle.addEventListener("click", () => setOpen(!open), {signal});
+    narrow.addEventListener("change", () => setOpen(false), {signal});
+    pane.addEventListener("click", event => {
+      if (event.target.closest("[data-open-review-browser]")) setOpen(true);
+      if (narrow.matches && event.target.closest('[phx-click="review_open"]')) setOpen(false, true);
+    }, {signal});
+    window.addEventListener("keydown", event => {
+      if (open && narrow.matches && event.key === "Escape" && !event.defaultPrevented) {
+        if (document.querySelector("dialog[open], #app-menu:popover-open")) return;
+        event.preventDefault();
+        setOpen(false, true);
+      }
+    }, {signal});
+    this.renderDrawer = render;
+    render();
   },
-  updated() { this.restore(); }
+  updated() { this.restore(); this.renderDrawer?.(); },
+  destroyed() { this.drawerEvents?.abort(); }
 };
 
 // Follow streaming output only while the reader is at the end.
@@ -29,14 +65,17 @@ export const FollowTranscript = {
   mounted() {
     const scroller = this.el, button = document.getElementById("jump-latest");
     let follow = true;
-    const sync = () => { if (follow) scroller.scrollTop = scroller.scrollHeight; button.hidden = follow; };
+    const updateButton = () => { button.hidden = follow; };
+    const sync = () => { if (follow) scroller.scrollTop = scroller.scrollHeight; updateButton(); };
     button.onclick = () => { follow = true; sync(); };
     scroller.onscroll = () => {
       follow = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 32;
-      button.hidden = follow;
+      updateButton();
     };
-    this.observer = new MutationObserver(sync);
-    this.observer.observe(scroller, {subtree: true, childList: true, characterData: true});
+    // Changes to the composer, viewport, transcript or images can move the end.
+    this.observer = new ResizeObserver(sync);
+    this.observer.observe(scroller);
+    this.observer.observe(scroller.firstElementChild);
     sync();
   },
   destroyed() { this.observer.disconnect(); }
@@ -102,8 +141,8 @@ export const InboxBrowser = {
     };
 
     this.onKeydown = event => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (isEditable(event.target)) return;
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (document.querySelector("dialog[open], #app-menu:popover-open") || isEditable(event.target)) return;
 
       if (event.key === "j" || event.key === "ArrowDown") {
         event.preventDefault();

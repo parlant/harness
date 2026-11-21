@@ -14,7 +14,7 @@ defmodule HWeb.InspectorLiveTest do
     {:ok, %{session: other}} = Backend.create_session(%{"cwd" => ctx.projects_dir})
     conn = log_in_owner(ctx.conn, ctx.owner_token)
     {:ok, view, _} = live(conn, "/sessions/#{other.session_id}")
-    assert has_element?(view, "#session-splitter[role=separator]")
+    assert has_element?(view, "#app-menu [data-open-inspector]")
     inspector = find_live_child(view, "feedback-pane")
     assert inspector
     refute inspector.pid == view.pid
@@ -22,7 +22,7 @@ defmodule HWeb.InspectorLiveTest do
     payload = %{
       "action" => "save",
       "note" => "Make this narrower",
-      "target" => "#session-sidebar",
+      "target" => "#session-details",
       "path" => "/sessions/#{other.session_id}",
       "request_id" => "e290a95c-c64d-4111-a107-4858495d3603",
       "image" => Base.encode64(<<255, 216, 255, 224, 255, 217>>)
@@ -45,7 +45,7 @@ defmodule HWeb.InspectorLiveTest do
     refute has_element?(inspector, "#inspect-activity")
     render_hook(inspector, "watch")
     assert has_element?(inspector, "#inspect-activity", "Make this narrower")
-    assert text["text"] =~ "#session-sidebar"
+    assert text["text"] =~ "#session-details"
     assert image["data"] == payload["image"]
     {:ok, feedback, _} = live(conn, "/sessions/#{sid}")
     assert has_element?(feedback, "#entries-stream img[alt='Attached screenshot']")

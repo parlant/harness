@@ -271,8 +271,8 @@ defmodule HWeb.InboxLiveTest do
 
       # Header shows <- Inbox return navigation and Next -> attention pill
       assert has_element?(session_view, "#header-inbox-link.btn-inbox-return", "← Inbox")
-      assert has_element?(session_view, "#next-attention-btn", "1 need attention")
-      assert has_element?(session_view, "#next-attention-btn", "Next →")
+      assert has_element?(session_view, ~s(#next-attention-btn [aria-label="1 need attention"]))
+      assert has_element?(session_view, "#next-attention-btn .next-attention-label", "Next")
 
       # Sidebar/mobile drawer shows All Sessions (Inbox) tree with both sessions
       assert has_element?(
@@ -294,7 +294,11 @@ defmodule HWeb.InboxLiveTest do
         })
 
       wait_until(fn ->
-        has_element?(session_view, "#next-attention-btn.is-error", "Next error →") and
+        has_element?(
+          session_view,
+          "#next-attention-btn.is-error .next-attention-label",
+          "Next error"
+        ) and
           has_element?(
             session_view,
             ~s(#session-sidebar-inbox-tree a[data-session-id="#{s2.session_id}"].is-error)
@@ -308,7 +312,7 @@ defmodule HWeb.InboxLiveTest do
         |> render_click()
         |> follow_redirect(conn, "/sessions/#{s2.session_id}?from=inbox")
 
-      assert has_element?(s2_view, ".header-sid", s2.session_id)
+      assert has_element?(s2_view, "#session-details .session-id-label", s2.session_id)
       assert has_element?(s2_view, "#header-inbox-link.btn-inbox-return", "← Inbox")
 
       # Clicking <- Inbox returns cleanly to /inbox
@@ -399,8 +403,8 @@ defmodule HWeb.InboxLiveTest do
              )
 
       refute has_element?(view, ~s(a[data-session-id^="wrong-"]))
-      assert has_element?(view, "#next-attention-btn", "1 need attention")
-      assert has_element?(view, "#next-attention-btn", "Next →")
+      assert has_element?(view, ~s(#next-attention-btn [aria-label="1 need attention"]))
+      assert has_element?(view, "#next-attention-btn .next-attention-label", "Next")
 
       view |> element("#branches-list a") |> render_click()
       assert_patch(view, ~p"/sessions/current/conversations/1?#{session_filters}")
@@ -420,7 +424,7 @@ defmodule HWeb.InboxLiveTest do
       refute has_element?(returned, ~s(a[data-session-id^="wrong-"]))
     end
 
-    test "updates carousel candidates on tag edits and lets the top bar change and clear filters",
+    test "updates carousel candidates on tag edits and lets Session details change and clear filters",
          %{conn: conn, projects_dir: cwd, owner_token: owner_token, daemon_opts: opts} do
       for {sid, tags} <- [{"current", ["work"]}, {"peer", ["work"]}, {"other", ["personal"]}] do
         assert {:ok, _} = Daemon.create_session(%{session_id: sid, cwd: cwd, tags: tags}, opts)
@@ -432,8 +436,7 @@ defmodule HWeb.InboxLiveTest do
 
       assert has_element?(
                view,
-               "#next-attention-btn[title=\"Jump to peer\"]",
-               "1 need attention"
+               ~s(#next-attention-btn[title="Jump to peer"] [aria-label="1 need attention"])
              )
 
       peer |> form("#session-tags-form", %{tags: "personal, urgent"}) |> render_submit()
@@ -451,8 +454,7 @@ defmodule HWeb.InboxLiveTest do
 
       assert has_element?(
                view,
-               "#next-attention-btn[title=\"Jump to peer\"]",
-               "1 need attention"
+               ~s(#next-attention-btn[title="Jump to peer"] [aria-label="1 need attention"])
              )
 
       refute has_element?(view, ~s(a[data-session-id="other"]))
@@ -466,7 +468,7 @@ defmodule HWeb.InboxLiveTest do
                "All tags"
              )
 
-      assert has_element?(view, "#next-attention-btn", "2 need attention")
+      assert has_element?(view, ~s(#next-attention-btn [aria-label="2 need attention"]))
       assert has_element?(view, ~s(a[data-session-id="other"]))
 
       assert {:ok, _} = Daemon.archive_session("other", %{archived: true}, opts)
@@ -588,7 +590,7 @@ defmodule HWeb.InboxLiveTest do
         })
 
       wait_until(fn ->
-        has_element?(view, ~s(#workspace-sidebar a[data-session-id="live-added-session"]))
+        has_element?(view, ~s(#workspace-sessions a[data-session-id="live-added-session"]))
       end)
     end
   end
@@ -651,14 +653,14 @@ defmodule HWeb.InboxLiveTest do
       # Opening s1: #next-attention-btn is absent because s2 does not need attention
       {:ok, s1_view, _} = live(conn, "/sessions/#{s1.session_id}?from=inbox")
       refute has_element?(s1_view, "#next-attention-btn")
-      assert has_element?(s1_view, "#session-attention-toggle", "Needs attention")
+      assert has_element?(s1_view, "#session-attention-toggle", "Mark as read")
 
       # Toggle attention right from SessionLive header
       s1_view
       |> element("#session-attention-toggle")
       |> render_click()
 
-      assert has_element?(s1_view, "#session-attention-toggle", "Mark attention")
+      assert has_element?(s1_view, "#session-attention-toggle", "Mark for attention")
 
       # Archive s2 from /inbox -> disappears from Inbox, appears in Archived, and Unarchive restores it
       {:ok, inbox_view, _} = live(conn, "/inbox")

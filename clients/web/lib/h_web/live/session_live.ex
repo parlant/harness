@@ -15,8 +15,8 @@ defmodule HWeb.SessionLive do
     ConversationComponents,
     InboxComponents,
     InboxFilter,
-    Transcript,
-    Workbench
+    Layouts,
+    Transcript
   }
 
   @thinking_levels ~w(off minimal low medium high xhigh)
@@ -65,7 +65,6 @@ defmodule HWeb.SessionLive do
         before_entry_id: nil,
         has_more: false,
         run_active?: false,
-        drawer_open?: false,
         composer_text: "",
         attachment_error: nil,
         cwd_missing?: false,
@@ -108,7 +107,6 @@ defmodule HWeb.SessionLive do
            session_id: sid,
            conversation_id: cid,
            provider_filter: nil,
-           drawer_open?: false,
            cwd_missing?: false,
            show_fork_picker?: false,
            picker_error: nil
@@ -201,10 +199,6 @@ defmodule HWeb.SessionLive do
   end
 
   @impl true
-  def handle_event("toggle_drawer", _params, socket) do
-    {:noreply, assign(socket, :drawer_open?, not socket.assigns.drawer_open?)}
-  end
-
   def handle_event("toggle_subsessions", _params, socket) do
     next = not socket.assigns.show_subsessions?
     filter = %{socket.assigns.inbox_filter | subsessions: next}
@@ -628,6 +622,41 @@ defmodule HWeb.SessionLive do
 
     socket |> assign(:transcript, transcript) |> assign(assigns)
   end
+
+  defp profile(session, false, groups, provider_filter, agent) when not is_nil(session) do
+    if session.status != "archived" and Map.get(session, :cwd_exists, true) do
+      active_id = agent["model"]
+      active_provider = model_provider(groups, active_id)
+      provider = provider_filter || active_provider
+      active = Enum.find(groups[active_provider] || [], &(&1.id == active_id))
+      thinking = agent["thinking"] || "medium"
+      model_label = (active && active.name) || active_id || "Choose model"
+
+      provider_label =
+        if active, do: provider_label(active_provider, [active]), else: "No registered provider"
+
+      %{
+        label: "#{model_label} · #{thinking_label(thinking)} reasoning",
+        model_label: model_label,
+        provider_label: provider_label,
+        provider: provider,
+        models: groups[provider] || [],
+        current_visible?: not is_nil(active) and active_provider == provider,
+        unavailable_reason: active && active[:unavailable_reason],
+        thinking: thinking,
+        thinking_label: thinking_label(thinking)
+      }
+    end
+  end
+
+  defp profile(_, _, _, _, _), do: nil
+
+  defp thinking_label("xhigh"), do: "Extra high"
+  defp thinking_label(level), do: String.capitalize(level)
+
+  defp session_title(%{title: title}, _) when is_binary(title) and title != "", do: title
+  defp session_title(%{cwd: cwd}, _) when is_binary(cwd) and cwd != "", do: Path.basename(cwd)
+  defp session_title(_, sid), do: sid
 
   defp model_provider(groups, id) do
     Enum.find_value(groups, fn {provider, models} ->

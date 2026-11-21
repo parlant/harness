@@ -113,7 +113,7 @@ export const Inspector = {
     root.addEventListener("click", e => {
       if (e.target === toggle) { setOpen(true); form.elements.note.focus(); }
       switch (e.target.closest("[data-action]")?.dataset.action) {
-        case "close": finishPick(); setOpen(false); toggle.focus(); break;
+        case "close": finishPick(); setOpen(false); document.getElementById("app-menu-button")?.focus(); break;
         case "pick":
           if (busy || sending) return;
           picking = true; panel.hidden = true;

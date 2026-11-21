@@ -84,6 +84,27 @@ defmodule HWeb.SessionLiveTest do
     assert length(Fake.requests(fake)) == 1
   end
 
+  test "opens in reading mode with a compact header, a separate reply form and on-demand settings",
+       ctx do
+    {:ok, %{session: session}} =
+      Daemon.create_session(%{cwd: ctx.projects_dir, title: "Release notes"}, ctx.daemon_opts)
+
+    {:ok, view, _} =
+      live(log_in_owner(ctx.conn, ctx.owner_token), "/sessions/#{session.session_id}")
+
+    assert has_element?(view, ".app-bar h1", "Release notes")
+    assert has_element?(view, ~s(.app-bar button[popovertarget="app-menu"]))
+    assert has_element?(view, ~s(.app-bar button[data-open-panel="session-details"]))
+    assert has_element?(view, "dialog#session-details #carousel-filter-search-form")
+    refute has_element?(view, ".app-bar select")
+    refute has_element?(view, "#transcript-scroll #composer-form")
+    refute has_element?(view, "details#reply[open]")
+    assert has_element?(view, "details#reply #composer-form textarea[name=content]")
+    assert has_element?(view, ~s(#composer-form [data-open-panel="agent-options"]))
+    assert has_element?(view, "dialog#agent-options #agent-config-form")
+    refute has_element?(view, "#composer-form select")
+  end
+
   test "provider filters the model list without changing the conversation", ctx do
     id = "example-router:vendor/Exact-Model"
 
@@ -551,8 +572,8 @@ defmodule HWeb.SessionLiveTest do
       |> render_click()
       |> follow_redirect(conn, holder_path)
 
-    assert has_element?(holder_view, ".header-sid", holder_sid)
-    assert has_element?(holder_view, ".session-header .badge", "conv ##{holder_cid}")
+    assert has_element?(holder_view, "#session-details .session-id-label", holder_sid)
+    assert has_element?(holder_view, "#session-details .badge", "conv ##{holder_cid}")
     assert has_element?(holder_view, "#header-inbox-link.btn-inbox-return")
 
     {:ok, view, _} = live(conn, waiter_path)

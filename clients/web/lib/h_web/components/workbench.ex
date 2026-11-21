@@ -6,16 +6,23 @@ defmodule HWeb.Workbench do
   """
   use Phoenix.Component
 
+  alias Phoenix.LiveView.JS
+
   attr :id, :string, required: true
   attr :class, :any, default: nil
   attr :sidebar_label, :string, required: true
   attr :main_label, :string, required: true
+  attr :drawer_toggle, :string, default: nil
   slot :sidebar, required: true
   slot :main, required: true
 
   def split(assigns) do
     ~H"""
-    <div id={@id} class={["workbench", @class]}>
+    <div
+      id={@id}
+      class={["workbench", @class]}
+      phx-mounted={JS.ignore_attributes(["style", "data-drawer-open"])}
+    >
       <aside id={@id <> "-sidebar"} class="workbench-sidebar" aria-label={@sidebar_label}>
         {render_slot(@sidebar)}
       </aside>
@@ -31,6 +38,7 @@ defmodule HWeb.Workbench do
         aria-valuenow="272"
         tabindex="0"
         phx-hook="PaneSplitter"
+        data-drawer={@drawer_toggle}
       >
       </div>
       <main id={@id <> "-main"} class="workbench-main" aria-label={@main_label}>

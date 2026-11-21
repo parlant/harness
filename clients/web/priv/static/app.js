@@ -6,6 +6,44 @@ import {Inspector} from "./inspector.js";
   const csrfMeta = document.querySelector("meta[name='csrf-token']");
   const csrfToken = csrfMeta ? csrfMeta.getAttribute("content") : "";
 
+  // Native popovers and modal dialogs keep chrome out of the page's scroll flow.
+  document.addEventListener("click", event => {
+    if (event.defaultPrevented || !(event.target instanceof Element)) return;
+    const target = event.target;
+    const opener = target.closest("[data-open-panel]");
+    const closer = target.closest("[data-close-panel]");
+    const inspector = target.closest("[data-open-inspector]");
+    if (opener) {
+      const panel = document.getElementById(opener.dataset.openPanel);
+      if (panel && !panel.open) panel.showModal();
+    } else if (closer) {
+      closer.closest("dialog")?.close();
+    } else if (target.matches(".app-panel[open]")) {
+      target.close();
+    } else if (inspector) {
+      document.getElementById("inspector-toggle")?.click();
+    }
+    const menu = target.closest("#app-menu");
+    if (menu && target.closest("a, [data-dismiss-menu], [data-open-inspector]")) menu.hidePopover();
+    target.closest("[data-panel-navigate]")?.closest("dialog")?.close();
+  });
+
+  // Mobile keyboards can shrink the visual viewport without resizing 100dvh.
+  // Only retarget the shell while the composer is focused and unzoomed.
+  const viewport = window.visualViewport;
+  const fitKeyboard = () => {
+    const root = document.documentElement;
+    if (viewport?.scale === 1 && document.activeElement?.id === "prompt-input" &&
+        matchMedia("(pointer: coarse)").matches && viewport.height < window.innerHeight - 100) {
+      root.style.setProperty("--screen-height", `${Math.round(viewport.height)}px`);
+    } else {
+      root.style.removeProperty("--screen-height");
+    }
+  };
+  viewport?.addEventListener("resize", fitKeyboard);
+  document.addEventListener("focusin", fitKeyboard);
+  document.addEventListener("focusout", () => requestAnimationFrame(fitKeyboard));
+
   function draftKey(el) {
     const sid = el.dataset.sessionId;
     const cid = el.dataset.conversationId;
@@ -16,6 +54,10 @@ import {Inspector} from "./inspector.js";
     PaneSplitter, FollowTranscript, InboxBrowser, Inspector, ReviewEditor,
     ComposerDraft: {
       mounted() {
+        const reply = this.el.closest("details");
+        this.reply = reply;
+        this.onToggle = () => { if (reply.open) this.scheduleAutogrow?.(); };
+        reply.addEventListener("toggle", this.onToggle);
         const key = this.key = draftKey(this.el);
         if (key && this.el.value === "") {
           try {
@@ -76,9 +118,14 @@ import {Inspector} from "./inspector.js";
             if (this.el.form) {
               this.el.form.requestSubmit(document.getElementById("send-btn"));
             }
-          } else if (event.key === "Escape") {
-            const stopBtn = document.getElementById("stop-btn");
-            if (stopBtn) stopBtn.click();
+          } else if (event.key === "Escape" && !event.isComposing) {
+            event.preventDefault();
+            const stop = document.getElementById("stop-btn");
+            if (stop) stop.click();
+            else {
+              reply.open = false;
+              reply.querySelector("summary")?.focus({preventScroll: true});
+            }
           }
         };
 
@@ -116,6 +163,7 @@ import {Inspector} from "./inspector.js";
       },
 
       destroyed() {
+        this.reply.removeEventListener("toggle", this.onToggle);
         this.resizeObserver?.disconnect();
         if (this.growFrame != null) window.cancelAnimationFrame(this.growFrame);
         if (this.onInput) this.el.removeEventListener("input", this.onInput);

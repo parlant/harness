@@ -6,7 +6,7 @@ defmodule HWeb.InboxLive do
   """
   use HWeb, :live_view
 
-  alias HWeb.{Backend, CatalogState, InboxComponents, InboxFilter}
+  alias HWeb.{Backend, CatalogState, InboxComponents, InboxFilter, Layouts}
 
   @impl true
   def mount(_params, _session, socket) do

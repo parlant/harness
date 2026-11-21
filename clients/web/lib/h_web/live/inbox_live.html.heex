@@ -1,51 +1,54 @@
-<div id="inbox-shell" class="inbox-shell" phx-hook="InboxBrowser">
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark">H</span>
-      <span class="brand-title">Inbox</span>
+<div id="inbox-shell" class="screen inbox-shell" phx-hook="InboxBrowser">
+  <Layouts.app_bar title="Inbox" section={:inbox}>
+    <:actions>
       <span
         :if={@counts.attention > 0}
         id="inbox-topbar-attention"
-        class={["badge mono", if(@counts.error > 0, do: "badge-danger", else: "badge-attention")]}
+        class={[
+          "badge inbox-header-count",
+          if(@counts.error > 0, do: "badge-danger", else: "badge-attention")
+        ]}
       >
         {@counts.attention} attention
       </span>
-      <span :if={@counts.processing > 0} class="badge mono inbox-topbar-running">
-        {@counts.processing} running
-      </span>
-    </div>
-
-    <nav class="topbar-actions" aria-label="Primary navigation">
       <.link
         :if={@next_attention}
         id="inbox-jump-next-btn"
         navigate={InboxFilter.session_path(@next_attention.session_id, @inbox_filter)}
-        class="btn btn-sm btn-primary"
-      >
-        Jump to next →
-      </.link>
-      <.link navigate={~p"/workspaces"} class="btn btn-sm">Workspaces</.link>
-      <.link navigate={~p"/settings/providers"} class="btn btn-sm">Providers</.link>
+        class="bar-button"
+        title="Jump to next session needing attention"
+      >Next →</.link>
       <button
-        id="inbox-refresh-btn"
         type="button"
-        class="btn btn-sm btn-ghost"
-        phx-click="refresh"
+        class="bar-button"
+        aria-haspopup="dialog"
+        aria-controls="inbox-filters"
+        data-open-panel="inbox-filters"
+        aria-label="Inbox filters"
+        title="Inbox filters"
       >
-        Refresh
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" /></svg>
+        <span
+          :if={Map.drop(InboxFilter.params(@inbox_filter), [:filter, :subsessions]) != %{}}
+          class="filter-dot"
+          aria-hidden="true"
+        ></span>
       </button>
-      <form action={~p"/logout"} method="post" class="inline-form">
-        <input type="hidden" name="_csrf_token" value={get_csrf_token()} />
-        <button type="submit" class="btn btn-sm btn-ghost">Sign out</button>
-      </form>
-    </nav>
+    </:actions>
+    <:menu_actions>
+      <button id="inbox-refresh-btn" type="button" phx-click="refresh" data-dismiss-menu>Refresh Inbox</button>
+    </:menu_actions>
+  </Layouts.app_bar>
+
+  <Layouts.panel id="inbox-filters" title="Filter Inbox">
     <InboxComponents.scope_controls
       id="inbox-filter"
       filter={@inbox_filter}
       options={@filter_options}
       clear_path={InboxFilter.inbox_path(%InboxFilter{})}
     />
-  </header>
+    <button type="button" class="btn" data-close-panel>Done</button>
+  </Layouts.panel>
 
   <main class="inbox-main" aria-label="Multi-session inbox">
     <div class="inbox-container">

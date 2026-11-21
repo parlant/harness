@@ -1,40 +1,40 @@
-<div class="review-shell">
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark">H</span>
-      <span class="brand-title">File review</span>
-      <span class="review-cwd mono muted" title={@session.cwd}>{@session.cwd}</span>
-    </div>
-    <nav class="topbar-actions" aria-label="Review navigation">
-      <.link
-        :if={@from_inbox?}
-        navigate={InboxFilter.inbox_path(@inbox_filter)}
-        class="btn btn-sm"
-      >Inbox</.link>
+<div class="screen review-shell">
+  <Layouts.app_bar title="File review" section={:review}>
+    <:leading>
       <.link
         navigate={
           InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, @conversation_id)
         }
         id="review-session-link"
-        class="btn btn-sm"
+        class="bar-button"
         title={@session_id}
-      >
-        ← Session <span class="mono">· {@conversation_id}</span>
-      </.link>
-      <.link
-        navigate={~p"/workspaces?#{%{env_id: @session.env_id, path: @session.cwd}}"}
-        class="btn btn-sm"
-      >Workspaces</.link>
-    </nav>
-  </header>
+      >← Session</.link>
+    </:leading>
+    <:actions>
+      <button
+        id="review-browser-toggle"
+        type="button"
+        class="bar-button"
+        aria-controls="review-sidebar"
+        aria-expanded="false"
+        phx-mounted={JS.ignore_attributes("aria-expanded")}
+      >Browse</button>
+    </:actions>
+    <:menu_actions>
+      <.link :if={@from_inbox?} navigate={InboxFilter.inbox_path(@inbox_filter)}>Return to filtered Inbox</.link>
+      <.link navigate={~p"/workspaces?#{%{env_id: @session.env_id, path: @session.cwd}}"}>Open this workspace</.link>
+    </:menu_actions>
+  </Layouts.app_bar>
 
   <Workbench.split
     id="review"
     class="review-grid"
     sidebar_label="Workspace files"
     main_label="File editor"
+    drawer_toggle="review-browser-toggle"
   >
     <:sidebar>
+      <p class="review-cwd mono muted" title={@session.cwd}>{@session.cwd}</p>
       <div :if={@git_available?} class="review-toolbar" aria-label="Review source">
         <button
           :if={@commit || @tab == "history"}
@@ -155,18 +155,21 @@
       </div>
     </:sidebar>
     <:main>
-      <p :if={!@file} class="review-hint muted">
-        {cond do
-          @tab == "history" ->
-            "Choose a commit to inspect its changes or browse its files."
+      <div :if={!@file} class="review-empty">
+        <p class="review-hint muted">
+          {cond do
+            @tab == "history" ->
+              "Choose a commit to inspect its changes or browse its files."
 
-          @commit ->
-            "Open a file to view this commit, compare with its first parent, or leave a session comment."
+            @commit ->
+              "Open a file to view this commit, compare with its first parent, or leave a session comment."
 
-          true ->
-            "Open a file to view it, compare it with HEAD, or select text and leave a comment in this session."
-        end}
-      </p>
+            true ->
+              "Open a file to view it, compare it with HEAD, or select text and leave a comment in this session."
+          end}
+        </p>
+        <button type="button" class="btn" data-open-review-browser>Browse files</button>
+      </div>
       <div
         :if={@file}
         id="review-editor"
@@ -183,7 +186,7 @@
         data-base={@commit && @commit.base}
       >
         <div class="review-toolbar">
-          <strong class="mono" data-review-path></strong>
+          <strong class="mono review-open-path" data-review-path></strong>
           <button type="button" class="btn btn-sm" data-review="working">{if @commit,
             do: "Commit file",
             else: "Working file"}</button>

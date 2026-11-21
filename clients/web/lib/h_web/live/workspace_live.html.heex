@@ -1,80 +1,52 @@
-<div class="workspace-shell">
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark">H</span>
-      <span class="brand-title">Workspaces &amp; Sessions</span>
-    </div>
-
-    <div class="topbar-actions">
-      <.link id="workspace-inbox-link" navigate={~p"/inbox"} class="btn btn-sm">
-        <span>Inbox</span>
+<div class="screen workspace-shell">
+  <Layouts.app_bar title="Workspaces" section={:workspaces}>
+    <:actions>
+      <.link id="workspace-inbox-link" navigate={~p"/inbox"} class="bar-button" title="Inbox">
+        Inbox
         <span
           :if={@session_counts.attention > 0}
           class={[
-            "badge mono",
+            "badge",
             if(@session_counts.error > 0, do: "badge-danger", else: "badge-attention")
           ]}
-        >
-          {@session_counts.attention}
-        </span>
+        >{@session_counts.attention}</span>
       </.link>
+      <button
+        type="button"
+        class="bar-button"
+        aria-haspopup="dialog"
+        aria-controls="workspace-sessions"
+        data-open-panel="workspace-sessions"
+      >Sessions</button>
+    </:actions>
+    <:menu_actions>
       <button
         id="refresh-sessions-btn"
         type="button"
-        class="btn btn-sm"
         phx-click="refresh_sessions"
-      >
-        Refresh
-      </button>
-      <form action={~p"/logout"} method="post" class="inline-form">
-        <input type="hidden" name="_csrf_token" value={get_csrf_token()} />
-        <button type="submit" class="btn btn-sm btn-ghost">Sign out</button>
-      </form>
+        data-dismiss-menu
+      >Refresh sessions</button>
+    </:menu_actions>
+  </Layouts.app_bar>
+
+  <Layouts.panel id="workspace-sessions" title="All sessions" side>
+    <div id="all-sessions-list">
+      <InboxComponents.workspace_tree
+        id="workspace-sessions-tree"
+        groups={@session_groups}
+        from_inbox={false}
+        compact={true}
+        new_session_event="start_session"
+        review_event="review_workspace"
+        empty_message="No sessions yet. Select a folder and start one."
+      />
     </div>
-  </header>
+  </Layouts.panel>
 
-  <Workbench.split
-    id="workspace"
-    class="workspace-grid"
-    sidebar_label="Session explorer"
-    main_label="Workspace browser"
-  >
-    <:sidebar>
-      <div class="panel-header">
-        <h2>All Sessions</h2>
-        <div class="sidebar-header-actions">
-          <span class="badge mono">{length(@sessions)}</span>
-          <.link navigate={~p"/inbox"} class="btn btn-sm btn-ghost">
-            Inbox
-            <span
-              :if={@session_counts.attention > 0}
-              class={[
-                "badge mono",
-                if(@session_counts.error > 0, do: "badge-danger", else: "badge-attention")
-              ]}
-            >
-              {@session_counts.attention}
-            </span>
-          </.link>
-        </div>
-      </div>
-
-      <div id="all-sessions-list">
-        <InboxComponents.workspace_tree
-          id="workspace-sessions-tree"
-          groups={@session_groups}
-          from_inbox={false}
-          compact={true}
-          new_session_event="start_session"
-          review_event="review_workspace"
-          empty_message="No sessions yet. Select a folder and start one."
-        />
-      </div>
-    </:sidebar>
-    <:main>
+  <main class="workspace-browser screen-scroll" aria-label="Workspace browser">
+    <div class="workspace-content">
       <div class="panel-header">
         <h2>Workspace Browser</h2>
-        <.link navigate={~p"/settings/providers"}>Providers</.link>
         <div class="env-tabs" role="tablist" aria-label="Execution environments">
           <button
             :for={env <- @environments}
@@ -266,6 +238,6 @@
           </li>
         </ul>
       </div>
-    </:main>
-  </Workbench.split>
+    </div>
+  </main>
 </div>

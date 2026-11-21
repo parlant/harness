@@ -2,7 +2,7 @@ defmodule HWeb.ProvidersLive do
   use HWeb, :live_view
 
   alias H.Accounts
-  alias HWeb.Backend
+  alias HWeb.{Backend, Layouts}
 
   @example_model %{
     "vendor/model-id" => %{

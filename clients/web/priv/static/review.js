@@ -346,7 +346,9 @@ export const ReviewEditor = {
     this.buttons.head.hidden = this.el.dataset.git === "false" || !this.sources.head || this.sources.head === "empty";
     this.buttons.diff.hidden = this.el.dataset.git === "false" || !this.sources.head;
     this.buttons.preview.hidden = this.view === "diff" || !this.current?.preview;
-    this.fields.comment.hidden = !this.base || this.el.dataset.readonly === "true";
+    const comment = this.fields.comment;
+    comment.hidden = !this.base || this.el.dataset.readonly === "true";
+    comment.classList.toggle("has-selection", Boolean(this.anchor || comment.elements.note.value.trim()));
     this.buttons.select.disabled = this.dirty || this.pending;
     this.fields.range.textContent = this.anchor ? `Lines ${this.anchor.range[0]}–${this.anchor.range[2]}` : "Select a passage in the saved file.";
     for (const button of this.fields.comment.querySelectorAll('[type="submit"]')) {

@@ -20,7 +20,7 @@ server on loopback, not behind a public proxy. Neither is enabled in prod.
 
 ## Attach a screenshot or file in chat
 
-On desktop or mobile, open a session and choose **Attach file** beside **Send**.
+Open **Reply**, then choose **Attach file** (+) beside the model button.
 Choose one PNG, JPEG or WebP image (up to 2 MiB), or one UTF-8 text file
 (up to 64 KiB). Review the filename and screenshot preview, then add a note
 and press **Send**. **Remove** lets you discard the selection before sending.
@@ -35,7 +35,7 @@ without enabling the development inspector below.
 
 ## Inspect → review → save or ask (development only)
 
-1. Choose **Inspect UI**, then **Pick element**. Hover to outline it, click to
+1. Choose **Main menu → Inspect UI**, then **Pick element**. Hover to outline it, click to
    select it without activating it, or press Escape to cancel. The picker
    records a pathname and element locator, not page HTML or form contents.
 2. **Capture element** uses Region Capture in supported desktop Chromium
@@ -58,23 +58,29 @@ without enabling the development inspector below.
 
 ## Pane composition
 
-`HWeb.Workbench.split/1` is a function component with `:sidebar` and `:main`
-slots, not a registry of pane processes. Workspace and session routes use it;
-`/inbox` (`HWeb.InboxLive`) renders a live working-directory-grouped overview
-backed by `H.Daemon.subscribe_sessions/2` (`:catalog` PubSub) and shared
-`HWeb.InboxComponents` also used by the workspace sidebar and the session
-drawer/switcher. The separator is draggable or keyboard adjustable (arrows,
-Home, End); widths are per view and browser tab. On narrow screens the
-workspace stacks and the session sidebar becomes a drawer. The chat keeps its
-composer in place and follows output only while you're at the bottom; **Latest**
-returns there.
+Authenticated pages share `HWeb.Layouts.app_bar/1`: one row for navigation,
+page title and immediate actions. The main menu opens over the page. The central
+content takes the remaining viewport height and scrolls independently of the bar.
+In a session this is the transcript. **Reply** reveals the message field; **Hide
+reply** tucks it away without clearing text or the selected attachment. The model
+button in the composer opens **Agent settings**. Browsing providers doesn't
+change the conversation; choosing a model or reasoning level applies it directly.
+The transcript follows output while you're at the end. Reading earlier messages
+turns following off; **Latest** returns to the end. **Stop** remains available
+during a run even with the composer closed.
 
-The Inbox and session top bars share working-directory, tag, and text filters.
+Session details (**⋯**), workspace sessions and Inbox filters use native dialog
+panels rather than expanding the header. File review uses `HWeb.Workbench.split/1`
+with `:sidebar` and `:main` slots; the separator is draggable or keyboard adjustable
+(arrows, Home, End). Width is per view and browser tab. On narrow screens **Browse**
+switches between the tree and the editor rather than stacking two scroll areas.
+
+The Inbox filter panel and session details share working-directory, tag, and text filters.
 The filters travel in the URL: opening a row, jumping to the next session
 needing attention, switching branches, and returning to the Inbox preserve
 them. A directory filter matches the exact environment and directory; a tag
 filter matches the full tag. Use **Clear filters** to reset the view. Edit a
-session's tags in the Session section of its sidebar. In the Inbox browser,
+session's tags in **Session details**. In the Inbox browser,
 `n`/`p` cycle through attention rows; Tab moves between controls.
 
 - Put presentation in function components (`ConversationComponents`), and
@@ -124,9 +130,9 @@ requires a provider call.
   empty review session; after it has a transcript entry, the next open creates
   a fresh one. It does not reuse or alter unrelated sessions. Opening files
   does not start an agent run.
-- **Inbox → Files** uses the row's session. **Session → Review files** uses the
-  displayed conversation, including when it is a fork. Return to the session
-  to see the comments in its transcript.
+- **Session → ⋯ → Review files** opens review in the displayed conversation,
+  including a fork. **Inbox → Files** uses the row's session. Return to the
+  session to see comments in its transcript.
 - In a git worktree, **Changes** shows staged, unstaged and untracked files
   under the session directory. **HEAD** and **Diff** compare with the last
   commit, not the index. Deleted text files can be read from HEAD. **All files**

@@ -4,7 +4,7 @@ defmodule HWeb.WorkspaceLive do
   """
   use HWeb, :live_view
 
-  alias HWeb.{Backend, CatalogState, InboxComponents, Workbench}
+  alias HWeb.{Backend, CatalogState, InboxComponents, Layouts}
 
   @impl true
   def mount(params, _session, socket) do

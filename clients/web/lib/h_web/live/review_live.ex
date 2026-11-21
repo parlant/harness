@@ -1,7 +1,7 @@
 defmodule HWeb.ReviewLive do
   use HWeb, :live_view
 
-  alias HWeb.{Backend, InboxFilter, Workbench}
+  alias HWeb.{Backend, InboxFilter, Layouts, Workbench}
 
   @refresh_ms 2500
   @max_open_dirs 48
