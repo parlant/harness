@@ -237,11 +237,8 @@ defmodule HWeb.SessionLiveTest do
 
     view
     |> form("#composer-form", %{content: "Steer now"})
-    |> render_change()
-
-    view
-    |> element("#steer-btn")
-    |> render_click()
+    |> put_submitter("#steer-btn")
+    |> render_submit()
 
     send(pid1, {:release, gate1})
     assert_receive {:gate_entered, ^gate2, _pid2}, 2_000

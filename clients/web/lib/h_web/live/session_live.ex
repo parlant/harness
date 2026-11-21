@@ -11,6 +11,7 @@ defmodule HWeb.SessionLive do
   alias HWeb.{
     Backend,
     CatalogState,
+    ComposerAttachment,
     ConversationComponents,
     InboxComponents,
     InboxFilter,
@@ -66,6 +67,7 @@ defmodule HWeb.SessionLive do
         run_active?: false,
         drawer_open?: false,
         composer_text: "",
+        attachment_error: nil,
         cwd_missing?: false,
         show_fork_picker?: false,
         picker_env_id: "host",
@@ -75,6 +77,7 @@ defmodule HWeb.SessionLive do
         picker_error: nil,
         error_banner: nil
       )
+      |> allow_upload(:attachment, ComposerAttachment.upload_options())
       |> stream_configure(:entries, dom_id: &"entry-#{&1["id"]}")
       |> load_catalog()
       |> load_initial(session_id, cid)
@@ -100,6 +103,7 @@ defmodule HWeb.SessionLive do
         {:noreply,
          socket
          |> unsubscribe_current()
+         |> reset_composer()
          |> assign(
            session_id: sid,
            conversation_id: cid,
@@ -116,6 +120,7 @@ defmodule HWeb.SessionLive do
         {:noreply,
          socket
          |> unsubscribe_current()
+         |> reset_composer()
          |> assign(conversation_id: cid, provider_filter: nil)
          |> recompute_catalog_assigns()
          |> load_conversation(sid, cid)}
@@ -357,52 +362,43 @@ defmodule HWeb.SessionLive do
     end
   end
 
-  def handle_event("composer_change", %{"content" => content}, socket) do
-    {:noreply, assign(socket, :composer_text, content)}
+  def handle_event("composer_change", %{"content" => content} = params, socket)
+      when is_binary(content) do
+    socket = assign(socket, :composer_text, content)
+
+    socket =
+      if params["_target"] == ["attachment"],
+        do: assign(socket, :attachment_error, nil),
+        else: socket
+
+    {:noreply, socket}
+  end
+
+  def handle_event("remove_attachment", %{"ref" => ref}, socket) do
+    {:noreply, socket |> remove_attachment(ref) |> assign(:attachment_error, nil)}
   end
 
   def handle_event("submit", params, socket) do
-    content = String.trim(params["content"] || socket.assigns.composer_text || "")
-    mode = params["mode"]
+    text = non_empty(params["content"]) || ""
+    steer? = params["mode"] == "steer"
 
-    if content == "" do
-      {:noreply, socket}
+    with true <- params["destination"] == composer_destination(socket.assigns),
+         {:ok, content} <- composer_content(socket, text) do
+      if content == "" do
+        {:noreply, socket}
+      else
+        args = %{
+          "type" => "input",
+          "content" => content,
+          "when_busy" => if(steer?, do: "steer", else: "follow_up"),
+          "when_idle" => if(steer?, do: "reject", else: "start")
+        }
+
+        send_submit(socket, args, params["request_id"], clear_composer?: true)
+      end
     else
-      args =
-        if mode == "steer" do
-          %{
-            "type" => "input",
-            "content" => content,
-            "when_busy" => "steer",
-            "when_idle" => "reject"
-          }
-        else
-          %{
-            "type" => "input",
-            "content" => content,
-            "when_busy" => "follow_up",
-            "when_idle" => "start"
-          }
-        end
-
-      send_submit(socket, args, params["request_id"], clear_composer?: true)
-    end
-  end
-
-  def handle_event("steer", params, socket) do
-    content = String.trim(params["content"] || socket.assigns.composer_text || "")
-
-    if content == "" do
-      {:noreply, assign(socket, :error_banner, "Enter a message before steering.")}
-    else
-      args = %{
-        "type" => "input",
-        "content" => content,
-        "when_busy" => "steer",
-        "when_idle" => "reject"
-      }
-
-      send_submit(socket, args, params["request_id"], clear_composer?: true)
+      false -> {:noreply, socket}
+      {:error, message} -> {:noreply, assign(socket, :attachment_error, message)}
     end
   end
 
@@ -827,6 +823,46 @@ defmodule HWeb.SessionLive do
     CatalogState.normalize_parent(raw_parent)
   end
 
+  defp composer_destination(%{session_id: sid, conversation_id: cid}), do: "#{sid}:#{cid}"
+
+  defp composer_content(socket, text) do
+    case socket.assigns.uploads.attachment do
+      %{entries: [], errors: []} ->
+        {:ok, text}
+
+      %{entries: [%{valid?: true, done?: true, cancelled?: false} = entry], errors: []} ->
+        # Keep the upload available if the daemon rejects the message (e.g. an
+        # idle steer). The upload process cleans up the temp file on removal.
+        with {:ok, block} <-
+               consume_uploaded_entry(socket, entry, fn meta ->
+                 {:postpone, ComposerAttachment.read(meta, entry)}
+               end) do
+          prefix = if text == "", do: [], else: [%{"type" => "text", "text" => text}]
+          {:ok, prefix ++ [block]}
+        end
+
+      _ ->
+        {:error, "Finish uploading or remove the attachment before sending."}
+    end
+  end
+
+  defp remove_attachment(socket, ref) do
+    if Enum.any?(socket.assigns.uploads.attachment.entries, &(&1.ref == ref and !&1.cancelled?)),
+      do: cancel_upload(socket, :attachment, ref),
+      else: socket
+  end
+
+  defp reset_composer(socket) do
+    Enum.reduce(socket.assigns.uploads.attachment.entries, socket, fn entry, acc ->
+      remove_attachment(acc, entry.ref)
+    end)
+    |> assign(composer_text: "", attachment_error: nil)
+  end
+
+  defp upload_error(:too_large), do: "Choose an image up to 2 MiB or a text file up to 64 KiB."
+  defp upload_error(:too_many_files), do: "Attach one file at a time."
+  defp upload_error(_), do: "Upload failed. Remove the attachment and choose it again."
+
   defp send_submit(socket, args, request_id, opts) do
     envelope = build_envelope(socket, "submit", args, request_id)
 
@@ -846,7 +882,7 @@ defmodule HWeb.SessionLive do
         socket =
           if Keyword.get(opts, :clear_composer?, false) do
             socket
-            |> assign(:composer_text, "")
+            |> reset_composer()
             |> push_event("clear_draft", %{
               session_id: socket.assigns.session_id,
               conversation_id: socket.assigns.conversation_id

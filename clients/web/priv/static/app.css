@@ -793,6 +793,35 @@ body {
   flex-wrap: wrap;
 }
 
+.composer-attach {
+  position: relative;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.composer-attach:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-file-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.composer-attachment {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.composer-attachment-preview { max-width: 6rem; max-height: 3rem; object-fit: contain; }
+.composer-attachment progress { max-width: 100%; }
+.attachment-error { margin: 0; color: var(--warn); font-size: 13px; }
+
 .composer-hint {
   font-size: 12px;
 }
@@ -853,6 +882,9 @@ body {
   .composer-actions {
     justify-content: flex-end;
   }
+
+  .composer-actions .composer-hint { display: none; }
+  .composer-attach { min-height: 44px; }
 }
 
 /* A non-modal tool window: everything outside it remains usable. */

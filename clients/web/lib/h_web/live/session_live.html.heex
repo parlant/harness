@@ -674,6 +674,7 @@
         phx-change="composer_change"
         class="composer"
       >
+        <input type="hidden" name="destination" value={composer_destination(assigns)} />
         <textarea
           id="prompt-input"
           name="content"
@@ -690,18 +691,72 @@
           class="composer-input"
         >{@composer_text}</textarea>
 
+        <div
+          :for={entry <- @uploads.attachment.entries}
+          :if={not entry.cancelled?}
+          id={"composer-attachment-#{entry.ref}"}
+          class="composer-attachment"
+        >
+          <.live_img_preview
+            :if={entry.valid? && ComposerAttachment.image_name?(entry.client_name)}
+            entry={entry}
+            class="composer-attachment-preview"
+            alt="Selected image preview"
+          />
+          <span>{entry.client_name}</span>
+          <progress
+            :if={entry.preflighted? && !entry.done?}
+            max="100"
+            value={entry.progress}
+            aria-label="Uploading attachment"
+          />
+          <button
+            type="button"
+            class="btn btn-sm"
+            phx-click="remove_attachment"
+            phx-value-ref={entry.ref}
+            aria-label="Remove attachment"
+          >
+            Remove
+          </button>
+          <p
+            :for={error <- upload_errors(@uploads.attachment, entry)}
+            role="alert"
+            class="attachment-error"
+          >
+            {upload_error(error)}
+          </p>
+        </div>
+        <p
+          :for={error <- upload_errors(@uploads.attachment)}
+          role="alert"
+          class="attachment-error"
+        >
+          {upload_error(error)}
+        </p>
+        <p :if={@attachment_error} role="alert" class="attachment-error">{@attachment_error}</p>
+
         <div class="composer-actions">
+          <label class="btn composer-attach">
+            Attach file
+            <.live_file_input
+              upload={@uploads.attachment}
+              class="composer-file-input"
+              aria-label="Attach file"
+            />
+          </label>
           <span class="composer-hint muted">Shift+Enter to send · Enter for newline</span>
+          <button id="send-btn" type="submit" class="btn btn-primary">Send</button>
           <button
             :if={@run_active?}
             id="steer-btn"
-            type="button"
+            type="submit"
+            name="mode"
+            value="steer"
             class="btn btn-warn"
-            phx-click="steer"
           >
             Steer
           </button>
-          <button id="send-btn" type="submit" class="btn btn-primary">Send</button>
         </div>
       </form>
     </div>

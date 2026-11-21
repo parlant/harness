@@ -18,7 +18,7 @@ defmodule HWeb.Endpoint do
   ]
 
   # Monaco positions lines with style attributes; stylesheet elements still require the nonce.
-  @csp "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; script-src 'self'; worker-src 'self'; style-src-attr 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'"
+  @csp "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; script-src 'self'; worker-src 'self'; style-src-attr 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'"
 
   socket("/live", Phoenix.LiveView.Socket,
     websocket: [connect_info: [session: @session_options]],

@@ -16,7 +16,7 @@ import {Inspector} from "./inspector.js";
     PaneSplitter, FollowTranscript, InboxBrowser, Inspector, ReviewEditor,
     ComposerDraft: {
       mounted() {
-        const key = draftKey(this.el);
+        const key = this.key = draftKey(this.el);
         if (key && this.el.value === "") {
           try {
             const saved = window.localStorage.getItem(key);
@@ -74,9 +74,7 @@ import {Inspector} from "./inspector.js";
           if (event.key === "Enter" && event.shiftKey && !event.isComposing) {
             event.preventDefault();
             if (this.el.form) {
-              this.el.form.dispatchEvent(
-                new Event("submit", { bubbles: true, cancelable: true })
-              );
+              this.el.form.requestSubmit(document.getElementById("send-btn"));
             }
           } else if (event.key === "Escape") {
             const stopBtn = document.getElementById("stop-btn");
@@ -104,6 +102,16 @@ import {Inspector} from "./inspector.js";
       },
 
       updated() {
+        const key = draftKey(this.el);
+        if (key !== this.key) {
+          this.key = key;
+          this.el.value = "";
+          try {
+            if (key) this.el.value = window.localStorage.getItem(key) || "";
+          } catch (_err) {
+            // Ignore localStorage access errors.
+          }
+        }
         this.scheduleAutogrow?.();
       },
 

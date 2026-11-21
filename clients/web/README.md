@@ -18,7 +18,22 @@ Restart for configuration, dependency, supervision
 or engine changes. The reloader and inspector are development tools: keep the
 server on loopback, not behind a public proxy. Neither is enabled in prod.
 
-## Inspect → review → save or ask
+## Attach a screenshot or file in chat
+
+On desktop or mobile, open a session and choose **Attach file** beside **Send**.
+Choose one PNG, JPEG or WebP image (up to 2 MiB), or one UTF-8 text file
+(up to 64 KiB). Review the filename and screenshot preview, then add a note
+and press **Send**. **Remove** lets you discard the selection before sending.
+If your phone saves HEIC photos, use a screenshot or export to JPEG first.
+
+For UI feedback, include your device/browser, what you did and what you expected.
+Sending adds the attachment to conversation history and submits it to the agent;
+use a vision-capable model for screenshots. Remove private information before
+sending. The file is not copied into the workspace. Switching conversations or
+reloading discards the unsent attachment. This works in the bundled Web UI
+without enabling the development inspector below.
+
+## Inspect → review → save or ask (development only)
 
 1. Choose **Inspect UI**, then **Pick element**. Hover to outline it, click to
    select it without activating it, or press Escape to cancel. The picker
@@ -83,7 +98,7 @@ workbench supports two resizable regions, not arbitrary drag-to-dock tabs.
 The session transcript shows user messages and assistant replies. Assistant
 replies render Markdown while streaming and after commit; fenced `console`
 and shell blocks use a scrollable terminal style and are never executed.
-User text stays plain, and existing screenshot attachments still display.
+User text stays plain, and attached screenshots display in the transcript.
 Markdown does not render raw HTML or load images from URLs.
 
 Consecutive tool and system activity appears in one line between messages,
