@@ -239,16 +239,30 @@ defmodule H.ExecutionEnv.Host.Exec do
     end
   end
 
+  defp signal_pgid(os_pid, sig) when is_integer(os_pid) do
+    cond do
+      exe =
+          System.find_executable("kill") ||
+            Enum.find(["/bin/kill", "/usr/bin/kill"], &File.regular?/1) ->
+        System.cmd(exe, ["-#{sig}", "--", "-#{os_pid}"], stderr_to_stdout: true)
+
+      true ->
+        System.cmd("/bin/sh", ["-c", "kill -#{sig} -#{os_pid}"], stderr_to_stdout: true)
+    end
+  catch
+    :error, :enoent -> {"", 1}
+  end
+
   defp reap_pgid(nil), do: :ok
 
   defp reap_pgid(os_pid) when is_integer(os_pid) do
     if pgid_alive?(os_pid) do
-      System.cmd("/bin/kill", ["-TERM", "--", "-#{os_pid}"], stderr_to_stdout: true)
+      signal_pgid(os_pid, "TERM")
 
       if wait_pgid_exit(os_pid, @term_grace_ms) do
         :ok
       else
-        System.cmd("/bin/kill", ["-KILL", "--", "-#{os_pid}"], stderr_to_stdout: true)
+        signal_pgid(os_pid, "KILL")
         wait_pgid_exit(os_pid, 200)
         :ok
       end
@@ -258,7 +272,7 @@ defmodule H.ExecutionEnv.Host.Exec do
   end
 
   defp pgid_alive?(os_pid) do
-    case System.cmd("/bin/kill", ["-0", "--", "-#{os_pid}"], stderr_to_stdout: true) do
+    case signal_pgid(os_pid, "0") do
       {_, 0} -> true
       _ -> false
     end
