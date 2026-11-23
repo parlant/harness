@@ -167,6 +167,11 @@ defmodule H.Storage.File do
     end
   end
 
+  @impl true
+  def list_entries(%__MODULE__{} = state) do
+    {:ok, Engine.list_entries(state), state}
+  end
+
   # Option validation & directory setup
 
   defp fetch_dir(opts) do

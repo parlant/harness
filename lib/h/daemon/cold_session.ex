@@ -8,7 +8,7 @@ defmodule H.Daemon.ColdSession do
   `H.Catalog` archive state.
   """
 
-  alias H.{Document, Storage, Task}
+  alias H.{Document, Session.Tree, Storage, Task}
   alias H.Session.Server.{Recovery, State}
 
   def detail(entry, opts, wire_session_fn, wire_conversation_fn) do
@@ -40,6 +40,36 @@ defmodule H.Daemon.ColdSession do
            session: wire_session_fn.(session_entry),
            conversations: Enum.map(sorted_convs, wire_conversation_fn),
            tasks: Enum.map(tasks, &Task.to_wire/1)
+         }}
+      end
+    end)
+  end
+
+  def tree(entry, opts, wire_session_fn) do
+    with_cold_store(entry, opts, fn store ->
+      with {:ok, bootstrap, store} <- Storage.read_bootstrap(store),
+           {:ok, entries, _store} <- Storage.list_entries(store) do
+        conversations =
+          bootstrap.conversations ||
+            %{1 => %{id: 1, parent: nil, owner: :ownerless, entry_ids: []}}
+
+        meta = bootstrap.session_meta || %{}
+
+        session_entry =
+          cond do
+            Map.has_key?(meta, :title) -> %{entry | title: meta.title}
+            Map.has_key?(meta, "title") -> %{entry | title: meta["title"]}
+            true -> entry
+          end
+
+        {wired_convs, nodes, truncated} = Tree.build_native(conversations, entries)
+
+        {:ok,
+         %{
+           session: wire_session_fn.(session_entry),
+           conversations: wired_convs,
+           nodes: nodes,
+           truncated: truncated
          }}
       end
     end)

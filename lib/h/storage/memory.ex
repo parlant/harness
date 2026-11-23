@@ -70,4 +70,9 @@ defmodule H.Storage.Memory do
       {:ok, page, state}
     end
   end
+
+  @impl true
+  def list_entries(%__MODULE__{} = state) do
+    {:ok, Engine.list_entries(state), state}
+  end
 end

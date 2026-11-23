@@ -573,6 +573,8 @@ defmodule H.SessionServerTest do
       def get_doc(s, addr, opts), do: H.Storage.Memory.get_doc(s, addr, opts)
       @impl true
       def scan_entries(s, q), do: H.Storage.Memory.scan_entries(s, q)
+      @impl true
+      def list_entries(s), do: H.Storage.Memory.list_entries(s)
 
       @impl true
       def commit(%{seq: 0} = s, batches), do: H.Storage.Memory.commit(s, batches)

@@ -6,6 +6,8 @@ defmodule HWeb.Backend do
 
   @callback list_environments(keyword()) :: [map()]
   @callback browse_workspace(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  @callback list_files(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  @callback list_session_files(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback list_sessions(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
   @callback create_session(map(), keyword()) ::
               {:ok, %{session: map(), seq: non_neg_integer()}} | {:error, term()}
@@ -17,6 +19,7 @@ defmodule HWeb.Backend do
   @callback save_review_file(String.t(), String.t(), String.t(), String.t(), keyword()) ::
               {:ok, String.t()} | {:error, term()}
   @callback get_session_detail(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  @callback get_session_tree(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback scan_entries(String.t(), term(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback list_models(keyword()) :: [map()]
   @callback execute_command(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -48,6 +51,11 @@ defmodule HWeb.Backend do
 
   def browse_workspace(params \\ %{}, opts \\ []), do: impl().browse_workspace(params, opts)
 
+  def list_files(params \\ %{}, opts \\ []), do: impl().list_files(params, opts)
+
+  def list_session_files(session_id, params \\ %{}, opts \\ []),
+    do: impl().list_session_files(session_id, params, opts)
+
   def list_sessions(params \\ %{}, opts \\ []), do: impl().list_sessions(params, opts)
 
   def create_session(params, opts \\ []), do: impl().create_session(params, opts)
@@ -63,6 +71,8 @@ defmodule HWeb.Backend do
     do: impl().save_review_file(sid, path, revision, text, opts)
 
   def get_session_detail(session_id, opts \\ []), do: impl().get_session_detail(session_id, opts)
+
+  def get_session_tree(session_id, opts \\ []), do: impl().get_session_tree(session_id, opts)
 
   def scan_entries(session_id, conversation_id, params \\ %{}, opts \\ []),
     do: impl().scan_entries(session_id, conversation_id, params, opts)

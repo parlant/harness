@@ -42,6 +42,11 @@ defmodule H.Session.Server do
     GenServer.call(server, :get_detail)
   end
 
+  @spec get_tree(GenServer.server()) :: {:ok, map()} | {:error, term()}
+  def get_tree(server) do
+    GenServer.call(server, :get_tree)
+  end
+
   @spec get_seq(GenServer.server()) :: {:ok, non_neg_integer()}
   def get_seq(server) do
     GenServer.call(server, :get_seq)
@@ -141,6 +146,27 @@ defmodule H.Session.Server do
     }
 
     {:reply, {:ok, detail}, state}
+  end
+
+  def handle_call(:get_tree, _from, state) do
+    case Storage.list_entries(state.store) do
+      {:ok, entries, next_store} ->
+        {conversations, nodes, truncated} =
+          H.Session.Tree.build_native(state.conversations, entries)
+
+        tree = %{
+          session_meta: state.session_meta,
+          cwd_exists: State.cwd_available?(state),
+          conversations: conversations,
+          nodes: nodes,
+          truncated: truncated
+        }
+
+        {:reply, {:ok, tree}, %{state | store: next_store}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call(:idle, _from, state), do: {:reply, not State.session_active?(state), state}

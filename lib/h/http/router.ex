@@ -281,6 +281,21 @@ defmodule H.HTTP.Router do
     end
   end
 
+  get "/api/v1/sessions/:sid/tree" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :get_session_tree, [sid, daemon_opts]) do
+      {:ok, tree_map} ->
+        send_json(conn, 200, tree_map)
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "session not found"})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
   get "/api/v1/sessions/:sid/files" do
     conn = fetch_query_params(conn)
     {daemon, daemon_opts} = daemon_config(conn)

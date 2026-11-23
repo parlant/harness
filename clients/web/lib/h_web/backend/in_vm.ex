@@ -26,6 +26,16 @@ defmodule HWeb.Backend.InVM do
   end
 
   @impl HWeb.Backend
+  def list_files(params \\ %{}, opts \\ []) do
+    H.Daemon.list_files(params, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
+  def list_session_files(session_id, params \\ %{}, opts \\ []) do
+    H.Daemon.list_session_files(session_id, params, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
   def list_sessions(params \\ %{}, opts \\ []) do
     H.Daemon.list_sessions(params, daemon_opts(opts))
   end
@@ -54,6 +64,11 @@ defmodule HWeb.Backend.InVM do
   @impl HWeb.Backend
   def get_session_detail(session_id, opts \\ []) do
     H.Daemon.get_session_detail(session_id, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
+  def get_session_tree(session_id, opts \\ []) do
+    H.Daemon.get_session_tree(session_id, daemon_opts(opts))
   end
 
   @impl HWeb.Backend

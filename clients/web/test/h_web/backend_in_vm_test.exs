@@ -90,6 +90,24 @@ defmodule HWeb.BackendInVMTest do
     assert {:ok, %{session: ^listed, conversations: [%{id: "1"}]}} =
              InVM.get_session_detail(sid)
 
+    assert {:ok,
+            %{
+              session: %{session_id: ^sid},
+              conversations: [%{id: "1", leaf_entry_id: nil}],
+              nodes: [],
+              truncated: false
+            }} = InVM.get_session_tree(sid)
+
+    File.write!(Path.join(projects_dir, "demo.txt"), "hello\n")
+
+    assert {:ok, %{entries: files}} =
+             InVM.list_files(%{"env_id" => "host", "cwd" => projects_dir})
+
+    assert Enum.any?(files, &(&1.path == "demo.txt"))
+
+    assert {:ok, %{entries: session_files}} = InVM.list_session_files(sid, %{})
+    assert Enum.any?(session_files, &(&1.path == "demo.txt"))
+
     assert {:ok, %{items: [], next_cursor: nil}} = InVM.scan_entries(sid, "1", %{})
 
     assert {:ok, {:snapshot, _seq, _bin}} =

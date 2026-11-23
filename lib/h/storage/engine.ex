@@ -150,6 +150,12 @@ defmodule H.Storage.Engine do
     end
   end
 
+  def list_entries(state) do
+    state.entries
+    |> Map.values()
+    |> Enum.sort_by(& &1.id)
+  end
+
   def max_seen_id(state) do
     [
       Map.keys(state.conversations),

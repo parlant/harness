@@ -1022,6 +1022,69 @@ defmodule H.Daemon do
     end
   end
 
+  @doc """
+  Returns a bounded, read-only session-wide entry tree across all conversations
+  and branches without waking unloaded archived sessions.
+  """
+  @spec get_session_tree(String.t(), keyword()) ::
+          {:ok, %{session: map(), conversations: [map()], nodes: [map()], truncated: boolean()}}
+          | {:error, :not_found | {:quarantined, String.t()} | term()}
+  def get_session_tree(session_id, opts \\ [])
+      when is_binary(session_id) and is_list(opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- Validation.ensure_not_quarantined(entry) do
+      registry = Keyword.get(opts, :registry, @default_registry)
+
+      cond do
+        entry.status == "archived" ->
+          H.Archive.tree(entry, opts)
+
+        Map.get(entry, :archived) == true and
+            lookup_live_server(registry, session_id) == :not_running ->
+          ColdSession.tree(entry, opts, &wire_session(&1, opts))
+
+        true ->
+          live_session_tree(entry, opts, table)
+      end
+    end
+  end
+
+  defp live_session_tree(entry, opts, table) do
+    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts),
+         {:ok, tree} <- Server.get_tree(server) do
+      session_id = entry.session_id
+
+      session_entry =
+        case Catalog.get_session(session_id, table) do
+          {:ok, latest} -> latest
+          _ -> entry
+        end
+        |> then(fn current ->
+          if is_map(tree.session_meta) and Map.has_key?(tree.session_meta, :title) do
+            %{current | title: tree.session_meta.title}
+          else
+            current
+          end
+        end)
+
+      wired_session =
+        session_entry
+        |> wire_session(opts)
+        |> Map.put(:cwd_exists, Map.get(tree, :cwd_exists, true))
+
+      {:ok,
+       %{
+         session: wired_session,
+         conversations: tree.conversations,
+         nodes: tree.nodes,
+         truncated: tree.truncated
+       }}
+    end
+  end
+
   @doc "Scans cursor-paged raw transcript entries for a conversation."
   @spec scan_entries(String.t(), term(), map(), keyword()) ::
           {:ok, %{items: [map()], next_cursor: nil | String.t()}}

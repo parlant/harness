@@ -62,6 +62,7 @@ defmodule H.Storage do
   @callback scan_entries(state :: term(), entry_query()) ::
               {:ok, %{items: [map()], next_cursor: nil | id()}, state :: term()}
               | {:error, term()}
+  @callback list_entries(state :: term()) :: {:ok, [map()], state :: term()} | {:error, term()}
 
   @spec open(module(), keyword()) :: {:ok, t()} | {:error, term()}
   def open(mod, opts \\ []) when is_atom(mod) and is_list(opts) do
@@ -110,5 +111,12 @@ defmodule H.Storage do
   def scan_entries({mod, state}, query) when is_map(query) do
     with {:ok, page, next_state} <- mod.scan_entries(state, query),
          do: {:ok, page, {mod, next_state}}
+  end
+
+  @doc "Lists all persisted session entries across conversations in ascending ID order."
+  @spec list_entries(t()) :: {:ok, [map()], t()} | {:error, term()}
+  def list_entries({mod, state}) do
+    with {:ok, entries, next_state} <- mod.list_entries(state),
+         do: {:ok, entries, {mod, next_state}}
   end
 end

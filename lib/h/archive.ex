@@ -1,7 +1,7 @@
 defmodule H.Archive do
   @moduledoc "Read-only imported session snapshots, stored separately from live session WALs."
 
-  alias H.{Catalog, Schema}
+  alias H.{Catalog, Schema, Session.Tree}
 
   @kinds ~w(user assistant tool_result user_shell compaction system)
   @page_bytes 12 * 1024 * 1024
@@ -132,6 +132,43 @@ defmodule H.Archive do
         end)
 
       {:ok, %{session: Catalog.wire_session(current, opts), conversations: branches, tasks: []}}
+    end)
+  end
+
+  def tree(entry, opts) do
+    read(entry, opts, fn fd, entries, conversations, current ->
+      all_ids_asc = entries |> Map.keys() |> Enum.sort()
+      {selected_ids, truncated?} = Tree.take_latest(all_ids_asc)
+
+      locations =
+        Enum.map(selected_ids, fn id ->
+          {_, _, offset, size} = entries[id]
+          {offset, size}
+        end)
+
+      decoded_result =
+        case locations do
+          [] ->
+            {:ok, []}
+
+          _ ->
+            with {:ok, bins} <- :file.pread(fd, locations) do
+              {:ok, Enum.map(bins, &JSON.decode!/1)}
+            end
+        end
+
+      with {:ok, decoded_entries} <- decoded_result do
+        {wired_convs, nodes, truncated} =
+          Tree.build_archive(conversations, entries, decoded_entries, truncated?)
+
+        {:ok,
+         %{
+           session: Catalog.wire_session(current, opts),
+           conversations: wired_convs,
+           nodes: nodes,
+           truncated: truncated
+         }}
+      end
     end)
   end
 
