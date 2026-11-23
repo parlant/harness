@@ -236,7 +236,7 @@ defmodule H.Session.Server.State do
       Enum.find(sorted, fn task ->
         task.kind in ["generation", "compaction"] and task.status in ["pending", "running"] and
           ((task.checkpoint["retry_count"] || 0) > 0 or
-             get_in(task.checkpoint, ["retry", "kind"]) == "pool_wait")
+             is_map(task.checkpoint["wait"]))
       end)
 
     cond do
@@ -264,12 +264,17 @@ defmodule H.Session.Server.State do
   end
 
   defp retry_label(task, waiting?) do
-    case task.checkpoint["retry"] do
-      %{"kind" => "pool_wait", "code" => code} ->
+    case {task.checkpoint["wait"], task.checkpoint["retry"]} do
+      {%{} = wait, _} ->
+        title = wait["title"] || "Waiting"
+        code = wait["code"]
         phase = if waiting?, do: "waiting", else: "checking"
-        "Pool wait · #{code} · #{phase}"
 
-      %{"attempt" => attempt, "max_attempts" => limit, "code" => code, "delay_ms" => delay} ->
+        if is_binary(code) and code != "",
+          do: "#{title} · #{code} · #{phase}",
+          else: "#{title} · #{phase}"
+
+      {_, %{"attempt" => attempt, "max_attempts" => limit, "code" => code, "delay_ms" => delay}} ->
         phase = if waiting?, do: "waiting #{ceil(delay / 1_000)}s", else: "requesting"
         "Retry #{attempt}/#{limit} · #{code} · #{phase}"
 

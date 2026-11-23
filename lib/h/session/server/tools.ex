@@ -389,7 +389,8 @@ defmodule H.Session.Server.Tools do
             "submission_ids" => existing_sub_ids ++ steer_sub_ids
           })
           |> Map.delete("tool_task_ids")
-          |> Map.delete("retry"),
+          |> Map.delete("retry")
+          |> Map.delete("wait"),
         updated_at: now
     }
 

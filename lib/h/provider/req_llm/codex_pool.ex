@@ -160,15 +160,8 @@ defmodule H.Provider.ReqLLM.CodexPool do
         if Code.ensure_loaded?(policy.module) and
              function_exported?(policy.module, :unavailable, 2) do
           case policy_callback(policy.module, :unavailable, [model_id, policy.sources]) do
-            %{reason: diag_reason} = diag
-            when diag_reason in [
-                   :credits_disabled,
-                   :quota_exhausted,
-                   :workspace_blocked,
-                   :auth_cooldown,
-                   :checking_usage
-                 ] ->
-              format_pool_diagnostic(diag)
+            diag when is_map(diag) ->
+              format_policy_unavailability(diag)
 
             _ ->
               {:error, :credential_unavailable}
@@ -182,94 +175,73 @@ defmodule H.Provider.ReqLLM.CodexPool do
     end
   end
 
-  defp format_pool_diagnostic(%{reason: reason} = diag) do
-    now_ms = System.system_time(:millisecond)
-    wait_until_ms = if is_integer(diag[:wait_until_ms]), do: diag[:wait_until_ms], else: nil
-    {code, message} = pool_diagnostic_text(reason, wait_until_ms, now_ms)
+  defp format_policy_unavailability(diag) do
+    code = sanitize_code(Map.get(diag, :code))
+    message = sanitize_text(Map.get(diag, :message), 500)
 
-    if diag[:wait] == true do
-      {:error,
-       %{
-         code: code,
-         message: message,
-         retryable: true,
-         pool_wait: true,
-         pool_provider: "openai_codex",
-         wait_until_ms: wait_until_ms,
-         retry_after_ms: pool_fallback_delay_ms(reason, wait_until_ms, now_ms)
-       }}
+    if is_binary(code) and is_binary(message) do
+      if Map.get(diag, :wait) == true do
+        resumes_at =
+          case Map.get(diag, :resumes_at_ms) do
+            ts when is_integer(ts) and ts > 0 -> ts
+            _ -> nil
+          end
+
+        recheck_after_ms =
+          case Map.get(diag, :recheck_after_ms) do
+            ms when is_integer(ms) and ms >= 1_000 -> min(ms, 300_000)
+            _ -> 60_000
+          end
+
+        wait =
+          %{
+            topic: "account_policy:openai_codex",
+            title: sanitize_text(Map.get(diag, :wait_title), 120) || "Waiting to continue",
+            detail: sanitize_text(Map.get(diag, :wait_detail), 240),
+            resumes_at: resumes_at
+          }
+
+        {:error,
+         %{
+           code: code,
+           message: message,
+           retryable: true,
+           wait: wait,
+           retry_after_ms: recheck_after_ms
+         }}
+      else
+        {:error, %{code: code, message: message, retryable: false}}
+      end
     else
-      {:error, %{code: code, message: message, retryable: false}}
+      {:error, :credential_unavailable}
     end
   end
 
-  defp pool_diagnostic_text(:credits_disabled, wait_until_ms, now_ms) do
-    suffix = format_wait_suffix("resets in", wait_until_ms, now_ms)
+  defp sanitize_code(code) when is_binary(code) do
+    trimmed = String.trim(code)
 
-    {"codex_pool_credits_disabled",
-     "Included Codex quota is exhausted on all pooled accounts#{suffix}; workspace credits are available, but allow_credits is false in extensions.json."}
+    if Regex.match?(~r/\A[a-z0-9_.-]{1,64}\z/, trimmed),
+      do: trimmed,
+      else: nil
   end
 
-  defp pool_diagnostic_text(:quota_exhausted, wait_until_ms, now_ms) do
-    suffix = format_wait_suffix("resets in", wait_until_ms, now_ms)
-    {"codex_pool_quota_exhausted", "Codex quota is exhausted on all pooled accounts#{suffix}."}
-  end
+  defp sanitize_code(_), do: nil
 
-  defp pool_diagnostic_text(:workspace_blocked, wait_until_ms, now_ms) do
-    suffix = format_wait_suffix("resets in", wait_until_ms, now_ms)
+  defp sanitize_text(val, max_len) when is_binary(val) do
+    cleaned =
+      val
+      |> H.Credentials.sanitize()
+      |> String.replace(~r/[\x00-\x1F\x7F]+/u, " ")
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
 
-    {"codex_pool_workspace_blocked",
-     "Codex workspace spend or usage limit is reached on all pooled accounts#{suffix}."}
-  end
-
-  defp pool_diagnostic_text(:auth_cooldown, wait_until_ms, now_ms) do
-    suffix = format_wait_suffix("ready in", wait_until_ms, now_ms)
-
-    {"codex_pool_auth_cooldown",
-     "Pooled Codex accounts are cooling down after an authentication rejection#{suffix}."}
-  end
-
-  defp pool_diagnostic_text(:checking_usage, _wait_until_ms, _now_ms) do
-    {"codex_pool_checking_usage",
-     "Checking Codex account pool usage; waiting for an eligible account."}
-  end
-
-  defp format_wait_suffix(verb, wait_until_ms, now_ms)
-       when is_integer(wait_until_ms) and wait_until_ms > now_ms do
-    " (#{verb} #{format_duration_ms(wait_until_ms - now_ms)})"
-  end
-
-  defp format_wait_suffix(_verb, _wait_until_ms, _now_ms), do: ""
-
-  defp format_duration_ms(ms) when ms > 0 do
-    total_seconds = max(1, ceil(ms / 1_000))
-    hours = div(total_seconds, 3_600)
-    minutes = div(rem(total_seconds, 3_600), 60)
-    seconds = rem(total_seconds, 60)
-
-    cond do
-      hours > 0 and minutes > 0 -> "#{hours}h #{minutes}m"
-      hours > 0 -> "#{hours}h"
-      minutes > 0 and seconds > 0 -> "#{minutes}m #{seconds}s"
-      minutes > 0 -> "#{minutes}m"
-      true -> "#{seconds}s"
+    case cleaned do
+      "" -> nil
+      str -> String.slice(str, 0, max_len)
     end
   end
 
-  defp pool_fallback_delay_ms(:checking_usage, _wait_until_ms, _now_ms), do: 5_000
-
-  defp pool_fallback_delay_ms(:auth_cooldown, wait_until_ms, now_ms) do
-    remaining = (wait_until_ms || now_ms + 15_000) - now_ms
-    clamp(remaining, 1_000, 125_000)
-  end
-
-  defp pool_fallback_delay_ms(reason, wait_until_ms, now_ms)
-       when reason in [:credits_disabled, :quota_exhausted, :workspace_blocked] do
-    remaining = (wait_until_ms || now_ms + 60_000) - now_ms
-    clamp(remaining, 5_000, 300_000)
-  end
-
-  defp clamp(val, min_val, max_val), do: val |> max(min_val) |> min(max_val)
+  defp sanitize_text(_, _), do: nil
 
   defp policy_callback(module, callback, args) do
     apply(module, callback, args)

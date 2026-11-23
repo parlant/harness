@@ -139,7 +139,7 @@ defmodule Extensions.MultiCodexTest do
     assert MultiCodex.order("model", sources) == []
   end
 
-  test "reports unavailable diagnostics, pool_status, wait_when_exhausted: false, and broadcasts PubSub wake on recovery" do
+  test "reports unavailable diagnostics, status notes, wait_when_exhausted: false, and broadcasts generic wait_signal on recovery" do
     dir = Path.join(System.tmp_dir!(), "multicodex-diag-#{System.unique_integer([:positive])}")
     File.mkdir!(dir)
     File.chmod!(dir, 0o700)
@@ -167,7 +167,7 @@ defmodule Extensions.MultiCodexTest do
 
     pubsub = :"multicodex_pubsub_#{System.unique_integer([:positive])}"
     start_supervised!({Registry, keys: :duplicate, name: pubsub})
-    {:ok, _} = Registry.register(pubsub, {:account_pool, :openai_codex}, nil)
+    {:ok, _} = Registry.register(pubsub, {:wait_signal, "account_policy:openai_codex"}, nil)
 
     phase = :atomics.new(1, [])
     :atomics.put(phase, 1, 1)
@@ -198,38 +198,39 @@ defmodule Extensions.MultiCodexTest do
     assert_order(sources, [])
 
     diag = MultiCodex.unavailable("openai_codex:gpt-6.2-sol", sources)
-    assert diag.reason == :credits_disabled
+    assert diag.code == "codex_pool_credits_disabled"
+    assert diag.message =~ "allow_credits is false"
+    assert diag.summary == "Codex pool included quota exhausted (allow_credits: false)"
     assert diag.wait == true
-    assert is_integer(diag.wait_until_ms)
+    assert diag.wait_title == "Waiting for eligible Codex account"
+    assert is_binary(diag.wait_detail)
+    assert is_integer(diag.resumes_at_ms)
     now_sys = System.system_time(:millisecond)
-    assert diag.wait_until_ms > now_sys + 40_000 and diag.wait_until_ms < now_sys + 80_000
+    assert diag.resumes_at_ms > now_sys + 40_000 and diag.resumes_at_ms < now_sys + 80_000
 
-    status = MultiCodex.pool_status(sources)
-    assert status.allow_credits == false
-    assert status.wait_when_exhausted == true
+    status = MultiCodex.status(sources)
+    assert status.status_note =~ "MultiCodex pool"
+    assert status.status_note =~ "credits disabled"
+    assert status.status_note =~ "auto-wait on"
+    assert status.sources["first"] =~ "pool: credits disabled"
+    assert status.sources["second"] =~ "pool: credits disabled"
 
-    assert [
-             %{id: "first", eligibility: :credits_disabled, reset_at_ms: first_reset},
-             %{id: "second", eligibility: :credits_disabled, reset_at_ms: second_reset}
-           ] = status.sources
-
-    assert first_reset > second_reset
-    refute_receive {:account_pool_available, :openai_codex}, 50
+    refute_receive {:wait_signal, "account_policy:openai_codex"}, 50
 
     # Flip probe to eligible quota and trigger a fresh poll tick.
     :atomics.put(phase, 1, 2)
     send(Process.whereis(MultiCodex), :tick)
 
     assert_receive {:probe, "first", 2}, 1_000
-    assert_receive {:account_pool_available, :openai_codex}, 1_000
+    assert_receive {:wait_signal, "account_policy:openai_codex"}, 1_000
     assert_order(sources, ["first", "second"])
 
-    recovered_status = MultiCodex.pool_status(sources)
+    recovered_status = MultiCodex.status(sources)
 
-    assert [
-             %{id: "first", eligibility: :eligible, reset_at_ms: nil},
-             %{id: "second", eligibility: :eligible, reset_at_ms: nil}
-           ] = recovered_status.sources
+    assert recovered_status.sources == %{
+             "first" => "pool: eligible",
+             "second" => "pool: eligible"
+           }
 
     # Verify auth_cooldown diagnostic + wait_when_exhausted: false
     :ok = stop_supervised!(MultiCodex)
@@ -252,17 +253,17 @@ defmodule Extensions.MultiCodexTest do
     assert_order(sources, [])
 
     no_wait_diag = MultiCodex.unavailable("openai_codex:gpt-6.2-sol", sources)
-    assert no_wait_diag.reason == :quota_exhausted
+    assert no_wait_diag.code == "codex_pool_quota_exhausted"
     assert no_wait_diag.wait == false
-    assert is_integer(no_wait_diag.wait_until_ms)
+    assert is_integer(no_wait_diag.resumes_at_ms)
 
     assert MultiCodex.rejected("openai_codex:gpt-6.2-sol", "first", :invalid_token) == :ok
     assert MultiCodex.rejected("openai_codex:gpt-6.2-sol", "second", :invalid_token) == :ok
 
     cooldown_diag = MultiCodex.unavailable("openai_codex:gpt-6.2-sol", sources)
-    assert cooldown_diag.reason == :auth_cooldown
+    assert cooldown_diag.code == "codex_pool_auth_cooldown"
     assert cooldown_diag.wait == false
-    assert cooldown_diag.wait_until_ms > System.system_time(:millisecond)
+    assert cooldown_diag.resumes_at_ms > System.system_time(:millisecond)
   end
 
   test "returns nil unavailable when all pooled aliases lack credentials" do
@@ -293,13 +294,14 @@ defmodule Extensions.MultiCodexTest do
     end)
 
     assert %{
-             allow_credits: false,
-             wait_when_exhausted: true,
-             sources: [
-               %{id: "a", eligibility: :unavailable, reset_at_ms: nil},
-               %{id: "b", eligibility: :unavailable, reset_at_ms: nil}
-             ]
-           } = MultiCodex.pool_status(sources)
+             status_note: note,
+             sources: %{
+               "a" => "pool: unavailable",
+               "b" => "pool: unavailable"
+             }
+           } = MultiCodex.status(sources)
+
+    assert note =~ "MultiCodex pool"
   end
 
   defp wait_until(fun, tries \\ 100) do

@@ -83,6 +83,9 @@ defmodule HWeb.Activity do
         live["workspace_wait"] ->
           :waiting
 
+        wait = get_in(live, ["generation", "wait"]) || get_in(live, ["compaction", "wait"]) ->
+          if wait["status"] == "waiting", do: :waiting, else: :retrying
+
         get_in(live, ["generation", "retry"]) || get_in(live, ["compaction", "retry"]) ->
           :retrying
 
@@ -100,7 +103,7 @@ defmodule HWeb.Activity do
       end
 
     cond do
-      status in [:working, :retrying] and count == 0 -> %{count: 1, status: status}
+      status in [:working, :retrying, :waiting] and count == 0 -> %{count: 1, status: status}
       count > 0 -> %{count: count, status: status}
       true -> nil
     end

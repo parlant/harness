@@ -187,7 +187,7 @@ defmodule H.Session.Server.Recovery do
         recent_submissions: recent_subs,
         workers: %{},
         subagent_watches: %{},
-        pool_watches: MapSet.new(),
+        wait_watches: MapSet.new(),
         wake_timers: %{},
         ephemeral: %{},
         held_leases: %{},
@@ -746,13 +746,14 @@ defmodule H.Session.Server.Recovery do
            id: tid,
            kind: kind,
            status: "sleeping",
-           wake: %{"reason" => "pool_wait", "provider" => provider} = wake
+           wake: %{"reason" => "wait"} = wake
          },
          now
        )
        when kind in ["generation", "compaction"] do
     until_ms = get_in(wake, ["until"]) || now
-    [{:watch_account_pool, provider}, {:arm_wake_timer, tid, max(0, until_ms - now)}]
+    watch = if is_binary(wake["topic"]), do: [{:watch_wait_signal, wake["topic"]}], else: []
+    watch ++ [{:arm_wake_timer, tid, max(0, until_ms - now)}]
   end
 
   defp task_resume_effect(%{id: tid, kind: kind, status: "sleeping", wake: wake}, now)

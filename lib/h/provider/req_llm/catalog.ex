@@ -227,17 +227,14 @@ defmodule H.Provider.ReqLLM.Catalog do
     if Code.ensure_loaded?(mod) and function_exported?(mod, :unavailable, 2) and
          safe_policy_call(mod, :order, ["openai_codex:gpt-6.2-sol", sources]) == [] do
       case safe_policy_call(mod, :unavailable, ["openai_codex:gpt-6.2-sol", sources]) do
-        %{reason: :credits_disabled} ->
-          "Codex pool included quota exhausted (allow_credits: false)"
+        %{summary: summary} when is_binary(summary) ->
+          sanitize_reason(summary)
 
-        %{reason: :quota_exhausted} ->
-          "Codex pool quota exhausted"
+        %{summary: nil} ->
+          nil
 
-        %{reason: :workspace_blocked} ->
-          "Codex pool workspace limit reached"
-
-        %{reason: :auth_cooldown} ->
-          "Codex pool cooling down after auth error"
+        %{message: message} when is_binary(message) ->
+          sanitize_reason(message)
 
         _ ->
           nil
@@ -248,6 +245,20 @@ defmodule H.Provider.ReqLLM.Catalog do
   end
 
   defp pool_unavailable_reason(_), do: nil
+
+  defp sanitize_reason(val) when is_binary(val) do
+    cleaned =
+      val
+      |> Credentials.sanitize()
+      |> String.replace(~r/[\x00-\x1F\x7F]+/u, " ")
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    case cleaned do
+      "" -> nil
+      str -> String.slice(str, 0, 200)
+    end
+  end
 
   defp safe_policy_call(mod, fun, args) do
     apply(mod, fun, args)

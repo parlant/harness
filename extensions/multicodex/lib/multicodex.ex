@@ -57,8 +57,8 @@ defmodule Extensions.MultiCodex do
     do: GenServer.call(__MODULE__, {:unavailable, candidates}, 500)
 
   @impl H.Provider.AccountPolicy
-  def pool_status(sources),
-    do: GenServer.call(__MODULE__, {:pool_status, sources}, 500)
+  def status(sources),
+    do: GenServer.call(__MODULE__, {:status, sources}, 500)
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -131,63 +131,64 @@ defmodule Extensions.MultiCodex do
 
         cond do
           credits_resets != [] ->
-            %{
-              reason: :credits_disabled,
-              wait: state.wait_when_exhausted,
-              wait_until_ms: earliest_timestamp(credits_resets)
-            }
+            build_unavailable(
+              :credits_disabled,
+              earliest_timestamp(credits_resets),
+              state,
+              now_sys
+            )
 
           exhausted_resets != [] ->
-            %{
-              reason: :quota_exhausted,
-              wait: state.wait_when_exhausted,
-              wait_until_ms: earliest_timestamp(exhausted_resets)
-            }
+            build_unavailable(
+              :quota_exhausted,
+              earliest_timestamp(exhausted_resets),
+              state,
+              now_sys
+            )
 
           blocked_resets != [] ->
-            %{
-              reason: :workspace_blocked,
-              wait: state.wait_when_exhausted,
-              wait_until_ms: earliest_timestamp(blocked_resets)
-            }
+            build_unavailable(
+              :workspace_blocked,
+              earliest_timestamp(blocked_resets),
+              state,
+              now_sys
+            )
 
           cooldown_remaining != [] ->
-            %{
-              reason: :auth_cooldown,
-              wait: state.wait_when_exhausted,
-              wait_until_ms: now_sys + Enum.min(cooldown_remaining)
-            }
+            build_unavailable(
+              :auth_cooldown,
+              now_sys + Enum.min(cooldown_remaining),
+              state,
+              now_sys
+            )
 
           state.job == nil and state.next == [] and
               Enum.all?(pool_candidates, &(state.probe_errors[&1] == :credential_unavailable)) ->
             nil
 
           true ->
-            %{
-              reason: :checking_usage,
-              wait: state.wait_when_exhausted,
-              wait_until_ms: nil
-            }
+            build_unavailable(:checking_usage, nil, state, now_sys)
         end
       end
 
     {:reply, result, state}
   end
 
-  def handle_call({:pool_status, sources}, _from, state) do
+  def handle_call({:status, sources}, _from, state) do
     now_mono = System.monotonic_time(:millisecond)
     now_sys = System.system_time(:millisecond)
 
-    statuses =
-      Enum.map(sources, fn id ->
-        classify_source(id, state, now_mono, now_sys)
+    source_notes =
+      sources
+      |> Enum.filter(&(&1 in state.sources))
+      |> Map.new(fn id ->
+        {id, format_source_note(id, state, now_mono, now_sys)}
       end)
 
     {:reply,
      %{
-       allow_credits: state.allow_credits,
-       wait_when_exhausted: state.wait_when_exhausted,
-       sources: statuses
+       status_note: format_provider_status_note(state),
+       sources: source_notes
      }, state}
   end
 
@@ -336,8 +337,10 @@ defmodule Extensions.MultiCodex do
 
   defp broadcast_available(%{pubsub: pubsub}) when not is_nil(pubsub) do
     if Process.whereis(pubsub) do
-      Registry.dispatch(pubsub, {:account_pool, :openai_codex}, fn entries ->
-        for {pid, _} <- entries, do: send(pid, {:account_pool_available, :openai_codex})
+      topic = "account_policy:openai_codex"
+
+      Registry.dispatch(pubsub, {:wait_signal, topic}, fn entries ->
+        for {pid, _} <- entries, do: send(pid, {:wait_signal, topic})
       end)
     end
   end
@@ -350,34 +353,127 @@ defmodule Extensions.MultiCodex do
     |> Enum.min(fn -> nil end)
   end
 
-  defp classify_source(id, state, now_mono, now_sys) do
+  defp build_unavailable(reason, resumes_at_ms, state, now_sys) do
+    {code, message, summary} = unavailable_copy(reason, resumes_at_ms, now_sys)
+
+    diag = %{
+      code: code,
+      message: message,
+      summary: summary,
+      wait: state.wait_when_exhausted,
+      wait_title: "Waiting for eligible Codex account",
+      wait_detail: "Will continue automatically when an account becomes eligible.",
+      resumes_at_ms: resumes_at_ms,
+      recheck_after_ms: recheck_after_ms(reason, resumes_at_ms, now_sys)
+    }
+
+    diag
+  end
+
+  defp unavailable_copy(:credits_disabled, resumes_at_ms, now_sys) do
+    suffix = format_wait_suffix("resets in", resumes_at_ms, now_sys)
+
+    {"codex_pool_credits_disabled",
+     "Included Codex quota is exhausted on all pooled accounts#{suffix}; workspace credits are available, but allow_credits is false in extensions.json.",
+     "Codex pool included quota exhausted (allow_credits: false)"}
+  end
+
+  defp unavailable_copy(:quota_exhausted, resumes_at_ms, now_sys) do
+    suffix = format_wait_suffix("resets in", resumes_at_ms, now_sys)
+
+    {"codex_pool_quota_exhausted", "Codex quota is exhausted on all pooled accounts#{suffix}.",
+     "Codex pool quota exhausted"}
+  end
+
+  defp unavailable_copy(:workspace_blocked, resumes_at_ms, now_sys) do
+    suffix = format_wait_suffix("resets in", resumes_at_ms, now_sys)
+
+    {"codex_pool_workspace_blocked",
+     "Codex workspace spend or usage limit is reached on all pooled accounts#{suffix}.",
+     "Codex pool workspace limit reached"}
+  end
+
+  defp unavailable_copy(:auth_cooldown, resumes_at_ms, now_sys) do
+    suffix = format_wait_suffix("ready in", resumes_at_ms, now_sys)
+
+    {"codex_pool_auth_cooldown",
+     "Pooled Codex accounts are cooling down after an authentication rejection#{suffix}.",
+     "Codex pool cooling down after auth error"}
+  end
+
+  defp unavailable_copy(:checking_usage, _resumes_at_ms, _now_sys) do
+    {"codex_pool_checking_usage",
+     "Checking Codex account pool usage; waiting for an eligible account.", nil}
+  end
+
+  defp recheck_after_ms(:checking_usage, _resumes_at_ms, _now_sys), do: 5_000
+
+  defp recheck_after_ms(:auth_cooldown, resumes_at_ms, now_sys) do
+    remaining = (resumes_at_ms || now_sys + 15_000) - now_sys
+    clamp(remaining, 1_000, 125_000)
+  end
+
+  defp recheck_after_ms(_reason, resumes_at_ms, now_sys) do
+    remaining = (resumes_at_ms || now_sys + 60_000) - now_sys
+    clamp(remaining, 5_000, 300_000)
+  end
+
+  defp clamp(val, min_val, max_val), do: val |> max(min_val) |> min(max_val)
+
+  defp format_provider_status_note(state) do
+    credits_label = if state.allow_credits, do: "credits enabled", else: "credits disabled"
+    wait_label = if state.wait_when_exhausted, do: "auto-wait on", else: "auto-wait off"
+    "Managed by MultiCodex pool (overrides stock active) · #{credits_label} · #{wait_label}"
+  end
+
+  defp format_source_note(id, state, now_mono, now_sys) do
     cooldown_until = Map.get(state.blocked, id)
 
     cond do
       is_integer(cooldown_until) and cooldown_until > now_mono ->
-        %{id: id, eligibility: :auth_cooldown, reset_at_ms: now_sys + (cooldown_until - now_mono)}
+        suffix = format_wait_suffix("ready in", now_sys + (cooldown_until - now_mono), now_sys)
+        "pool: auth cooldown#{suffix}"
 
       match?({expires, _, _} when expires > now_mono, state.cache[id]) ->
         {_expires, capacity, reset_at_ms} = state.cache[id]
-
-        %{
-          id: id,
-          eligibility: capacity_eligibility(capacity, state.allow_credits),
-          reset_at_ms: reset_at_ms
-        }
+        base = capacity_note(capacity, state.allow_credits)
+        suffix = format_wait_suffix("resets in", reset_at_ms, now_sys)
+        base <> suffix
 
       state.probe_errors[id] == :credential_unavailable ->
-        %{id: id, eligibility: :unavailable, reset_at_ms: nil}
+        "pool: unavailable"
 
       true ->
-        %{id: id, eligibility: :checking, reset_at_ms: nil}
+        "pool: checking"
     end
   end
 
-  defp capacity_eligibility({:quota, _}, _allow_credits), do: :eligible
-  defp capacity_eligibility(:credits, true), do: :credits_only
-  defp capacity_eligibility(:credits, false), do: :credits_disabled
-  defp capacity_eligibility(:exhausted, _allow_credits), do: :quota_exhausted
-  defp capacity_eligibility(:blocked, _allow_credits), do: :workspace_blocked
-  defp capacity_eligibility(_, _allow_credits), do: :unavailable
+  defp capacity_note({:quota, _}, _allow_credits), do: "pool: eligible"
+  defp capacity_note(:credits, true), do: "pool: credits only"
+  defp capacity_note(:credits, false), do: "pool: credits disabled"
+  defp capacity_note(:exhausted, _allow_credits), do: "pool: quota exhausted"
+  defp capacity_note(:blocked, _allow_credits), do: "pool: workspace blocked"
+  defp capacity_note(_, _allow_credits), do: "pool: unavailable"
+
+  defp format_wait_suffix(verb, wait_until_ms, now_sys)
+       when is_integer(wait_until_ms) and wait_until_ms > now_sys do
+    " (#{verb} #{format_duration_ms(wait_until_ms - now_sys)})"
+  end
+
+  defp format_wait_suffix(_verb, _wait_until_ms, _now_sys), do: ""
+
+  defp format_duration_ms(ms) when ms > 0 do
+    total_seconds = max(1, ceil(ms / 1_000))
+    hours = div(total_seconds, 3_600)
+    minutes = div(rem(total_seconds, 3_600), 60)
+    seconds = rem(total_seconds, 60)
+
+    cond do
+      hours > 0 and minutes > 0 -> "#{hours}h #{minutes}m"
+      hours > 0 -> "#{hours}h"
+      minutes > 0 and seconds > 0 -> "#{minutes}m #{seconds}s"
+      minutes > 0 -> "#{minutes}m"
+      true -> "#{seconds}s"
+    end
+  end
 end

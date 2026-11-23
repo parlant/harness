@@ -131,6 +131,7 @@ defmodule HWeb.ConversationComponents do
       end
 
     retry = get_in(live, ["generation", "retry"]) || get_in(live, ["compaction", "retry"])
+    wait = get_in(live, ["generation", "wait"]) || get_in(live, ["compaction", "wait"])
 
     assigns =
       assign(assigns,
@@ -140,13 +141,15 @@ defmodule HWeb.ConversationComponents do
         text: text,
         failure: failure,
         failure_label: failure_label,
-        retry: retry
+        retry: retry,
+        wait: wait
       )
 
     ~H"""
     <section
       :if={
-        @streaming_text? || @activity || @subagent_slots != [] || @inbox != [] || @failure || @retry
+        @streaming_text? || @activity || @subagent_slots != [] || @inbox != [] || @failure ||
+          @retry || @wait
       }
       id="live-region"
       class="live-region"
@@ -158,40 +161,37 @@ defmodule HWeb.ConversationComponents do
         count={@activity.count}
         status={@activity.status}
       />
+      <div :if={@wait} id="wait-banner" class="retry-banner" role="status">
+        <strong>{@wait["title"] || "Waiting to continue"}</strong>
+        <p>{@wait["code"]}: {@wait["message"]}</p>
+        <p :if={@wait["status"] == "waiting"}>
+          <span :if={@wait["detail"]}>{@wait["detail"]}</span>
+          <time
+            :if={@wait["resumes_at"]}
+            datetime={DateTime.from_unix!(@wait["resumes_at"], :millisecond) |> DateTime.to_iso8601()}
+          >
+            Estimated ready: {DateTime.from_unix!(@wait["resumes_at"], :millisecond)
+            |> Calendar.strftime("%H:%M:%S UTC")}.
+          </time>
+          Stop remains available.
+        </p>
+        <p :if={@wait["status"] != "waiting"}>Rechecking availability…</p>
+      </div>
       <div :if={@retry} id="retry-banner" class="retry-banner" role="status">
-        <%= if @retry["kind"] == "pool_wait" do %>
-          <strong>Waiting for eligible Codex account</strong>
-          <p>{@retry["code"]}: {@retry["message"]}</p>
-          <p :if={@retry["status"] == "waiting"}>
-            Waiting for pool eligibility; will continue automatically when an account is ready.
-            <time
-              :if={@retry["wait_until"]}
-              datetime={
-                DateTime.from_unix!(@retry["wait_until"], :millisecond) |> DateTime.to_iso8601()
-              }
-            >
-              Resets around: {DateTime.from_unix!(@retry["wait_until"], :millisecond)
-              |> Calendar.strftime("%H:%M:%S UTC")}
-            </time>
-            Stop remains available.
-          </p>
-          <p :if={@retry["status"] != "waiting"}>Rechecking account pool…</p>
-        <% else %>
-          <strong>Retrying after provider error · {@retry["attempt"]}/{@retry["max_attempts"]}</strong>
-          <p>{@retry["code"]}: {@retry["message"]}</p>
-          <p :if={@retry["status"] == "waiting"}>
-            Waiting {ceil((@retry["delay_ms"] || 0) / 1_000)}s before retry.
-            <time
-              :if={@retry["until"]}
-              datetime={DateTime.from_unix!(@retry["until"], :millisecond) |> DateTime.to_iso8601()}
-            >
-              Next attempt: {DateTime.from_unix!(@retry["until"], :millisecond)
-              |> Calendar.strftime("%H:%M:%S UTC")}
-            </time>
-            Stop remains available.
-          </p>
-          <p :if={@retry["status"] != "waiting"}>Retry request in progress.</p>
-        <% end %>
+        <strong>Retrying after provider error · {@retry["attempt"]}/{@retry["max_attempts"]}</strong>
+        <p>{@retry["code"]}: {@retry["message"]}</p>
+        <p :if={@retry["status"] == "waiting"}>
+          Waiting {ceil((@retry["delay_ms"] || 0) / 1_000)}s before retry.
+          <time
+            :if={@retry["until"]}
+            datetime={DateTime.from_unix!(@retry["until"], :millisecond) |> DateTime.to_iso8601()}
+          >
+            Next attempt: {DateTime.from_unix!(@retry["until"], :millisecond)
+            |> Calendar.strftime("%H:%M:%S UTC")}
+          </time>
+          Stop remains available.
+        </p>
+        <p :if={@retry["status"] != "waiting"}>Retry request in progress.</p>
       </div>
       <article :if={@streaming_text?} id="live-generation" class="entry-card entry-live">
         <header class="entry-header">

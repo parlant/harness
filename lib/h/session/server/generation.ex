@@ -12,6 +12,13 @@ defmodule H.Session.Server.Generation do
   alias H.Session.Server.{State, Stream, Submissions, Tools}
 
   @max_retry_backoff_ms 60_000
+  @wait_topic_regex ~r/\A[a-z0-9:._-]+\z/
+
+  def valid_wait_topic?(topic) when is_binary(topic) do
+    byte_size(topic) in 1..80 and Regex.match?(@wait_topic_regex, topic)
+  end
+
+  def valid_wait_topic?(_), do: false
 
   def replay_inference?(task), do: is_nil(task.checkpoint["dispatch_policy"])
 
@@ -105,6 +112,7 @@ defmodule H.Session.Server.Generation do
               |> Map.put("kept_from_id", kept_from_id)
               |> Map.put("status", "running")
               |> mark_retry_running()
+              |> mark_wait_running()
 
             next_live =
               live |> Map.drop(["run", "generation"]) |> Map.put("compaction", comp_live)
@@ -246,21 +254,19 @@ defmodule H.Session.Server.Generation do
     end
   end
 
-  def stage_pool_available(provider, state) do
-    provider_str = provider_string(provider)
-
+  def stage_wait_signal(topic, state) when is_binary(topic) do
     waiting_tasks =
       state.tasks
       |> Map.values()
       |> Enum.filter(fn t ->
         t.status == "sleeping" and t.kind in ["generation", "compaction"] and
-          get_in(t.wake, ["reason"]) == "pool_wait" and
-          get_in(t.wake, ["provider"]) == provider_str
+          get_in(t.wake, ["reason"]) == "wait" and
+          get_in(t.wake, ["topic"]) == topic
       end)
       |> Enum.sort_by(& &1.id)
 
     if waiting_tasks == [] do
-      {:immediate, nil, nil, [{:maybe_unwatch_account_pool, provider}], state}
+      {:immediate, nil, nil, [{:maybe_unwatch_wait_signal, topic}], state}
     else
       now = System.system_time(:millisecond)
 
@@ -272,11 +278,11 @@ defmodule H.Session.Server.Generation do
         end)
 
       staged = %{
-        raw_item: {:account_pool_available, provider},
+        raw_item: {:wait_signal, topic},
         writes: writes,
         conv_events: conv_events,
         submissions: [],
-        effects: effects ++ [{:maybe_unwatch_account_pool, provider}],
+        effects: effects ++ [{:maybe_unwatch_wait_signal, topic}],
         reply_from: nil,
         receipt: nil
       }
@@ -284,6 +290,8 @@ defmodule H.Session.Server.Generation do
       {:batch, staged, state}
     end
   end
+
+  def stage_wait_signal(_topic, state), do: {:skip, state}
 
   def abort_compaction_run(comp_task, cid, reason, state, now) do
     aborted_task = Task.abort(comp_task, reason, now)
@@ -305,7 +313,7 @@ defmodule H.Session.Server.Generation do
     effects =
       State.worker_kill_effects(state, comp_task.id) ++
         [{:cancel_wake_timer, comp_task.id}] ++
-        pool_unwatch_effect(comp_task)
+        wait_unwatch_effect(comp_task)
 
     {writes, state, effects}
   end
@@ -349,7 +357,7 @@ defmodule H.Session.Server.Generation do
       State.worker_kill_effects(state, gen_task.id) ++
         tool_kills ++
         [{:release_lease, cid}, {:cancel_wake_timer, gen_task.id}] ++
-        pool_unwatch_effect(gen_task)
+        wait_unwatch_effect(gen_task)
 
     {writes, state, effects}
   end
@@ -425,6 +433,7 @@ defmodule H.Session.Server.Generation do
         "retry_count" => retry_count,
         "retry" => retry
       })
+      |> then(fn t -> %{t | checkpoint: Map.delete(t.checkpoint, "wait")} end)
 
     next_live =
       case task.kind do
@@ -440,6 +449,7 @@ defmodule H.Session.Server.Generation do
             |> Map.put("task_id", to_string(task.id))
             |> Map.put("kept_from_id", task.checkpoint["kept_from_id"])
             |> Map.put("status", "retrying")
+            |> Map.delete("wait")
             |> Map.put("retry", retry)
 
           Map.put(live, "compaction", comp_live)
@@ -458,38 +468,63 @@ defmodule H.Session.Server.Generation do
     {writes, next_live, delay_ms, state}
   end
 
-  def schedule_pool_wait(task, cid, live, state, now, error) do
-    provider = to_string(Map.get(error, :pool_provider, "openai_codex"))
-    delay_ms = max(1_000, Map.get(error, :retry_after_ms, 60_000))
+  def schedule_inference_wait(task, cid, live, state, now, error) do
+    wait_spec = Map.get(error, :wait) || %{}
+
+    delay_ms =
+      case Map.get(error, :retry_after_ms) do
+        ms when is_integer(ms) -> max(1_000, ms)
+        _ -> 60_000
+      end
+
     until_ms = now + delay_ms
 
-    retry =
-      %{
-        "kind" => "pool_wait",
-        "provider" => provider,
-        "delay_ms" => delay_ms,
-        "until" => until_ms,
-        "status" => "waiting",
-        "code" => to_string(Map.get(error, :code, "codex_accounts_unavailable")),
-        "message" =>
-          H.Credentials.sanitize(
-            to_string(Map.get(error, :message, "Waiting for eligible account"))
-          )
-      }
-      |> then(fn m ->
-        case Map.get(error, :wait_until_ms) do
-          ts when is_integer(ts) -> Map.put(m, "wait_until", ts)
-          _ -> m
-        end
-      end)
+    topic =
+      case Map.get(wait_spec, :topic) do
+        t when is_binary(t) -> if valid_wait_topic?(t), do: t, else: nil
+        _ -> nil
+      end
 
-    base_checkpoint = Map.delete(task.checkpoint || %{}, "attempt_id")
+    code = sanitize_bounded_string(Map.get(error, :code), 80) || "waiting"
+    title = sanitize_bounded_string(Map.get(wait_spec, :title), 120) || "Waiting to continue"
+
+    message =
+      sanitize_bounded_string(Map.get(error, :message), 500) ||
+        "Temporarily waiting to continue."
+
+    detail = sanitize_bounded_string(Map.get(wait_spec, :detail), 240)
+
+    resumes_at =
+      case Map.get(wait_spec, :resumes_at) do
+        ts when is_integer(ts) and ts > 0 -> ts
+        _ -> nil
+      end
+
+    wait_doc =
+      %{
+        "status" => "waiting",
+        "code" => code,
+        "title" => title,
+        "message" => message,
+        "until" => until_ms
+      }
+      |> maybe_put_string("detail", detail)
+      |> maybe_put_int("resumes_at", resumes_at)
+
+    wake =
+      %{"until" => until_ms, "reason" => "wait"}
+      |> maybe_put_string("topic", topic)
+
+    base_checkpoint =
+      (task.checkpoint || %{})
+      |> Map.delete("attempt_id")
+      |> Map.delete("retry")
 
     sleeping_task = %{
       task
       | status: "sleeping",
-        wake: %{"until" => until_ms, "reason" => "pool_wait", "provider" => provider},
-        checkpoint: Map.put(base_checkpoint, "retry", retry),
+        wake: wake,
+        checkpoint: Map.put(base_checkpoint, "wait", wait_doc),
         updated_at: now
     }
 
@@ -498,7 +533,7 @@ defmodule H.Session.Server.Generation do
         "generation" ->
           Map.put(live || %{}, "generation", %{
             "message" => %{"thinking" => "", "text" => "", "tool_calls" => []},
-            "retry" => retry
+            "wait" => wait_doc
           })
 
         "compaction" ->
@@ -506,8 +541,9 @@ defmodule H.Session.Server.Generation do
             (Map.get(live || %{}, "compaction") || %{})
             |> Map.put("task_id", to_string(task.id))
             |> Map.put("kept_from_id", task.checkpoint["kept_from_id"])
-            |> Map.put("status", "retrying")
-            |> Map.put("retry", retry)
+            |> Map.put("status", "waiting")
+            |> Map.delete("retry")
+            |> Map.put("wait", wait_doc)
 
           Map.put(live || %{}, "compaction", comp_live)
       end
@@ -522,7 +558,8 @@ defmodule H.Session.Server.Generation do
       {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
     ]
 
-    effects = [{:watch_account_pool, provider}, {:arm_wake_timer, task.id, delay_ms}]
+    watch_effects = if topic, do: [{:watch_wait_signal, topic}], else: []
+    effects = watch_effects ++ [{:arm_wake_timer, task.id, delay_ms}]
     {writes, next_live, effects, state}
   end
 
@@ -536,6 +573,7 @@ defmodule H.Session.Server.Generation do
       (get_in(state.docs, [cid, "live", "generation"]) || %{})
       |> Map.put("message", %{"thinking" => "", "text" => "", "tool_calls" => []})
       |> mark_retry_running()
+      |> mark_wait_running()
 
     next_live = Map.put(state.docs[cid]["live"] || %{}, "generation", generation)
 
@@ -553,7 +591,7 @@ defmodule H.Session.Server.Generation do
 
     effects =
       [{:cancel_wake_timer, tid}] ++
-        pool_unwatch_effect(gen_task) ++ [{:spawn_generation, cid, tid}]
+        wait_unwatch_effect(gen_task) ++ [{:spawn_generation, cid, tid}]
 
     {writes, conv_events, effects, state}
   end
@@ -569,6 +607,7 @@ defmodule H.Session.Server.Generation do
       |> Map.put("kept_from_id", comp_task.checkpoint["kept_from_id"])
       |> Map.put("status", "pending")
       |> mark_retry_running()
+      |> mark_wait_running()
 
     next_live = Map.put(live, "compaction", comp_live)
 
@@ -586,25 +625,54 @@ defmodule H.Session.Server.Generation do
 
     effects =
       [{:cancel_wake_timer, tid}] ++
-        pool_unwatch_effect(comp_task) ++ [{:spawn_compaction, cid, tid}]
+        wait_unwatch_effect(comp_task) ++ [{:spawn_compaction, cid, tid}]
 
     {writes, conv_events, effects, state}
   end
 
-  defp pool_unwatch_effect(%{wake: %{"reason" => "pool_wait", "provider" => provider}}),
-    do: [{:maybe_unwatch_account_pool, provider}]
+  defp wait_unwatch_effect(%{wake: %{"reason" => "wait", "topic" => topic}})
+       when is_binary(topic),
+       do: [{:maybe_unwatch_wait_signal, topic}]
 
-  defp pool_unwatch_effect(_task), do: []
+  defp wait_unwatch_effect(_task), do: []
 
-  defp provider_string(:openai_codex), do: "openai_codex"
-  defp provider_string(provider) when is_binary(provider), do: provider
-  defp provider_string(provider) when is_atom(provider), do: Atom.to_string(provider)
-  defp provider_string(_), do: nil
+  defp valid_wait_error?(%{wait: %{} = _wait}), do: true
+  defp valid_wait_error?(_), do: false
+
+  defp sanitize_bounded_string(nil, _max), do: nil
+
+  defp sanitize_bounded_string(val, max_len) do
+    cleaned =
+      val
+      |> to_string()
+      |> H.Credentials.sanitize()
+      |> String.replace(~r/[\x00-\x1F\x7F]+/u, " ")
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    case cleaned do
+      "" -> nil
+      str -> String.slice(str, 0, max_len)
+    end
+  end
+
+  defp maybe_put_string(map, _key, nil), do: map
+  defp maybe_put_string(map, key, val) when is_binary(val), do: Map.put(map, key, val)
+
+  defp maybe_put_int(map, _key, nil), do: map
+  defp maybe_put_int(map, key, val) when is_integer(val), do: Map.put(map, key, val)
 
   defp mark_retry_running(activity) do
     case activity["retry"] do
       %{} = retry -> Map.put(activity, "retry", Map.put(retry, "status", "running"))
       _ -> Map.delete(activity, "retry")
+    end
+  end
+
+  defp mark_wait_running(activity) do
+    case activity["wait"] do
+      %{} = wait -> Map.put(activity, "wait", Map.put(wait, "status", "running"))
+      _ -> Map.delete(activity, "wait")
     end
   end
 
@@ -915,9 +983,9 @@ defmodule H.Session.Server.Generation do
     retry_count = (gen_task.checkpoint["retry_count"] || 0) + 1
 
     cond do
-      Map.get(err, :pool_wait) == true ->
+      valid_wait_error?(err) ->
         {writes, next_live, effects, state} =
-          schedule_pool_wait(gen_task, cid, state.docs[cid]["live"], state, now, err)
+          schedule_inference_wait(gen_task, cid, state.docs[cid]["live"], state, now, err)
 
         staged = %{
           raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:error, err}}},
@@ -1156,9 +1224,9 @@ defmodule H.Session.Server.Generation do
     live = state.docs[cid]["live"] || %{}
 
     cond do
-      Map.get(err, :pool_wait) == true ->
+      valid_wait_error?(err) ->
         {writes, next_live, effects, state} =
-          schedule_pool_wait(comp_task, cid, live, state, now, err)
+          schedule_inference_wait(comp_task, cid, live, state, now, err)
 
         staged = %{
           raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},

@@ -269,8 +269,8 @@ defmodule H.Session.Server do
     process_with_drain({:wake_task, tid}, state)
   end
 
-  def handle_info({:account_pool_available, provider}, state) do
-    process_with_drain({:account_pool_available, provider}, state)
+  def handle_info({:wait_signal, topic}, state) when is_binary(topic) do
+    process_with_drain({:wait_signal, topic}, state)
   end
 
   def handle_info({:submission_settled, outcome}, state) do
@@ -350,8 +350,8 @@ defmodule H.Session.Server do
       {:wake_task, tid} ->
         drain_mailbox(remaining - 1, [{:wake_task, tid} | acc])
 
-      {:account_pool_available, provider} ->
-        drain_mailbox(remaining - 1, [{:account_pool_available, provider} | acc])
+      {:wait_signal, topic} when is_binary(topic) ->
+        drain_mailbox(remaining - 1, [{:wait_signal, topic} | acc])
 
       {:submission_settled, outcome} ->
         drain_mailbox(remaining - 1, [{:submission_settled, outcome} | acc])
@@ -554,8 +554,8 @@ defmodule H.Session.Server do
     Generation.stage_wake(tid, state)
   end
 
-  defp stage_single_item({:account_pool_available, provider}, state, _staged_rev) do
-    Generation.stage_pool_available(provider, state)
+  defp stage_single_item({:wait_signal, topic}, state, _staged_rev) do
+    Generation.stage_wait_signal(topic, state)
   end
 
   defp stage_single_item({:submission_settled, outcome}, state, _staged_rev) do
@@ -601,42 +601,34 @@ defmodule H.Session.Server do
     cancel_wake_timer(tid, state)
   end
 
-  defp apply_effect({:watch_account_pool, provider}, state) do
-    case normalize_pool_provider(provider) do
-      :openai_codex ->
-        if MapSet.member?(state.pool_watches, :openai_codex) do
-          state
-        else
-          if state.pubsub && Process.whereis(state.pubsub) do
-            Registry.register(state.pubsub, {:account_pool, :openai_codex}, nil)
-          end
-
-          state = %{state | pool_watches: MapSet.put(state.pool_watches, :openai_codex)}
-          maybe_wake_if_pool_already_available(state)
-          state
+  defp apply_effect({:watch_wait_signal, topic}, state) do
+    if Generation.valid_wait_topic?(topic) do
+      if MapSet.member?(state.wait_watches, topic) do
+        state
+      else
+        if state.pubsub && Process.whereis(state.pubsub) do
+          Registry.register(state.pubsub, {:wait_signal, topic}, nil)
         end
 
-      nil ->
+        state = %{state | wait_watches: MapSet.put(state.wait_watches, topic)}
+        maybe_wake_if_wait_signal_ready(topic, state)
         state
+      end
+    else
+      state
     end
   end
 
-  defp apply_effect({:maybe_unwatch_account_pool, provider}, state) do
-    case normalize_pool_provider(provider) do
-      :openai_codex ->
-        if MapSet.member?(state.pool_watches, :openai_codex) and
-             not has_pool_wait_task?(state, "openai_codex") do
-          if state.pubsub && Process.whereis(state.pubsub) do
-            Registry.unregister(state.pubsub, {:account_pool, :openai_codex})
-          end
+  defp apply_effect({:maybe_unwatch_wait_signal, topic}, state) do
+    if is_binary(topic) and MapSet.member?(state.wait_watches, topic) and
+         not has_wait_task?(state, topic) do
+      if state.pubsub && Process.whereis(state.pubsub) do
+        Registry.unregister(state.pubsub, {:wait_signal, topic})
+      end
 
-          %{state | pool_watches: MapSet.delete(state.pool_watches, :openai_codex)}
-        else
-          state
-        end
-
-      nil ->
-        state
+      %{state | wait_watches: MapSet.delete(state.wait_watches, topic)}
+    else
+      state
     end
   end
 
@@ -679,19 +671,15 @@ defmodule H.Session.Server do
     end
   end
 
-  defp normalize_pool_provider(:openai_codex), do: :openai_codex
-  defp normalize_pool_provider("openai_codex"), do: :openai_codex
-  defp normalize_pool_provider(_), do: nil
-
-  defp has_pool_wait_task?(state, provider_str) do
+  defp has_wait_task?(state, topic) do
     Enum.any?(state.tasks, fn {_id, task} ->
       task.status == "sleeping" and
-        get_in(task.wake, ["reason"]) == "pool_wait" and
-        get_in(task.wake, ["provider"]) == provider_str
+        get_in(task.wake, ["reason"]) == "wait" and
+        get_in(task.wake, ["topic"]) == topic
     end)
   end
 
-  defp maybe_wake_if_pool_already_available(state) do
+  defp maybe_wake_if_wait_signal_ready("account_policy:openai_codex" = topic, state) do
     case state.provider_config[:codex_account_policy] do
       %{module: mod, sources: sources} when is_atom(mod) and is_list(sources) ->
         model = state.default_model || "openai_codex:gpt-6.2-sol"
@@ -706,13 +694,15 @@ defmodule H.Session.Server do
           end
 
         if is_list(ordered) and ordered != [] do
-          send(self(), {:account_pool_available, :openai_codex})
+          send(self(), {:wait_signal, topic})
         end
 
       _ ->
         :ok
     end
   end
+
+  defp maybe_wake_if_wait_signal_ready(_topic, _state), do: :ok
 
   defp do_export_branch(state, cid, nil) do
     {:ok, entries, state} = State.load_visible_entries(state, cid)

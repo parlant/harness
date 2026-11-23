@@ -42,12 +42,12 @@ defmodule H.Accounts do
   def discover(server, policy) do
     case call(server, :discover) do
       {:ok, %{providers: providers} = payload} when is_map(policy) ->
-        pool = build_pool_view(policy)
+        status = fetch_policy_status(policy)
 
         updated =
           Enum.map(providers, fn
-            %{id: "openai_codex"} = provider when not is_nil(pool) ->
-              Map.put(provider, :pool, pool)
+            %{id: "openai_codex"} = provider when is_map(status) ->
+              apply_provider_status(provider, status)
 
             provider ->
               provider
@@ -750,64 +750,83 @@ defmodule H.Accounts do
     :ok
   end
 
-  defp build_pool_view(%{module: mod, sources: pool_sources})
-       when is_atom(mod) and is_list(pool_sources) do
-    fallback = %{
-      enabled: true,
-      sources: Enum.map(pool_sources, &%{id: to_string(&1)})
-    }
-
-    if Code.ensure_loaded?(mod) and function_exported?(mod, :pool_status, 1) do
-      case safe_pool_status(mod, pool_sources) do
-        %{
-          allow_credits: allow_credits,
-          wait_when_exhausted: wait_when_exhausted,
-          sources: sources
-        }
-        when is_boolean(allow_credits) and is_boolean(wait_when_exhausted) and is_list(sources) ->
+  defp fetch_policy_status(%{module: mod, sources: policy_sources})
+       when is_atom(mod) and is_list(policy_sources) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :status, 1) do
+      case safe_policy_status(mod, policy_sources) do
+        %{} = status ->
           %{
-            enabled: true,
-            allow_credits: allow_credits,
-            wait_when_exhausted: wait_when_exhausted,
-            sources: Enum.map(sources, &sanitize_pool_source/1)
+            status_note: sanitize_status_note(Map.get(status, :status_note), 240),
+            sources: sanitize_source_notes(Map.get(status, :sources))
           }
 
         _ ->
-          fallback
+          nil
       end
     else
-      fallback
+      nil
     end
   end
 
-  defp build_pool_view(_), do: nil
+  defp fetch_policy_status(_), do: nil
 
-  defp safe_pool_status(mod, pool_sources) do
-    mod.pool_status(pool_sources)
+  defp apply_provider_status(provider, status) do
+    source_notes = status.sources
+
+    sources =
+      Enum.map(provider.sources, fn source ->
+        case Map.get(source_notes, source.id) do
+          note when is_binary(note) -> Map.put(source, :status_note, note)
+          _ -> source
+        end
+      end)
+
+    provider = %{provider | sources: sources}
+
+    case status.status_note do
+      note when is_binary(note) -> Map.put(provider, :status_note, note)
+      _ -> provider
+    end
+  end
+
+  defp safe_policy_status(mod, policy_sources) do
+    mod.status(policy_sources)
   rescue
     _ -> :unavailable
   catch
     _, _ -> :unavailable
   end
 
-  defp sanitize_pool_source(%{id: id} = source) do
-    eligibility =
-      case Map.get(source, :eligibility) do
-        val when is_atom(val) and not is_nil(val) -> Atom.to_string(val)
-        val when is_binary(val) -> val
-        _ -> "unavailable"
-      end
+  defp sanitize_source_notes(notes) when is_map(notes) do
+    Enum.reduce(notes, %{}, fn
+      {id, note}, acc when is_binary(id) ->
+        case sanitize_status_note(note, 120) do
+          nil -> acc
+          clean -> Map.put(acc, id, clean)
+        end
 
-    reset_at_ms =
-      case Map.get(source, :reset_at_ms) do
-        ts when is_integer(ts) -> ts
-        _ -> nil
-      end
-
-    %{id: to_string(id), eligibility: eligibility, reset_at_ms: reset_at_ms}
+      _, acc ->
+        acc
+    end)
   end
 
-  defp sanitize_pool_source(other), do: %{id: to_string(other)}
+  defp sanitize_source_notes(_), do: %{}
+
+  defp sanitize_status_note(val, max_len) when is_binary(val) do
+    cleaned =
+      val
+      |> H.Credentials.sanitize()
+      |> String.replace(~r/[\x00-\x1F\x7F]+/u, " ")
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    case cleaned do
+      "" -> nil
+      str -> String.slice(str, 0, max_len)
+    end
+  end
+
+  defp sanitize_status_note(_, _), do: nil
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

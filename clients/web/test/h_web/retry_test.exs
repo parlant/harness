@@ -65,45 +65,48 @@ defmodule HWeb.RetryTest do
     end
   end
 
-  test "pool_wait banner explains Codex account pool waiting and rechecking states" do
-    retry = %{
-      "kind" => "pool_wait",
-      "provider" => "openai_codex",
-      "delay_ms" => 60_000,
-      "until" => 1_800_000_060_000,
-      "wait_until" => 1_800_003_600_000,
+  test "generic wait banner explains waiting and rechecking states without extension specifics" do
+    wait = %{
       "status" => "waiting",
-      "code" => "codex_pool_credits_disabled",
-      "message" =>
-        "Included Codex quota is exhausted on all pooled accounts; workspace credits are available, but allow_credits is false in extensions.json."
+      "code" => "capacity_waiting",
+      "title" => "Waiting for capacity",
+      "message" => "All workers are currently busy; queued for next slot.",
+      "detail" => "Will continue automatically when ready.",
+      "until" => 1_800_000_060_000,
+      "resumes_at" => 1_800_003_600_000
     }
 
     for kind <- ["generation", "compaction"] do
+      assert HWeb.Transcript.run_active?(%{kind => %{"wait" => wait}})
+
       html =
         render_component(&ConversationComponents.live_region/1,
-          live: %{kind => %{"retry" => retry}},
+          live: %{kind => %{"wait" => wait}},
           tail_activity: nil,
           inbox: []
         )
 
-      assert html =~ "Waiting for eligible Codex account"
-      assert html =~ "codex_pool_credits_disabled"
-      assert html =~ "allow_credits is false"
-      assert html =~ "Waiting for pool eligibility; will continue automatically"
-      assert html =~ "Resets around:"
+      assert html =~ "id=\"wait-banner\""
+      assert html =~ "Waiting for capacity"
+      assert html =~ "capacity_waiting"
+      assert html =~ "All workers are currently busy; queued for next slot."
+      assert html =~ "Will continue automatically when ready."
+      assert html =~ "Estimated ready:"
       assert html =~ "Stop remains available."
+      assert html =~ "data-status=\"waiting\""
       refute html =~ "Retrying after provider error"
 
       rechecking =
         render_component(&ConversationComponents.live_region/1,
-          live: %{kind => %{"retry" => Map.put(retry, "status", "running")}},
+          live: %{kind => %{"wait" => Map.put(wait, "status", "running")}},
           tail_activity: nil,
           inbox: []
         )
 
-      assert rechecking =~ "Waiting for eligible Codex account"
-      assert rechecking =~ "Rechecking account pool"
-      refute rechecking =~ "Waiting for pool eligibility"
+      assert rechecking =~ "Waiting for capacity"
+      assert rechecking =~ "Rechecking availability…"
+      assert rechecking =~ "data-status=\"retrying\""
+      refute rechecking =~ "Estimated ready:"
     end
   end
 end

@@ -26,16 +26,15 @@ defmodule H.CodexPoolWaitTest do
     end
 
     @impl true
-    def pool_status(sources) do
+    def status(sources) do
       case Application.get_env(:harness, __MODULE__, %{}) do
-        %{pool_status: status} when is_map(status) ->
+        %{status: status} when is_map(status) ->
           status
 
         _ ->
           %{
-            allow_credits: false,
-            wait_when_exhausted: true,
-            sources: Enum.map(sources, &%{id: &1, eligibility: :checking, reset_at_ms: nil})
+            status_note: "Managed by fake policy",
+            sources: Map.new(sources, &{&1, "checking"})
           }
       end
     end
@@ -164,9 +163,9 @@ defmodule H.CodexPoolWaitTest do
     }
   end
 
-  defp broadcast_pool_available(pubsub) do
-    Registry.dispatch(pubsub, {:account_pool, :openai_codex}, fn entries ->
-      for {pid, _} <- entries, do: send(pid, {:account_pool_available, :openai_codex})
+  defp broadcast_wait_signal(pubsub, topic \\ "account_policy:openai_codex") do
+    Registry.dispatch(pubsub, {:wait_signal, topic}, fn entries ->
+      for {pid, _} <- entries, do: send(pid, {:wait_signal, topic})
     end)
   end
 
@@ -193,12 +192,22 @@ defmodule H.CodexPoolWaitTest do
     end
   end
 
-  test "generation enters sleeping pool_wait when credits are disabled and wakes automatically on PubSub recovery" do
-    reset_at = System.system_time(:millisecond) + 3_600_000
+  test "generation enters sleeping generic wait when policy requests wait and wakes automatically on PubSub signal" do
+    resumes_at = System.system_time(:millisecond) + 3_600_000
 
     FakePoolPolicy.set_state(%{
       order: [],
-      unavailable: %{reason: :credits_disabled, wait: true, wait_until_ms: reset_at}
+      unavailable: %{
+        code: "codex_pool_credits_disabled",
+        message:
+          "Included Codex quota is exhausted on all pooled accounts; allow_credits is false in extensions.json.",
+        summary: "Codex pool included quota exhausted (allow_credits: false)",
+        wait: true,
+        wait_title: "Waiting for eligible Codex account",
+        wait_detail: "Will continue automatically when an account becomes eligible.",
+        resumes_at_ms: resumes_at,
+        recheck_after_ms: 60_000
+      }
     })
 
     %{daemon_opts: opts, cwd: cwd, pubsub: pubsub, catalog_table: catalog_table} = setup_env()
@@ -213,38 +222,45 @@ defmodule H.CodexPoolWaitTest do
         opts
       )
 
-    live_retry =
+    live_wait =
       wait_until(fn ->
         {_seq, snap} = snapshot(sid, opts)
 
-        case get_in(snap, ["docs", "live", "generation", "retry"]) do
-          %{"kind" => "pool_wait", "status" => "waiting"} = retry -> retry
+        case get_in(snap, ["docs", "live", "generation", "wait"]) do
+          %{"status" => "waiting"} = wait -> wait
           _ -> nil
         end
       end)
 
-    assert live_retry["provider"] == "openai_codex"
-    assert live_retry["code"] == "codex_pool_credits_disabled"
-    assert live_retry["message"] =~ "allow_credits is false"
-    assert live_retry["wait_until"] == reset_at
+    {_seq, wait_snap} = snapshot(sid, opts)
+    refute Map.has_key?(wait_snap["docs"]["live"]["generation"], "retry")
+    refute Map.has_key?(live_wait, "topic")
+    refute Map.has_key?(live_wait, "provider")
+    assert live_wait["code"] == "codex_pool_credits_disabled"
+    assert live_wait["title"] == "Waiting for eligible Codex account"
+    assert live_wait["message"] =~ "allow_credits is false"
+    assert live_wait["detail"] == "Will continue automatically when an account becomes eligible."
+    assert live_wait["resumes_at"] == resumes_at
+    assert is_integer(live_wait["until"])
 
     {:ok, detail} = Daemon.get_session_detail(sid, opts)
     assert [gen_task] = Enum.filter(detail.tasks, &(&1.kind == "generation"))
     assert gen_task.status == "sleeping"
-    assert gen_task.wake["reason"] == "pool_wait"
-    assert gen_task.wake["provider"] == "openai_codex"
+    assert gen_task.wake["reason"] == "wait"
+    assert gen_task.wake["topic"] == "account_policy:openai_codex"
 
     {:ok, summary} = Catalog.get_session(sid, catalog_table)
     assert summary.attention == "retrying"
     assert summary.active == true
     assert summary.activity_kind == "retry"
-    assert summary.activity_label =~ "Pool wait"
+    assert summary.activity_label =~ "Waiting for eligible Codex account"
+    assert summary.activity_label =~ "codex_pool_credits_disabled"
 
     refute_receive {:dispatched, _}, 50
 
-    # Pool recovers and broadcasts availability over PubSub.
+    # Policy recovers and broadcasts generic wait signal over PubSub.
     FakePoolPolicy.set_state(%{order: ["personal"], unavailable: nil})
-    broadcast_pool_available(pubsub)
+    broadcast_wait_signal(pubsub)
 
     assert_receive {:dispatched, "openai_codex:gpt-6.2-sol"}, 2_000
 
@@ -307,10 +323,18 @@ defmodule H.CodexPoolWaitTest do
         1
       )
 
-    # Exhaust pool before manual compaction.
+    # Exhaust policy before manual compaction.
     FakePoolPolicy.set_state(%{
       order: [],
-      unavailable: %{reason: :quota_exhausted, wait: true, wait_until_ms: nil}
+      unavailable: %{
+        code: "codex_pool_quota_exhausted",
+        message: "Codex quota is exhausted on all pooled accounts.",
+        wait: true,
+        wait_title: "Waiting for eligible Codex account",
+        wait_detail: "Will continue automatically when an account becomes eligible.",
+        resumes_at_ms: nil,
+        recheck_after_ms: 60_000
+      }
     })
 
     {:ok, _} =
@@ -320,21 +344,21 @@ defmodule H.CodexPoolWaitTest do
         opts
       )
 
-    comp_retry =
+    comp_wait =
       wait_until(fn ->
         {_seq, snap} = snapshot(sid, opts)
 
-        case get_in(snap, ["docs", "live", "compaction", "retry"]) do
-          %{"kind" => "pool_wait", "status" => "waiting"} = retry -> retry
+        case get_in(snap, ["docs", "live", "compaction", "wait"]) do
+          %{"status" => "waiting"} = wait -> wait
           _ -> nil
         end
       end)
 
-    assert comp_retry["code"] == "codex_pool_quota_exhausted"
+    assert comp_wait["code"] == "codex_pool_quota_exhausted"
     refute_receive {:dispatched, _}, 50
 
     FakePoolPolicy.set_state(%{order: ["work"], unavailable: nil})
-    broadcast_pool_available(pubsub)
+    broadcast_wait_signal(pubsub)
 
     assert_receive {:dispatched, "openai_codex:gpt-6.2-sol"}, 2_000
 
@@ -344,10 +368,16 @@ defmodule H.CodexPoolWaitTest do
     end)
   end
 
-  test "reopening a session preserves sleeping pool_wait and resumes on PubSub recovery" do
+  test "reopening a session preserves sleeping wait and resumes on PubSub wait signal" do
     FakePoolPolicy.set_state(%{
       order: [],
-      unavailable: %{reason: :workspace_blocked, wait: true, wait_until_ms: nil}
+      unavailable: %{
+        code: "codex_pool_workspace_blocked",
+        message: "Codex workspace spend limit is reached on all pooled accounts.",
+        wait: true,
+        wait_title: "Waiting for eligible Codex account",
+        recheck_after_ms: 60_000
+      }
     })
 
     %{daemon_opts: opts, cwd: cwd, pubsub: pubsub, runtime_sup: runtime_sup, registry: registry} =
@@ -365,7 +395,7 @@ defmodule H.CodexPoolWaitTest do
 
     wait_until(fn ->
       {:ok, detail} = Daemon.get_session_detail(sid, opts)
-      Enum.any?(detail.tasks, &(&1.status == "sleeping" and &1.wake["reason"] == "pool_wait"))
+      Enum.any?(detail.tasks, &(&1.status == "sleeping" and &1.wake["reason"] == "wait"))
     end)
 
     # Cleanly stop the session supervisor and reopen it via Daemon.
@@ -377,12 +407,13 @@ defmodule H.CodexPoolWaitTest do
     {:ok, detail} = Daemon.get_session_detail(sid, opts)
     assert [gen_task] = Enum.filter(detail.tasks, &(&1.kind == "generation"))
     assert gen_task.status == "sleeping"
-    assert gen_task.wake["reason"] == "pool_wait"
+    assert gen_task.wake["reason"] == "wait"
+    assert gen_task.wake["topic"] == "account_policy:openai_codex"
     refute_receive {:dispatched, _}, 50
 
     # Broadcast after reopen wakes the recovered coordinator!
     FakePoolPolicy.set_state(%{order: ["personal"], unavailable: nil})
-    broadcast_pool_available(pubsub)
+    broadcast_wait_signal(pubsub)
 
     assert_receive {:dispatched, "openai_codex:gpt-6.2-sol"}, 2_000
 
@@ -392,10 +423,14 @@ defmodule H.CodexPoolWaitTest do
     end)
   end
 
-  test "wait_when_exhausted: false pauses immediately with codex_pool_credits_disabled" do
+  test "wait: false pauses immediately with policy code and sanitized message" do
     FakePoolPolicy.set_state(%{
       order: [],
-      unavailable: %{reason: :credits_disabled, wait: false, wait_until_ms: nil}
+      unavailable: %{
+        code: "codex_pool_credits_disabled",
+        message: "Included quota exhausted; allow_credits is false in extensions.json.",
+        wait: false
+      }
     })
 
     %{daemon_opts: opts, cwd: cwd} = setup_env()
@@ -421,10 +456,16 @@ defmodule H.CodexPoolWaitTest do
     refute_receive {:dispatched, _}, 50
   end
 
-  test "switching model via configure during pool_wait wakes and runs on the new model" do
+  test "switching model via configure during wait wakes and runs on the new model" do
     FakePoolPolicy.set_state(%{
       order: [],
-      unavailable: %{reason: :credits_disabled, wait: true, wait_until_ms: nil}
+      unavailable: %{
+        code: "codex_pool_credits_disabled",
+        message: "Included quota exhausted.",
+        wait: true,
+        wait_title: "Waiting for eligible Codex account",
+        recheck_after_ms: 60_000
+      }
     })
 
     %{daemon_opts: opts, cwd: cwd} = setup_env()
@@ -441,7 +482,7 @@ defmodule H.CodexPoolWaitTest do
 
     wait_until(fn ->
       {:ok, detail} = Daemon.get_session_detail(sid, opts)
-      Enum.any?(detail.tasks, &(&1.status == "sleeping" and &1.wake["reason"] == "pool_wait"))
+      Enum.any?(detail.tasks, &(&1.status == "sleeping" and &1.wake["reason"] == "wait"))
     end)
 
     {:ok, _} =
@@ -459,10 +500,16 @@ defmodule H.CodexPoolWaitTest do
     end)
   end
 
-  test "aborting during pool_wait settles cleanly and ignores later pool availability broadcasts" do
+  test "aborting during wait settles cleanly and ignores later wait signal broadcasts" do
     FakePoolPolicy.set_state(%{
       order: [],
-      unavailable: %{reason: :credits_disabled, wait: true, wait_until_ms: nil}
+      unavailable: %{
+        code: "codex_pool_credits_disabled",
+        message: "Included quota exhausted.",
+        wait: true,
+        wait_title: "Waiting for eligible Codex account",
+        recheck_after_ms: 60_000
+      }
     })
 
     %{daemon_opts: opts, cwd: cwd, pubsub: pubsub} = setup_env()
@@ -479,7 +526,7 @@ defmodule H.CodexPoolWaitTest do
 
     wait_until(fn ->
       {:ok, detail} = Daemon.get_session_detail(sid, opts)
-      Enum.any?(detail.tasks, &(&1.status == "sleeping" and &1.wake["reason"] == "pool_wait"))
+      Enum.any?(detail.tasks, &(&1.status == "sleeping" and &1.wake["reason"] == "wait"))
     end)
 
     {:ok, _} =
@@ -495,24 +542,26 @@ defmodule H.CodexPoolWaitTest do
     end)
 
     FakePoolPolicy.set_state(%{order: ["personal"], unavailable: nil})
-    broadcast_pool_available(pubsub)
+    broadcast_wait_signal(pubsub)
 
     refute_receive {:dispatched, _}, 150
   end
 
-  test "list_models surfaces unavailable_reason when pool is exhausted and Accounts.discover/2 exposes sanitized pool status" do
-    reset_at = System.system_time(:millisecond) + 120_000
-
+  test "list_models surfaces sanitized unavailable_reason and Accounts.discover/2 exposes generic status_note fields" do
     FakePoolPolicy.set_state(%{
       order: [],
-      unavailable: %{reason: :credits_disabled, wait: true, wait_until_ms: reset_at},
-      pool_status: %{
-        allow_credits: false,
-        wait_when_exhausted: true,
-        sources: [
-          %{id: "personal", eligibility: :credits_disabled, reset_at_ms: reset_at},
-          %{id: "work", eligibility: :quota_exhausted, reset_at_ms: reset_at}
-        ]
+      unavailable: %{
+        code: "codex_pool_credits_disabled",
+        message: "Included quota exhausted.",
+        summary: "Codex pool included quota exhausted (allow_credits: false)",
+        wait: true
+      },
+      status: %{
+        status_note: "Managed by test policy · credits disabled · auto-wait on",
+        sources: %{
+          "personal" => "pool: credits disabled (resets in 2m)",
+          "work" => "pool: quota exhausted"
+        }
       }
     })
 
@@ -530,16 +579,23 @@ defmodule H.CodexPoolWaitTest do
 
     assert {:ok, %{providers: [provider]}} = Accounts.discover(accounts, policy)
     assert provider.id == "openai_codex"
+    refute Map.has_key?(provider, :pool)
+    assert provider.status_note == "Managed by test policy · credits disabled · auto-wait on"
 
-    assert provider.pool == %{
-             enabled: true,
-             allow_credits: false,
-             wait_when_exhausted: true,
-             sources: [
-               %{id: "personal", eligibility: "credits_disabled", reset_at_ms: reset_at},
-               %{id: "work", eligibility: "quota_exhausted", reset_at_ms: reset_at}
-             ]
-           }
+    assert [
+             %{
+               id: "personal",
+               state: "available",
+               active: true,
+               status_note: "pool: credits disabled (resets in 2m)"
+             },
+             %{
+               id: "work",
+               state: "available",
+               active: false,
+               status_note: "pool: quota exhausted"
+             }
+           ] = provider.sources
 
     # Once an account becomes eligible, unavailable_reason clears.
     FakePoolPolicy.set_state(%{order: ["personal"], unavailable: nil})

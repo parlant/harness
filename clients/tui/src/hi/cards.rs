@@ -1033,54 +1033,68 @@ fn render_live(
         .map(|t| format!(" · turn {t}"))
         .unwrap_or_default();
 
+    let inf_wait = state.inference_wait();
+    let inf_waiting = inf_wait.and_then(|w| str_at(w, "status")) == Some("waiting");
+    if let Some(wait) = inf_wait {
+        separate(out);
+        let title = str_at(wait, "title").unwrap_or("Waiting to continue");
+        let code = str_at(wait, "code");
+        let header = match code {
+            Some(c) if !c.is_empty() => format!("[{title} · {c}]"),
+            _ => format!("[{title}]"),
+        };
+        out.push(StyledRow::plain(
+            sanitize_single_line(&header),
+            theme.tool_running,
+        ));
+        if let Some(message) = str_at(wait, "message").filter(|m| !m.is_empty()) {
+            out.push(StyledRow::plain(
+                format!("  {}", sanitize_single_line(message)),
+                theme.tool_meta,
+            ));
+        }
+        let phase = if inf_waiting {
+            match str_at(wait, "detail").filter(|d| !d.is_empty()) {
+                Some(detail) => format!("  {} · Esc to abort", sanitize_single_line(detail)),
+                None => "  Waiting in background · Esc to abort".to_string(),
+            }
+        } else {
+            "  Rechecking availability · Esc to abort".to_string()
+        };
+        out.push(StyledRow::plain(phase, theme.tool_meta));
+    }
+
     let retry = state.inference_retry();
     let waiting = retry.and_then(|r| str_at(r, "status")) == Some("waiting");
     if let Some(retry) = retry {
         separate(out);
+        let attempt = u64_at(retry, "attempt").unwrap_or(0);
+        let limit = u64_at(retry, "max_attempts").unwrap_or(0);
         let code = str_at(retry, "code").unwrap_or("provider_error");
         let message = str_at(retry, "message").unwrap_or("Provider request failed");
-        if str_at(retry, "kind") == Some("pool_wait") {
-            out.push(StyledRow::plain(
-                sanitize_single_line(&format!("[Waiting for Codex account pool · {code}]")),
-                theme.tool_running,
-            ));
-            out.push(StyledRow::plain(
-                format!("  {}", sanitize_single_line(message)),
-                theme.tool_meta,
-            ));
-            let phase = if waiting {
-                "  Waiting in background for an eligible account · Esc to abort".to_string()
-            } else {
-                "  Rechecking account pool · Esc to abort".to_string()
-            };
-            out.push(StyledRow::plain(phase, theme.tool_meta));
+        out.push(StyledRow::plain(
+            sanitize_single_line(&format!(
+                "[Retrying after provider error {attempt}/{limit} · {code}]"
+            )),
+            theme.tool_running,
+        ));
+        out.push(StyledRow::plain(
+            format!("  {}", sanitize_single_line(message)),
+            theme.tool_meta,
+        ));
+        let phase = if waiting {
+            let seconds = u64_at(retry, "delay_ms").unwrap_or(0).div_ceil(1000);
+            format!("  Waiting {seconds}s before retry · Esc to abort")
         } else {
-            let attempt = u64_at(retry, "attempt").unwrap_or(0);
-            let limit = u64_at(retry, "max_attempts").unwrap_or(0);
-            out.push(StyledRow::plain(
-                sanitize_single_line(&format!(
-                    "[Retrying after provider error {attempt}/{limit} · {code}]"
-                )),
-                theme.tool_running,
-            ));
-            out.push(StyledRow::plain(
-                format!("  {}", sanitize_single_line(message)),
-                theme.tool_meta,
-            ));
-            let phase = if waiting {
-                let seconds = u64_at(retry, "delay_ms").unwrap_or(0).div_ceil(1000);
-                format!("  Waiting {seconds}s before retry · Esc to abort")
-            } else {
-                "  Retry request in progress · Esc to abort".into()
-            };
-            out.push(StyledRow::plain(phase, theme.tool_meta));
-        }
+            "  Retry request in progress · Esc to abort".into()
+        };
+        out.push(StyledRow::plain(phase, theme.tool_meta));
     }
 
     if let Some(gen) = live
         .get("generation")
         .and_then(Value::as_object)
-        .filter(|_| !waiting)
+        .filter(|_| !waiting && !inf_waiting)
     {
         separate(out);
         out.push(StyledRow::from_spans(vec![
@@ -2026,11 +2040,11 @@ mod tests {
     }
 
     #[test]
-    fn pool_wait_live_renders_distinct_waiting_and_rechecking_cards() {
+    fn inference_wait_live_renders_generic_waiting_and_rechecking_cards() {
         let mut waiting_state = TranscriptState::default();
         waiting_state.apply_snapshot(SnapshotFrame {
             version: Some(1),
-            session_id: Some("s-pool".to_string()),
+            session_id: Some("s-wait".to_string()),
             conversation_id: Some("1".to_string()),
             seq: 2,
             before_entry_id: None,
@@ -2040,14 +2054,14 @@ mod tests {
                 "live": {
                     "generation": {
                         "message": {"thinking": "", "text": "", "tool_calls": []},
-                        "retry": {
-                            "kind": "pool_wait",
-                            "provider": "openai_codex",
-                            "delay_ms": 60_000,
-                            "until": 1_800_000_060_000u64,
+                        "wait": {
                             "status": "waiting",
-                            "code": "codex_pool_credits_disabled",
-                            "message": "Included Codex quota is exhausted; allow_credits is false."
+                            "code": "capacity_waiting",
+                            "title": "Waiting for capacity",
+                            "message": "Temporarily at capacity; waiting for next available slot.",
+                            "detail": "Will continue automatically when ready.",
+                            "until": 1_800_000_060_000u64,
+                            "resumes_at": 1_800_003_600_000u64
                         }
                     }
                 }
@@ -2058,23 +2072,24 @@ mod tests {
         assert_clean_rows(&waiting_rows);
         let waiting_text = waiting_rows.join("\n");
         assert!(
-            waiting_text.contains("[Waiting for Codex account pool · codex_pool_credits_disabled]"),
+            waiting_text.contains("[Waiting for capacity · capacity_waiting]"),
             "{waiting_text}"
         );
         assert!(
-            waiting_text.contains("Included Codex quota is exhausted; allow_credits is false."),
+            waiting_text.contains("Temporarily at capacity; waiting for next available slot."),
             "{waiting_text}"
         );
         assert!(
-            waiting_text.contains("Waiting in background for an eligible account · Esc to abort"),
+            waiting_text.contains("Will continue automatically when ready. · Esc to abort"),
             "{waiting_text}"
         );
         assert!(!waiting_text.contains("Retrying after provider error"));
+        assert!(!waiting_text.contains("... streaming"));
 
         let mut running_state = TranscriptState::default();
         running_state.apply_snapshot(SnapshotFrame {
             version: Some(1),
-            session_id: Some("s-pool".to_string()),
+            session_id: Some("s-wait".to_string()),
             conversation_id: Some("1".to_string()),
             seq: 3,
             before_entry_id: None,
@@ -2084,14 +2099,12 @@ mod tests {
                 "live": {
                     "generation": {
                         "message": {"thinking": "", "text": "", "tool_calls": []},
-                        "retry": {
-                            "kind": "pool_wait",
-                            "provider": "openai_codex",
-                            "delay_ms": 60_000,
-                            "until": 1_800_000_060_000u64,
+                        "wait": {
                             "status": "running",
-                            "code": "codex_pool_credits_disabled",
-                            "message": "Checking eligibility"
+                            "code": "capacity_waiting",
+                            "title": "Waiting for capacity",
+                            "message": "Checking readiness",
+                            "until": 1_800_000_060_000u64
                         }
                     }
                 }
@@ -2100,7 +2113,7 @@ mod tests {
 
         let running_text = rows(&running_state, false, false).join("\n");
         assert!(
-            running_text.contains("Rechecking account pool · Esc to abort"),
+            running_text.contains("Rechecking availability · Esc to abort"),
             "{running_text}"
         );
     }

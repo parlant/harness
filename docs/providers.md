@@ -180,8 +180,8 @@ aliases are temporarily ineligible (for example, included quota is exhausted
 while `allow_credits: false`, a workspace spend limit is reached, an auth
 cooldown is active, or initial usage probing is still running), `/account`,
 `hi account list`, `/model`, and web **Keys & accounts** surface the cached pool
-eligibility status. By default (`wait_when_exhausted: true`), runs enter a
-background `pool_wait` state and resume automatically once a pooled account
+eligibility status via sanitized status notes. By default (`wait_when_exhausted: true`), runs enter a
+background wait state and resume automatically once a pooled account
 becomes eligible (or immediately if you switch models with `/model`, or stop
 cleanly with `Esc`/Stop). With `wait_when_exhausted: false`, runs pause
 immediately with a specific diagnostic code (`codex_pool_credits_disabled`,

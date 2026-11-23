@@ -918,7 +918,6 @@ fn format_codex_login_choices(providers: &[LoginProvider]) -> Vec<(String, Strin
         .iter()
         .filter(|p| p.id == "openai_codex" && p.interaction == "device_code_v1")
     {
-        let pool_enabled = provider.pool.as_ref().is_some_and(|pool| pool.enabled);
         for s in provider
             .sources
             .iter()
@@ -933,14 +932,13 @@ fn format_codex_login_choices(providers: &[LoginProvider]) -> Vec<(String, Strin
                 _ => "not signed in",
             };
             let mut tags = vec![state.to_string()];
-            if pool_enabled {
-                if let Some(pool_src) = provider
-                    .pool
-                    .as_ref()
-                    .and_then(|pool| pool.sources.iter().find(|ps| ps.id == s.id))
-                {
-                    tags.push(format_pool_eligibility(pool_src.eligibility.as_deref()));
-                }
+            if let Some(note) = s
+                .status_note
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+            {
+                tags.push(sanitize_single_line(note));
             }
             if s.active {
                 tags.push("stock active".to_string());
@@ -949,21 +947,6 @@ fn format_codex_login_choices(providers: &[LoginProvider]) -> Vec<(String, Strin
         }
     }
     choices
-}
-
-fn format_pool_eligibility(eligibility: Option<&str>) -> String {
-    match eligibility {
-        Some("eligible") => "pool: eligible".to_string(),
-        Some("credits_only") => "pool: credits only".to_string(),
-        Some("credits_disabled") => "pool: credits disabled".to_string(),
-        Some("quota_exhausted") => "pool: quota exhausted".to_string(),
-        Some("workspace_blocked") => "pool: workspace blocked".to_string(),
-        Some("auth_cooldown") => "pool: auth cooldown".to_string(),
-        Some("checking") => "pool: checking".to_string(),
-        Some("unavailable") => "pool: unavailable".to_string(),
-        Some(other) => format!("pool: {}", sanitize_single_line(&other.replace('_', " "))),
-        None => "pool: configured".to_string(),
-    }
 }
 
 fn attach_session_target(
@@ -2599,26 +2582,17 @@ mod tests {
     }
 
     #[test]
-    fn codex_login_choices_include_pool_eligibility_labels_when_pool_is_enabled() {
+    fn codex_login_choices_include_sanitized_source_status_notes() {
         let providers: Vec<LoginProvider> = serde_json::from_value(json!([
             {
                 "id": "openai_codex",
                 "interaction": "device_code_v1",
+                "status_note": "Managed externally",
                 "sources": [
-                    {"id": "personal", "state": "available", "active": true},
-                    {"id": "work", "state": "available", "active": false},
+                    {"id": "personal", "state": "available", "active": true, "status_note": "ready · tier A"},
+                    {"id": "work", "state": "available", "active": false, "status_note": "busy\u{001b}[31m\nnext"},
                     {"id": "backup", "state": "not_signed_in", "active": false}
-                ],
-                "pool": {
-                    "enabled": true,
-                    "allow_credits": false,
-                    "wait_when_exhausted": true,
-                    "sources": [
-                        {"id": "personal", "eligibility": "credits_disabled", "reset_at_ms": 1_800_000_000_000i64},
-                        {"id": "work", "eligibility": "eligible", "reset_at_ms": null},
-                        {"id": "backup", "eligibility": "checking", "reset_at_ms": null}
-                    ]
-                }
+                ]
             }
         ]))
         .unwrap();
@@ -2629,15 +2603,15 @@ mod tests {
             vec![
                 (
                     "personal".to_string(),
-                    "personal  [signed in · pool: credits disabled · stock active]".to_string()
+                    "personal  [signed in · ready · tier A · stock active]".to_string()
                 ),
                 (
                     "work".to_string(),
-                    "work  [signed in · pool: eligible]".to_string()
+                    "work  [signed in · busy\\x1b[31m\\nnext]".to_string()
                 ),
                 (
                     "backup".to_string(),
-                    "backup  [not signed in · pool: checking]".to_string()
+                    "backup  [not signed in]".to_string()
                 ),
             ]
         );

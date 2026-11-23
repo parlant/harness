@@ -634,7 +634,7 @@ defmodule H.Session.Server.Commands do
             t.owner == {:conversation, cid} and
               t.status == "sleeping" and
               t.kind in ["generation", "compaction"] and
-              get_in(t.wake, ["reason"]) == "pool_wait"
+              get_in(t.wake, ["reason"]) == "wait"
           end)
           |> Enum.sort_by(& &1.id)
           |> Enum.map(&{:arm_wake_timer, &1.id, 0})

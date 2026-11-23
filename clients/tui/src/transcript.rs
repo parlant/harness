@@ -221,6 +221,14 @@ impl TranscriptState {
             .filter(|v| v.is_object())
     }
 
+    pub fn inference_wait(&self) -> Option<&Value> {
+        let live = self.live_doc()?;
+        live.get("generation")
+            .and_then(|v| v.get("wait"))
+            .or_else(|| live.get("compaction").and_then(|v| v.get("wait")))
+            .filter(|v| v.is_object())
+    }
+
     pub fn is_run_active(&self) -> bool {
         let Some(live) = self.live_doc() else {
             return false;

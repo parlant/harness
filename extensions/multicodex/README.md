@@ -42,7 +42,7 @@ Nothing requires a Codex executable, Pi, or another SDK.
    `true`: when signed-in pooled accounts are temporarily ineligible (for example,
    included quota is exhausted while `allow_credits: false`, a workspace spend
    limit is reached, an auth cooldown is active, or the initial usage check is
-   in progress), H parks the run in a `pool_wait` state and resumes automatically
+   in progress), H parks the run in a recoverable wait state and resumes automatically
    as soon as a fresh usage poll observes an eligible account. Set
    `"wait_when_exhausted": false` to fail immediately with the specific
    `codex_pool_*` diagnostic instead. The daemon can boot even if
@@ -60,9 +60,9 @@ background, using the [upstream usage schema](https://github.com/openai/codex/bl
 first (least used first, ties in config order), then explicit credit capacity
 if enabled. Unknown, expired, exhausted, and workspace-blocked observations are not
 eligible. When an observation becomes eligible, MultiCodex broadcasts
-`{:account_pool_available, :openai_codex}` on `H.PubSub` so waiting sessions
+`{:wait_signal, "account_policy:openai_codex"}` on `H.PubSub` so waiting sessions
 wake immediately without polling in core. It also implements the optional
-`unavailable/2` and `pool_status/1` callbacks from cached memory so model lists,
+`unavailable/2` and `status/1` callbacks from cached memory so model lists,
 `/account`, web settings, and session errors report specific causes and reset
 times without extra provider I/O. Startup and fresh sign-in may need a polling cycle before an alias
 becomes eligible. Provider balances and permissions can change before dispatch;

@@ -118,6 +118,12 @@ impl<'a> StatusFields<'a> {
                 "archived"
             } else if state.workspace_wait().is_some() {
                 "waiting"
+            } else if let Some(wait) = state.inference_wait() {
+                if wait.get("status").and_then(serde_json::Value::as_str) == Some("waiting") {
+                    "waiting"
+                } else {
+                    "retrying"
+                }
             } else if state.inference_retry().is_some() {
                 "retrying"
             } else if state.is_run_active() {
