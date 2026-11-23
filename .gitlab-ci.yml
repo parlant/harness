@@ -1,9 +1,8 @@
 # H (:harness) CI & Multi-Platform Release Pipeline
 #
-# Targets GitLab SaaS shared runners:
-#   - Linux x86_64 : saas-linux-medium-amd64
-#   - Linux arm64  : saas-linux-medium-arm64
-#   - macOS arm64  : saas-macos-medium-m1
+# Targets GitLab SaaS shared Linux runners (`saas-linux-medium-amd64`,
+# `saas-linux-medium-arm64`) and an opt-in macOS Apple Silicon runner
+# (`h-macos-arm64`, or `H_MACOS_RUNNER_TAG` override).
 #
 # Release builds run automatically on version tags (`v*`) and can be triggered
 # manually on `main` or feature branches for pre-release verification.
@@ -171,8 +170,11 @@ bundle:linux-arm64:
 
 bundle:darwin-arm64:
   stage: build
-  tags: [saas-macos-medium-m1]
-  extends: .bundle_rules
+  tags: [h-macos-arm64]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/ && $H_ENABLE_MACOS_RUNNER == "1"'
+    - when: manual
+      allow_failure: true
   variables:
     MIX_ENV: "prod"
     HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -222,10 +224,11 @@ release:publish:
       artifacts: true
     - job: bundle:linux-arm64
       artifacts: true
-    - job: bundle:darwin-arm64
-      artifacts: true
     - job: bundle:installer-archive
       artifacts: true
+    - job: bundle:darwin-arm64
+      artifacts: true
+      optional: true
   rules:
     - if: $CI_COMMIT_TAG =~ /^v/
   before_script:

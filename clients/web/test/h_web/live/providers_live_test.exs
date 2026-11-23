@@ -50,6 +50,7 @@ defmodule HWeb.ProvidersLiveTest do
        ctx do
     path = Path.join(ctx.data_dir, "openai-compatible.json")
     File.cp!(@catalog, path)
+    File.chmod!(path, 0o600)
     assert {:ok, _, running} = Compatible.read(ctx.data_dir)
     accounts = start_accounts(ctx, running)
     key = "fixture-credential-not-for-display"

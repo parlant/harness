@@ -161,6 +161,7 @@ def smoke(source):
                 assert refused.returncode != 0 and "invalid_openai_compatible_json" in refused.stderr
                 assert old.poll() is None
                 shutil.copyfile(router_catalog, compatible)
+                compatible.chmod(0o600)
 
                 replacement = launch("restart")
                 ready(replacement)
