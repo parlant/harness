@@ -162,14 +162,24 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 key_file=""
-if [ -n "${H_SIGNING_KEY_PEM:-}" ]; then
+make_tmp_key() {
   case $(uname -s) in
     Darwin) tmpdir=/private/tmp ;;
     *) tmpdir=${TMPDIR:-/tmp} ;;
   esac
   tmp_key=$(mktemp "$tmpdir/h-sign-key.XXXXXX")
   chmod 600 "$tmp_key"
+}
+
+if [ -n "${H_SIGNING_KEY_PEM:-}" ]; then
+  make_tmp_key
   printf '%s\n' "$H_SIGNING_KEY_PEM" > "$tmp_key"
+  key_file="$tmp_key"
+elif [ -n "${H_SIGNING_KEY:-}" ] && [ -f "$H_SIGNING_KEY" ]; then
+  # Copy file-type CI variables (which GitLab Runner mounts mode 0666) to a 0600 temp file.
+  make_tmp_key
+  cp -- "$H_SIGNING_KEY" "$tmp_key"
+  chmod 600 "$tmp_key"
   key_file="$tmp_key"
 elif [ -n "${H_SIGNING_KEY:-}" ]; then
   key_file="$H_SIGNING_KEY"
