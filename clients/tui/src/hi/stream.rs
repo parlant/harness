@@ -446,8 +446,12 @@ mod tests {
     }
 
     fn write_sse_chunk(stream: &mut impl Write, payload: &str) {
-        write!(stream, "{:x}\r\n{}\r\n", payload.len(), payload).unwrap();
-        stream.flush().unwrap();
+        try_write_sse_chunk(stream, payload).unwrap();
+    }
+
+    fn try_write_sse_chunk(stream: &mut impl Write, payload: &str) -> io::Result<()> {
+        write!(stream, "{:x}\r\n{}\r\n", payload.len(), payload)?;
+        stream.flush()
     }
 
     #[test]
@@ -767,7 +771,9 @@ mod tests {
                     "id: {seq}\nevent: commit\ndata: {{\"seq\":{seq},\"prev_seq\":{},\"appended_entries\":[{{\"id\":\"{seq}\",\"kind\":\"assistant\",\"data\":{{\"text\":\"m{seq}\"}}}}],\"doc_ops\":{{}}}}\n\n",
                     seq - 1
                 );
-                write_sse_chunk(&mut s1, &frame);
+                if try_write_sse_chunk(&mut s1, &frame).is_err() {
+                    break;
+                }
             }
             // Wait until client abandons s1
             let mut tmp = [0u8; 32];
@@ -994,7 +1000,9 @@ mod tests {
                     "id: {seq}\nevent: commit\ndata: {{\"seq\":{seq},\"prev_seq\":{},\"appended_entries\":[{{\"id\":\"{seq}\",\"kind\":\"assistant\",\"data\":{{\"text\":\"{big_text}\"}}}}],\"doc_ops\":{{}}}}\n\n",
                     seq - 1
                 );
-                write_sse_chunk(&mut s1, &frame);
+                if try_write_sse_chunk(&mut s1, &frame).is_err() {
+                    break;
+                }
             }
             let mut tmp = [0u8; 32];
             let _ = s1.read(&mut tmp);
