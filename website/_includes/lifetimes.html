@@ -1,0 +1,27 @@
+{% assign life = site.data.figures.lifetimes %}
+<figure class="lifetime-figure">
+  <figcaption class="manual-intro">
+    <p class="manual-kicker">{{ life.number }}</p>
+    <h2 class="manual-title">{{ life.title }}</h2>
+    <p>{{ life.intro }}</p>
+    <p class="life-hint">{{ life.instruction }}</p>
+  </figcaption>
+  <div class="lifetime-list">
+    {% for row in life.entries %}
+      <details class="life-row" {% if forloop.first %}open{% endif %}>
+        <summary>
+          <svg viewBox="0 0 56 32" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.5">
+            {% case row.shape %}
+            {% when 'branch' %}<path d="M4 9h46M21 9c8 0 8 16 16 16h11"/><circle cx="22" cy="9" r="3"/><circle cx="49" cy="25" r="3"/>
+            {% when 'tasks' %}<path d="M8 8v17h33M8 8h22"/><rect x="29" y="5" width="16" height="6"/><rect x="39" y="22" width="12" height="6"/>
+            {% when 'supervision' %}<path d="M27 8v7M9 24v-9h37v9"/><circle cx="27" cy="6" r="3"/><circle cx="9" cy="25" r="3"/><circle cx="46" cy="25" r="3"/>
+            {% when 'cursor' %}<path d="M3 20h47M23 8l4 5 4-5z"/><circle cx="11" cy="20" r="3"/><circle cx="27" cy="20" r="3"/><circle cx="43" cy="20" r="3"/>
+            {% endcase %}
+          </svg>
+          <span>{{ row.name }}</span><span class="manual-toggle" aria-hidden="true"></span>
+        </summary>
+        <div class="life-note"><p><strong>{{ row.question }}</strong></p><p>{{ row.body }}</p></div>
+      </details>
+    {% endfor %}
+  </div>
+</figure>

@@ -92,3 +92,5 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 - [hi design and parity target](docs/hi.md) — interaction parity, Rust choices and durable differences
 - [Extensions](docs/extensions.md) — daemon packages, profiles, environments, providers and clients
 - [Design references](docs/references.md)
+
+The [project website](website/README.md) builds separately with Jekyll. Its demos are static walkthroughs; no running daemon or provider account is required.

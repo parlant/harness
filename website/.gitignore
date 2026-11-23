@@ -1,0 +1,10 @@
+_site/
+public/
+.jekyll-cache/
+.sass-cache/
+node_modules/
+assets/css/main.css
+.bundle/
+vendor/
+.pi/
+.DS_Store

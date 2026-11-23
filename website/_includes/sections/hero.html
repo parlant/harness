@@ -1,0 +1,13 @@
+{% assign hero = include.section %}
+<section class="manual-hero" aria-labelledby="manual-heading">
+  <div>
+    <p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ hero.kicker }}</p>
+    <h1 id="manual-heading" class="manual-display">{{ hero.title }} <em>{{ hero.emphasis }}</em></h1>
+    <p class="manual-lead">{{ hero.body }}</p>
+    <div class="manual-actions">
+      <a class="manual-primary" href="{{ hero.primary.url | relative_url }}">{{ hero.primary.label }} <span aria-hidden="true">→</span></a>
+      <a class="manual-secondary" href="{{ hero.secondary.url | relative_url }}">{{ hero.secondary.label }}</a>
+    </div>
+  </div>
+  {% include sections/session-plate.html %}
+</section>

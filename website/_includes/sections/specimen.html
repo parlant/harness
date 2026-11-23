@@ -1,0 +1,21 @@
+{% assign specimen = include.specimen %}
+<figure class="client-specimen specimen-{{ specimen.client }}">
+  <div class="specimen-tag manual-kicker">{{ specimen.label }}</div>
+  <div class="specimen-screen">
+    <div class="specimen-strip"><span class="specimen-symbol" aria-hidden="true">{% if specimen.client == 'terminal' %}›_{% else %}▤{% endif %}</span>{{ specimen.strip }}</div>
+    <div class="specimen-panes">
+      {% if specimen.items %}
+        <div class="specimen-rail">
+          <p>{{ specimen.sidebar }}</p>
+          <ul>{% for item in specimen.items %}<li {% if item.selected %}class="specimen-selected"{% endif %}>{{ item.label }}</li>{% endfor %}</ul>
+        </div>
+      {% endif %}
+      <div class="specimen-thread">
+        <p class="specimen-context">{{ specimen.context }}</p>
+        <dl>{% for entry in specimen.entries %}<dt>{{ entry.label }}</dt><dd>{{ entry.text }}</dd>{% endfor %}</dl>
+        {% if specimen.prompt %}<div class="specimen-command"><span aria-hidden="true">❯</span> {{ specimen.prompt }}<small>{{ specimen.hint }}</small></div>{% endif %}
+      </div>
+    </div>
+  </div>
+  <figcaption>{{ specimen.caption }}</figcaption>
+</figure>

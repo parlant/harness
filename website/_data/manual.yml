@@ -1,0 +1,32 @@
+- title: 'Start here'
+  pages:
+    - {title: 'Manual overview', url: /docs/}
+    - {title: 'Set up H', url: /docs/setup/}
+    - {title: 'Configuration', url: /docs/configuration/}
+    - {title: 'Providers and credentials', url: /docs/providers/}
+- title: 'Use H'
+  pages:
+    - {title: 'Sessions and workspaces', url: /docs/sessions/}
+    - {title: 'Terminal client', url: /docs/terminal/}
+    - {title: 'Web client', url: /docs/web/}
+    - {title: 'Manage the daemon', url: /docs/daemon/}
+    - {title: 'Security boundaries', url: /docs/security/}
+- title: 'Practical guides'
+  pages:
+    - {title: 'Guide index', url: /docs/guides/}
+    - {title: 'Resume in another client', url: /docs/guides/resume/}
+    - {title: 'Review a change', url: /docs/guides/file-review/}
+    - {title: 'Delegate to a subagent', url: /docs/guides/subagents/}
+    - {title: 'Import pi transcripts', url: /docs/guides/import/}
+- title: 'Build on H'
+  pages:
+    - {title: 'Architecture', url: /docs/architecture/}
+    - {title: 'Local HTTP and SSE API', url: /docs/protocol/}
+    - {title: 'Build a client', url: /docs/guides/build-a-client/}
+    - {title: 'Extend the hi CLI', url: /docs/guides/extend-hi/}
+    - {title: 'Build a local extension', url: /docs/extensions/}
+    - {title: 'Contribute a change', url: /docs/contributing/}
+- title: 'Extensions'
+  pages:
+    - {title: 'Extension browser', url: /extensions/}
+    - {title: 'MultiCodex', url: /extensions/multicodex/}

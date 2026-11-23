@@ -1,0 +1,8 @@
+<dl class="study-ledger">
+  {% for entry in include.entries %}
+    <div>
+      <dt>{{ entry.label }}</dt>
+      <dd>{% if entry.code %}<code>{{ entry.code }}</code>{% endif %}{{ entry.text }}</dd>
+    </div>
+  {% endfor %}
+</dl>

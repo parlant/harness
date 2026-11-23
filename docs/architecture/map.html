@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>H / Architecture atlas</title>
+<style>
+:root{color-scheme:dark;--base:#101918;--line:#364a44;--paper:#e9f1e7;--muted:#adbbb4;--mint:#8ee3b9;--amber:#f2c486;--blue:#a8cdec}*{box-sizing:border-box}body{margin:0;background:var(--base);color:var(--paper);font:15px/1.4 system-ui,sans-serif;display:flex;flex-direction:column;height:100vh;height:100dvh}header,footer{display:flex;align-items:center;gap:1rem;padding:.8rem clamp(.8rem,3vw,3rem);flex-wrap:wrap;background:#15201d}header{border-bottom:1px solid var(--line);justify-content:space-between}.brand{display:flex;align-items:center;gap:.8rem}.mark{background:var(--mint);color:var(--base);padding:.25rem .6rem;font:bold 1.35rem monospace;border-radius:5px}h1{margin:0;font-size:1.1rem;letter-spacing:-.02em}.sub,footer{font-size:.8rem;color:var(--muted)}nav,.tools{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap}button{background:transparent;color:var(--paper);border:1px solid var(--line);border-radius:6px;padding:.45rem .65rem;cursor:pointer;font:inherit;font-size:.84rem}button:hover,button[aria-pressed=true]{color:var(--mint);background:#263d33;border-color:#68957f}button:focus-visible,a:focus-visible,svg:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}main{position:relative;flex:1;min-height:10rem;background-color:#101918;background-image:radial-gradient(#2e4039 1px,transparent 1px);background-size:18px 18px}#map{display:block;width:100%;height:100%;cursor:grab;touch-action:none;user-select:none}#map.dragging{cursor:grabbing}footer{justify-content:space-between;border-top:1px solid var(--line)}a{color:var(--mint)}.tools output{min-width:3rem;text-align:center;font:13px monospace}.board{fill:#16211e;stroke:#3c5047}.card{fill:#202e29;stroke:#44574e}.signal{fill:none;stroke:#9cb9a9;stroke-width:2;marker-end:url(#arrow)}text{fill:var(--paper);font-family:system-ui,sans-serif}.kicker,.tag,.caption{font-family:ui-monospace,monospace}.kicker{fill:var(--mint);letter-spacing:2px;font-size:14px}.heading{font-size:33px;font-weight:650;letter-spacing:-1px}.lead{font-size:17px;fill:var(--muted)}.tag{font-size:13px;letter-spacing:1px}.name{font-size:22px;font-weight:620}.copy{font-size:16px;fill:#c8d5cd}.caption{font-size:14px;fill:var(--mint)}.aside{font-size:15px;fill:var(--amber)}@media(max-width:650px){header,footer{gap:.4rem;padding:.5rem}nav button{font-size:.75rem}.help{display:none}}
+</style>
+</head>
+<body>
+<header><div class="brand"><b class="mark">H</b><div><h1>Architecture atlas</h1><div class="sub">Field guide to the local coding-agent engine</div></div></div>
+<nav aria-label="Focus a diagram"><button data-board="0">01 · Session</button><button data-board="1">02 · Execution</button><button data-board="2">03 · Lifetimes</button></nav></header>
+<main><svg id="map" tabindex="0" aria-labelledby="title desc" xmlns="http://www.w3.org/2000/svg"><title id="title">How H runs a coding session</title><desc id="desc">Three diagrams: client connections, the commit and effect cycle, and four different lifetimes. Drag or use arrow keys to pan. Scroll, pinch or press plus and minus to zoom. Press 0 to see all diagrams.</desc><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L8 4 L0 8z" fill="#9cb9a9"/></marker></defs><g id="world"></g></svg></main>
+<footer><div class="tools" aria-label="Map controls"><button id="minus" aria-label="Zoom out">−</button><output id="zoom" aria-label="Zoom level"></output><button id="plus" aria-label="Zoom in">+</button><button id="fit">Fit all</button></div><span class="help">Drag to pan · Scroll or pinch to zoom · Select a chapter to recenter</span><a href="../architecture.md">Architecture notes ↗</a></footer>
+<script>
+'use strict';
+const map = document.querySelector('#map'), world = document.querySelector('#world');
+const NS = 'http://www.w3.org/2000/svg', W = 1060, H = 530, stride = W + 80;
+const mint = '#8ee3b9', blue = '#a8cdec', amber = '#f2c486';
+function el(parent, tag, attrs, content) {
+  const n = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) n.setAttribute(key, value);
+  if (content !== undefined) n.textContent = content;
+  parent.append(n); return n;
+}
+function text(p,x,y,cls,str,attrs={}) { return el(p,'text',{x,y,class:cls,...attrs},str); }
+function board(i, label, heading, lead) {
+  const g = el(world,'g',{transform:`translate(${i*stride} 0)`});
+  el(g,'rect',{width:W,height:H,rx:18,class:'board'});
+  text(g,34,40,'kicker',`H / ${label}     •     PLATE 0${i+1} OF 03`);
+  text(g,34,85,'heading',heading); text(g,35,117,'lead',lead);
+  return g;
+}
+function card(g,x,y,w,h,color,tag,title,lines) {
+  el(g,'rect',{x,y,width:w,height:h,rx:9,class:'card'});
+  text(g,x+18,y+25,'tag',tag,{fill:color,style:`fill:${color}`});
+  text(g,x+18,y+57,'name',title);
+  lines.forEach((s,i)=>text(g,x+18,y+84+21*i,'copy',s));
+}
+function arrow(g,d){ el(g,'path',{d,class:'signal'}); }
+function note(g,str){ el(g,'path',{d:'M34 468H1026',stroke:'#3c5047'}); text(g,35,500,'aside',str); }
+const a = board(0,'SESSION','Two interfaces. One session.','The engine owns the run. A client can leave, reconnect, or follow the same conversation from another screen.');
+card(a,34,156,274,115,blue,'CLIENT / RUST','hi · terminal',['Local JSON API + SSE events']);
+card(a,34,314,274,115,blue,'CLIENT / PHOENIX','Web workbench',['LiveView → in-VM backend']);
+arrow(a,'M308 213 H346 V264 H392'); arrow(a,'M308 371 H346 V312 H392');
+card(a,394,219,246,143,mint,'ENGINE / ADMISSION','H.Daemon',['Validate the command.','Route it by session ID.']);
+arrow(a,'M640 289 H737');text(a,661,276,'caption','route');
+card(a,739,205,286,175,mint,'ENGINE / SINGLE WRITER','H.Session.Server',['Order session transitions.','Commit batches of entries,','tasks and documents.']);
+note(a,'Client navigation is local. Closing a browser tab or detaching the terminal does not cancel a run.');
+const b = board(1,'EXECUTION','Commit first. Then act.','Follow a generation through the session coordinator. Only the coordinator commits the worker’s outcome.');
+card(b,34,164,305,117,mint,'01 / STAGE','Session coordinator',['Record task intent and policy.']);
+card(b,439,164,586,117,blue,'02 / COMMIT','H.Storage.File',['Per-session CRC-framed log and rename-based snapshots.']);
+arrow(b,'M339 223 H437');text(b,357,211,'caption','batch');
+arrow(b,'M738 281 V330');text(b,752,312,'caption','after commit');
+card(b,439,332,586,116,amber,'03 / DISPATCH','Supervised worker',['H.Context → provider request, or a tool → execution environment.']);
+card(b,34,332,305,116,mint,'04 / SETTLE','Session coordinator',['Check attempt; commit outcome.']);
+arrow(b,'M439 390 H341');text(b,357,378,'caption','result');
+note(b,'Recovery reads stored checkpoints. An interrupted write, edit or shell command is not automatically replayed.');
+const c = board(2,'LIFETIMES','Four different questions.','A branch, a task, a process and a cursor can refer to the same run without sharing a lifetime.');
+card(c,34,145,482,140,blue,'01 / HISTORY ANCESTRY','Which entries can I see?',['A fork inherits a visible prefix through one entry.','Later entries on either branch stay on that branch.']);
+card(c,544,145,482,140,amber,'02 / WORK OWNERSHIP','Which run owns this work?',['A generation can own tool-call tasks.','Forking history neither copies nor cancels them.']);
+card(c,34,304,482,140,mint,'03 / OTP SUPERVISION','Which processes restart together?',['A per-session supervisor groups the coordinator','with its task supervisor. Restart is not replay.']);
+card(c,544,304,482,140,blue,'04 / CLIENT NAVIGATION','Where am I looking?',['Each client selects its own branch and page.','Moving its cursor does not rewrite shared history.']);
+note(c,'The catalog indexes sessions for browsing; opening an inbox need not load every session coordinator.');
+
+// Camera coordinates map world units to CSS pixels; all gestures share the same transform.
+let scale=1, tx=0, ty=0, focused=0;
+const tabs=[...document.querySelectorAll('[data-board]')];
+function paint(){
+  world.setAttribute('transform',`translate(${tx} ${ty}) scale(${scale})`);
+  document.querySelector('#zoom').textContent=Math.round(scale*100)+'%';
+  tabs.forEach((t,i)=>t.setAttribute('aria-pressed',String(focused===i)));
+}
+function frame(i){
+  const width=i===-1?2*stride+W:W;
+  scale=Math.min(map.clientWidth/(width+40),map.clientHeight/(H+40));
+  tx=map.clientWidth/2-((i===-1?0:i*stride)+width/2)*scale;
+  ty=(map.clientHeight-H*scale)/2; focused=i; paint();
+}
+function magnify(factor,x=map.clientWidth/2,y=map.clientHeight/2){
+  const next=Math.max(Math.min(.08,map.clientWidth/(2*stride+W+40)),Math.min(8,scale*factor));
+  tx=x-(x-tx)*next/scale; ty=y-(y-ty)*next/scale; scale=next; focused=null; paint();
+}
+tabs.forEach((t,i)=>t.onclick=()=>frame(i));
+document.querySelector('#fit').onclick=()=>frame(-1);
+document.querySelector('#plus').onclick=()=>magnify(1.25);
+document.querySelector('#minus').onclick=()=>magnify(.8);
+map.addEventListener('wheel',e=>{
+  e.preventDefault(); const r=map.getBoundingClientRect();
+  const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?map.clientHeight:1);
+  magnify(Math.exp(-Math.max(-300,Math.min(300,delta))*.002),e.clientX-r.left,e.clientY-r.top);
+},{passive:false});
+const pointers=new Map();
+function gesture(){
+  const [a,b]=pointers.values(); if(!b)return {...a,d:0};
+  return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,d:Math.hypot(a.x-b.x,a.y-b.y)};
+}
+function point(e){const r=map.getBoundingClientRect();return {x:e.clientX-r.left,y:e.clientY-r.top};}
+map.onpointerdown=e=>{
+  if(e.button!==0||pointers.size>=2)return;
+  map.focus();map.setPointerCapture(e.pointerId);pointers.set(e.pointerId,point(e));map.classList.add('dragging');
+};
+map.onpointermove=e=>{
+  if(!pointers.has(e.pointerId))return;
+  const old=gesture();pointers.set(e.pointerId,point(e));const now=gesture();
+  tx+=now.x-old.x;ty+=now.y-old.y;
+  if(old.d&&now.d)magnify(now.d/old.d,now.x,now.y);else{focused=null;paint();}
+};
+map.onlostpointercapture=map.onpointercancel=map.onpointerup=e=>{
+  pointers.delete(e.pointerId);if(!pointers.size)map.classList.remove('dragging');
+};
+map.onkeydown=e=>{
+  if(e.metaKey||e.ctrlKey||e.altKey)return;
+  switch(e.key){case '+':case '=':magnify(1.25);break;case '-':magnify(.8);break;case '0':frame(-1);break;
+    case 'ArrowLeft':tx+=60;break;case 'ArrowRight':tx-=60;break;case 'ArrowUp':ty+=60;break;case 'ArrowDown':ty-=60;break;default:return;}
+  if(e.key.startsWith('Arrow')){focused=null;paint();}e.preventDefault();
+};
+new ResizeObserver(()=>{if(focused!==null)frame(focused);}).observe(map);
+frame(0);
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{% assign f = site.data.figures.extension %}
+<figure class="boundary-path">
+  <figcaption><span class="rail-title">{{ f.number }}</span><h2>{{ f.title }}</h2></figcaption>
+  <ol>{% for step in f.steps %}<li><span class="rail-title" aria-hidden="true">0{{ forloop.index }}</span><strong>{{ step.title }}</strong><code>{{ step.artifact }}</code><p>{{ step.note }}</p></li>{% endfor %}</ol>
+  <p>{{ f.caption }}</p>
+</figure>

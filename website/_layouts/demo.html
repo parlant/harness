@@ -1,0 +1,49 @@
+---
+layout: default
+---
+{% assign guide = site.data.figures.demo %}
+<div class="manual-demo wrap">
+  <header class="study-header">
+    <p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ page.kicker }}</p>
+    <h1 class="manual-display">{{ page.title }}</h1>
+    <p class="manual-lead">{{ page.description }}</p>
+  </header>
+  <div class="study-grid">
+    <aside class="study-margin">
+      <nav aria-label="{{ guide.label }}">
+        <h2 class="manual-kicker">{{ guide.label }}</h2>
+        <ol>
+          {% for item in guide.pages %}
+            <li><a href="{{ item.url | relative_url }}" {% if page.url == item.url %}aria-current="page"{% endif %}><span class="manual-folio" aria-hidden="true">0{{ forloop.index }}</span>{{ item.title }}</a></li>
+          {% endfor %}
+        </ol>
+      </nav>
+      <p class="study-status"><strong>{{ guide.status }}</strong>{{ guide.status_note }}</p>
+    </aside>
+    <div class="study-main">
+      {% if page.specimen %}
+        {% include sections/specimen.html specimen=page.specimen %}
+      {% else %}
+      <section class="study-record" aria-labelledby="record-title">
+        <p class="manual-kicker">{{ page.record.label }}</p>
+        <h2 class="manual-title" id="record-title">{{ page.record.title }}</h2>
+        {% include sections/ledger.html entries=page.record.entries %}
+      </section>
+      {% endif %}
+      <section class="study-scenarios" aria-labelledby="scenarios-title">
+        <h2 class="manual-title" id="scenarios-title">{{ page.scenarios_title }}</h2>
+        <div class="study-instructions">{{ content }}</div>
+        {% for sample in page.scenarios %}
+          <details class="study-choice" name="scenario" {% if forloop.first %}open{% endif %}>
+            <summary>{{ sample.title }}<span class="manual-toggle" aria-hidden="true"></span></summary>
+            <div class="study-result">
+              {% include sections/ledger.html entries=sample.entries %}
+              <p class="study-note">{{ sample.note }}</p>
+            </div>
+          </details>
+        {% endfor %}
+      </section>
+      <a class="manual-secondary" href="{{ guide.setup_url | relative_url }}">{{ guide.setup }} <span aria-hidden="true">→</span></a>
+    </div>
+  </div>
+</div>

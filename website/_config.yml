@@ -1,0 +1,40 @@
+title: H
+tagline: A local coding-agent harness
+description: H is a local coding-agent daemon with durable sessions, synchronized terminal and web clients, and a lean core you can extend.
+# Preview origin only. Set the real HTTPS origin in a launch override (see README).
+url: http://localhost:8080
+baseurl: ""
+preview: true
+lang: en
+markdown: kramdown
+kramdown:
+  toc_levels: 2..3
+plugins:
+  - jekyll-llms-txt
+  - jekyll-seo-tag
+  - jekyll-sitemap
+llms_txt:
+  sections:
+    - title: Start here
+      paths: ["/", "/demo/**"]
+      content_paths: ["specimen.caption"]
+    - title: Features
+      paths: ["/features/"]
+    - title: Manual
+      paths: ["/docs/**"]
+    - title: Extension directory
+      paths: ["/extensions/**"]
+exclude:
+  - AGENTS.md
+  - README.md
+  - docs
+  - Gemfile
+  - Gemfile.lock
+  - Makefile
+  - node_modules
+  - package.json
+  - package-lock.json
+  - scripts
+  - assets/css/input.css
+  - assets/css/site.css
+  - vendor

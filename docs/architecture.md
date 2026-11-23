@@ -1,5 +1,7 @@
 # Architecture
 
+[Open the interactive architecture atlas](architecture/map.html) in a browser for a zoomable tour of client connections, session execution, and the four lifetimes. The HTML file works offline.
+
 For startup path extensions, managed accounts, and proposed hooks, see [Extensions](extensions.md). For step-anchored subsession delegation, settlement signals, and the `subagent` tool, see [Subagents](architecture/subagents.md).
 
 The engine is the root Mix application (`:harness`, `H.*`). It owns session state and runs work even when no client is attached. Phoenix is a separate Mix application; the terminal client is a separate Rust binary. Neither is required to run the engine.

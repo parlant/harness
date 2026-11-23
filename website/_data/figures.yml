@@ -1,0 +1,58 @@
+session:
+  label: Example session
+  name: Parser review
+  steps:
+    - {surface: 'Terminal · hi', action: 'Start a code review'}
+    - {surface: 'Terminal · /quit', action: 'Disconnect the terminal'}
+    - {surface: 'Browser · hiweb', action: 'Watch the same reply stream'}
+  outcome: Same run. No handoff.
+  caption: The daemon keeps working between clients.
+lifetimes:
+  number: Fig. 02
+  title: Four lifetimes
+  intro: A fork changes which entries a conversation sees. It does not duplicate a task, restart a worker, or move another reader’s cursor.
+  instruction: Open a row to inspect its boundary.
+  entries:
+    - name: History ancestry
+      shape: branch
+      question: Which entries can I see?
+      body: A conversation inherits its parent’s visible prefix through the selected entry. New entries extend that conversation without changing its parent.
+    - name: Work ownership
+      shape: tasks
+      question: Which run owns the work?
+      body: A generation can own tool calls. Forking at an earlier entry neither copies nor cancels those tasks; they still belong to the run that started them.
+    - name: OTP supervision
+      shape: supervision
+      question: Which processes restart together?
+      body: A per-session supervisor groups the coordinator and its workers. Restarting a process does not rewind the transcript or grant permission to repeat an interrupted shell command.
+    - name: Client cursor
+      shape: cursor
+      question: Where am I reading?
+      body: Each client chooses its own session, branch, and page. Moving one cursor leaves both the stored entries and the other client’s view alone.
+demo:
+  label: Demo index
+  status: Illustrated walkthrough
+  status_note: Static examples. No daemon or model is running here.
+  pages:
+    - title: Conversation
+      url: /demo/
+    - title: hi · Terminal
+      url: /demo/hi/
+    - title: hiweb · Browser
+      url: /demo/hiweb/
+  setup: Set up locally
+  setup_url: /docs/setup/
+extension:
+  number: Fig. 03
+  title: From package to session
+  steps:
+    - title: Author builds
+      artifact: 'extension.json + ebin/'
+      note: The package supplies a manifest and compiled modules, not a running daemon.
+    - title: Owner enables
+      artifact: extensions.json
+      note: At startup H loads the selected local artifact with the daemon’s authority. A workspace cannot enable it.
+    - title: Session selects
+      artifact: harness_id
+      note: A client can request a registered profile. The coordinator still owns commits and task recovery.
+  caption: Building an artifact does not enable it. Selecting a profile does not install code.
