@@ -48,15 +48,19 @@ test:elixir:
     - mix compile --warnings-as-errors
     - mix test
     - |
-      cd clients/web
-      mix deps.get --check-locked
-      mix compile --warnings-as-errors
-      mix test
+      (
+        cd clients/web
+        mix deps.get --check-locked
+        mix compile --warnings-as-errors
+        mix test
+      )
     - |
-      cd installer
-      mix format --check-formatted
-      mix compile --warnings-as-errors
-      mix test
+      (
+        cd installer
+        mix format --check-formatted
+        mix compile --warnings-as-errors
+        mix test
+      )
 
 test:rust:
   stage: test
