@@ -81,6 +81,32 @@ defmodule HWeb.SessionLiveTest do
            )
 
     assert has_element?(view, "#entries-stream .console-block code", "$ mix test")
+
+    # Below-card toolbars carry raw copy text (plain for user, Markdown for assistant) and fork action
+    assert has_element?(
+             view,
+             ~s(#entries-stream .entry-user footer.entry-toolbar button[data-copy-btn][data-copy-text="Hello fake model"])
+           )
+
+    assert has_element?(
+             view,
+             "#entries-stream .entry-user footer.entry-toolbar button[phx-click=fork_entry]"
+           )
+
+    assert has_element?(
+             view,
+             "#entries-stream .entry-assistant footer.entry-toolbar button[data-copy-btn]"
+           )
+
+    raw_assistant_copy =
+      final_html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(
+        "#entries-stream .entry-assistant footer.entry-toolbar button[data-copy-btn]"
+      )
+      |> LazyHTML.attribute("data-copy-text")
+
+    assert raw_assistant_copy == ["**Partial answer complete.**\n\n```console\n$ mix test\n```"]
     assert length(Fake.requests(fake)) == 1
   end
 

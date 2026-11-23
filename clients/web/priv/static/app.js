@@ -6,6 +6,54 @@ import {Inspector} from "./inspector.js";
   const csrfMeta = document.querySelector("meta[name='csrf-token']");
   const csrfToken = csrfMeta ? csrfMeta.getAttribute("content") : "";
 
+  // Delegated clipboard copy for below-card message toolbar buttons.
+  const copyTimers = new WeakMap();
+  async function writeClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_err) {
+        // Fall back to execCommand below for non-HTTPS or restricted contexts.
+      }
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    ta.style.pointerEvents = "none";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (_err) {
+      ok = false;
+    }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  document.addEventListener("click", event => {
+    if (event.defaultPrevented || !(event.target instanceof Element)) return;
+    const copyBtn = event.target.closest("[data-copy-btn]");
+    if (!copyBtn) return;
+    const text = copyBtn.dataset.copyText;
+    if (typeof text !== "string" || text === "") return;
+    event.preventDefault();
+    writeClipboard(text).then(ok => {
+      if (!ok) return;
+      copyBtn.dataset.copied = "true";
+      const prevTimer = copyTimers.get(copyBtn);
+      if (prevTimer) window.clearTimeout(prevTimer);
+      copyTimers.set(copyBtn, window.setTimeout(() => {
+        delete copyBtn.dataset.copied;
+        copyTimers.delete(copyBtn);
+      }, 1800));
+    });
+  });
+
   // Native popovers and modal dialogs keep chrome out of the page's scroll flow.
   document.addEventListener("click", event => {
     if (event.defaultPrevented || !(event.target instanceof Element)) return;

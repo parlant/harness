@@ -269,29 +269,12 @@
                 status={activity.status}
               />
             <% else %>
-              <article id={dom_id} class={["entry-card", "entry-#{entry["kind"]}"]}>
-                <header class="entry-header">
-                  <div class="entry-header-left">
-                    <span class="role-label">{entry["kind"]}</span>
-                    <span class="badge mono">#{entry["id"]}</span>
-                    <span :if={entry["data"]["aborted"]} class="badge badge-warn">aborted</span>
-                  </div>
-
-                  <button
-                    :if={@session && @session.status != "archived"}
-                    type="button"
-                    class="btn btn-sm btn-ghost"
-                    phx-click="fork_entry"
-                    phx-value-entry_id={entry["id"]}
-                  >
-                    Fork here
-                  </button>
-                </header>
-
-                <div class="entry-body">
-                  <ConversationComponents.entry_body entry={entry} catalog_by_id={@catalog.by_id} />
-                </div>
-              </article>
+              <ConversationComponents.entry_card
+                id={dom_id}
+                entry={entry}
+                catalog_by_id={@catalog.by_id}
+                can_fork?={@session != nil && @session.status != "archived"}
+              />
             <% end %>
           <% end %>
         </div>

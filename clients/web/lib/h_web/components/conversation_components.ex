@@ -16,6 +16,98 @@ defmodule HWeb.ConversationComponents do
 
   def message?(_), do: false
 
+  attr(:id, :string, required: true)
+  attr(:entry, :map, required: true)
+  attr(:catalog_by_id, :map, default: %{})
+  attr(:can_fork?, :boolean, default: false)
+
+  def entry_card(assigns) do
+    data = assigns.entry["data"] || %{}
+    kind = assigns.entry["kind"]
+    tool_name = data["tool_name"] || data["name"]
+    text = message_text(data)
+    status = entry_status(data)
+
+    assigns =
+      assign(assigns,
+        data: data,
+        kind: kind,
+        tool_name: tool_name,
+        text: text,
+        copy_text: copyable_text(kind, tool_name, text),
+        status: status
+      )
+
+    ~H"""
+    <article
+      id={@id}
+      class={[
+        "entry-card",
+        "entry-#{@kind}",
+        @status && "has-status"
+      ]}
+    >
+      <div class="entry-body">
+        <.entry_body entry={@entry} catalog_by_id={@catalog_by_id} />
+      </div>
+
+      <footer class="entry-toolbar">
+        <span :if={@status == :aborted} class="entry-status is-warn">
+          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 18 18 6M6 6l12 12" />
+          </svg>
+          <span>Aborted</span>
+        </span>
+        <span :if={@status == :failed} class="entry-status is-danger">
+          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+          </svg>
+          <span>Failed</span>
+        </span>
+
+        <button
+          :if={@copy_text}
+          type="button"
+          class="toolbar-btn copy-btn"
+          data-copy-btn
+          data-copy-text={@copy_text}
+          aria-label="Copy message"
+          title="Copy"
+        >
+          <svg class="toolbar-icon icon-copy" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="8" y="8" width="12" height="12" rx="2" />
+            <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+          </svg>
+          <svg class="toolbar-icon icon-check" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m5 13 4 4L19 7" />
+          </svg>
+          <span class="copy-feedback" aria-live="polite">Copied</span>
+        </button>
+
+        <button
+          :if={@can_fork?}
+          type="button"
+          class="toolbar-btn fork-btn"
+          phx-click="fork_entry"
+          phx-value-entry_id={@entry["id"]}
+          aria-label={"Fork from step ##{@entry["id"]}"}
+          title="Branch from here"
+        >
+          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="6" cy="6" r="2.5" />
+            <circle cx="18" cy="6" r="2.5" />
+            <circle cx="6" cy="18" r="2.5" />
+            <path d="M6 8.5v7M18 8.5a6 6 0 0 1-6 6H6" />
+          </svg>
+          <span>Fork</span>
+        </button>
+
+        <span :if={@entry["id"]} class="entry-step-id mono">#{@entry["id"]}</span>
+      </footer>
+    </article>
+    """
+  end
+
   attr(:entry, :map, required: true)
   attr(:catalog_by_id, :map, default: %{})
 
@@ -193,11 +285,18 @@ defmodule HWeb.ConversationComponents do
         </p>
         <p :if={@retry["status"] != "waiting"}>Retry request in progress.</p>
       </div>
-      <article :if={@streaming_text?} id="live-generation" class="entry-card entry-live">
-        <header class="entry-header">
-          <span class="role-label">assistant (live)</span>
-        </header>
-        <.assistant_text text={@text} />
+      <article
+        :if={@streaming_text?}
+        id="live-generation"
+        class="entry-card entry-assistant entry-live"
+      >
+        <div class="entry-body">
+          <.assistant_text text={@text} />
+        </div>
+        <footer class="entry-toolbar entry-live-status" role="status">
+          <span class="live-pulse-dot" aria-hidden="true"></span>
+          <span>Streaming…</span>
+        </footer>
       </article>
 
       <div :if={@subagent_slots != []} id="live-subagents" class="live-tools">
@@ -360,6 +459,27 @@ defmodule HWeb.ConversationComponents do
     </div>
     """
   end
+
+  defp copyable_text("user", _tool_name, text), do: non_empty_copy(text)
+  defp copyable_text("assistant", _tool_name, text), do: non_empty_copy(text)
+  defp copyable_text("tool_result", "subagent", text), do: non_empty_copy(text)
+  defp copyable_text(_, _, _), do: nil
+
+  defp non_empty_copy(text) when is_binary(text) do
+    if String.trim(text) == "", do: nil, else: text
+  end
+
+  defp non_empty_copy(_), do: nil
+
+  defp entry_status(data) when is_map(data) do
+    cond do
+      data["aborted"] == true or data["stop_reason"] == "aborted" -> :aborted
+      data["is_error"] == true or not is_nil(data["error"]) -> :failed
+      true -> nil
+    end
+  end
+
+  defp entry_status(_), do: nil
 
   defp subagent_tool_calls(data) when is_map(data) do
     for %{"name" => "subagent"} = tc <- List.wrap(data["tool_calls"]), do: tc
