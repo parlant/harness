@@ -12,8 +12,8 @@
 
 | Method and path | Request / response |
 |---|---|
-| `GET /daemon/status` | Owner read-only lifecycle status. Returns `200` `{"state":"running"\|"draining"\|"stopping","active_workers":N}`. Remains available while draining. |
-| `POST /daemon/shutdown` | Owner stop for launcher-managed standalone instances. Body `{}` or `{"mode":"idle"}` refuses (`409` `{"error":"daemon_busy"}`) if any session or account operation is active, else returns `202` `{"state":"stopping"}`. Body `{"mode":"drain"}` closes admission immediately, lets in-flight workers finish without starting new tools or turns, and returns `202` `{"state":"draining"\|"stopping"}`. Unknown modes return `422` `{"error":"invalid_shutdown_mode"}`. |
+| `GET /daemon/status` | Owner read-only lifecycle status. Returns `200` `{"state":"running"\|"draining"\|"stopping","active_workers":N,"shutdown_timeout_ms":MS}`. Remains available while draining; `shutdown_timeout_ms` dynamically scales above the `300000`ms floor when a running tool or worker has a higher remaining timeout plus commit grace. |
+| `POST /daemon/shutdown` | Owner stop for launcher-managed standalone instances. Body `{}` or `{"mode":"idle"}` refuses (`409` `{"error":"daemon_busy"}`) if any session or account operation is active, else returns `202` `{"state":"stopping"}`. Body `{"mode":"drain"}` closes admission immediately, lets in-flight workers finish without starting new tools or turns, and returns `202` `{"state":"draining"\|"stopping","shutdown_timeout_ms":MS}`. Unknown modes return `422` `{"error":"invalid_shutdown_mode"}`. |
 | `GET /models` | `models` from the configured adapter. Named Chat Completions entries use the exact `provider:model-id` and also include `provider_name`, `supports_images`, and `price_per_million_tokens`. Missing stored keys are indicated by `unavailable_reason`. |
 | `GET /provider-keys` | Lists supported API-key providers, alias names and active alias. Never returns a key. |
 | `POST /provider-keys/set` | Owner write-only body `{provider,source,api_key}`. Saves or replaces an alias; the first one is active. No provider call. |

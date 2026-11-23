@@ -185,11 +185,10 @@ bundle:darwin-arm64:
   before_script:
     - |
       eval "$(/opt/homebrew/bin/brew shellenv)"
-      brew install erlang elixir node python3 || true
-      if ! command -v cargo >/dev/null 2>&1; then
-        curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
-      fi
-      export PATH="$HOME/.cargo/bin:$PATH"
+      export PATH="$HOME/.cargo/bin:/opt/homebrew/nodenv/shims:$PATH"
+      for cmd in elixir cargo node python3 swiftc; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "Missing required tool on macOS runner: $cmd" >&2; exit 1; }
+      done
       elixir --version
       cargo --version
       node --version
@@ -198,9 +197,10 @@ bundle:darwin-arm64:
       mix local.rebar --force
   script:
     - eval "$(/opt/homebrew/bin/brew shellenv)"
-    - export PATH="$HOME/.cargo/bin:$PATH"
+    - export PATH="$HOME/.cargo/bin:/opt/homebrew/nodenv/shims:$PATH"
     - export H_GIT_COMMIT="${CI_COMMIT_SHA}"
     - export H_GIT_TAG="${CI_COMMIT_TAG:-}"
+    - rm -rf dist/bundle-darwin-arm64 dist/release
     - mkdir -p dist/release
     - scripts/build-bundle.sh "dist/bundle-darwin-arm64"
     - python3 -B scripts/smoke-bundle.py "dist/bundle-darwin-arm64"
