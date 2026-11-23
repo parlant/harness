@@ -510,6 +510,12 @@ defmodule HWeb.SessionLiveTest do
         live: %{
           "tools" => [
             %{
+              "id" => "call_sub_1",
+              "name" => "subagent",
+              "status" => "done",
+              "child_session_id" => "finished-child-hidden"
+            },
+            %{
               "id" => "call_sub_2",
               "name" => "subagent",
               "status" => "waiting",
@@ -524,6 +530,8 @@ defmodule HWeb.SessionLiveTest do
     assert live_html =~ "subagent-card"
     assert live_html =~ "Open subsession →"
     assert live_html =~ "idle"
+    refute live_html =~ "finished-child-hidden"
+    refute live_html =~ "activity-spinner"
   end
 
   test "workspace wait links to the holder and offers cancel and stop-holder actions", %{

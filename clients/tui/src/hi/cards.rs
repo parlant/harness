@@ -268,6 +268,7 @@ fn render_entry(
             let tag = match (aborted, finish) {
                 (true, _) | (_, Some("aborted")) => " · aborted",
                 (_, Some("length")) => " · truncated",
+                (_, Some("content_filter")) => " · filtered",
                 (_, Some("error")) => " · error",
                 _ => "",
             };
@@ -276,7 +277,11 @@ fn render_entry(
                 theme.assistant_header,
             )];
             if !tag.is_empty() {
-                let tag_style = if aborted || finish == Some("error") || finish == Some("aborted") {
+                let tag_style = if aborted
+                    || finish == Some("error")
+                    || finish == Some("aborted")
+                    || finish == Some("content_filter")
+                {
                     theme.failure_header
                 } else {
                     theme.tool_running
@@ -286,7 +291,7 @@ fn render_entry(
             spans.push(StyledSpan::new("]", theme.assistant_header));
             out.push(StyledRow::from_spans(spans));
 
-            render_blocks(
+            let has_body = render_blocks(
                 out,
                 &entry.data,
                 tools_expanded,
@@ -295,6 +300,7 @@ fn render_entry(
                 false,
                 theme,
             );
+            let tcs = tool_calls_of(&entry.data);
 
             if aborted || finish == Some("aborted") {
                 out.push(StyledRow::plain(
@@ -306,14 +312,45 @@ fn render_entry(
                     "! Response was truncated before completion.",
                     theme.tool_running,
                 ));
+            } else if finish == Some("content_filter") {
+                let raw = entry
+                    .data
+                    .get("provider_meta")
+                    .and_then(|m| str_at(m, "finish_reason_raw"));
+                let msg = entry
+                    .data
+                    .get("provider_meta")
+                    .and_then(|m| str_at(m, "finish_message"));
+                let notice = match (raw, msg) {
+                    (Some(r), Some(m)) => format!(
+                        "! Output blocked by content filter ({}): {}",
+                        sanitize_single_line(r),
+                        sanitize_single_line(m)
+                    ),
+                    (Some(r), None) => format!(
+                        "! Output blocked by content filter ({})",
+                        sanitize_single_line(r)
+                    ),
+                    (None, Some(m)) => format!(
+                        "! Output blocked by content filter: {}",
+                        sanitize_single_line(m)
+                    ),
+                    (None, None) => "! Output blocked by content filter".to_string(),
+                };
+                out.push(StyledRow::plain(notice, theme.failure_header));
             } else if finish == Some("error") {
                 out.push(StyledRow::plain(
                     "! Error: generation failed",
                     theme.failure_header,
                 ));
+            } else if !has_body && tcs.is_empty() {
+                out.push(StyledRow::plain(
+                    "! Empty assistant response (no text or tool calls)",
+                    theme.tool_meta,
+                ));
             }
 
-            for (cid, name, args) in tool_calls_of(&entry.data) {
+            for (cid, name, args) in tcs {
                 if cid.is_some_and(|c| result_ids.contains(c) || live_ids.contains(c)) {
                     continue;
                 }
@@ -2115,6 +2152,57 @@ mod tests {
         assert!(
             running_text.contains("Rechecking availability · Esc to abort"),
             "{running_text}"
+        );
+    }
+
+    #[test]
+    fn content_filtered_and_empty_assistant_entries_render_explicit_notices() {
+        let mut state = TranscriptState::default();
+        state.apply_snapshot(SnapshotFrame {
+            version: Some(1),
+            session_id: Some("s-filter".to_string()),
+            conversation_id: Some("1".to_string()),
+            seq: 3,
+            before_entry_id: None,
+            has_more: Some(false),
+            entries: vec![
+                make_entry(
+                    "1",
+                    "assistant",
+                    json!({
+                        "content": [],
+                        "tool_calls": [],
+                        "finish_reason": "content_filter",
+                        "provider_meta": {
+                            "finish_reason_raw": "PROHIBITED_CONTENT",
+                            "finish_message": "The model output could not be generated."
+                        }
+                    }),
+                ),
+                make_entry(
+                    "2",
+                    "assistant",
+                    json!({
+                        "content": [],
+                        "tool_calls": [],
+                        "finish_reason": "stop"
+                    }),
+                ),
+            ],
+            docs: None,
+        });
+
+        let rendered = rows(&state, false, false);
+        assert_clean_rows(&rendered);
+        let text = rendered.join("\n");
+        assert!(text.contains("[assistant #1 · filtered]"), "{text}");
+        assert!(
+            text.contains("! Output blocked by content filter (PROHIBITED_CONTENT): The model output could not be generated."),
+            "{text}"
+        );
+        assert!(
+            text.contains("! Empty assistant response (no text or tool calls)"),
+            "{text}"
         );
     }
 }

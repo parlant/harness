@@ -274,5 +274,26 @@ defmodule HWeb.ConversationComponentsTest do
                "data" => %{"content" => @rejected}
              })
     end
+
+    test "surfaces historical content-filtered empty assistant entries with provider notice" do
+      entry = %{
+        "kind" => "assistant",
+        "data" => %{
+          "content" => [],
+          "tool_calls" => [],
+          "finish_reason" => "content_filter",
+          "provider_meta" => %{
+            "finish_reason_raw" => "PROHIBITED_CONTENT",
+            "finish_message" => "The model output could not be generated."
+          }
+        }
+      }
+
+      assert ConversationComponents.message?(entry)
+      html = render_component(&ConversationComponents.entry_body/1, entry: entry)
+
+      assert html =~
+               "Output blocked by provider content filter (PROHIBITED_CONTENT): The model output could not be generated."
+    end
   end
 end

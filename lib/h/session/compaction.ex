@@ -308,7 +308,7 @@ defmodule H.Session.Compaction do
       case entry_kind(entry) do
         "user" -> true
         "user_shell" -> fetch(data, :include_in_context) == true
-        "assistant" -> fetch(data, :aborted) != true
+        "assistant" -> not Context.aborted_assistant?(entry)
         "tool_result" -> true
         _ -> false
       end

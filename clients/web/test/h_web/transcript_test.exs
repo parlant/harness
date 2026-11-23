@@ -128,4 +128,140 @@ defmodule HWeb.TranscriptTest do
       assert Transcript.compact_assigns(t2).cursor_seq == 2
     end
   end
+
+  describe "subagent tool_call and tool_result projection" do
+    test "does not leave stuck incomplete activity lines or liveWorking spinners for parallel subagent rounds" do
+      {:ok, rows, t1} =
+        Transcript.apply_snapshot(Transcript.new(session_id: "p1", conversation_id: "1"), %{
+          "seq" => 10,
+          "entries" => [
+            %{
+              "id" => "1",
+              "kind" => "user",
+              "data" => %{"content" => [%{"type" => "text", "text" => "Delegate two tasks"}]}
+            },
+            %{
+              "id" => "2",
+              "kind" => "assistant",
+              "data" => %{
+                "content" => [],
+                "tool_calls" => [
+                  %{"id" => "sub_1", "name" => "subagent", "arguments" => %{"mode" => "await"}},
+                  %{"id" => "sub_2", "name" => "subagent", "arguments" => %{"mode" => "await"}}
+                ]
+              }
+            },
+            %{
+              "id" => "3",
+              "kind" => "tool_result",
+              "data" => %{
+                "tool_call_id" => "sub_1",
+                "name" => "subagent",
+                "content" => [%{"type" => "text", "text" => "Subagent 1 finished"}]
+              }
+            }
+          ],
+          "docs" => %{
+            "live" => %{
+              "run" => %{"task_id" => "9", "turns" => 2},
+              "tools" => %{
+                "sub_1" => %{"id" => "sub_1", "name" => "subagent", "status" => "done"},
+                "sub_2" => %{"id" => "sub_2", "name" => "subagent", "status" => "waiting"}
+              }
+            },
+            "inbox" => [],
+            "agent" => %{},
+            "usage" => %{}
+          }
+        })
+
+      # Only visible entries (user, assistant subagent card, tool_result subagent card) — zero bogus activity rows!
+      assert Enum.map(rows, & &1["id"]) == ["1", "2", "3"]
+      assert t1.tail_activity == nil
+
+      # Live summary does not show a spinning Working activity while only parked waiting on sub_2
+      live1 = Transcript.compact_assigns(t1).ephemeral_live
+      assert HWeb.Activity.live_summary(t1.tail_activity, live1, %{}, false) == nil
+
+      # When sub_2 settles and next turn starts with a bash tool call, no stale "incomplete" row appears!
+      {:ok, commit_rows, t2} =
+        Transcript.apply_commit(t1, %{
+          "seq" => 11,
+          "appended_entries" => [
+            %{
+              "id" => "4",
+              "kind" => "tool_result",
+              "data" => %{
+                "tool_call_id" => "sub_2",
+                "name" => "subagent",
+                "content" => [%{"type" => "text", "text" => "Subagent 2 finished"}]
+              }
+            },
+            %{
+              "id" => "5",
+              "kind" => "assistant",
+              "data" => %{"content" => [%{"type" => "text", "text" => "Both subagents done!"}]}
+            }
+          ],
+          "doc_ops" => %{"live" => [["replace", %{}]]}
+        })
+
+      assert Enum.map(commit_rows, & &1["id"]) == ["4", "5"]
+      refute Enum.any?(commit_rows, &Map.has_key?(&1, "activity"))
+      assert t2.tail_activity == nil
+    end
+
+    test "preserves surrounding non-subagent tool activity across a subagent tool_result" do
+      {:ok, rows, t1} =
+        Transcript.apply_snapshot(Transcript.new(session_id: "p1", conversation_id: "1"), %{
+          "seq" => 5,
+          "entries" => [
+            %{
+              "id" => "1",
+              "kind" => "assistant",
+              "data" => %{
+                "content" => [%{"type" => "text", "text" => "Running mixed tools"}],
+                "tool_calls" => [
+                  %{"id" => "sub_1", "name" => "subagent", "arguments" => %{"prompt" => "go"}},
+                  %{"id" => "read_1", "name" => "read", "arguments" => %{"path" => "a.txt"}}
+                ]
+              }
+            },
+            %{
+              "id" => "2",
+              "kind" => "tool_result",
+              "data" => %{
+                "tool_call_id" => "read_1",
+                "name" => "read",
+                "content" => [%{"type" => "text", "text" => "body"}]
+              }
+            },
+            %{
+              "id" => "3",
+              "kind" => "tool_result",
+              "data" => %{
+                "tool_call_id" => "sub_1",
+                "name" => "subagent",
+                "content" => [%{"type" => "text", "text" => "sub done"}]
+              }
+            },
+            %{
+              "id" => "4",
+              "kind" => "assistant",
+              "data" => %{"content" => [%{"type" => "text", "text" => "All done"}]}
+            }
+          ],
+          "docs" => %{"live" => %{}, "inbox" => [], "agent" => %{}, "usage" => %{}}
+        })
+
+      assert [
+               %{"id" => "1"},
+               %{"id" => "3"},
+               %{"id" => "activity-1", "activity" => %{count: 1, status: :complete}},
+               %{"id" => "4"}
+             ] = rows
+
+      assert t1.tail_activity == nil
+    end
+  end
 end

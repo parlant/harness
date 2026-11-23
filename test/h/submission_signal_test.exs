@@ -313,6 +313,70 @@ defmodule H.SubmissionSignalTest do
 
       send(gpid_w, {:release, gate_withdraw})
     end
+
+    test "settles placed submission and reloads non-colliding IDs even when recent_submissions LRU cache overflows and session store reopens" do
+      gate = make_ref()
+      test_pid = self()
+
+      env =
+        start_isolated_env([
+          {:gate, [], test_pid, gate,
+           %{content: [%{type: "text", text: "Settled after 300 writes"}]}}
+        ])
+
+      {:ok, _} = Daemon.create_session(%{"session_id" => "s-lru", "cwd" => env.cwd}, env.opts)
+
+      {:ok, receipt} =
+        Daemon.execute_command(
+          "s-lru",
+          cmd("req-initial", "submit", "1", %{"type" => "input", "content" => "Long turn"}),
+          env.opts
+        )
+
+      assert receipt.status == "placed"
+      assert_receive {:gate_entered, ^gate, gpid}
+
+      assert {:ok, {:pending, _}} =
+               Daemon.watch_submission("s-lru", "req-initial", self(), env.opts)
+
+      # Flood > 256 immediate terminal configure submissions while generation is running
+      for i <- 1..270 do
+        {:ok, _} =
+          Daemon.execute_command(
+            "s-lru",
+            cmd("req-cfg-#{i}", "configure", "1", %{"thinking" => "high"}),
+            env.opts
+          )
+      end
+
+      # Also corrupt/evict in-memory recent_submissions to simulate any cache miss on settle,
+      # proving Submissions.settle/5 falls back to Storage cleanly!
+      [{server_pid, _}] = Registry.lookup(env.opts[:registry], {:session, "s-lru"})
+
+      :sys.replace_state(server_pid, fn st ->
+        %{st | recent_submissions: Map.delete(st.recent_submissions, "req-initial")}
+      end)
+
+      send(gpid, {:release, gate})
+
+      assert_receive {:submission_settled, outcome}, 2_000
+      assert outcome.request_id == "req-initial"
+      assert outcome.status == "done"
+      assert outcome.answer_text == "Settled after 300 writes"
+
+      # Verify max_seen_id accounts for submission IDs on reopen without ID collisions
+      dir = Path.join([env.data_dir, "sessions", "s-lru"])
+      {:ok, ro_store} = H.Storage.File.open_read_only(dir: dir, session_id: "s-lru")
+      {:ok, bs, _} = H.Storage.read_bootstrap(ro_store)
+
+      max_sub_id =
+        bs.submissions
+        |> Map.values()
+        |> Enum.map(&(&1[:id] || &1["id"]))
+        |> Enum.max()
+
+      assert bs.next_id > max_sub_id
+    end
   end
 
   describe "GET /api/v1/sessions/:sid/submissions/:request_id" do

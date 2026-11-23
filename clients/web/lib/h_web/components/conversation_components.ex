@@ -7,7 +7,8 @@ defmodule HWeb.ConversationComponents do
   def message?(%{"kind" => "user"}), do: true
 
   def message?(%{"kind" => "assistant", "data" => data}) do
-    String.trim(message_text(data)) != "" or images(data) != [] or subagent_tool_calls(data) != []
+    String.trim(message_text(data)) != "" or images(data) != [] or subagent_tool_calls(data) != [] or
+      filtered_assistant_notice(data) != nil
   end
 
   def message?(%{"kind" => "tool_result", "data" => data}) do
@@ -122,6 +123,7 @@ defmodule HWeb.ConversationComponents do
         kind: kind,
         tool_name: tool_name,
         text: message_text(data),
+        filter_notice: filtered_assistant_notice(data),
         images: images(data),
         subagent_calls: subagent_tool_calls(data)
       )
@@ -145,6 +147,9 @@ defmodule HWeb.ConversationComponents do
         loading="lazy"
       />
       <.assistant_text :if={@kind == "assistant" and @text != ""} text={@text} />
+      <p :if={@kind == "assistant" and @text == "" and @filter_notice} class="muted">
+        {@filter_notice}
+      </p>
       <p :if={@kind == "user" and @text != ""} class="entry-text">{@text}</p>
 
       <div :for={tc <- @subagent_calls}>
@@ -491,7 +496,7 @@ defmodule HWeb.ConversationComponents do
     tools
     |> Enum.sort_by(fn {id, _} -> to_string(id) end)
     |> Enum.flat_map(fn {id, slot} ->
-      if is_map(slot) and slot["name"] == "subagent" do
+      if is_map(slot) and slot["name"] == "subagent" and slot["status"] != "done" do
         [Map.put_new(slot, "id", to_string(id))]
       else
         []
@@ -500,7 +505,7 @@ defmodule HWeb.ConversationComponents do
   end
 
   defp live_subagent_slots(tools) when is_list(tools) do
-    for %{"name" => "subagent"} = slot <- tools, do: slot
+    for %{"name" => "subagent"} = slot <- tools, slot["status"] != "done", do: slot
   end
 
   defp live_subagent_slots(_), do: []
@@ -603,6 +608,21 @@ defmodule HWeb.ConversationComponents do
   end
 
   defp format_failure(other), do: inspect(other)
+
+  defp filtered_assistant_notice(%{"finish_reason" => "content_filter"} = data) do
+    meta = if is_map(data["provider_meta"]), do: data["provider_meta"], else: %{}
+    raw = non_empty_string(meta["finish_reason_raw"])
+    msg = non_empty_string(meta["finish_message"])
+
+    cond do
+      raw != nil and msg != nil -> "Output blocked by provider content filter (#{raw}): #{msg}"
+      msg != nil -> "Output blocked by provider content filter: #{msg}"
+      raw != nil -> "Output blocked by provider content filter (#{raw})."
+      true -> "Output blocked by provider content filter."
+    end
+  end
+
+  defp filtered_assistant_notice(_), do: nil
 
   defp format_json(value) when is_binary(value), do: value
 

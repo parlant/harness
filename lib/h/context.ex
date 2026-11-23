@@ -168,11 +168,30 @@ defmodule H.Context do
 
     entry_kind(entry) == "assistant" and
       (fetch(data, :aborted) == true or
+         empty_assistant_data?(data) or
          (pi_assistant?(data) and fetch(data, :finish_reason) in ["aborted", "error"]))
+  end
+
+  defp empty_assistant_data?(data) do
+    normalize_tool_calls(fetch(data, :tool_calls, [])) == [] and
+      extract_content_blocks(data)
+      |> Enum.all?(fn
+        %{type: "thinking"} -> true
+        %{type: "text", text: text} when is_binary(text) -> String.trim(text) == ""
+        _ -> false
+      end)
   end
 
   defp pi_assistant?(data),
     do: fetch(data, :role) == "assistant" and is_binary(fetch(data, :api))
+
+  defp empty_assistant_blocks?(blocks) when is_list(blocks) do
+    Enum.all?(blocks, fn
+      %{type: "thinking"} -> true
+      %{type: "text", text: text} when is_binary(text) -> String.trim(text) == ""
+      _ -> false
+    end)
+  end
 
   defp project_entries(entries) do
     Enum.flat_map(entries, &project_entry/1)
@@ -202,7 +221,7 @@ defmodule H.Context do
           |> maybe_put_field(:reasoning_details, fetch(data, :reasoning_details))
           |> maybe_put_meta(data)
 
-        if tool_calls == [] and msg.content == [] and pi_assistant?(data) do
+        if tool_calls == [] and empty_assistant_blocks?(msg.content) do
           []
         else
           [msg]
