@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Multi-arch Linux release builder for H (:harness).
 #
-# Base glibc 2.35 (Ubuntu 22.04 Jammy) yields portable binaries that run across
-# Ubuntu 22.04+, Debian 12+, Fedora, RHEL/Rocky 9+, and Arch on both linux/amd64
+# Base glibc 2.36 (Debian 12 Bookworm) yields portable binaries that run across
+# Debian 12+, Ubuntu 24.04+, Fedora, RHEL/Rocky 9.3+, and Arch on both linux/amd64
 # and linux/arm64. Non-core native libraries (libcrypto.so.3, libtinfo.so.6) are
 # vendored into <bundle>/native/ with relative $ORIGIN RUNPATH (zero LD_LIBRARY_PATH).
 #
@@ -15,7 +15,7 @@
 #     --output type=local,dest=./dist/release \
 #     .
 
-ARG ELIXIR_IMAGE=hexpm/elixir:1.20.5-erlang-29.1.2-ubuntu-jammy-20261110
+ARG ELIXIR_IMAGE=hexpm/elixir:1.20.5-erlang-29.1.2-debian-bookworm-20261104
 ARG NODE_MAJOR=22
 ARG RUST_VERSION=stable
 

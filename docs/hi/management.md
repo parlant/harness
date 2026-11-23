@@ -217,7 +217,7 @@ Prebuilt signed releases target `darwin-arm64`, `linux-arm64`, and `linux-x86_64
   embedding `Contents/Resources/harness` with a menu-bar controller for web UI
   launch, owner token copy, CLI linking, and cooperative daemon restart.
 - **Multi-arch Linux builds (`Dockerfile.release`, `scripts/build-linux-bundles.sh`)**:
-  uses `docker buildx` on a glibc 2.35 baseline, vendors `libcrypto.so.3` and
+  uses `docker buildx` on a Debian Bookworm (glibc 2.36) baseline, vendors `libcrypto.so.3` and
   `libtinfo.so.6` into `native/` with relative `$ORIGIN` `RUNPATH` (leaving host
   `LD_LIBRARY_PATH` untouched), runs `scripts/smoke-bundle.py`, and verifies
   artifacts in clean Debian runtime containers.

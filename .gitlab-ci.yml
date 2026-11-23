@@ -15,7 +15,7 @@ stages:
 
 variables:
   ELIXIR_TEST_IMAGE: "elixir:1.20.5-otp-29"
-  ELIXIR_IMAGE: "hexpm/elixir:1.20.5-erlang-29.1.2-ubuntu-jammy-20261110"
+  ELIXIR_IMAGE: "hexpm/elixir:1.20.5-erlang-29.1.2-debian-bookworm-20261104"
   RUST_IMAGE: "rust:1-bookworm"
   RUBY_IMAGE: "ruby:3.3-bookworm"
   RUST_VERSION: "stable"
@@ -113,11 +113,11 @@ test:website:
     DEBIAN_FRONTEND: "noninteractive"
   before_script:
     - |
-      apt-get update -qq
-      apt-get install -y -qq --no-install-recommends \
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
         build-essential ca-certificates curl git gnupg patchelf pkg-config python3 xz-utils
-      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-      apt-get install -y -qq --no-install-recommends nodejs
+      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | DEBIAN_FRONTEND=noninteractive bash -
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends nodejs
       curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
       export PATH="$HOME/.cargo/bin:$PATH"
       mix local.hex --force
