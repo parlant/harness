@@ -1,30 +1,13 @@
-// Client-side slash command, argument, workspace file (@), inline path, and
-// directory auto-completion with pixel-aligned inline ghost hints.
-// Uses textContent exclusively (never innerHTML) to satisfy strict CSP and XSS safety.
-
+// One completion controller per editor. LiveView owns the field and its form;
+// the hook owns the suggestion list and the inline hint in an ignored layer.
 function parseMeta(raw) {
-  if (!raw) return { commands: [], thinking_levels: [], attention_args: [], archive_args: [], models: [] };
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-      thinking_levels: Array.isArray(parsed.thinking_levels) ? parsed.thinking_levels : [],
-      attention_args: Array.isArray(parsed.attention_args) ? parsed.attention_args : [],
-      archive_args: Array.isArray(parsed.archive_args) ? parsed.archive_args : [],
-      models: Array.isArray(parsed.models) ? parsed.models : []
-    };
-  } catch (_err) {
-    return { commands: [], thinking_levels: [], attention_args: [], archive_args: [], models: [] };
-  }
-}
-
-function ghostSuffixFor(typed, completion) {
-  if (!typed || !completion) return "";
-  if (completion.length <= typed.length) return "";
-  if (completion.toLowerCase().startsWith(typed.toLowerCase())) {
-    return completion.slice(typed.length);
-  }
-  return "";
+  let meta;
+  try { meta = JSON.parse(raw); } catch { /* No catalog yet. */ }
+  return Object.fromEntries(
+    ["commands", "thinking_levels", "attention_args", "archive_args", "models"].map(key =>
+      [key, Array.isArray(meta?.[key]) ? meta[key] : []]
+    )
+  );
 }
 
 function tokenAtCursor(value, cursor) {
@@ -32,793 +15,481 @@ function tokenAtCursor(value, cursor) {
   while (start > 0 && !/\s/.test(value[start - 1])) start -= 1;
   let end = cursor;
   while (end < value.length && !/\s/.test(value[end])) end += 1;
+  return { start, end, prefix: value.slice(start, cursor) };
+}
+
+function slashLine(value) {
+  const line = value.trim();
+  return line.startsWith("/") && !line.startsWith("//") && !line.includes("\n");
+}
+
+const staticArgs = ["/thinking", "/model", "/attention", "/archive", "/fork"];
+
+export function composerContext(value, cursor, explicit = false) {
+  if (slashLine(value) && !value.slice(0, cursor).trimStart().includes("\n")) {
+    const leading = value.length - value.trimStart().length;
+    const name = value.trimStart().match(/^\S+/)[0];
+    const end = leading + name.length;
+    if (cursor >= leading && cursor <= end) {
+      return { mode: "command", start: leading, end, prefix: value.slice(leading, cursor) };
+    }
+
+    const cmd = name.toLowerCase();
+    const rest = value.slice(end);
+    const start = end + rest.length - rest.trimStart().length;
+    const prefix = value.slice(start, cursor);
+    if (cursor >= start && cmd === "/cwd") {
+      return { mode: "path", kind: "directory", start, end: Math.max(start, value.trimEnd().length), prefix };
+    }
+    if (cursor >= start && staticArgs.includes(cmd) && !/\s/.test(prefix)) {
+      return { mode: "argument", cmd, start, end: tokenAtCursor(value, cursor).end, prefix };
+    }
+  }
+
+  const token = tokenAtCursor(value, cursor);
+  if (token.prefix.startsWith("@")) {
+    return { ...token, mode: "path", kind: "workspace_file", prefix: token.prefix.slice(1) };
+  }
+  if (token.prefix && (explicit || token.prefix.includes("/") || token.prefix === "~")) {
+    // Don't treat the leading slash of an escaped command as a filesystem path.
+    if (token.start === value.length - value.trimStart().length && token.prefix.startsWith("/")) return null;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token.prefix)) return null;
+    const shell = /^(?:\/(?:steer|follow-up)\s+)?!/i.test(value.trimStart());
+    return { ...token, mode: "path", kind: "path", shell };
+  }
+  return null;
+}
+
+function localItems(ctx, meta) {
+  const q = ctx.prefix.toLowerCase();
+  if (ctx.mode === "command") {
+    const prefix = meta.commands.filter(cmd => cmd.name.startsWith(q));
+    const fuzzy = meta.commands.filter(cmd => !cmd.name.startsWith(q) && cmd.name.includes(q.slice(1)));
+    return [...prefix, ...fuzzy].map(cmd => ({
+      value: cmd.name, label: cmd.usage || cmd.name, description: cmd.description,
+      takesArg: cmd.takes_arg
+    }));
+  }
+  if (ctx.cmd === "/model") {
+    const models = meta.models.filter(m => m.id.toLowerCase().includes(q) || m.label?.toLowerCase().includes(q));
+    return [...models.filter(m => m.id.toLowerCase().startsWith(q)),
+      ...models.filter(m => !m.id.toLowerCase().startsWith(q))].slice(0, 30).map(m => ({
+      value: m.id, description: m.label || m.provider
+    }));
+  }
+  const choices = {
+    "/thinking": meta.thinking_levels,
+    "/attention": meta.attention_args,
+    "/archive": meta.archive_args,
+    "/fork": ["cancel"]
+  };
+  const descriptions = {
+    "/thinking": { default: "Reasoning effort" },
+    "/attention": { on: "Mark for attention", off: "Mark as read" },
+    "/archive": { force: "Stop work and archive", off: "Restore from archive" },
+    "/fork": { cancel: "Cancel active fork edit" }
+  }[ctx.cmd];
+  return (choices[ctx.cmd] || []).filter(value => value.startsWith(q)).map(value => ({
+    value, description: descriptions[value] || descriptions.default
+  }));
+}
+
+export function completionEdit(value, ctx, item) {
+  let inserted = item.value;
+  const directory = ctx.mode === "path" && item.kind === "dir";
+  if (directory && ctx.kind === "workspace_file") inserted = `@${inserted}`;
+  // Keep an existing argument (and its separating space) when editing the command name.
+  const commandArg = ctx.mode === "command" && item.takesArg && ctx.end === value.length;
+  if (commandArg) inserted += " ";
   return {
-    start,
-    end,
-    cursor,
-    prefix: value.slice(start, cursor),
-    full: value.slice(start, end)
+    value: value.slice(0, ctx.start) + inserted + value.slice(ctx.end),
+    cursor: ctx.start + inserted.length,
+    chain: commandArg || directory
   };
 }
 
-function isPathLikePrefix(prefix) {
-  if (!prefix) return false;
-  return (
-    prefix.startsWith("./") ||
-    prefix.startsWith("../") ||
-    prefix.startsWith("~/") ||
-    prefix === "~" ||
-    prefix.startsWith("/") ||
-    prefix.includes("/")
-  );
+function create(tag, className, text) {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text) node.textContent = text;
+  return node;
 }
 
-function isShellLine(value) {
-  const trimmed = value.trimStart();
-  return trimmed.startsWith("!") || trimmed.startsWith("/steer !") || trimmed.startsWith("/follow-up !");
-}
+// Copy the native field's text metrics. The hidden mirror wraps only the real
+// draft; an absolutely positioned suffix cannot wrap it or make the field grow.
+const textMetrics = ["font", "letterSpacing", "wordSpacing", "tabSize", "textAlign",
+  "textTransform", "direction", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
 
-function renderPopupList(popup, items, selectedIdx, onSelect) {
-  popup.textContent = "";
-  if (!items.length) {
-    popup.hidden = true;
-    return;
-  }
-
-  items.forEach((item, idx) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = idx === selectedIdx ? "completion-item is-selected" : "completion-item";
-    row.setAttribute("role", "option");
-    row.setAttribute("aria-selected", idx === selectedIdx ? "true" : "false");
-
-    const label = document.createElement("span");
-    label.className = "completion-item-label mono";
-    label.textContent = item.label || item.value;
-    row.appendChild(label);
-
-    if (item.kind) {
-      const badge = document.createElement("span");
-      badge.className = "completion-item-kind mono";
-      badge.textContent = item.kind;
-      row.appendChild(badge);
-    }
-
-    if (item.description) {
-      const desc = document.createElement("span");
-      desc.className = "completion-item-desc muted";
-      desc.textContent = item.description;
-      row.appendChild(desc);
-    }
-
-    row.addEventListener("mousedown", event => {
-      // Prevent textarea/input blur before click commits.
-      event.preventDefault();
-    });
-    row.addEventListener("click", event => {
-      event.preventDefault();
-      onSelect(item);
+class CompletionView {
+  constructor(input, layer, composer, onSelect) {
+    this.input = input;
+    this.composer = composer;
+    this.layer = layer;
+    this.popup = create("div", "completion-popup");
+    this.popup.id = `${layer.id}-list`;
+    this.popup.setAttribute("role", "listbox");
+    this.popup.setAttribute("aria-label", composer ? "Command and path suggestions" : "Directory suggestions");
+    this.popup.hidden = true;
+    this.popup.addEventListener("mousedown", event => event.preventDefault());
+    this.popup.addEventListener("click", event => {
+      const option = event.target.closest(".completion-item");
+      if (option) onSelect(Number(option.dataset.index));
     });
 
-    popup.appendChild(row);
-  });
-
-  popup.hidden = false;
-  const activeEl = popup.children[selectedIdx];
-  if (activeEl && typeof activeEl.scrollIntoView === "function") {
-    activeEl.scrollIntoView({ block: "nearest" });
-  }
-}
-
-export class ComposerCompleter {
-  constructor(hook, textarea) {
-    this.hook = hook;
-    this.el = textarea;
-    this.popup = document.getElementById("composer-completions");
-    this.ghost = document.getElementById("composer-ghost");
-    this.ghostMirror = this.ghost?.querySelector(".ghost-mirror") || null;
-    this.ghostSuffix = this.ghost?.querySelector(".ghost-suffix") || null;
-    this.meta = parseMeta(textarea.dataset.completionMeta);
-
-    this.items = [];
-    this.selected = 0;
-    this.context = null;
-    this.ghostHint = "";
-    this.lookupSeq = 0;
-    this.pendingLookupId = null;
-    this.debounceTimer = null;
-
-    this.onScroll = () => this.syncGhostScroll();
-    this.onSelectionChange = () => this.update(false);
-    this.onBlur = () => {
-      // Small delay allows mousedown/click on popup items to execute.
-      window.setTimeout(() => {
-        if (document.activeElement !== this.el) this.dismiss();
-      }, 120);
-    };
-
-    this.el.addEventListener("scroll", this.onScroll);
-    this.el.addEventListener("click", this.onSelectionChange);
-    this.el.addEventListener("keyup", this.onKeyupSelection);
-    this.el.addEventListener("blur", this.onBlur);
-
-    this.hook.handleEvent("completion_results", payload => {
-      if (!payload || payload.target_id !== this.el.id) return;
-      if (payload.lookup_id !== this.pendingLookupId) return;
-      if (!this.context || this.context.asyncKind !== payload.kind) return;
-      const list = Array.isArray(payload.items) ? payload.items : [];
-      this.items = list.map(entry => ({
-        value: entry.value,
-        label: entry.label || entry.value,
-        kind: entry.kind || "",
-        description: entry.description || ""
-      }));
-      this.selected = 0;
-      this.render();
-    });
+    this.ghost = create("div", "completion-ghost");
+    this.ghost.setAttribute("aria-hidden", "true");
+    this.mirror = create("div", composer ? "completion-mirror is-multiline" : "completion-mirror");
+    this.draft = document.createTextNode("");
+    this.suffix = create("span", "completion-suffix");
+    this.mirror.append(this.draft, this.suffix);
+    this.ghost.append(this.mirror);
+    this.ghost.hidden = true;
+    layer.replaceChildren(this.ghost, this.popup);
   }
 
-  onKeyupSelection = event => {
-    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
-      this.update(false);
-    }
-  };
-
-  refreshMeta() {
-    this.meta = parseMeta(this.el.dataset.completionMeta);
+  setItems(items) {
+    this.popup.replaceChildren(...items.map((item, index) => {
+      const row = create("button", "completion-item");
+      row.id = `${this.popup.id}-${index}`;
+      row.dataset.index = index;
+      row.type = "button";
+      row.tabIndex = -1;
+      row.setAttribute("role", "option");
+      const label = item.label || item.value;
+      const path = item.kind === "dir" || item.kind === "file";
+      const split = path ? label.lastIndexOf("/", label.length - (label.endsWith("/") ? 2 : 1)) + 1 : 0;
+      const name = create("span", "completion-item-label mono", label.slice(split));
+      const detail = label.slice(0, split) || item.description;
+      const body = create("span", "completion-item-body");
+      body.append(name);
+      if (detail) body.append(create("span", "completion-item-desc", detail));
+      row.append(body);
+      if (path) row.append(create("span", "completion-item-kind", item.kind === "dir" ? "Folder" : "File"));
+      row.title = path ? item.value : [label, detail].filter(Boolean).join(" — ");
+      if (path) row.setAttribute("aria-label", `${item.value} (${item.kind === "dir" ? "folder" : "file"})`);
+      return row;
+    }));
+    this.popup.scrollTop = 0;
   }
 
-  isOpen() {
-    return this.items.length > 0 && this.popup && !this.popup.hidden;
-  }
-
-  hasGhostSuffix() {
-    return Boolean(this.ghostSuffix && this.ghostSuffix.textContent !== "");
-  }
-
-  dismiss() {
-    if (this.debounceTimer) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
-    this.pendingLookupId = null;
-    this.items = [];
-    this.selected = 0;
-    this.context = null;
-    this.ghostHint = "";
-    if (this.popup) {
-      this.popup.textContent = "";
-      this.popup.hidden = true;
-    }
-    this.clearGhost();
-  }
-
-  clearGhost() {
-    if (this.ghostMirror) this.ghostMirror.textContent = "";
-    if (this.ghostSuffix) this.ghostSuffix.textContent = "";
-  }
-
-  syncGhostScroll() {
-    if (this.ghost) {
-      this.ghost.scrollTop = this.el.scrollTop;
+  select(index) {
+    for (const [i, row] of Array.from(this.popup.children).entries()) {
+      row.setAttribute("aria-selected", String(i === index));
     }
   }
 
-  analyzeContext(explicitTab) {
-    const value = this.el.value;
-    const cursor = this.el.selectionStart ?? value.length;
-    const selEnd = this.el.selectionEnd ?? cursor;
-    if (cursor !== selEnd) return null;
+  layout(index, hint) {
+    const field = this.input.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const shell = this.input.closest(".screen");
+    const screen = shell?.getBoundingClientRect();
+    const header = shell?.querySelector(".app-bar")?.getBoundingClientRect();
+    const top = Math.max(viewport?.offsetTop ?? 0, header?.bottom ?? screen?.top ?? 0) + 6;
+    const bottom = Math.min((viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight),
+      screen?.bottom ?? Infinity) - 6;
+    const left = Math.max(field.left, (viewport?.offsetLeft ?? 0) + 4);
+    const right = Math.min(field.right, (viewport?.offsetLeft ?? 0) + (viewport?.width ?? window.innerWidth) - 4);
+    const reply = this.composer && this.input.closest(".reply")?.getBoundingClientRect();
+    const aboveEdge = reply && reply.top - top >= 92 ? reply.top : field.top;
+    const above = aboveEdge - top - 6;
+    const below = bottom - field.bottom - 6;
+    const openUp = this.composer ? above >= 44 || above > below : below < 100 && above > below;
+    const room = openUp ? above : below;
+    const active = this.popup.children[index];
+    this.popup.hidden = !active || room < 38 || field.top >= bottom || field.bottom <= top || right <= left;
 
-    const before = value.slice(0, cursor);
-
-    // 1. Slash command name or argument on single-line leading "/"
-    if (value.startsWith("/") && !value.startsWith("//") && !before.includes("\n")) {
-      const spaceIdx = before.search(/\s/);
-      if (spaceIdx === -1) {
-        return {
-          mode: "command",
-          replaceStart: 0,
-          replaceEnd: value.search(/\s/) === -1 ? value.length : value.search(/\s/),
-          prefix: before
-        };
-      }
-
-      const cmdName = before.slice(0, spaceIdx).toLowerCase();
-      const cmdSpec = this.meta.commands.find(c => c.name === cmdName);
-      if (cmdSpec) {
-        const afterCmd = before.slice(spaceIdx + 1);
-        if (cmdName === "/cwd") {
-          const argStart = spaceIdx + 1 + (afterCmd.length - afterCmd.trimStart().length);
-          const argPrefix = before.slice(argStart);
-          return {
-            mode: "async",
-            asyncKind: "directory",
-            cmdSpec,
-            replaceStart: argStart,
-            replaceEnd: cursor,
-            prefix: argPrefix
-          };
-        }
-
-        if (["/thinking", "/model", "/attention", "/archive", "/fork"].includes(cmdName)) {
-          const trimmedStartLen = afterCmd.length - afterCmd.trimStart().length;
-          const argStart = spaceIdx + 1 + trimmedStartLen;
-          const argPrefix = before.slice(argStart);
-          if (!argPrefix.includes(" ")) {
-            return {
-              mode: "command_arg",
-              cmdName,
-              cmdSpec,
-              replaceStart: argStart,
-              replaceEnd: cursor,
-              prefix: argPrefix
-            };
-          }
-        }
-
-        // For commands taking arbitrary text/args (/steer, /follow-up, etc.), allow @ or path completion below.
-      }
-    }
-
-    // 2. Token-level @workspace_file or inline path/directory completion
-    const tok = tokenAtCursor(value, cursor);
-    if (tok.prefix.startsWith("@")) {
-      return {
-        mode: "async",
-        asyncKind: "workspace_file",
-        replaceStart: tok.start,
-        replaceEnd: tok.end,
-        prefix: tok.prefix.slice(1),
-        insertPrefix: "@"
-      };
-    }
-
-    if (tok.prefix && (isPathLikePrefix(tok.prefix) || explicitTab)) {
-      if (tok.start === 0 && tok.prefix.startsWith("/")) {
-        return null;
-      }
-      return {
-        mode: "async",
-        asyncKind: "path",
-        shell: isShellLine(value),
-        replaceStart: tok.start,
-        replaceEnd: tok.end,
-        prefix: tok.prefix
-      };
-    }
-
-    return null;
-  }
-
-  update(explicitTab = false) {
-    const ctx = this.analyzeContext(explicitTab);
-    if (!ctx) {
-      this.dismiss();
-      return;
-    }
-
-    this.context = ctx;
-    this.ghostHint = "";
-
-    if (ctx.mode === "command") {
-      this.pendingLookupId = null;
-      const q = ctx.prefix.toLowerCase();
-      const qNoSlash = q.slice(1);
-      const prefixMatches = [];
-      const containsMatches = [];
-      for (const cmd of this.meta.commands) {
-        if (q === "/" || cmd.name.startsWith(q)) {
-          prefixMatches.push(cmd);
-        } else if (qNoSlash && cmd.name.includes(qNoSlash)) {
-          containsMatches.push(cmd);
-        }
-      }
-      this.items = [...prefixMatches, ...containsMatches].map(cmd => ({
-        value: cmd.name,
-        label: cmd.usage || cmd.name,
-        description: cmd.description || "",
-        takesArg: Boolean(cmd.takes_arg),
-        argHint: cmd.arg_hint || ""
-      }));
-      this.selected = 0;
-      this.render();
-      return;
-    }
-
-    if (ctx.mode === "command_arg") {
-      this.pendingLookupId = null;
-      this.items = this.staticArgChoices(ctx.cmdName, ctx.prefix);
-      this.selected = 0;
-      this.ghostHint = ctx.prefix === "" && ctx.cmdSpec?.arg_hint ? ctx.cmdSpec.arg_hint : "";
-      this.render();
-      return;
-    }
-
-    if (ctx.mode === "async") {
-      if (ctx.asyncKind === "directory" && ctx.prefix === "") {
-        this.ghostHint = "<directory>";
-      }
-      this.scheduleAsyncLookup(ctx, explicitTab ? 0 : 60);
-    }
-  }
-
-  staticArgChoices(cmdName, prefix) {
-    const q = prefix.toLowerCase();
-    if (cmdName === "/thinking") {
-      return this.meta.thinking_levels
-        .filter(level => level.startsWith(q))
-        .map(level => ({ value: level, label: level, description: "Reasoning effort" }));
-    }
-    if (cmdName === "/attention") {
-      return this.meta.attention_args
-        .filter(val => val.startsWith(q))
-        .map(val => ({
-          value: val,
-          label: val,
-          description: val === "on" ? "Mark for attention" : "Mark as read"
-        }));
-    }
-    if (cmdName === "/archive") {
-      return this.meta.archive_args
-        .filter(val => val.startsWith(q))
-        .map(val => ({
-          value: val,
-          label: val,
-          description: val === "force" ? "Stop work and archive" : "Restore from archive"
-        }));
-    }
-    if (cmdName === "/fork") {
-      return "cancel".startsWith(q)
-        ? [{ value: "cancel", label: "cancel", description: "Cancel active fork-edit" }]
-        : [];
-    }
-    if (cmdName === "/model") {
-      const pref = [];
-      const contains = [];
-      for (const m of this.meta.models) {
-        const idLow = (m.id || "").toLowerCase();
-        const labelLow = (m.label || "").toLowerCase();
-        if (!q || idLow.startsWith(q)) {
-          pref.push(m);
-        } else if (idLow.includes(q) || labelLow.includes(q)) {
-          contains.push(m);
-        }
-      }
-      return [...pref, ...contains].slice(0, 30).map(m => ({
-        value: m.id,
-        label: m.id,
-        description: m.label || m.provider || ""
-      }));
-    }
-    return [];
-  }
-
-  scheduleAsyncLookup(ctx, delayMs) {
-    if (this.debounceTimer) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
-    const run = () => {
-      this.debounceTimer = null;
-      this.lookupSeq += 1;
-      const lookupId = this.lookupSeq;
-      this.pendingLookupId = lookupId;
-      this.hook.pushEvent("complete_path", {
-        lookup_id: lookupId,
-        target_id: this.el.id,
-        kind: ctx.asyncKind,
-        prefix: ctx.prefix,
-        shell: Boolean(ctx.shell)
+    if (!this.popup.hidden) {
+      Object.assign(this.popup.style, {
+        top: `${openUp ? aboveEdge - 6 : field.bottom + 6}px`,
+        left: `${left}px`, width: `${right - left}px`,
+        maxHeight: `min(16rem, ${room}px)`,
+        transform: openUp ? "translateY(-100%)" : "none"
       });
+      this.input.setAttribute("aria-activedescendant", active.id);
+      // Never scroll the page, transcript, or mobile viewport to reveal a row.
+      const row = active.getBoundingClientRect();
+      const list = this.popup.getBoundingClientRect();
+      if (row.top < list.top + 1) this.popup.scrollTop += row.top - list.top - 1;
+      if (row.bottom > list.bottom - 1) this.popup.scrollTop += row.bottom - list.bottom + 1;
+    } else {
+      this.input.removeAttribute("aria-activedescendant");
+    }
+    this.layoutGhost(!this.popup.hidden ? hint : "");
+  }
+
+  layoutGhost(hint) {
+    this.ghost.hidden = !hint;
+    if (!hint) return;
+    const input = this.input;
+    const style = getComputedStyle(input);
+    for (const key of textMetrics) this.mirror.style[key] = style[key];
+    Object.assign(this.ghost.style, {
+      left: `${input.clientLeft}px`, top: `${input.clientTop}px`,
+      width: `${input.clientWidth}px`, height: `${input.clientHeight}px`
+    });
+    this.mirror.style.transform = `translate(${-input.scrollLeft}px, ${-input.scrollTop}px)`;
+    this.draft.data = input.value.endsWith("\n") ? `${input.value}\u200b` : input.value;
+    this.suffix.textContent = hint;
+
+    // A long hint belongs in the list, not on a phantom line in the editor.
+    const box = this.ghost.getBoundingClientRect();
+    const text = this.suffix.getBoundingClientRect();
+    // The line box includes leading that native inputs may clip when scrolled.
+    const leading = Math.max(0, (parseFloat(style.lineHeight) - parseFloat(style.fontSize)) / 2) || 0;
+    if (text.left < box.left || text.right > box.right - parseFloat(style.paddingRight) ||
+        text.top + leading < box.top || text.bottom - leading > box.bottom) this.ghost.hidden = true;
+  }
+
+  close() {
+    this.popup.hidden = true;
+    this.ghost.hidden = true;
+    this.input.removeAttribute("aria-activedescendant");
+  }
+}
+
+let lookupSeq = 0;
+
+export class Completer {
+  constructor(hook, input, options = {}) {
+    this.hook = hook;
+    this.input = input;
+    this.composer = !options.kind;
+    this.kind = options.kind;
+    this.event = options.event || "complete_path";
+    this.items = [];
+    this.controller = new AbortController();
+    const listen = (target, name, fn, opts = {}) =>
+      target?.addEventListener(name, fn, { ...opts, signal: this.controller.signal });
+    const layer = document.getElementById(`${input.id}-completion`);
+    this.view = new CompletionView(input, layer, this.composer, index => this.accept(index));
+    this.refresh();
+
+    listen(input, "input", () => { if (!this.accepting) this.update(); });
+    listen(input, "blur", () => { this.composing = false; this.dismiss(); });
+    listen(input.form, "submit", () => this.dismiss());
+    listen(input, "compositionstart", () => {
+      this.composing = true;
+      if (this.context?.mode === "path") this.update(false, true);
+    });
+    listen(input, "compositionend", () => { this.composing = false; this.update(false, true); });
+    listen(input, "keydown", event => {
+      if (this.handleKeydown(event)) event.preventDefault();
+    });
+    // Input events don't cover moving the caret, tapping, or selecting text.
+    listen(document, "selectionchange", () => this.update());
+    listen(input, "click", () => this.update());
+    listen(input, "select", () => this.update());
+    listen(input, "keyup", event => {
+      if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) this.update();
+    });
+    const resize = () => this.scheduleLayout();
+    listen(window, "resize", resize);
+    listen(window, "scroll", event => { if (event.target !== this.view.popup) resize(); }, { capture: true });
+    listen(window.visualViewport, "resize", resize);
+    listen(window.visualViewport, "scroll", resize);
+    this.observer = new ResizeObserver(resize);
+    this.observer.observe(input);
+    const reply = input.closest(".reply");
+    if (reply) this.observer.observe(reply);
+    this.resultsRef = hook.handleEvent("completion_results", payload => this.receive(payload));
+  }
+
+  refresh() {
+    const raw = this.input.dataset.completionMeta;
+    const changed = raw !== this.rawMeta;
+    if (changed || !this.meta) this.meta = parseMeta(raw);
+    this.rawMeta = raw;
+    if (this.snapshot && (changed || !this.isCurrent())) this.update(false, changed);
+    else this.scheduleLayout();
+  }
+
+  read() {
+    const { value, selectionStart: start, selectionEnd: end } = this.input;
+    return { value, start, end };
+  }
+
+  isCurrent(snapshot = this.snapshot) {
+    const { value, start, end } = this.read();
+    return document.activeElement === this.input && snapshot?.value === value &&
+      snapshot.start === start && snapshot.end === end;
+  }
+
+  contextFor({ value, start, end }, explicit) {
+    if (start !== end) return null;
+    return this.composer ? composerContext(value, start, explicit) : {
+      mode: "path", kind: this.kind, prefix: value.slice(0, start), start: 0, end: value.length
     };
+  }
 
-    if (delayMs === 0) {
-      run();
+  update(explicit = false, force = false) {
+    if (document.activeElement !== this.input) return;
+    if (!explicit && !force && this.isCurrent()) return;
+    const next = this.read();
+    const ctx = this.contextFor(next, explicit);
+    this.cancelLookup();
+    this.snapshot = next;
+    this.context = ctx;
+    if (!ctx || (ctx.mode === "path" && this.composing)) {
+      this.setItems([]);
+    } else if (ctx.mode !== "path") {
+      this.setItems(localItems(ctx, this.meta));
     } else {
-      this.debounceTimer = window.setTimeout(run, delayMs);
+      // While narrowing within the same directory, keep only still-valid
+      // prefix matches. Never reuse them across triggers or directory levels.
+      const last = this.result;
+      const q = ctx.prefix.toLowerCase();
+      const parent = prefix => prefix.slice(0, prefix.lastIndexOf("/") + 1);
+      const compatible = last?.kind === ctx.kind && last.shell === ctx.shell &&
+        q.startsWith(last.prefix) && parent(q) === parent(last.prefix);
+      this.setItems(compatible ? last.items.filter(item => item.value.toLowerCase().startsWith(q)) : []);
+      const id = ++lookupSeq;
+      this.pending = id;
+      const run = () => {
+        this.timer = null;
+        if (this.pending !== id || !this.isCurrent(next)) return;
+        this.hook.pushEvent(this.event, {
+          lookup_id: id, target_id: this.input.id, kind: ctx.kind, prefix: ctx.prefix, shell: Boolean(ctx.shell)
+        }, () => {});
+      };
+      if (explicit) run();
+      else this.timer = window.setTimeout(run, 75);
     }
   }
 
-  render() {
-    if (this.popup) {
-      renderPopupList(this.popup, this.items, this.selected, item => this.accept(item));
-    }
-    this.renderGhost();
-  }
-
-  renderGhost() {
-    if (!this.ghostMirror || !this.ghostSuffix) return;
-    const value = this.el.value;
-    const cursor = this.el.selectionStart ?? value.length;
-    const selEnd = this.el.selectionEnd ?? cursor;
-
-    // Only render inline ghost suffix when caret sits cleanly at the very end.
-    if (cursor !== value.length || cursor !== selEnd || !this.context) {
-      this.clearGhost();
-      return;
-    }
-
-    const active = this.items[this.selected];
-    let suffix = "";
-
-    if (active) {
-      if (this.context.mode === "command") {
-        suffix = ghostSuffixFor(this.context.prefix, active.value);
-        if (!suffix && active.value === this.context.prefix.toLowerCase() && active.argHint) {
-          suffix = ` ${active.argHint}`;
-        } else if (suffix && active.argHint) {
-          suffix = `${suffix} ${active.argHint}`;
-        }
-      } else if (this.context.mode === "command_arg") {
-        suffix = ghostSuffixFor(this.context.prefix, active.value);
-        if (!suffix && this.context.prefix === "") {
-          suffix = active.value;
-        }
-      } else if (this.context.mode === "async") {
-        const typed = this.context.insertPrefix
-          ? this.context.prefix
-          : this.context.prefix;
-        suffix = ghostSuffixFor(typed, active.value);
-        if (!suffix && typed === "" && this.context.asyncKind === "directory") {
-          suffix = active.value;
-        }
-      }
-    } else if (this.ghostHint) {
-      suffix = this.ghostHint;
-    }
-
-    if (!suffix) {
-      this.clearGhost();
-      return;
-    }
-
-    this.ghostMirror.textContent = value;
-    this.ghostSuffix.textContent = suffix;
-    this.syncGhostScroll();
-  }
-
-  moveSelection(delta) {
-    if (!this.items.length) return;
-    const len = this.items.length;
-    this.selected = (this.selected + delta + len) % len;
-    this.render();
-  }
-
-  accept(item = this.items[this.selected]) {
-    if (!item || !this.context) return false;
+  receive(payload) {
     const ctx = this.context;
-    const value = this.el.value;
+    if (!ctx || this.pending == null || !this.isCurrent() || payload?.target_id !== this.input.id ||
+        payload.lookup_id !== this.pending || payload.kind !== ctx.kind || payload.prefix !== ctx.prefix) return;
+    this.pending = null;
+    const items = Array.isArray(payload.items) ? payload.items.filter(item => typeof item?.value === "string") : [];
+    this.result = { kind: ctx.kind, shell: ctx.shell, prefix: ctx.prefix.toLowerCase(), items };
+    this.setItems(items, this.items[this.selected]?.value);
+  }
 
-    let inserted = item.value;
-    let shouldChain = false;
+  cancelLookup() {
+    window.clearTimeout(this.timer);
+    this.timer = null;
+    this.pending = null;
+  }
 
-    if (ctx.mode === "command") {
-      if (item.takesArg) {
-        inserted = `${item.value} `;
-        shouldChain = true;
-      }
-    } else if (ctx.mode === "async") {
-      if (ctx.insertPrefix === "@") {
-        // Strip leading '@' when inserting workspace file path so the model receives the clean path.
-        inserted = item.value;
-        shouldChain = item.value.endsWith("/");
-      } else {
-        inserted = item.value;
-        shouldChain = item.value.endsWith("/");
-      }
+  setItems(items, preferred) {
+    this.items = items;
+    const exact = this.context?.prefix.toLowerCase();
+    const index = items.findIndex(item => item.value === preferred || (!preferred && item.value.toLowerCase() === exact));
+    this.selected = Math.max(0, index);
+    this.view.setItems(items);
+    this.view.select(this.selected);
+    this.layout();
+  }
+
+  layout() {
+    const active = this.items[this.selected];
+    if (!active || !this.isCurrent()) {
+      this.view.close();
+      return;
     }
+    const { prefix } = this.context;
+    const end = this.snapshot.start === this.snapshot.value.length;
+    const matches = active.value.toLowerCase().startsWith(prefix.toLowerCase());
+    this.view.layout(this.selected, end && prefix && matches ? active.value.slice(prefix.length) : "");
+  }
 
-    const nextValue = value.slice(0, ctx.replaceStart) + inserted + value.slice(ctx.replaceEnd);
-    const nextCursor = ctx.replaceStart + inserted.length;
+  scheduleLayout() {
+    if (!this.items.length || this.frame != null) return;
+    this.frame = requestAnimationFrame(() => {
+      this.frame = null;
+      this.layout();
+    });
+  }
 
-    this.el.value = nextValue;
-    this.el.focus({ preventScroll: true });
-    this.el.setSelectionRange(nextCursor, nextCursor);
-    this.el.dispatchEvent(new Event("input", { bubbles: true }));
-
-    if (shouldChain) {
-      this.update(true);
-    } else {
-      this.dismiss();
-    }
+  accept(index = this.selected) {
+    const item = this.items[index];
+    if (this.composing || !item || !this.isCurrent()) return false;
+    const next = completionEdit(this.snapshot.value, this.context, item);
+    this.accepting = true;
+    this.input.value = next.value;
+    this.input.setSelectionRange(next.cursor, next.cursor);
+    this.input.dispatchEvent(new Event("input", { bubbles: true }));
+    this.accepting = false;
+    if (next.chain) this.update(true);
+    else this.dismiss();
     return true;
   }
 
   handleKeydown(event) {
-    if (event.isComposing) return false;
+    if (event.defaultPrevented || this.composing || event.isComposing || event.keyCode === 229) return false;
+    const current = this.isCurrent();
+    const open = current && this.items.length > 0 && !this.view.popup.hidden;
+    const modified = event.shiftKey || event.metaKey || event.ctrlKey || event.altKey;
+    if (modified) return false;
 
-    const popupOpen = this.isOpen();
-
-    if (event.key === "Escape") {
-      if (popupOpen || this.hasGhostSuffix()) {
-        event.preventDefault();
-        this.dismiss();
-        return true;
-      }
-      return false;
-    }
-
-    if (popupOpen && event.key === "ArrowDown") {
-      event.preventDefault();
-      this.moveSelection(1);
+    if (event.key === "Escape" && (open || this.pending != null)) {
+      this.dismiss();
       return true;
     }
-
-    if (popupOpen && event.key === "ArrowUp") {
-      event.preventDefault();
-      this.moveSelection(-1);
+    if (open && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      this.selected = (this.selected + offset + this.items.length) % this.items.length;
+      this.view.select(this.selected);
+      this.layout();
       return true;
     }
-
     if (event.key === "Tab") {
-      if (popupOpen) {
-        event.preventDefault();
-        this.accept();
-        return true;
-      }
-      const ctx = this.analyzeContext(true);
-      if (ctx) {
-        event.preventDefault();
-        this.update(true);
-        return true;
-      }
-      return false;
-    }
-
-    if (
-      event.key === "ArrowRight" &&
-      !event.shiftKey &&
-      !event.metaKey &&
-      !event.ctrlKey &&
-      !event.altKey &&
-      this.el.selectionStart === this.el.value.length &&
-      this.el.selectionEnd === this.el.value.length &&
-      popupOpen &&
-      this.hasGhostSuffix()
-    ) {
-      event.preventDefault();
-      this.accept();
+      if (open) return this.accept();
+      if (current && this.context && this.pending == null && !this.items.length) return false;
+      if (!this.contextFor(this.read(), true)) return false;
+      this.update(true);
       return true;
     }
+    if (open && event.key === "ArrowRight" && !this.view.ghost.hidden) return this.accept();
 
-    // Plain Enter on a single-line leading "/" slash command:
-    // - If popup is open and text is an incomplete command prefix (e.g. "/tr"),
-    //   complete/execute the highlighted command smoothly.
-    // - If text is already a complete slash command (e.g. "/tree" or "/thinking high"),
-    //   submit the form!
-    if (
-      event.key === "Enter" &&
-      !event.shiftKey &&
-      !event.metaKey &&
-      !event.ctrlKey &&
-      !event.altKey
-    ) {
-      const value = this.el.value;
-      const singleLineSlash =
-        value.startsWith("/") && !value.startsWith("//") && !value.includes("\n");
-
-      if (singleLineSlash) {
-        event.preventDefault();
-        const trimmed = value.trim();
-        const exactCmd = this.meta.commands.find(c => c.name === trimmed.toLowerCase());
-
-        if (popupOpen && this.context?.mode === "command" && !exactCmd) {
-          const chosen = this.items[this.selected];
-          if (chosen) {
-            if (chosen.takesArg) {
-              this.accept(chosen);
-              return true;
-            }
-            this.el.value = chosen.value;
-            this.el.dispatchEvent(new Event("input", { bubbles: true }));
-            this.dismiss();
-            this.el.form?.requestSubmit(document.getElementById("send-btn"));
-            return true;
-          }
-        }
-
-        if (popupOpen && this.context?.mode === "command_arg") {
-          const chosen = this.items[this.selected];
-          if (chosen && chosen.value.toLowerCase() !== this.context.prefix.toLowerCase()) {
-            this.accept(chosen);
-            return true;
-          }
-        }
-
-        this.dismiss();
-        this.el.form?.requestSubmit(document.getElementById("send-btn"));
-        return true;
+    if (this.composer && event.key === "Enter" && slashLine(this.input.value)) {
+      const line = this.input.value.trim();
+      const command = line.split(/\s/, 1)[0].toLowerCase();
+      const exact = this.meta.commands.some(cmd => cmd.name === command);
+      const item = this.items[this.selected];
+      if (open && this.context.mode === "command" && !exact) {
+        const execute = !item.takesArg && this.context.end === this.input.value.trimEnd().length &&
+          this.snapshot.start === this.context.end;
+        if (!this.accept() || !execute) return true;
+      } else if (open && this.context.mode === "argument" &&
+          item.value.toLowerCase() !== this.context.prefix.toLowerCase()) {
+        return this.accept();
       }
+      event.preventDefault();
+      this.dismiss();
+      this.input.form?.requestSubmit(document.getElementById("send-btn"));
+      return true;
     }
-
     return false;
+  }
+
+  dismiss() {
+    this.cancelLookup();
+    this.context = null;
+    this.result = null;
+    this.items = [];
+    this.snapshot = this.read();
+    this.view.close();
   }
 
   destroy() {
     this.dismiss();
-    this.el.removeEventListener("scroll", this.onScroll);
-    this.el.removeEventListener("click", this.onSelectionChange);
-    this.el.removeEventListener("keyup", this.onKeyupSelection);
-    this.el.removeEventListener("blur", this.onBlur);
+    this.controller.abort();
+    this.observer.disconnect();
+    cancelAnimationFrame(this.frame);
+    this.hook.removeHandleEvent(this.resultsRef);
+    this.view.layer.replaceChildren();
   }
 }
 
 export const DirectoryComplete = {
   mounted() {
-    this.input = this.el.querySelector("input");
-    this.popup = this.el.querySelector(".dir-completions");
-    this.ghostMirror = this.el.querySelector(".dir-ghost .ghost-mirror");
-    this.ghostSuffix = this.el.querySelector(".dir-ghost .ghost-suffix");
-    this.eventName = this.el.dataset.event || "complete_directory";
-    this.kind = this.el.dataset.kind || "directory";
-    this.targetId = this.el.dataset.targetId || this.input?.id || "";
-
-    this.items = [];
-    this.selected = 0;
-    this.lookupSeq = 0;
-    this.pendingLookupId = null;
-    this.debounceTimer = null;
-
-    if (!this.input) return;
-
-    this.onInput = () => {
-      this.renderGhost();
-      this.scheduleLookup(60);
-    };
-
-    this.onKeydown = event => {
-      if (event.isComposing) return;
-      const popupOpen = this.items.length > 0 && this.popup && !this.popup.hidden;
-
-      if (event.key === "Escape" && (popupOpen || this.ghostSuffix?.textContent)) {
-        event.preventDefault();
-        this.dismiss();
-        return;
-      }
-
-      if (popupOpen && event.key === "ArrowDown") {
-        event.preventDefault();
-        this.selected = (this.selected + 1) % this.items.length;
-        this.render();
-        return;
-      }
-
-      if (popupOpen && event.key === "ArrowUp") {
-        event.preventDefault();
-        this.selected = (this.selected - 1 + this.items.length) % this.items.length;
-        this.render();
-        return;
-      }
-
-      if (event.key === "Tab") {
-        event.preventDefault();
-        if (popupOpen) {
-          this.accept(this.items[this.selected]);
-        } else {
-          this.scheduleLookup(0);
-        }
-        return;
-      }
-
-      if (
-        event.key === "ArrowRight" &&
-        !event.shiftKey &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        this.input.selectionStart === this.input.value.length &&
-        this.input.selectionEnd === this.input.value.length &&
-        popupOpen &&
-        this.ghostSuffix?.textContent
-      ) {
-        event.preventDefault();
-        this.accept(this.items[this.selected]);
-      }
-    };
-
-    this.onBlur = () => {
-      window.setTimeout(() => {
-        if (document.activeElement !== this.input) this.dismiss();
-      }, 120);
-    };
-
-    this.input.addEventListener("input", this.onInput);
-    this.input.addEventListener("keydown", this.onKeydown);
-    this.input.addEventListener("blur", this.onBlur);
-
-    this.handleEvent("completion_results", payload => {
-      if (!payload || payload.target_id !== this.targetId) return;
-      if (payload.lookup_id !== this.pendingLookupId) return;
-      this.items = Array.isArray(payload.items) ? payload.items : [];
-      this.selected = 0;
-      this.render();
+    this.completer = new Completer(this, this.el.querySelector("input"), {
+      kind: this.el.dataset.kind, event: this.el.dataset.event
     });
   },
-
-  scheduleLookup(delayMs) {
-    if (this.debounceTimer) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
-    const run = () => {
-      this.debounceTimer = null;
-      this.lookupSeq += 1;
-      const lookupId = this.lookupSeq;
-      this.pendingLookupId = lookupId;
-      this.pushEvent(this.eventName, {
-        lookup_id: lookupId,
-        target_id: this.targetId,
-        kind: this.kind,
-        prefix: this.input.value
-      });
-    };
-    if (delayMs === 0) run();
-    else this.debounceTimer = window.setTimeout(run, delayMs);
-  },
-
-  render() {
-    if (this.popup) {
-      renderPopupList(this.popup, this.items, this.selected, item => this.accept(item));
-    }
-    this.renderGhost();
-  },
-
-  renderGhost() {
-    if (!this.ghostMirror || !this.ghostSuffix || !this.input) return;
-    const value = this.input.value;
-    const cursor = this.input.selectionStart ?? value.length;
-    const selEnd = this.input.selectionEnd ?? cursor;
-    const active = this.items[this.selected];
-    if (!active || cursor !== value.length || cursor !== selEnd) {
-      this.ghostMirror.textContent = "";
-      this.ghostSuffix.textContent = "";
-      return;
-    }
-    const suffix = ghostSuffixFor(value, active.value);
-    if (!suffix) {
-      this.ghostMirror.textContent = "";
-      this.ghostSuffix.textContent = "";
-      return;
-    }
-    this.ghostMirror.textContent = value;
-    this.ghostSuffix.textContent = suffix;
-  },
-
-  accept(item) {
-    if (!item || !this.input) return;
-    this.input.value = item.value;
-    this.input.focus({ preventScroll: true });
-    this.input.setSelectionRange(item.value.length, item.value.length);
-    this.input.dispatchEvent(new Event("input", { bubbles: true }));
-    if (item.value.endsWith("/")) {
-      this.scheduleLookup(0);
-    } else {
-      this.dismiss();
-    }
-  },
-
-  dismiss() {
-    if (this.debounceTimer) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
-    this.pendingLookupId = null;
-    this.items = [];
-    this.selected = 0;
-    if (this.popup) {
-      this.popup.textContent = "";
-      this.popup.hidden = true;
-    }
-    if (this.ghostMirror) this.ghostMirror.textContent = "";
-    if (this.ghostSuffix) this.ghostSuffix.textContent = "";
-  },
-
-  destroyed() {
-    this.dismiss();
-    if (this.input) {
-      this.input.removeEventListener("input", this.onInput);
-      this.input.removeEventListener("keydown", this.onKeydown);
-      this.input.removeEventListener("blur", this.onBlur);
-    }
-  }
+  updated() { this.completer.refresh(); },
+  disconnected() { this.completer.dismiss(); },
+  destroyed() { this.completer.destroy(); }
 };

@@ -222,9 +222,15 @@ defmodule HWeb.SlashCommandsTest do
 
       assert Enum.map(items, &{&1.value, &1.kind}) == [
                {"lib/h_web/", "dir"},
-               {"lib/h_web/slash_commands.ex", "file"},
                {"README.md", "file"}
              ]
+    end
+
+    test "workspace folder drill-down only offers immediate matching children" do
+      assert {:ok, [%{value: "lib/h_web/slash_commands.ex", kind: "file"}]} =
+               SlashCommands.complete_session_files("sess-1", "lib/h_web/", backend: FakeBackend)
+
+      assert_receive {:list_session_files, "sess-1", %{"query" => "lib/h_web/", "max_depth" => 3}}
     end
   end
 end

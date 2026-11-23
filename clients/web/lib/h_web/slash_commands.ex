@@ -632,21 +632,35 @@ defmodule HWeb.SlashCommands do
     limit = Keyword.get(opts, :limit, 50)
     clean_query = String.trim(query)
 
+    # A bare @ browses the root. With a directory prefix, browse just its
+    # children instead of filling the menu with every descendant of that path.
+    segments = String.split(clean_query, "/")
+    parent = segments |> Enum.drop(-1) |> Enum.join("/")
+    parent_prefix = if parent == "", do: "", else: String.downcase(parent) <> "/"
+
+    params = %{
+      "limit" => limit,
+      "include_dirs" => true,
+      "include_hidden" => Enum.any?(segments, &String.starts_with?(&1, "."))
+    }
+
     params =
-      %{
-        "limit" => limit,
-        "include_dirs" => true,
-        "include_hidden" => String.starts_with?(clean_query, ".")
-      }
-      |> then(fn p ->
-        if clean_query == "", do: p, else: Map.put(p, "query", clean_query)
-      end)
+      cond do
+        clean_query == "" ->
+          Map.put(params, "max_depth", 1)
+
+        parent_prefix != "" ->
+          Map.merge(params, %{"query" => clean_query, "max_depth" => min(length(segments), 32)})
+
+        true ->
+          Map.put(params, "query", clean_query)
+      end
 
     case backend.list_session_files(session_id, params) do
       {:ok, %{entries: entries}} ->
         q_down = String.downcase(clean_query)
 
-        items =
+        candidates =
           entries
           |> Enum.reduce([], fn entry, acc ->
             rel = entry_path(entry)
@@ -654,6 +668,16 @@ defmodule HWeb.SlashCommands do
 
             cond do
               not is_binary(rel) or rel == "" or has_control_chars?(rel) ->
+                acc
+
+              parent_prefix != "" and not String.starts_with?(String.downcase(rel), q_down) ->
+                acc
+
+              parent_prefix != "" and
+                  String.contains?(
+                    String.replace_prefix(String.downcase(rel), parent_prefix, ""),
+                    "/"
+                  ) ->
                 acc
 
               kind == "dir" ->
@@ -676,6 +700,18 @@ defmodule HWeb.SlashCommands do
           end)
           |> Enum.uniq_by(& &1.value)
           |> Enum.take(limit)
+
+        # A matching folder already offers a way to reach its descendants.
+        # Keep recursive search hits from elsewhere, but don't repeat that subtree.
+        matching_dirs =
+          for %{kind: "dir", value: path} <- candidates,
+              String.starts_with?(String.downcase(path), q_down),
+              do: path
+
+        items =
+          Enum.reject(candidates, fn %{value: path} ->
+            Enum.any?(matching_dirs, &(&1 != path and String.starts_with?(path, &1)))
+          end)
 
         {:ok, items}
 

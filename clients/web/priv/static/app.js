@@ -1,7 +1,7 @@
 import {PaneSplitter, FollowTranscript, InboxBrowser} from "./workbench.js";
 import {ReviewEditor} from "./review.js";
 import {Inspector} from "./inspector.js";
-import {ComposerCompleter, DirectoryComplete} from "./completion.js";
+import {Completer, DirectoryComplete} from "./completion.js";
 
 (() => {
   const csrfMeta = document.querySelector("meta[name='csrf-token']");
@@ -124,7 +124,7 @@ import {ComposerCompleter, DirectoryComplete} from "./completion.js";
       mounted() {
         const reply = this.el.closest("details");
         this.reply = reply;
-        this.completer = new ComposerCompleter(this, this.el);
+        this.completer = new Completer(this, this.el);
         this.onToggle = () => {
           if (reply.open) this.scheduleAutogrow?.();
           else this.completer?.dismiss();
@@ -175,7 +175,6 @@ import {ComposerCompleter, DirectoryComplete} from "./completion.js";
 
         this.onInput = () => {
           this.scheduleAutogrow?.();
-          this.completer?.update(false);
           const k = draftKey(this.el);
           if (!k) return;
           try {
@@ -186,19 +185,17 @@ import {ComposerCompleter, DirectoryComplete} from "./completion.js";
         };
 
         this.onKeydown = (event) => {
-          if (this.completer?.handleKeydown(event)) {
-            return;
-          }
-          if (event.key === "Enter" && (event.shiftKey || event.metaKey || event.ctrlKey) && !event.isComposing) {
+          if (event.defaultPrevented || this.completer.composing || event.isComposing || event.keyCode === 229) return;
+          if (event.key === "Enter" && (event.shiftKey || event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             this.completer?.dismiss();
             if (this.el.form) {
               this.el.form.requestSubmit(document.getElementById("send-btn"));
             }
-          } else if (event.key === "Escape" && !event.isComposing) {
+          } else if (event.key === "Escape") {
             event.preventDefault();
             const cancelFork = document.getElementById("cancel-fork-edit-btn");
-            const stop = document.getElementById("stop-btn");
+            const stop = reply.querySelector("#composer-stop-btn");
             if (cancelFork) cancelFork.click();
             else if (stop) stop.click();
             else {
@@ -280,8 +277,12 @@ import {ComposerCompleter, DirectoryComplete} from "./completion.js";
           }
           this.completer?.dismiss();
         }
-        this.completer?.refreshMeta();
+        this.completer?.refresh();
         this.scheduleAutogrow?.();
+      },
+
+      disconnected() {
+        this.completer?.dismiss();
       },
 
       destroyed() {

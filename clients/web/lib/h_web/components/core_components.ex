@@ -4,6 +4,14 @@ defmodule HWeb.CoreComponents do
   """
   use Phoenix.Component
 
+  attr(:id, :string, required: true)
+
+  def completion_layer(assigns) do
+    ~H"""
+    <div id={@id} class="completion-layer" phx-update="ignore"></div>
+    """
+  end
+
   attr(:flash, :map, required: true)
   attr(:kind, :atom, values: [:info, :error], required: true)
 

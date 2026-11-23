@@ -998,20 +998,61 @@ body {
 
 .session-footer {
   position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  column-gap: 6px;
   width: min(100%, 50rem);
   margin-inline: auto;
   padding: 0 max(10px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(10px, env(safe-area-inset-left));
 }
-.session-footer:has(.reply) { padding-bottom: max(6px, env(safe-area-inset-bottom)); }
-.session-footer > .jump-latest, .session-footer > .stop-run {
+.session-footer > :is(.flash-banner, .reply) { flex: 0 0 100%; min-width: 0; }
+.session-footer:has(.reply, .stop-run-compact) { padding-bottom: max(6px, env(safe-area-inset-bottom)); }
+/* Stop shares the collapsed reply row, so it cannot cover the transcript. */
+.session-footer:has(> .stop-run-compact) > .reply:not([open]) { flex: 1 1 0; }
+.reply[open] ~ .stop-run-compact { display: none; }
+.session-footer > .jump-latest {
   position: absolute;
   bottom: calc(100% + 8px);
+  right: max(10px, env(safe-area-inset-right));
   background: var(--surface);
   border-color: var(--border);
   box-shadow: 0 2px 8px #0002;
 }
-.session-footer > .jump-latest { right: max(10px, env(safe-area-inset-right)); }
-.session-footer > .stop-run { left: max(10px, env(safe-area-inset-left)); color: var(--danger); }
+.stop-run {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+  color: var(--danger);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.stop-run:hover { color: var(--danger); background: var(--danger-soft); }
+.stop-run svg { display: block; width: 16px; height: 16px; }
+.stop-run-compact {
+  position: relative;
+  width: 44px;
+  min-height: 44px;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
+}
+.stop-run-compact:hover { background: transparent; }
+.stop-run-compact::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border: 1px solid var(--border);
+  border-radius: inherit;
+  background: var(--surface);
+}
+.stop-run-compact:hover::before { background: var(--danger-soft); }
+.stop-run-compact svg { position: relative; }
 [hidden] { display: none !important; }
 .reply {
   background: var(--surface);
@@ -1061,6 +1102,9 @@ body {
 .composer-input:focus { outline: none; box-shadow: none; }
 .composer-actions { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .composer-actions .btn { min-height: 36px; flex: none; }
+.composer-send-actions { display: flex; flex: none; }
+.composer-send-actions > .btn:not(:first-child) { border-start-start-radius: 0; border-end-start-radius: 0; }
+.composer-send-actions > .btn:not(:last-child) { border-start-end-radius: 0; border-end-end-radius: 0; }
 .composer-profile { min-width: 0; margin-right: auto; color: var(--muted); font-weight: 500; }
 .composer-profile-name { overflow: hidden; text-overflow: ellipsis; }
 .composer-profile-effort { flex: none; font-size: 12px; }
@@ -1125,6 +1169,7 @@ body {
   .app-panel select.input { min-height: 44px; }
   .reply-toggle, .reply[open] .reply-toggle, .composer-actions .btn { min-height: 44px; }
   .composer-actions .composer-attach { width: 44px; height: 44px; padding: 0; }
+  .composer-send-actions > .stop-run { width: 44px; }
   .screen .input { font-size: 16px; }
 }
 @media (max-width: 450px) {
@@ -2021,172 +2066,82 @@ html.inspect-picking * { cursor: crosshair !important; }
   width: min(52rem, calc(100vw - 24px));
 }
 
-/* Composer slash-command & path completion + inline ghost text */
-.composer-completion-anchor {
-  position: relative;
-}
-
-.composer-editor-wrap {
-  position: relative;
-  display: grid;
-}
-
-.composer-editor-wrap > .composer-ghost,
+/* The completion layer is browser-owned and never participates in editor sizing. */
+.composer-editor-wrap, .dir-complete-wrap { position: relative; min-width: 0; }
 .composer-editor-wrap > .composer-input {
-  grid-area: 1 / 1;
-  width: 100%;
-  min-height: 43px;
-  max-height: min(10rem, calc(var(--screen-height, 100dvh) * .24));
-  line-height: 1.5;
-  padding: 3px 3px 5px;
-  margin: 0;
-  border: none;
-  font-family: inherit;
-  font-size: 16px;
-  letter-spacing: normal;
+  display: block;
   white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
+.dir-complete-wrap { flex: 1 1 auto; }
+.dir-complete-wrap > .dir-complete-input { display: block; font-family: var(--mono); line-height: 1.45; }
 
-.composer-ghost {
-  pointer-events: none;
-  user-select: none;
-  overflow: hidden;
-  color: transparent;
-  z-index: 0;
-}
-
-.composer-editor-wrap > .composer-input {
-  position: relative;
-  z-index: 1;
-  background: transparent;
-}
-
-.ghost-mirror {
-  color: transparent;
-}
-
-.ghost-suffix {
-  color: var(--muted);
-  opacity: 0.55;
-  pointer-events: none;
-}
-
-/* Reusable directory completion wrapper for single-line path inputs */
-.dir-complete-wrap {
-  position: relative;
-  display: grid;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.dir-complete-wrap > .dir-ghost,
-.dir-complete-wrap > .dir-complete-input {
-  grid-area: 1 / 1;
-  width: 100%;
-  min-width: 0;
-  padding: 7px 10px;
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.45;
-  letter-spacing: normal;
-  white-space: pre;
-  overflow: hidden;
-}
-
-.dir-ghost {
-  pointer-events: none;
-  user-select: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  z-index: 0;
-}
-
-.dir-complete-wrap > .dir-complete-input {
-  position: relative;
-  z-index: 1;
-  background: transparent;
-}
-
-.dir-complete-wrap::before {
-  content: "";
-  grid-area: 1 / 1;
-  background: var(--surface);
-  border-radius: 4px;
-  pointer-events: none;
-  z-index: 0;
-}
-
-/* Completion dropdown popup */
-.completion-popup {
+.completion-ghost {
   position: absolute;
-  left: 0;
-  right: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+.completion-mirror {
+  width: 100%;
+  white-space: pre;
+  color: transparent;
+}
+.completion-mirror.is-multiline {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.completion-suffix {
+  position: absolute;
+  white-space: pre;
+  color: var(--muted);
+}
+
+.completion-popup {
+  position: fixed;
   z-index: 30;
-  max-height: 15rem;
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px #0003;
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  border-radius: 9px;
+  box-shadow: 0 8px 24px #0004;
+  padding: 3px;
+  touch-action: pan-y;
 }
-
-.composer-completions {
-  bottom: calc(100% + 6px);
-}
-
-.dir-completions {
-  top: calc(100% + 4px);
-}
-
 .completion-item {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   width: 100%;
+  min-height: 34px;
   border: 0;
   border-radius: 5px;
   background: transparent;
   color: var(--text);
-  padding: 6px 8px;
+  padding: 5px 8px;
   text-align: left;
-  font-size: 12px;
+  font: inherit;
+  font-size: 13px;
   cursor: pointer;
 }
-
-.completion-item:hover,
-.completion-item.is-selected {
-  background: var(--user-bg);
+.completion-item[aria-selected="true"] { background: var(--user-bg); }
+@media (hover: hover) {
+  .completion-item:hover { background: var(--surface-2); }
 }
-
-.completion-item-label {
-  font-weight: 600;
-  white-space: nowrap;
+@media (pointer: coarse) {
+  .completion-item { min-height: 44px; }
 }
-
-.completion-item-kind {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--muted);
-  flex-shrink: 0;
-}
-
-.completion-item-desc {
-  margin-left: auto;
+.completion-item-body { flex: 1; min-width: 0; }
+.completion-item-label, .completion-item-desc {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
 }
+.completion-item-label { font-weight: 600; }
+.completion-item-desc, .completion-item-kind { color: var(--muted); font-size: 11px; }
+.completion-item-kind { flex: none; }
 
 .fork-edit-banner {
   background: var(--warn-soft);

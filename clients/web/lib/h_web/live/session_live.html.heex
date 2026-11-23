@@ -413,11 +413,7 @@
                   phx-hook="DirectoryComplete"
                   data-event="complete_path"
                   data-kind="picker_directory"
-                  data-target-id="picker-path-input"
                 >
-                  <div class="dir-ghost" aria-hidden="true">
-                    <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
-                  </div>
                   <input
                     id="picker-path-input"
                     type="text"
@@ -425,10 +421,15 @@
                     value={@picker_path}
                     aria-label="Target directory path"
                     autocomplete="off"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    aria-autocomplete="both"
+                    aria-controls="picker-path-input-completion-list"
+                    phx-mounted={JS.ignore_attributes("aria-activedescendant")}
                     spellcheck="false"
                     class="input mono dir-complete-input"
                   />
-                  <div class="completion-popup dir-completions" role="listbox" hidden></div>
+                  <.completion_layer id="picker-path-input-completion" />
                 </div>
                 <button type="submit" class="btn btn-sm">Go</button>
               </form>
@@ -499,11 +500,7 @@
                   phx-hook="DirectoryComplete"
                   data-event="complete_path"
                   data-kind="picker_directory"
-                  data-target-id="picker-path-input"
                 >
-                  <div class="dir-ghost" aria-hidden="true">
-                    <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
-                  </div>
                   <input
                     id="picker-path-input"
                     type="text"
@@ -511,10 +508,15 @@
                     value={@picker_path}
                     aria-label="Target directory path"
                     autocomplete="off"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    aria-autocomplete="both"
+                    aria-controls="picker-path-input-completion-list"
+                    phx-mounted={JS.ignore_attributes("aria-activedescendant")}
                     spellcheck="false"
                     class="input mono dir-complete-input"
                   />
-                  <div class="completion-popup dir-completions" role="listbox" hidden></div>
+                  <.completion_layer id="picker-path-input-completion" />
                 </div>
                 <button type="submit" class="btn btn-sm">Go</button>
               </form>
@@ -616,13 +618,6 @@
         phx-mounted={JS.ignore_attributes("hidden")}
         hidden
       >Latest ↓</button>
-      <button
-        :if={@run_active?}
-        id="stop-btn"
-        type="button"
-        class="bar-button stop-run"
-        phx-click="abort"
-      >Stop</button>
       <details :if={profile} id="reply" class="reply" phx-mounted={JS.ignore_attributes("open")}>
         <summary id="reply-toggle" class="reply-toggle">
           <span class="reply-open-label">Reply</span>
@@ -641,37 +636,27 @@
           class="composer"
         >
           <input type="hidden" name="destination" value={composer_destination(assigns)} />
-          <div class="composer-completion-anchor">
-            <div
-              id="composer-completions"
-              class="completion-popup composer-completions"
-              role="listbox"
-              aria-label="Command and path completions"
-              hidden
-            >
-            </div>
-            <div class="composer-editor-wrap">
-              <div id="composer-ghost" class="composer-ghost" aria-hidden="true">
-                <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
-              </div>
-              <textarea
-                id="prompt-input"
-                name="content"
-                rows="1"
-                aria-label="Message"
-                placeholder={
-                  if Map.get(@session, :archived, false),
-                    do: "Session is archived (unloaded) — send a message to resume…",
-                    else: "Message the agent… (type / for commands, @ for files)"
-                }
-                phx-hook="ComposerDraft"
-                phx-mounted={JS.ignore_attributes("style")}
-                data-session-id={@session_id}
-                data-conversation-id={@conversation_id}
-                data-completion-meta={completion_metadata_json(@model_groups)}
-                class="composer-input"
-              >{@composer_text}</textarea>
-            </div>
+          <div class="composer-editor-wrap">
+            <textarea
+              id="prompt-input"
+              name="content"
+              rows="1"
+              aria-label="Message"
+              aria-autocomplete="both"
+              aria-controls="prompt-input-completion-list"
+              placeholder={
+                if Map.get(@session, :archived, false),
+                  do: "Session is archived (unloaded) — send a message to resume…",
+                  else: "Message the agent… (type / for commands, @ for files)"
+              }
+              phx-hook="ComposerDraft"
+              phx-mounted={JS.ignore_attributes(["style", "aria-activedescendant"])}
+              data-session-id={@session_id}
+              data-conversation-id={@conversation_id}
+              data-completion-meta={completion_metadata_json(@model_groups)}
+              class="composer-input"
+            >{@composer_text}</textarea>
+            <.completion_layer id="prompt-input-completion" />
           </div>
 
           <div
@@ -748,20 +733,27 @@
               <span class="composer-profile-effort muted" aria-hidden="true">· {profile.thinking_label}</span>
               <span aria-hidden="true">⌄</span>
             </button>
-            <button id="send-btn" type="submit" class="btn btn-primary" title="Send (Shift+Enter)">Send</button>
-            <button
-              :if={@run_active?}
-              id="steer-btn"
-              type="submit"
-              name="mode"
-              value="steer"
-              class="btn btn-warn"
-            >
-              Steer
-            </button>
+            <div class="composer-send-actions" role="group" aria-label="Message actions">
+              <button
+                id="send-btn"
+                type="submit"
+                class="btn btn-primary"
+                title={if @run_active?, do: "Queue (Shift+Enter)", else: "Send (Shift+Enter)"}
+              >{if @run_active?, do: "Queue", else: "Send"}</button>
+              <button
+                :if={@run_active?}
+                id="steer-btn"
+                type="submit"
+                name="mode"
+                value="steer"
+                class="btn btn-warn"
+              >Steer</button>
+              <ConversationComponents.stop_button :if={@run_active?} id="composer-stop-btn" />
+            </div>
           </div>
         </form>
       </details>
+      <ConversationComponents.stop_button :if={@run_active?} id="stop-btn" compact />
     </footer>
   </main>
 

@@ -68,8 +68,9 @@ reply** tucks it away without clearing text or the selected attachment. The mode
 button in the composer opens **Agent settings**. Browsing providers doesn't
 change the conversation; choosing a model or reasoning level applies it directly.
 The transcript follows output while you're at the end. Reading earlier messages
-turns following off; **Latest** returns to the end. **Stop** remains available
-during a run even with the composer closed.
+turns following off; **Latest** returns to the end. During a run, the open
+composer groups **Queue**, **Steer**, and the square **Stop** icon. With reply
+closed, **Stop** is a small round button on the right, below the transcript.
 
 Session details (**⋯**), workspace sessions and Inbox filters use native dialog
 panels rather than expanding the header. File review uses `HWeb.Workbench.split/1`
@@ -117,11 +118,13 @@ render raw HTML or load images from URLs. Each message card places status
 indicators (`Aborted`, `Failed`, or live `Streaming…`), raw Markdown / plain-text
 copy, and `Fork` below the card.
 
-In the composer, typing `/` opens slash-command completion with inline ghost
-hints (`Tab` or `→` at end accepts; `Enter` executes single-line slash commands),
-`@` completes workspace files, `/cwd <dir>` and directory inputs complete
-directories with `Tab` chaining, and `/tree` (or **Tree** in the session bar)
-browses the turn-step tree across all conversations and branches.
+In the composer, type `/` at the start of a message for slash commands, or
+`@` anywhere for workspace files. Pick a suggestion by tapping it or pressing
+`Tab`; `→` also accepts a visible inline hint at the end of the draft. Picking an
+`@` folder keeps browsing inside that folder; picking a file inserts its plain
+path. `/cwd <dir>` and workspace path fields offer directory-only completion.
+`Enter` executes single-line slash commands, and `/tree` (or **Tree** in the
+session bar) browses the turn-step tree across conversations and branches.
 
 Consecutive tool and system activity appears in one line between messages,
 including across **Load earlier** pages. A tool call and its result count once.
@@ -132,6 +135,7 @@ and `hi` still have the original transcript and tool output.
 ## Check a change
 
 Run `mix format`, `mix compile --warnings-as-errors`, and `mix test` here.
+For the browser completion logic, also run `node --test assets/test/*.test.mjs`.
 For a browser smoke check, pick the workspace's **Start New Session** button
 (it must not start anything), preview a crop, and save a note. Open its
 session, verify the image, and return to workspaces. Change a CSS rule, then

@@ -78,11 +78,7 @@
             phx-hook="DirectoryComplete"
             data-event="complete_directory"
             data-kind="directory"
-            data-target-id="workspace-path-input"
           >
-            <div class="dir-ghost" aria-hidden="true">
-              <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
-            </div>
             <input
               id="workspace-path-input"
               type="text"
@@ -90,10 +86,15 @@
               value={@path}
               aria-label="Workspace path"
               autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              aria-autocomplete="both"
+              aria-controls="workspace-path-input-completion-list"
+              phx-mounted={JS.ignore_attributes("aria-activedescendant")}
               spellcheck="false"
               class="input mono dir-complete-input"
             />
-            <div class="completion-popup dir-completions" role="listbox" hidden></div>
+            <.completion_layer id="workspace-path-input-completion" />
           </div>
           <button type="submit" class="btn btn-sm">Go</button>
         </form>
@@ -125,22 +126,23 @@
               phx-hook="DirectoryComplete"
               data-event="complete_directory"
               data-kind="directory"
-              data-target-id="selected-cwd-input"
             >
-              <div class="dir-ghost" aria-hidden="true">
-                <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
-              </div>
               <input
                 id="selected-cwd-input"
                 type="text"
                 name="cwd"
                 value={@selected_dir}
                 autocomplete="off"
+                autocapitalize="off"
+                autocorrect="off"
+                aria-autocomplete="both"
+                aria-controls="selected-cwd-input-completion-list"
+                phx-mounted={JS.ignore_attributes("aria-activedescendant")}
                 spellcheck="false"
                 class="input mono dir-complete-input"
                 required
               />
-              <div class="completion-popup dir-completions" role="listbox" hidden></div>
+              <.completion_layer id="selected-cwd-input-completion" />
             </div>
           </label>
 

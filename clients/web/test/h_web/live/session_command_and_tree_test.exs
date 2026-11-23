@@ -238,6 +238,8 @@ defmodule HWeb.SessionCommandAndTreeTest do
     conn = log_in_owner(conn, owner_token)
     {:ok, view, _html} = live(conn, "/sessions/#{sid}")
 
+    assert has_element?(view, ~s(#prompt-input-completion[phx-update="ignore"]))
+
     # Directory completion for /cwd al
     render_hook(view, "complete_path", %{
       "lookup_id" => 1,
@@ -281,6 +283,32 @@ defmodule HWeb.SessionCommandAndTreeTest do
       target_id: "prompt-input",
       kind: "workspace_file",
       items: [%{value: "hello.ex", label: "hello.ex", kind: "file"}]
+    })
+
+    render_hook(view, "complete_path", %{
+      "lookup_id" => 4,
+      "target_id" => "prompt-input",
+      "kind" => "workspace_file",
+      "prefix" => "alp"
+    })
+
+    assert_push_event(view, "completion_results", %{
+      lookup_id: 4,
+      kind: "workspace_file",
+      items: [%{value: "alpha-dir/", kind: "dir"}]
+    })
+
+    render_hook(view, "complete_path", %{
+      "lookup_id" => 5,
+      "target_id" => "prompt-input",
+      "kind" => "workspace_file",
+      "prefix" => "alpha-dir/"
+    })
+
+    assert_push_event(view, "completion_results", %{
+      lookup_id: 5,
+      kind: "workspace_file",
+      items: [%{value: "alpha-dir/nested/", kind: "dir"}]
     })
 
     # WorkspaceLive directory completion

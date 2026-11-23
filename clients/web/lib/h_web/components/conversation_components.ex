@@ -18,6 +18,26 @@ defmodule HWeb.ConversationComponents do
   def message?(_), do: false
 
   attr(:id, :string, required: true)
+  attr(:compact, :boolean, default: false)
+
+  def stop_button(assigns) do
+    ~H"""
+    <button
+      id={@id}
+      type="button"
+      class={["stop-run", if(@compact, do: "stop-run-compact", else: "btn")]}
+      phx-click="abort"
+      aria-label="Stop current run"
+      title="Stop current run"
+    >
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor" />
+      </svg>
+    </button>
+    """
+  end
+
+  attr(:id, :string, required: true)
   attr(:entry, :map, required: true)
   attr(:catalog_by_id, :map, default: %{})
   attr(:can_fork?, :boolean, default: false)

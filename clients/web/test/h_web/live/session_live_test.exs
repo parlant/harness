@@ -59,8 +59,25 @@ defmodule HWeb.SessionLiveTest do
 
     live_html = render(view)
     refute live_html =~ "Checking project files..."
-    assert has_element?(view, "#stop-btn")
-    assert has_element?(view, "#steer-btn")
+
+    assert has_element?(
+             view,
+             ~s(.session-footer > #stop-btn.stop-run-compact[type="button"][phx-click="abort"][aria-label="Stop current run"] svg rect)
+           )
+
+    assert has_element?(
+             view,
+             ~s(#composer-form .composer-send-actions #composer-stop-btn[type="button"][phx-click="abort"][aria-label="Stop current run"] svg rect)
+           )
+
+    assert has_element?(view, "#composer-form .composer-send-actions #send-btn", "Queue")
+
+    assert has_element?(
+             view,
+             ~s(#composer-form .composer-send-actions #steer-btn[name="mode"][value="steer"]),
+             "Steer"
+           )
+
     refute has_element?(view, ".tool-call-card")
 
     # Release gated fake provider to finish turn
@@ -69,6 +86,11 @@ defmodule HWeb.SessionLiveTest do
     wait_until(fn ->
       html = render(view)
       html =~ "Partial answer complete." and not (html =~ "assistant (live)")
+    end)
+
+    wait_until(fn ->
+      has_element?(view, "#send-btn", "Send") and
+        not has_element?(view, "#stop-btn, #composer-stop-btn, #steer-btn")
     end)
 
     final_html = render(view)
@@ -290,9 +312,9 @@ defmodule HWeb.SessionLiveTest do
     send(pid1, {:release, gate1})
     assert_receive {:gate_entered, ^gate2, _pid2}, 2_000
 
-    # Abort active steered run
+    # Abort active steered run from the composer, without submitting the draft.
     view
-    |> element("#stop-btn")
+    |> element("#composer-stop-btn")
     |> render_click()
 
     wait_until(fn ->
