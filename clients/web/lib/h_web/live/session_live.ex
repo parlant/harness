@@ -16,6 +16,8 @@ defmodule HWeb.SessionLive do
     InboxComponents,
     InboxFilter,
     Layouts,
+    SessionTree,
+    SlashCommands,
     Transcript
   }
 
@@ -74,7 +76,15 @@ defmodule HWeb.SessionLive do
         picker_parent_path: nil,
         picker_dirs: [],
         picker_error: nil,
-        error_banner: nil
+        error_banner: nil,
+        info_banner: nil,
+        fork_edit: nil,
+        tree_raw: nil,
+        tree_view: SessionTree.project(nil, current_conversation_id: cid),
+        tree_filter: "default",
+        tree_query: "",
+        tree_folded_ids: MapSet.new(),
+        tree_error: nil
       )
       |> allow_upload(:attachment, ComposerAttachment.upload_options())
       |> stream_configure(:entries, dom_id: &"entry-#{&1["id"]}")
@@ -109,7 +119,15 @@ defmodule HWeb.SessionLive do
            provider_filter: nil,
            cwd_missing?: false,
            show_fork_picker?: false,
-           picker_error: nil
+           picker_error: nil,
+           info_banner: nil,
+           fork_edit: nil,
+           tree_raw: nil,
+           tree_view: SessionTree.project(nil, current_conversation_id: cid),
+           tree_filter: "default",
+           tree_query: "",
+           tree_folded_ids: MapSet.new(),
+           tree_error: nil
          )
          |> recompute_catalog_assigns()
          |> load_initial(sid, cid)}
@@ -119,7 +137,13 @@ defmodule HWeb.SessionLive do
          socket
          |> unsubscribe_current()
          |> reset_composer()
-         |> assign(conversation_id: cid, provider_filter: nil)
+         |> assign(
+           conversation_id: cid,
+           provider_filter: nil,
+           info_banner: nil,
+           fork_edit: nil
+         )
+         |> recompute_tree_view()
          |> recompute_catalog_assigns()
          |> load_conversation(sid, cid)}
 
@@ -244,6 +268,187 @@ defmodule HWeb.SessionLive do
 
   def handle_event("dismiss_error", _params, socket) do
     {:noreply, assign(socket, :error_banner, nil)}
+  end
+
+  def handle_event("dismiss_info", _params, socket) do
+    {:noreply, assign(socket, :info_banner, nil)}
+  end
+
+  def handle_event("cancel_fork_edit", _params, socket) do
+    {:noreply, cancel_fork_edit(socket)}
+  end
+
+  def handle_event("open_session_tree", params, socket) do
+    filter =
+      case params["filter"] do
+        f when is_binary(f) and f != "" -> SessionTree.normalize_filter(f)
+        _ -> socket.assigns.tree_filter
+      end
+
+    socket =
+      socket
+      |> assign(tree_filter: filter, tree_error: nil)
+      |> load_session_tree()
+      |> push_event("open_panel", %{id: "session-tree-panel"})
+
+    {:noreply, socket}
+  end
+
+  def handle_event("tree_filter", %{"filter" => filter}, socket) when is_binary(filter) do
+    socket =
+      socket
+      |> assign(:tree_filter, SessionTree.normalize_filter(filter))
+      |> recompute_tree_view()
+
+    {:noreply, socket}
+  end
+
+  def handle_event("tree_search", %{"query" => query}, socket) when is_binary(query) do
+    socket =
+      socket
+      |> assign(:tree_query, query)
+      |> recompute_tree_view()
+
+    {:noreply, socket}
+  end
+
+  def handle_event("tree_toggle_fold", %{"entry_id" => entry_id}, socket)
+      when is_binary(entry_id) do
+    folded = socket.assigns.tree_folded_ids
+
+    next_folded =
+      if MapSet.member?(folded, entry_id),
+        do: MapSet.delete(folded, entry_id),
+        else: MapSet.put(folded, entry_id)
+
+    socket =
+      socket
+      |> assign(:tree_folded_ids, next_folded)
+      |> recompute_tree_view()
+
+    {:noreply, socket}
+  end
+
+  def handle_event("tree_refresh", _params, socket) do
+    {:noreply, load_session_tree(socket)}
+  end
+
+  def handle_event("tree_branch_at", %{"entry_id" => entry_id_str} = params, socket) do
+    source_cid = normalize_cid(params["source_cid"] || socket.assigns.conversation_id)
+
+    case Integer.parse(to_string(entry_id_str)) do
+      {entry_id, ""} when entry_id > 0 ->
+        envelope =
+          build_envelope_for(
+            source_cid,
+            "fork",
+            %{"at_entry_id" => entry_id},
+            params["request_id"]
+          )
+
+        case Backend.execute_command(socket.assigns.session_id, envelope) do
+          {:ok, receipt} ->
+            new_cid = to_string(receipt[:conversation_id] || receipt["conversation_id"] || "")
+
+            socket =
+              socket
+              |> refresh_detail()
+              |> push_event("close_panel", %{id: "session-tree-panel"})
+
+            if new_cid != "" do
+              {:noreply,
+               push_patch(socket,
+                 to:
+                   InboxFilter.session_path(
+                     socket.assigns.session_id,
+                     socket.assigns.inbox_filter,
+                     socket.assigns.from_inbox?,
+                     new_cid
+                   )
+               )}
+            else
+              {:noreply, socket}
+            end
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :tree_error, format_error(reason))}
+        end
+
+      _ ->
+        {:noreply, assign(socket, :tree_error, "Invalid entry ID for fork.")}
+    end
+  end
+
+  def handle_event("tree_edit_user_step", %{"entry_id" => entry_id_str} = params, socket) do
+    source_cid = normalize_cid(params["source_cid"] || socket.assigns.conversation_id)
+    socket = begin_fork_edit(socket, to_string(entry_id_str), source_cid)
+
+    socket =
+      if socket.assigns.fork_edit do
+        push_event(socket, "close_panel", %{id: "session-tree-panel"})
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("complete_path", params, socket) do
+    lookup_id = params["lookup_id"]
+    kind = params["kind"] || "path"
+    prefix = if is_binary(params["prefix"]), do: params["prefix"], else: ""
+    target_id = params["target_id"] || "prompt-input"
+    shell? = params["shell"] == true
+    session = socket.assigns.session
+    env_id = (session && Map.get(session, :env_id)) || socket.assigns.picker_env_id || "host"
+
+    fallback_cwd =
+      cond do
+        kind == "picker_directory" and is_binary(socket.assigns.picker_path) and
+            String.starts_with?(socket.assigns.picker_path, "/") ->
+          socket.assigns.picker_path
+
+        (session && Map.get(session, :cwd_exists, true)) and is_binary(session.cwd) and
+            String.starts_with?(session.cwd, "/") ->
+          session.cwd
+
+        is_binary(socket.assigns.picker_path) and
+            String.starts_with?(socket.assigns.picker_path, "/") ->
+          socket.assigns.picker_path
+
+        true ->
+          "/"
+      end
+
+    items =
+      case kind do
+        k when k in ["directory", "picker_directory"] ->
+          case SlashCommands.complete_directories(env_id, fallback_cwd, prefix) do
+            {:ok, list} -> list
+            _ -> []
+          end
+
+        "workspace_file" ->
+          case SlashCommands.complete_session_files(socket.assigns.session_id, prefix) do
+            {:ok, list} -> list
+            _ -> []
+          end
+
+        _ ->
+          case SlashCommands.complete_paths(env_id, fallback_cwd, prefix, shell?: shell?) do
+            {:ok, list} -> list
+            _ -> []
+          end
+      end
+
+    {:noreply,
+     push_event(socket, "completion_results", %{
+       lookup_id: lookup_id,
+       target_id: target_id,
+       kind: kind,
+       prefix: prefix,
+       items: items
+     })}
   end
 
   def handle_event("toggle_session_attention", _params, socket) do
@@ -373,26 +578,34 @@ defmodule HWeb.SessionLive do
   end
 
   def handle_event("submit", params, socket) do
-    text = non_empty(params["content"]) || ""
+    raw_text = if is_binary(params["content"]), do: params["content"], else: ""
+    text = non_empty(raw_text) || ""
     steer? = params["mode"] == "steer"
 
-    with true <- params["destination"] == composer_destination(socket.assigns),
-         {:ok, content} <- composer_content(socket, text) do
-      if content == "" do
-        {:noreply, socket}
-      else
-        args = %{
-          "type" => "input",
-          "content" => content,
-          "when_busy" => if(steer?, do: "steer", else: "follow_up"),
-          "when_idle" => if(steer?, do: "reject", else: "start")
-        }
-
-        send_submit(socket, args, params["request_id"], clear_composer?: true)
-      end
+    if params["destination"] != composer_destination(socket.assigns) do
+      {:noreply, socket}
     else
-      false -> {:noreply, socket}
-      {:error, message} -> {:noreply, assign(socket, :attachment_error, message)}
+      case SlashCommands.parse_input(raw_text) do
+        {:command, cmd, arg} when not steer? ->
+          execute_slash_command(socket, cmd, arg, params["request_id"])
+
+        {:unknown_command, cmd} when not steer? ->
+          {:noreply,
+           assign(socket,
+             error_banner: "Unknown command #{cmd} · type / for commands",
+             info_banner: nil,
+             composer_text: raw_text
+           )}
+
+        {:user_shell, shell_cmd, include_in_context?} when not steer? ->
+          execute_user_shell(socket, shell_cmd, include_in_context?, params["request_id"])
+
+        {:message, clean_text} ->
+          submit_message_or_fork_edit(socket, clean_text, steer?, params["request_id"])
+
+        _ ->
+          submit_message_or_fork_edit(socket, text, steer?, params["request_id"])
+      end
     end
   end
 
@@ -1063,7 +1276,11 @@ defmodule HWeb.SessionLive do
   end
 
   defp build_envelope(socket, command, args, request_id) do
-    cid_int = String.to_integer(socket.assigns.conversation_id)
+    build_envelope_for(socket.assigns.conversation_id, command, args, request_id)
+  end
+
+  defp build_envelope_for(conversation_id, command, args, request_id) do
+    cid_int = String.to_integer(normalize_cid(conversation_id))
 
     %{
       "version" => 1,
@@ -1073,6 +1290,896 @@ defmodule HWeb.SessionLive do
       "args" => args
     }
   end
+
+  defp clear_composer_and_draft(socket) do
+    socket
+    |> reset_composer()
+    |> push_event("clear_draft", %{
+      session_id: socket.assigns.session_id,
+      conversation_id: socket.assigns.conversation_id
+    })
+  end
+
+  defp set_composer_draft(socket, text, opts \\ []) do
+    open_reply? = Keyword.get(opts, :open_reply?, false)
+
+    socket
+    |> assign(:composer_text, text)
+    |> push_event("set_draft", %{
+      session_id: socket.assigns.session_id,
+      conversation_id: socket.assigns.conversation_id,
+      text: text,
+      open_reply: open_reply?
+    })
+  end
+
+  defp load_session_tree(socket) do
+    case Backend.get_session_tree(socket.assigns.session_id) do
+      {:ok, tree} ->
+        socket
+        |> assign(tree_raw: tree, tree_error: nil)
+        |> recompute_tree_view()
+
+      {:error, reason} ->
+        assign(socket, :tree_error, format_error(reason))
+    end
+  end
+
+  defp recompute_tree_view(socket) do
+    view =
+      SessionTree.project(socket.assigns.tree_raw,
+        current_conversation_id: socket.assigns.conversation_id,
+        filter: socket.assigns.tree_filter,
+        query: socket.assigns.tree_query,
+        folded_ids: socket.assigns.tree_folded_ids
+      )
+
+    assign(socket, :tree_view, view)
+  end
+
+  defp submit_message_or_fork_edit(socket, text, steer?, request_id) do
+    case socket.assigns.fork_edit do
+      nil ->
+        with {:ok, content} <- composer_content(socket, text) do
+          if content == "" do
+            {:noreply, socket}
+          else
+            args = %{
+              "type" => "input",
+              "content" => content,
+              "when_busy" => if(steer?, do: "steer", else: "follow_up"),
+              "when_idle" => if(steer?, do: "reject", else: "start")
+            }
+
+            send_submit(socket, args, request_id, clear_composer?: true)
+          end
+        else
+          {:error, message} -> {:noreply, assign(socket, :attachment_error, message)}
+        end
+
+      fork_edit ->
+        submit_fork_edit(socket, fork_edit, text, steer?, request_id)
+    end
+  end
+
+  defp submit_fork_edit(socket, fork_edit, text, steer?, request_id) do
+    with {:ok, content} <- composer_content(socket, text) do
+      if content == "" do
+        {:noreply, socket}
+      else
+        if is_nil(fork_edit.predecessor_id) do
+          # Root prompt edit: create a new session in the same workspace and submit there.
+          session = socket.assigns.session
+          env_id = (session && session.env_id) || "host"
+          cwd = (session && session.cwd) || "/"
+          agent = socket.assigns.agent
+
+          create_params =
+            %{"env_id" => env_id, "cwd" => cwd}
+            |> maybe_put(
+              "agent",
+              if(is_map(agent) and map_size(agent) > 0,
+                do: Map.take(agent, ["model", "thinking"]),
+                else: nil
+              )
+            )
+
+          case Backend.create_session(create_params) do
+            {:ok, %{session: new_session}} ->
+              new_sid = new_session[:session_id] || new_session["session_id"]
+
+              envelope =
+                build_envelope_for(
+                  "1",
+                  "submit",
+                  %{
+                    "type" => "input",
+                    "content" => content,
+                    "when_busy" => "follow_up",
+                    "when_idle" => "start"
+                  },
+                  request_id
+                )
+
+              _ = Backend.execute_command(new_sid, envelope)
+
+              {:noreply,
+               socket
+               |> assign(fork_edit: nil, error_banner: nil, info_banner: nil)
+               |> clear_composer_and_draft()
+               |> unsubscribe_current()
+               |> push_navigate(
+                 to: InboxFilter.session_path(new_sid, socket.assigns.inbox_filter)
+               )}
+
+            {:error, reason} ->
+              {:noreply, assign(socket, :error_banner, format_error(reason))}
+          end
+        else
+          pred_int = String.to_integer(fork_edit.predecessor_id)
+
+          args = %{
+            "at_entry_id" => pred_int,
+            "content" => content,
+            "when_busy" => if(steer?, do: "steer", else: "follow_up"),
+            "when_idle" => if(steer?, do: "reject", else: "start")
+          }
+
+          envelope =
+            build_envelope_for(fork_edit.source_cid, "fork_and_submit", args, request_id)
+
+          case Backend.execute_command(socket.assigns.session_id, envelope) do
+            {:ok, receipt} ->
+              new_cid = to_string(receipt[:conversation_id] || receipt["conversation_id"] || "")
+
+              socket =
+                socket
+                |> assign(fork_edit: nil, error_banner: nil, info_banner: nil)
+                |> clear_composer_and_draft()
+                |> refresh_detail()
+
+              if new_cid != "" do
+                {:noreply,
+                 push_patch(socket,
+                   to:
+                     InboxFilter.session_path(
+                       socket.assigns.session_id,
+                       socket.assigns.inbox_filter,
+                       socket.assigns.from_inbox?,
+                       new_cid
+                     )
+                 )}
+              else
+                {:noreply, socket}
+              end
+
+            {:error, reason} ->
+              {:noreply, assign(socket, :error_banner, format_error(reason))}
+          end
+        end
+      end
+    else
+      {:error, message} -> {:noreply, assign(socket, :attachment_error, message)}
+    end
+  end
+
+  defp begin_fork_edit(socket, entry_id_str, source_cid) do
+    session = socket.assigns.session
+
+    cond do
+      is_nil(session) or session.status == "archived" ->
+        assign(socket, :error_banner, "Cannot fork-edit an archived session.")
+
+      true ->
+        with {:ok, tree} <- fetch_or_load_tree(socket),
+             node when is_map(node) <-
+               Enum.find(tree.nodes, &(to_string(&1.id) == to_string(entry_id_str))),
+             true <- to_string(node.kind) == "user" do
+          cid_for_scan =
+            to_string(node.conversation_id || source_cid || socket.assigns.conversation_id)
+
+          full_text =
+            fetch_user_entry_text(socket.assigns.session_id, cid_for_scan, to_string(node.id)) ||
+              node.preview
+
+          fork_edit = %{
+            entry_id: to_string(node.id),
+            predecessor_id: node.parent_id && to_string(node.parent_id),
+            source_cid: cid_for_scan,
+            saved_draft: socket.assigns.composer_text
+          }
+
+          socket
+          |> assign(
+            tree_raw: tree,
+            fork_edit: fork_edit,
+            error_banner: nil,
+            info_banner: nil
+          )
+          |> recompute_tree_view()
+          |> set_composer_draft(full_text, open_reply?: true)
+        else
+          {:error, reason} ->
+            assign(socket, :error_banner, format_error(reason))
+
+          nil ->
+            assign(socket, :error_banner, "Entry ##{entry_id_str} not found.")
+
+          false ->
+            assign(socket, :error_banner, "Entry ##{entry_id_str} is not a user prompt.")
+        end
+    end
+  end
+
+  defp cancel_fork_edit(socket) do
+    case socket.assigns.fork_edit do
+      nil ->
+        socket
+
+      %{saved_draft: saved} ->
+        socket
+        |> assign(fork_edit: nil, info_banner: "Fork edit cancelled.")
+        |> set_composer_draft(saved || "")
+    end
+  end
+
+  defp fetch_or_load_tree(socket) do
+    case socket.assigns.tree_raw do
+      %{} = tree -> {:ok, tree}
+      _ -> Backend.get_session_tree(socket.assigns.session_id)
+    end
+  end
+
+  defp fetch_user_entry_text(session_id, cid, entry_id_str) do
+    case Backend.scan_entries(session_id, cid, %{"order" => "desc", "limit" => 200}) do
+      {:ok, %{items: items}} ->
+        case Enum.find(items, &(to_string(&1[:id] || &1["id"]) == entry_id_str)) do
+          nil -> nil
+          entry -> extract_entry_plain_text(entry[:data] || entry["data"])
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp extract_entry_plain_text(data) when is_map(data) do
+    case data["content"] || data[:content] do
+      text when is_binary(text) ->
+        text
+
+      blocks when is_list(blocks) ->
+        blocks
+        |> Enum.flat_map(fn
+          b when is_binary(b) -> [b]
+          %{"type" => "text", "text" => t} when is_binary(t) -> [t]
+          %{type: "text", text: t} when is_binary(t) -> [t]
+          %{"text" => t} when is_binary(t) -> [t]
+          _ -> []
+        end)
+        |> Enum.join("\n")
+
+      _ ->
+        nil
+    end
+  end
+
+  defp extract_entry_plain_text(_), do: nil
+
+  defp execute_user_shell(socket, shell_cmd, include_in_context?, request_id) do
+    seq = socket.assigns.cursor_seq
+
+    if is_nil(seq) do
+      {:noreply,
+       assign(
+         socket,
+         :error_banner,
+         "Not synchronized; wait for snapshot before running shell command."
+       )}
+    else
+      args = %{
+        "command" => shell_cmd,
+        "include_in_context" => include_in_context?,
+        "expected_seq" => seq
+      }
+
+      envelope = build_envelope(socket, "user_shell", args, request_id)
+
+      case Backend.execute_command(socket.assigns.session_id, envelope) do
+        {:ok, _receipt} ->
+          {:noreply,
+           socket
+           |> assign(error_banner: nil, info_banner: nil)
+           |> clear_composer_and_draft()}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    end
+  end
+
+  defp execute_slash_command(socket, "/help", _arg, _request_id) do
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: nil)
+     |> clear_composer_and_draft()
+     |> push_event("open_panel", %{id: "slash-commands-help"})}
+  end
+
+  defp execute_slash_command(socket, cmd, _arg, _request_id) when cmd in ["/tree", "/branches"] do
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: nil, tree_error: nil)
+     |> clear_composer_and_draft()
+     |> load_session_tree()
+     |> push_event("open_panel", %{id: "session-tree-panel"})}
+  end
+
+  defp execute_slash_command(socket, "/conv", arg, _request_id) do
+    clean = String.trim_leading(arg, "#")
+
+    case Integer.parse(clean) do
+      {n, ""} when n > 0 ->
+        target_cid = Integer.to_string(n)
+
+        {:noreply,
+         socket
+         |> assign(error_banner: nil, info_banner: nil)
+         |> clear_composer_and_draft()
+         |> push_patch(
+           to:
+             InboxFilter.session_path(
+               socket.assigns.session_id,
+               socket.assigns.inbox_filter,
+               socket.assigns.from_inbox?,
+               target_cid
+             )
+         )}
+
+      _ ->
+        {:noreply, assign(socket, :error_banner, "Usage: /conv <id>")}
+    end
+  end
+
+  defp execute_slash_command(socket, "/branch", "", request_id) do
+    case latest_visible_entry_id(socket) do
+      nil ->
+        {:noreply, assign(socket, :error_banner, "No visible entries to branch from.")}
+
+      entry_id ->
+        execute_slash_command(socket, "/branch", to_string(entry_id), request_id)
+    end
+  end
+
+  defp execute_slash_command(socket, "/branch", arg, request_id) do
+    clean = String.trim_leading(arg, "#")
+
+    case Integer.parse(clean) do
+      {entry_id, ""} when entry_id > 0 ->
+        envelope = build_envelope(socket, "fork", %{"at_entry_id" => entry_id}, request_id)
+
+        case Backend.execute_command(socket.assigns.session_id, envelope) do
+          {:ok, receipt} ->
+            new_cid = to_string(receipt[:conversation_id] || receipt["conversation_id"] || "")
+
+            socket =
+              socket
+              |> assign(error_banner: nil, info_banner: nil)
+              |> clear_composer_and_draft()
+              |> refresh_detail()
+
+            if new_cid != "" do
+              {:noreply,
+               push_patch(socket,
+                 to:
+                   InboxFilter.session_path(
+                     socket.assigns.session_id,
+                     socket.assigns.inbox_filter,
+                     socket.assigns.from_inbox?,
+                     new_cid
+                   )
+               )}
+            else
+              {:noreply, socket}
+            end
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :error_banner, format_error(reason))}
+        end
+
+      _ ->
+        {:noreply, assign(socket, :error_banner, "Usage: /branch [<entry_id>]")}
+    end
+  end
+
+  defp execute_slash_command(socket, "/fork", "", _request_id) do
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: nil, tree_filter: "user-only", tree_error: nil)
+     |> clear_composer_and_draft()
+     |> load_session_tree()
+     |> push_event("open_panel", %{id: "session-tree-panel"})}
+  end
+
+  defp execute_slash_command(socket, "/fork", arg, _request_id) do
+    if String.downcase(arg) == "cancel" do
+      if socket.assigns.fork_edit do
+        {:noreply, cancel_fork_edit(socket)}
+      else
+        {:noreply, assign(socket, :info_banner, "No active fork-edit to cancel.")}
+      end
+    else
+      clean = String.trim_leading(arg, "#")
+
+      case Integer.parse(clean) do
+        {n, ""} when n > 0 ->
+          {:noreply,
+           begin_fork_edit(socket, Integer.to_string(n), socket.assigns.conversation_id)}
+
+        _ ->
+          {:noreply, assign(socket, :error_banner, "Usage: /fork [<user_entry_id> | cancel]")}
+      end
+    end
+  end
+
+  defp execute_slash_command(socket, "/cwd", "", _request_id) do
+    session = socket.assigns.session
+
+    msg =
+      if session do
+        "Workspace: #{session.env_id}:#{session.cwd}"
+      else
+        "Workspace unavailable."
+      end
+
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: msg)
+     |> clear_composer_and_draft()}
+  end
+
+  defp execute_slash_command(socket, "/cwd", arg, _request_id) do
+    session = socket.assigns.session
+    env_id = (session && session.env_id) || "host"
+    base_cwd = (session && session.cwd) || "/"
+
+    case SlashCommands.resolve_cwd_input(arg, env_id, base_cwd) do
+      {:ok, target_cwd} ->
+        fork_params = %{
+          "cwd" => target_cwd,
+          "env_id" => env_id,
+          "conversation_id" => socket.assigns.conversation_id
+        }
+
+        case Backend.fork_session(socket.assigns.session_id, fork_params) do
+          {:ok, %{session: new_session}} ->
+            new_sid = new_session[:session_id] || new_session["session_id"]
+
+            {:noreply,
+             socket
+             |> clear_composer_and_draft()
+             |> unsubscribe_current()
+             |> push_navigate(to: InboxFilter.session_path(new_sid, socket.assigns.inbox_filter))}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :error_banner, format_error(reason))}
+        end
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :error_banner, msg)}
+    end
+  end
+
+  defp execute_slash_command(socket, "/new", _arg, _request_id) do
+    session = socket.assigns.session
+
+    if is_nil(session) do
+      {:noreply, assign(socket, :error_banner, "Session workspace unavailable.")}
+    else
+      params = %{"env_id" => session.env_id, "cwd" => session.cwd}
+
+      case Backend.create_session(params) do
+        {:ok, %{session: new_session}} ->
+          new_sid = new_session[:session_id] || new_session["session_id"]
+
+          {:noreply,
+           socket
+           |> clear_composer_and_draft()
+           |> unsubscribe_current()
+           |> push_navigate(to: InboxFilter.session_path(new_sid, socket.assigns.inbox_filter))}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    end
+  end
+
+  defp execute_slash_command(socket, "/inbox", _arg, _request_id) do
+    {:noreply,
+     socket
+     |> clear_composer_and_draft()
+     |> unsubscribe_current()
+     |> push_navigate(to: InboxFilter.inbox_path(socket.assigns.inbox_filter))}
+  end
+
+  defp execute_slash_command(socket, "/workspaces", _arg, _request_id) do
+    {:noreply,
+     socket
+     |> clear_composer_and_draft()
+     |> unsubscribe_current()
+     |> push_navigate(to: ~p"/workspaces")}
+  end
+
+  defp execute_slash_command(socket, cmd, _arg, _request_id)
+       when cmd in ["/resume", "/sessions"] do
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: nil)
+     |> clear_composer_and_draft()
+     |> push_event("open_panel", %{id: "session-details"})}
+  end
+
+  defp execute_slash_command(socket, "/parent", _arg, _request_id) do
+    case socket.assigns.session_parent do
+      nil ->
+        {:noreply,
+         socket
+         |> assign(error_banner: nil, info_banner: "This session has no parent session.")
+         |> clear_composer_and_draft()}
+
+      parent ->
+        {:noreply,
+         socket
+         |> clear_composer_and_draft()
+         |> unsubscribe_current()
+         |> push_navigate(
+           to: ~p"/sessions/#{parent.session_id}/conversations/#{parent.conversation_id}"
+         )}
+    end
+  end
+
+  defp execute_slash_command(socket, cmd, _arg, _request_id) when cmd in ["/review", "/files"] do
+    {:noreply,
+     socket
+     |> clear_composer_and_draft()
+     |> unsubscribe_current()
+     |> push_navigate(
+       to:
+         InboxFilter.review_path(
+           socket.assigns.session_id,
+           socket.assigns.inbox_filter,
+           socket.assigns.from_inbox?,
+           socket.assigns.conversation_id
+         )
+     )}
+  end
+
+  defp execute_slash_command(socket, "/model", "", _request_id) do
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: nil)
+     |> clear_composer_and_draft()
+     |> push_event("open_panel", %{id: "agent-options"})}
+  end
+
+  defp execute_slash_command(socket, "/model", model_id, request_id) do
+    envelope = build_envelope(socket, "configure", %{"model" => model_id}, request_id)
+
+    case Backend.execute_command(socket.assigns.session_id, envelope) do
+      {:ok, _receipt} ->
+        {:noreply,
+         socket
+         |> assign(error_banner: nil, info_banner: "Model set to #{model_id}.")
+         |> clear_composer_and_draft()}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  defp execute_slash_command(socket, "/thinking", "", _request_id) do
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: nil)
+     |> clear_composer_and_draft()
+     |> push_event("open_panel", %{id: "agent-options"})}
+  end
+
+  defp execute_slash_command(socket, "/thinking", arg, request_id) do
+    level = String.downcase(arg)
+
+    if level in @thinking_levels do
+      envelope = build_envelope(socket, "configure", %{"thinking" => level}, request_id)
+
+      case Backend.execute_command(socket.assigns.session_id, envelope) do
+        {:ok, _receipt} ->
+          {:noreply,
+           socket
+           |> assign(error_banner: nil, info_banner: "Reasoning effort set to #{level}.")
+           |> clear_composer_and_draft()}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    else
+      {:noreply,
+       assign(
+         socket,
+         :error_banner,
+         "Invalid thinking level #{arg}. Use: #{Enum.join(@thinking_levels, ", ")}"
+       )}
+    end
+  end
+
+  defp execute_slash_command(socket, "/compact", arg, request_id) do
+    seq = socket.assigns.cursor_seq
+
+    if is_nil(seq) do
+      {:noreply,
+       assign(socket, :error_banner, "Not synchronized; wait for snapshot before /compact.")}
+    else
+      args = %{"expected_seq" => seq} |> maybe_put("instructions", non_empty(arg))
+      envelope = build_envelope(socket, "compact", args, request_id)
+
+      case Backend.execute_command(socket.assigns.session_id, envelope) do
+        {:ok, _receipt} ->
+          {:noreply,
+           socket
+           |> assign(error_banner: nil, info_banner: "Compaction requested.")
+           |> clear_composer_and_draft()}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    end
+  end
+
+  defp execute_slash_command(socket, "/continue", _arg, request_id) do
+    send_submit(socket, %{"type" => "continue"}, request_id, clear_composer?: true)
+  end
+
+  defp execute_slash_command(socket, "/abort", _arg, request_id) do
+    envelope = build_envelope(socket, "abort", %{}, request_id)
+
+    case Backend.execute_command(socket.assigns.session_id, envelope) do
+      {:ok, _receipt} ->
+        {:noreply,
+         socket
+         |> assign(error_banner: nil, info_banner: "Abort requested.")
+         |> clear_composer_and_draft()}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  defp execute_slash_command(socket, "/stop", _arg, _request_id) do
+    case Backend.stop_session(socket.assigns.session_id, %{}) do
+      {:ok, %{session: updated}} ->
+        {:noreply,
+         socket
+         |> assign(
+           session: updated,
+           error_banner: nil,
+           info_banner: "Stopped active session work."
+         )
+         |> apply_session_to_catalog(updated)
+         |> clear_composer_and_draft()}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  defp execute_slash_command(socket, "/dequeue", _arg, request_id) do
+    ids =
+      socket.assigns.inbox
+      |> Enum.map(fn item -> item["submission_id"] || item[:submission_id] end)
+      |> Enum.flat_map(fn
+        id when is_integer(id) and id > 0 ->
+          [id]
+
+        id when is_binary(id) ->
+          case Integer.parse(id) do
+            {n, ""} when n > 0 -> [n]
+            _ -> []
+          end
+
+        _ ->
+          []
+      end)
+
+    if ids == [] do
+      {:noreply,
+       socket
+       |> assign(error_banner: nil, info_banner: "No queued prompts to withdraw.")
+       |> clear_composer_and_draft()}
+    else
+      envelope = build_envelope(socket, "withdraw", %{"submission_ids" => ids}, request_id)
+
+      case Backend.execute_command(socket.assigns.session_id, envelope) do
+        {:ok, receipt} ->
+          withdrawn = receipt[:withdrawn] || receipt["withdrawn"] || []
+
+          restored =
+            withdrawn
+            |> Enum.map(fn item ->
+              extract_entry_plain_text(%{"content" => item[:content] || item["content"]})
+            end)
+            |> Enum.reject(&(&1 in [nil, ""]))
+            |> Enum.join("\n\n")
+
+          socket =
+            socket
+            |> assign(error_banner: nil, info_banner: "Withdrew #{length(ids)} queued prompt(s).")
+
+          socket =
+            if restored != "" do
+              set_composer_draft(socket, restored, open_reply?: true)
+            else
+              clear_composer_and_draft(socket)
+            end
+
+          {:noreply, socket}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    end
+  end
+
+  defp execute_slash_command(socket, "/name", "", _request_id) do
+    title = session_title(socket.assigns.session, socket.assigns.session_id)
+
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: "Session title: #{title}")
+     |> clear_composer_and_draft()}
+  end
+
+  defp execute_slash_command(socket, "/name", title, request_id) do
+    args =
+      %{"title" => title}
+      |> maybe_put("expected_seq", socket.assigns.cursor_seq)
+
+    envelope = build_envelope(socket, "rename", args, request_id)
+
+    case Backend.execute_command(socket.assigns.session_id, envelope) do
+      {:ok, _receipt} ->
+        {:noreply,
+         socket
+         |> refresh_detail()
+         |> assign(error_banner: nil, info_banner: "Session renamed to \"#{title}\".")
+         |> clear_composer_and_draft()}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  defp execute_slash_command(socket, "/attention", arg, _request_id) do
+    session = socket.assigns.session
+
+    if is_nil(session) or session.status == "archived" do
+      {:noreply, assign(socket, :error_banner, "Archived sessions are read-only.")}
+    else
+      target =
+        case String.downcase(arg) do
+          "" -> {:ok, not (Map.get(session, :needs_attention, true) == true)}
+          v when v in ["on", "true", "yes", "1"] -> {:ok, true}
+          v when v in ["off", "false", "no", "0"] -> {:ok, false}
+          _ -> :error
+        end
+
+      case target do
+        {:ok, bool} ->
+          case Backend.triage_session(socket.assigns.session_id, %{"needs_attention" => bool}) do
+            {:ok, %{session: updated}} ->
+              label = if bool, do: "marked for attention", else: "marked as read"
+
+              {:noreply,
+               socket
+               |> assign(session: updated, error_banner: nil, info_banner: "Session #{label}.")
+               |> apply_session_to_catalog(updated)
+               |> clear_composer_and_draft()}
+
+            {:error, reason} ->
+              {:noreply, assign(socket, :error_banner, format_error(reason))}
+          end
+
+        :error ->
+          {:noreply, assign(socket, :error_banner, "Usage: /attention [on|off]")}
+      end
+    end
+  end
+
+  defp execute_slash_command(socket, "/archive", arg, _request_id) do
+    session = socket.assigns.session
+
+    if is_nil(session) or session.status == "archived" do
+      {:noreply, assign(socket, :error_banner, "Imported archives are read-only.")}
+    else
+      case String.downcase(arg) do
+        v when v in ["off", "false", "unarchive", "restore"] ->
+          case Backend.archive_session(socket.assigns.session_id, %{"archived" => false}) do
+            {:ok, %{session: updated}} ->
+              {:noreply,
+               socket
+               |> assign(
+                 session: updated,
+                 error_banner: nil,
+                 info_banner: "Session restored from archive."
+               )
+               |> apply_session_to_catalog(updated)
+               |> clear_composer_and_draft()}
+
+            {:error, reason} ->
+              {:noreply, assign(socket, :error_banner, format_error(reason))}
+          end
+
+        v when v in ["", "on", "true", "force", "stop"] ->
+          stop? = v in ["force", "stop"]
+
+          case Backend.archive_session(socket.assigns.session_id, %{
+                 "archived" => true,
+                 "stop" => stop?
+               }) do
+            {:ok, _} ->
+              {:noreply,
+               socket
+               |> clear_composer_and_draft()
+               |> unsubscribe_current()
+               |> push_navigate(to: InboxFilter.inbox_path(socket.assigns.inbox_filter))}
+
+            {:error, reason} ->
+              {:noreply, assign(socket, :error_banner, format_error(reason))}
+          end
+
+        _ ->
+          {:noreply, assign(socket, :error_banner, "Usage: /archive [force|off]")}
+      end
+    end
+  end
+
+  defp execute_slash_command(socket, "/steer", arg, request_id) do
+    if arg == "" do
+      {:noreply, assign(socket, :error_banner, "Usage: /steer <message>")}
+    else
+      submit_message_or_fork_edit(socket, arg, true, request_id)
+    end
+  end
+
+  defp execute_slash_command(socket, "/follow-up", arg, request_id) do
+    if arg == "" do
+      {:noreply, assign(socket, :error_banner, "Usage: /follow-up <message>")}
+    else
+      submit_message_or_fork_edit(socket, arg, false, request_id)
+    end
+  end
+
+  defp latest_visible_entry_id(socket) do
+    case Backend.scan_entries(
+           socket.assigns.session_id,
+           socket.assigns.conversation_id,
+           %{"order" => "desc", "limit" => 1}
+         ) do
+      {:ok, %{items: [latest | _]}} -> latest[:id] || latest["id"]
+      _ -> nil
+    end
+  end
+
+  defp completion_metadata_json(model_groups) do
+    model_groups
+    |> SlashCommands.client_metadata()
+    |> Phoenix.json_library().encode!()
+  end
+
+  defp tree_kind_label("user"), do: "user"
+  defp tree_kind_label("assistant"), do: "assistant"
+  defp tree_kind_label("tool_result"), do: "tool"
+  defp tree_kind_label("user_shell"), do: "shell"
+  defp tree_kind_label("compaction"), do: "compact"
+  defp tree_kind_label(other), do: other
 
   defp generate_request_id do
     "hweb-" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)

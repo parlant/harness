@@ -29,7 +29,7 @@ defmodule HWeb.Endpoint do
     at: "/assets",
     from: :harness_web,
     gzip: false,
-    only: ~w(app.css app.js inspector.js workbench.js review.js monaco favicon.ico)
+    only: ~w(app.css app.js completion.js inspector.js workbench.js review.js monaco favicon.ico)
   )
 
   plug(Plug.Static,

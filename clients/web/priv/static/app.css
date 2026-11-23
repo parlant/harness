@@ -2015,3 +2015,412 @@ html.inspect-picking * { cursor: crosshair !important; }
   .review-document { min-height: 85px; }
 }
 .review-highlight { background: color-mix(in srgb, var(--accent), transparent 75%); }
+
+/* Wide modal panels (Session tree & Slash commands help) */
+.app-panel-wide {
+  width: min(52rem, calc(100vw - 24px));
+}
+
+/* Composer slash-command & path completion + inline ghost text */
+.composer-completion-anchor {
+  position: relative;
+}
+
+.composer-editor-wrap {
+  position: relative;
+  display: grid;
+}
+
+.composer-editor-wrap > .composer-ghost,
+.composer-editor-wrap > .composer-input {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-height: 43px;
+  max-height: min(10rem, calc(var(--screen-height, 100dvh) * .24));
+  line-height: 1.5;
+  padding: 3px 3px 5px;
+  margin: 0;
+  border: none;
+  font-family: inherit;
+  font-size: 16px;
+  letter-spacing: normal;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.composer-ghost {
+  pointer-events: none;
+  user-select: none;
+  overflow: hidden;
+  color: transparent;
+  z-index: 0;
+}
+
+.composer-editor-wrap > .composer-input {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+.ghost-mirror {
+  color: transparent;
+}
+
+.ghost-suffix {
+  color: var(--muted);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* Reusable directory completion wrapper for single-line path inputs */
+.dir-complete-wrap {
+  position: relative;
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dir-complete-wrap > .dir-ghost,
+.dir-complete-wrap > .dir-complete-input {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.45;
+  letter-spacing: normal;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.dir-ghost {
+  pointer-events: none;
+  user-select: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  z-index: 0;
+}
+
+.dir-complete-wrap > .dir-complete-input {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+.dir-complete-wrap::before {
+  content: "";
+  grid-area: 1 / 1;
+  background: var(--surface);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Completion dropdown popup */
+.completion-popup {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 15rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px #0003;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.composer-completions {
+  bottom: calc(100% + 6px);
+}
+
+.dir-completions {
+  top: calc(100% + 4px);
+}
+
+.completion-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.completion-item:hover,
+.completion-item.is-selected {
+  background: var(--user-bg);
+}
+
+.completion-item-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.completion-item-kind {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.completion-item-desc {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.fork-edit-banner {
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
+}
+
+/* Session Tree (/tree) dialog */
+.tree-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tree-filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tree-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tree-search-form {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tree-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: min(58dvh, 34rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--bg);
+}
+
+.tree-empty {
+  margin: 12px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid transparent;
+  font-size: 12px;
+}
+
+.tree-row:hover {
+  border-color: var(--border);
+}
+
+.tree-row.is-active-path {
+  background: color-mix(in srgb, var(--user-bg) 55%, var(--surface));
+}
+
+.tree-row.is-current-leaf {
+  border-color: var(--accent);
+}
+
+.tree-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.tree-prefix {
+  white-space: pre;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.tree-fold-btn {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.2;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tree-fold-btn:hover {
+  border-color: var(--accent);
+}
+
+.tree-active-dot {
+  width: 10px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.tree-active-dot.is-on {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.tree-id {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.tree-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.tree-kind-user {
+  background: var(--user-bg);
+  border-color: var(--user-border);
+  color: var(--accent);
+}
+
+.tree-kind-assistant {
+  background: var(--ok-soft);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.tree-kind-tool_result {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.tree-kind-user_shell {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.tree-kind-badge.is-error {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.tree-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.tree-conv-tip,
+.tree-folded-count {
+  flex-shrink: 0;
+}
+
+.tree-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* Slash command help dialog */
+.slash-help-intro {
+  margin: 0;
+  font-size: 13px;
+}
+
+.slash-help-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.slash-help-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.slash-help-usage {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .session-tree-btn-label {
+    display: none;
+  }
+  .tree-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .tree-row-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .slash-help-item {
+    flex-direction: column;
+    gap: 2px;
+  }
+}
