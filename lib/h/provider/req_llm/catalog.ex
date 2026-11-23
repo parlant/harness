@@ -215,11 +215,46 @@ defmodule H.Provider.ReqLLM.Catalog do
       end
 
     case status do
-      :signed_in -> nil
+      :signed_in -> pool_unavailable_reason(policy)
       :alias_mismatch -> "Codex pool aliases do not match accounts (extensions.json)"
       :sign_in_required -> "Codex sign-in required (/login)"
       {:error, _} -> "Codex account store unavailable"
     end
+  end
+
+  defp pool_unavailable_reason(%{module: mod, sources: sources})
+       when is_atom(mod) and is_list(sources) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :unavailable, 2) and
+         safe_policy_call(mod, :order, ["openai_codex:gpt-6.2-sol", sources]) == [] do
+      case safe_policy_call(mod, :unavailable, ["openai_codex:gpt-6.2-sol", sources]) do
+        %{reason: :credits_disabled} ->
+          "Codex pool included quota exhausted (allow_credits: false)"
+
+        %{reason: :quota_exhausted} ->
+          "Codex pool quota exhausted"
+
+        %{reason: :workspace_blocked} ->
+          "Codex pool workspace limit reached"
+
+        %{reason: :auth_cooldown} ->
+          "Codex pool cooling down after auth error"
+
+        _ ->
+          nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp pool_unavailable_reason(_), do: nil
+
+  defp safe_policy_call(mod, fun, args) do
+    apply(mod, fun, args)
+  rescue
+    _ -> :unavailable
+  catch
+    _, _ -> :unavailable
   end
 
   defp mark_codex_unavailable(%{provider: "openai_codex"} = model, reason),

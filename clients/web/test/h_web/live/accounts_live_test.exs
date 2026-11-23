@@ -71,4 +71,49 @@ defmodule HWeb.AccountsLiveTest do
     refute log =~ secret
     assert {:ok, %{api_key: ^secret}} = H.Accounts.resolve_api_key(accounts, :openai)
   end
+
+  defmodule FakePoolStatusPolicy do
+    @behaviour H.Provider.AccountPolicy
+    @impl true
+    def order(_, _), do: []
+    @impl true
+    def rejected(_, _, _), do: :ok
+
+    @impl true
+    def pool_status(_sources) do
+      %{
+        allow_credits: false,
+        wait_when_exhausted: true,
+        sources: [
+          %{id: "personal", eligibility: :credits_disabled, reset_at_ms: nil},
+          %{id: "work", eligibility: :eligible, reset_at_ms: nil}
+        ]
+      }
+    end
+  end
+
+  test "displays MultiCodex pool summary and per-alias eligibility badges when pool is active",
+       ctx do
+    accounts =
+      start_supervised!({H.Accounts, data_dir: ctx.data_dir, sources: ["personal", "work"]})
+
+    policy = %{module: FakePoolStatusPolicy, sources: ["personal", "work"]}
+
+    Application.put_env(
+      :harness_web,
+      :daemon_opts,
+      ctx.daemon_opts
+      |> Keyword.put(:accounts, accounts)
+      |> Keyword.put(:codex_account_policy, policy)
+    )
+
+    conn = log_in_owner(ctx.conn, ctx.owner_token)
+    {:ok, _view, html} = live(conn, "/settings/accounts")
+
+    assert html =~ "MultiCodex pool enabled"
+    assert html =~ "credits disabled"
+    assert html =~ "auto-wait on"
+    assert html =~ "pool: credits disabled"
+    assert html =~ "pool: eligible"
+  end
 end

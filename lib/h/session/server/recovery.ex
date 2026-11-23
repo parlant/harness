@@ -187,6 +187,8 @@ defmodule H.Session.Server.Recovery do
         recent_submissions: recent_subs,
         workers: %{},
         subagent_watches: %{},
+        pool_watches: MapSet.new(),
+        wake_timers: %{},
         ephemeral: %{},
         held_leases: %{},
         workspace_waits: %{},
@@ -738,6 +740,20 @@ defmodule H.Session.Server.Recovery do
          _now
        ),
        do: [{:spawn_tool, cid, tid}]
+
+  defp task_resume_effect(
+         %{
+           id: tid,
+           kind: kind,
+           status: "sleeping",
+           wake: %{"reason" => "pool_wait", "provider" => provider} = wake
+         },
+         now
+       )
+       when kind in ["generation", "compaction"] do
+    until_ms = get_in(wake, ["until"]) || now
+    [{:watch_account_pool, provider}, {:arm_wake_timer, tid, max(0, until_ms - now)}]
+  end
 
   defp task_resume_effect(%{id: tid, kind: kind, status: "sleeping", wake: wake}, now)
        when kind in ["generation", "compaction"] do

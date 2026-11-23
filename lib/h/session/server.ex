@@ -269,6 +269,10 @@ defmodule H.Session.Server do
     process_with_drain({:wake_task, tid}, state)
   end
 
+  def handle_info({:account_pool_available, provider}, state) do
+    process_with_drain({:account_pool_available, provider}, state)
+  end
+
   def handle_info({:submission_settled, outcome}, state) do
     process_with_drain({:submission_settled, outcome}, state)
   end
@@ -345,6 +349,9 @@ defmodule H.Session.Server do
 
       {:wake_task, tid} ->
         drain_mailbox(remaining - 1, [{:wake_task, tid} | acc])
+
+      {:account_pool_available, provider} ->
+        drain_mailbox(remaining - 1, [{:account_pool_available, provider} | acc])
 
       {:submission_settled, outcome} ->
         drain_mailbox(remaining - 1, [{:submission_settled, outcome} | acc])
@@ -547,6 +554,10 @@ defmodule H.Session.Server do
     Generation.stage_wake(tid, state)
   end
 
+  defp stage_single_item({:account_pool_available, provider}, state, _staged_rev) do
+    Generation.stage_pool_available(provider, state)
+  end
+
   defp stage_single_item({:submission_settled, outcome}, state, _staged_rev) do
     Subagents.stage_settled(outcome, state)
   end
@@ -581,8 +592,52 @@ defmodule H.Session.Server do
   end
 
   defp apply_effect({:arm_wake_timer, tid, delay_ms}, state) do
-    Process.send_after(self(), {:wake_task, tid}, delay_ms)
-    state
+    state = cancel_wake_timer(tid, state)
+    ref = Process.send_after(self(), {:wake_task, tid}, delay_ms)
+    %{state | wake_timers: Map.put(state.wake_timers, tid, ref)}
+  end
+
+  defp apply_effect({:cancel_wake_timer, tid}, state) do
+    cancel_wake_timer(tid, state)
+  end
+
+  defp apply_effect({:watch_account_pool, provider}, state) do
+    case normalize_pool_provider(provider) do
+      :openai_codex ->
+        if MapSet.member?(state.pool_watches, :openai_codex) do
+          state
+        else
+          if state.pubsub && Process.whereis(state.pubsub) do
+            Registry.register(state.pubsub, {:account_pool, :openai_codex}, nil)
+          end
+
+          state = %{state | pool_watches: MapSet.put(state.pool_watches, :openai_codex)}
+          maybe_wake_if_pool_already_available(state)
+          state
+        end
+
+      nil ->
+        state
+    end
+  end
+
+  defp apply_effect({:maybe_unwatch_account_pool, provider}, state) do
+    case normalize_pool_provider(provider) do
+      :openai_codex ->
+        if MapSet.member?(state.pool_watches, :openai_codex) and
+             not has_pool_wait_task?(state, "openai_codex") do
+          if state.pubsub && Process.whereis(state.pubsub) do
+            Registry.unregister(state.pubsub, {:account_pool, :openai_codex})
+          end
+
+          %{state | pool_watches: MapSet.delete(state.pool_watches, :openai_codex)}
+        else
+          state
+        end
+
+      nil ->
+        state
+    end
   end
 
   defp apply_effect({:kill_worker, attempt_id, pid, ref}, state) do
@@ -611,6 +666,52 @@ defmodule H.Session.Server do
 
   defp apply_effect({:abort_subagent, child_sid, child_cid, reason}, state) do
     Subagents.abort_child(child_sid, child_cid, reason, state)
+  end
+
+  defp cancel_wake_timer(tid, state) do
+    case Map.pop(state.wake_timers, tid) do
+      {nil, _timers} ->
+        state
+
+      {ref, timers} ->
+        Process.cancel_timer(ref)
+        %{state | wake_timers: timers}
+    end
+  end
+
+  defp normalize_pool_provider(:openai_codex), do: :openai_codex
+  defp normalize_pool_provider("openai_codex"), do: :openai_codex
+  defp normalize_pool_provider(_), do: nil
+
+  defp has_pool_wait_task?(state, provider_str) do
+    Enum.any?(state.tasks, fn {_id, task} ->
+      task.status == "sleeping" and
+        get_in(task.wake, ["reason"]) == "pool_wait" and
+        get_in(task.wake, ["provider"]) == provider_str
+    end)
+  end
+
+  defp maybe_wake_if_pool_already_available(state) do
+    case state.provider_config[:codex_account_policy] do
+      %{module: mod, sources: sources} when is_atom(mod) and is_list(sources) ->
+        model = state.default_model || "openai_codex:gpt-6.2-sol"
+
+        ordered =
+          try do
+            mod.order(model, sources)
+          rescue
+            _ -> []
+          catch
+            _, _ -> []
+          end
+
+        if is_list(ordered) and ordered != [] do
+          send(self(), {:account_pool_available, :openai_codex})
+        end
+
+      _ ->
+        :ok
+    end
   end
 
   defp do_export_branch(state, cid, nil) do

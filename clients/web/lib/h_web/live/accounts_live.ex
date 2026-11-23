@@ -9,7 +9,17 @@ defmodule HWeb.AccountsLive do
     opts = H.Daemon.instance_options() || Application.get_env(:harness_web, :daemon_opts, [])
 
     {:ok,
-     socket |> assign(accounts: opts[:accounts], flow: nil, sources: [], keys: []) |> refresh()}
+     socket
+     |> assign(
+       accounts: opts[:accounts],
+       codex_account_policy: opts[:codex_account_policy],
+       flow: nil,
+       sources: [],
+       pool: nil,
+       pool_by_id: %{},
+       keys: []
+     )
+     |> refresh()}
   end
 
   @impl true
@@ -57,11 +67,21 @@ defmodule HWeb.AccountsLive do
 
   defp refresh(socket) do
     server = socket.assigns.accounts
+    policy = socket.assigns.codex_account_policy
 
-    sources =
-      case Accounts.discover(server) do
-        {:ok, %{providers: [%{sources: sources}]}} -> sources
-        _ -> []
+    {sources, pool} =
+      case Accounts.discover(server, policy) do
+        {:ok, %{providers: [%{sources: sources} = provider]}} -> {sources, provider[:pool]}
+        _ -> {[], nil}
+      end
+
+    pool_by_id =
+      case pool do
+        %{sources: pool_sources} when is_list(pool_sources) ->
+          Map.new(pool_sources, &{&1.id, &1})
+
+        _ ->
+          %{}
       end
 
     keys =
@@ -70,8 +90,46 @@ defmodule HWeb.AccountsLive do
         _ -> []
       end
 
-    assign(socket, sources: sources, keys: keys)
+    assign(socket, sources: sources, pool: pool, pool_by_id: pool_by_id, keys: keys)
   end
+
+  defp pool_summary(%{enabled: true} = pool) do
+    parts = ["MultiCodex pool enabled (overrides stock active)"]
+
+    parts =
+      case Map.get(pool, :allow_credits) do
+        true -> parts ++ ["credits enabled"]
+        false -> parts ++ ["credits disabled"]
+        _ -> parts
+      end
+
+    parts =
+      case Map.get(pool, :wait_when_exhausted) do
+        true -> parts ++ ["auto-wait on"]
+        false -> parts ++ ["auto-wait off"]
+        _ -> parts
+      end
+
+    Enum.join(parts, " · ")
+  end
+
+  defp pool_summary(_), do: nil
+
+  defp pool_eligibility_label(%{eligibility: eligibility}) when is_binary(eligibility) do
+    case eligibility do
+      "eligible" -> "pool: eligible"
+      "credits_only" -> "pool: credits only"
+      "credits_disabled" -> "pool: credits disabled"
+      "quota_exhausted" -> "pool: quota exhausted"
+      "workspace_blocked" -> "pool: workspace blocked"
+      "auth_cooldown" -> "pool: auth cooldown"
+      "checking" -> "pool: checking"
+      "unavailable" -> "pool: unavailable"
+      other -> "pool: " <> String.replace(other, "_", " ")
+    end
+  end
+
+  defp pool_eligibility_label(_), do: "pool: configured"
 
   defp error(:credential_unavailable), do: "Sign into that alias before selecting it."
   defp error(:login_busy), do: "A login or credential refresh is already running."
@@ -147,6 +205,9 @@ defmodule HWeb.AccountsLive do
           <section class="settings-card">
             <h2>Codex device accounts</h2>
             <p>These settings are shared by this daemon's terminal and web clients.</p>
+            <p :if={@pool && @pool[:enabled]} id="codex-pool-summary" class="muted">
+              {pool_summary(@pool)}
+            </p>
             <form id="add-account" phx-submit="add">
               <label class="field-label" for="account-alias">Account alias</label>
               <input
@@ -163,6 +224,9 @@ defmodule HWeb.AccountsLive do
             <ul>
               <li :for={source <- @sources} id={"account-#{source.id}"}>
                 {source.id} · {String.replace(source.state, "_", " ")}
+                <span :if={Map.has_key?(@pool_by_id, source.id)} class="badge mono">
+                  {pool_eligibility_label(@pool_by_id[source.id])}
+                </span>
                 <span :if={source.active}> · stock active</span>
                 <button class="btn btn-sm" phx-click="login" phx-value-source={source.id}>Sign in</button>
                 <button

@@ -36,8 +36,29 @@ defmodule H.Accounts do
     GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
   end
 
-  def discover(nil), do: {:ok, %{providers: []}}
-  def discover(server), do: call(server, :discover)
+  def discover(server, policy \\ nil)
+  def discover(nil, _policy), do: {:ok, %{providers: []}}
+
+  def discover(server, policy) do
+    case call(server, :discover) do
+      {:ok, %{providers: providers} = payload} when is_map(policy) ->
+        pool = build_pool_view(policy)
+
+        updated =
+          Enum.map(providers, fn
+            %{id: "openai_codex"} = provider when not is_nil(pool) ->
+              Map.put(provider, :pool, pool)
+
+            provider ->
+              provider
+          end)
+
+        {:ok, %{payload | providers: updated}}
+
+      other ->
+        other
+    end
+  end
 
   @doc "Returns whether managed credentials are configured without refreshing anything."
   def configured?(server) when is_pid(server), do: call(server, :configured) != false
@@ -728,6 +749,65 @@ defmodule H.Accounts do
 
     :ok
   end
+
+  defp build_pool_view(%{module: mod, sources: pool_sources})
+       when is_atom(mod) and is_list(pool_sources) do
+    fallback = %{
+      enabled: true,
+      sources: Enum.map(pool_sources, &%{id: to_string(&1)})
+    }
+
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :pool_status, 1) do
+      case safe_pool_status(mod, pool_sources) do
+        %{
+          allow_credits: allow_credits,
+          wait_when_exhausted: wait_when_exhausted,
+          sources: sources
+        }
+        when is_boolean(allow_credits) and is_boolean(wait_when_exhausted) and is_list(sources) ->
+          %{
+            enabled: true,
+            allow_credits: allow_credits,
+            wait_when_exhausted: wait_when_exhausted,
+            sources: Enum.map(sources, &sanitize_pool_source/1)
+          }
+
+        _ ->
+          fallback
+      end
+    else
+      fallback
+    end
+  end
+
+  defp build_pool_view(_), do: nil
+
+  defp safe_pool_status(mod, pool_sources) do
+    mod.pool_status(pool_sources)
+  rescue
+    _ -> :unavailable
+  catch
+    _, _ -> :unavailable
+  end
+
+  defp sanitize_pool_source(%{id: id} = source) do
+    eligibility =
+      case Map.get(source, :eligibility) do
+        val when is_atom(val) and not is_nil(val) -> Atom.to_string(val)
+        val when is_binary(val) -> val
+        _ -> "unavailable"
+      end
+
+    reset_at_ms =
+      case Map.get(source, :reset_at_ms) do
+        ts when is_integer(ts) -> ts
+        _ -> nil
+      end
+
+    %{id: to_string(id), eligibility: eligibility, reset_at_ms: reset_at_ms}
+  end
+
+  defp sanitize_pool_source(other), do: %{id: to_string(other)}
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

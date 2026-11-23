@@ -29,7 +29,8 @@ Nothing requires a Codex executable, Pi, or another SDK.
          "settings": {
            "sources": ["personal", "work"],
            "poll_ms": 60000,
-           "allow_credits": false
+           "allow_credits": false,
+           "wait_when_exhausted": true
          }
        }
      ]
@@ -37,21 +38,33 @@ Nothing requires a Codex executable, Pi, or another SDK.
    ```
 
    List two to eight distinct aliases that you're authorized to use together.
-   Set `poll_ms` between 30,000 and 600,000. The daemon can boot even if
+   Set `poll_ms` between 30,000 and 600,000. `wait_when_exhausted` defaults to
+   `true`: when signed-in pooled accounts are temporarily ineligible (for example,
+   included quota is exhausted while `allow_credits: false`, a workspace spend
+   limit is reached, an auth cooldown is active, or the initial usage check is
+   in progress), H parks the run in a `pool_wait` state and resumes automatically
+   as soon as a fresh usage poll observes an eligible account. Set
+   `"wait_when_exhausted": false` to fail immediately with the specific
+   `codex_pool_*` diagnostic instead. The daemon can boot even if
    `accounts.json` is missing. `bin/h-daemon -ne` disables the pool but keeps
    device login and stock account selection.
 3. Sign in with `/login openai_codex <alias>` for the matching aliases. The
    daemon creates missing aliases in [`accounts.json`](../../docs/providers.md#managed-device-login)
-   without a restart. Until the pool has an eligible account, Codex requests
-   fail without dispatch; other providers are unaffected.
+   without a restart. Until at least one pooled alias is signed in, Codex
+   requests fail without dispatch; other providers are unaffected.
 
 ## Policy
 
 The extension polls the first-party Codex usage endpoint serially in the
 background, using the [upstream usage schema](https://github.com/openai/codex/blob/ac784eb10e6d02486b00d383b64822b69473c0e8/codex-rs/codex-backend-openapi-models/src/models/rate_limit_status_payload.rs) as a compatibility reference. At inference time it only reads a cache: fresh quota headroom
 first (least used first, ties in config order), then explicit credit capacity
-if enabled. Unknown, expired, and workspace-blocked observations are not
-eligible. Startup and fresh sign-in may need a polling cycle before an alias
+if enabled. Unknown, expired, exhausted, and workspace-blocked observations are not
+eligible. When an observation becomes eligible, MultiCodex broadcasts
+`{:account_pool_available, :openai_codex}` on `H.PubSub` so waiting sessions
+wake immediately without polling in core. It also implements the optional
+`unavailable/2` and `pool_status/1` callbacks from cached memory so model lists,
+`/account`, web settings, and session errors report specific causes and reset
+times without extra provider I/O. Startup and fresh sign-in may need a polling cycle before an alias
 becomes eligible. Provider balances and permissions can change before dispatch;
 these observations aren't reservations or a guarantee of model access.
 `allow_credits: false` excludes known credit-only accounts, but cannot cap

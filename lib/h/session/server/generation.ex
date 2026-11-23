@@ -225,67 +225,16 @@ defmodule H.Session.Server.Generation do
 
   def stage_wake(tid, state) do
     case Map.get(state.tasks, tid) do
-      %{status: "sleeping", kind: "generation"} = gen_task ->
+      %{status: "sleeping", kind: kind} = task when kind in ["generation", "compaction"] ->
         now = System.system_time(:millisecond)
-        cid = gen_task.checkpoint["conversation_id"]
-        pending_task = %{gen_task | status: "pending", wake: nil, updated_at: now}
-
-        generation =
-          (state.docs[cid]["live"]["generation"] || %{})
-          |> Map.put("message", %{"thinking" => "", "text" => "", "tool_calls" => []})
-          |> mark_retry_running()
-
-        next_live = Map.put(state.docs[cid]["live"], "generation", generation)
-
-        state =
-          state
-          |> State.put_task(pending_task)
-          |> State.put_doc(cid, "live", next_live)
+        {writes, conv_events, effects, state} = wake_sleeping_task(task, state, now)
 
         staged = %{
           raw_item: {:wake_task, tid},
-          writes: [
-            {:put_task, pending_task},
-            {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
-          ],
-          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          writes: writes,
+          conv_events: conv_events,
           submissions: [],
-          effects: [{:spawn_generation, cid, tid}],
-          reply_from: nil,
-          receipt: nil
-        }
-
-        {:batch, staged, state}
-
-      %{status: "sleeping", kind: "compaction"} = comp_task ->
-        now = System.system_time(:millisecond)
-        cid = comp_task.checkpoint["conversation_id"]
-        pending_task = %{comp_task | status: "pending", wake: nil, updated_at: now}
-        live = state.docs[cid]["live"] || %{}
-
-        comp_live =
-          (Map.get(live, "compaction") || %{})
-          |> Map.put("task_id", to_string(comp_task.id))
-          |> Map.put("kept_from_id", comp_task.checkpoint["kept_from_id"])
-          |> Map.put("status", "pending")
-          |> mark_retry_running()
-
-        next_live = Map.put(live, "compaction", comp_live)
-
-        state =
-          state
-          |> State.put_task(pending_task)
-          |> State.put_doc(cid, "live", next_live)
-
-        staged = %{
-          raw_item: {:wake_task, tid},
-          writes: [
-            {:put_task, pending_task},
-            {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
-          ],
-          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
-          submissions: [],
-          effects: [{:spawn_compaction, cid, tid}],
+          effects: effects,
           reply_from: nil,
           receipt: nil
         }
@@ -294,6 +243,45 @@ defmodule H.Session.Server.Generation do
 
       _ ->
         {:skip, state}
+    end
+  end
+
+  def stage_pool_available(provider, state) do
+    provider_str = provider_string(provider)
+
+    waiting_tasks =
+      state.tasks
+      |> Map.values()
+      |> Enum.filter(fn t ->
+        t.status == "sleeping" and t.kind in ["generation", "compaction"] and
+          get_in(t.wake, ["reason"]) == "pool_wait" and
+          get_in(t.wake, ["provider"]) == provider_str
+      end)
+      |> Enum.sort_by(& &1.id)
+
+    if waiting_tasks == [] do
+      {:immediate, nil, nil, [{:maybe_unwatch_account_pool, provider}], state}
+    else
+      now = System.system_time(:millisecond)
+
+      {writes, conv_events, effects, state} =
+        Enum.reduce(waiting_tasks, {[], %{}, [], state}, fn task,
+                                                            {acc_w, acc_ev, acc_eff, acc_st} ->
+          {w, ev, eff, next_st} = wake_sleeping_task(task, acc_st, now)
+          {acc_w ++ w, Map.merge(acc_ev, ev), acc_eff ++ eff, next_st}
+        end)
+
+      staged = %{
+        raw_item: {:account_pool_available, provider},
+        writes: writes,
+        conv_events: conv_events,
+        submissions: [],
+        effects: effects ++ [{:maybe_unwatch_account_pool, provider}],
+        reply_from: nil,
+        receipt: nil
+      }
+
+      {:batch, staged, state}
     end
   end
 
@@ -314,7 +302,12 @@ defmodule H.Session.Server.Generation do
         sub_writes ++
         [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
 
-    {writes, state, State.worker_kill_effects(state, comp_task.id)}
+    effects =
+      State.worker_kill_effects(state, comp_task.id) ++
+        [{:cancel_wake_timer, comp_task.id}] ++
+        pool_unwatch_effect(comp_task)
+
+    {writes, state, effects}
   end
 
   def abort_generation_run(gen_task, cid, reason, state, now) do
@@ -353,7 +346,10 @@ defmodule H.Session.Server.Generation do
         [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
 
     effects =
-      State.worker_kill_effects(state, gen_task.id) ++ tool_kills ++ [{:release_lease, cid}]
+      State.worker_kill_effects(state, gen_task.id) ++
+        tool_kills ++
+        [{:release_lease, cid}, {:cancel_wake_timer, gen_task.id}] ++
+        pool_unwatch_effect(gen_task)
 
     {writes, state, effects}
   end
@@ -462,7 +458,148 @@ defmodule H.Session.Server.Generation do
     {writes, next_live, delay_ms, state}
   end
 
+  def schedule_pool_wait(task, cid, live, state, now, error) do
+    provider = to_string(Map.get(error, :pool_provider, "openai_codex"))
+    delay_ms = max(1_000, Map.get(error, :retry_after_ms, 60_000))
+    until_ms = now + delay_ms
+
+    retry =
+      %{
+        "kind" => "pool_wait",
+        "provider" => provider,
+        "delay_ms" => delay_ms,
+        "until" => until_ms,
+        "status" => "waiting",
+        "code" => to_string(Map.get(error, :code, "codex_accounts_unavailable")),
+        "message" =>
+          H.Credentials.sanitize(
+            to_string(Map.get(error, :message, "Waiting for eligible account"))
+          )
+      }
+      |> then(fn m ->
+        case Map.get(error, :wait_until_ms) do
+          ts when is_integer(ts) -> Map.put(m, "wait_until", ts)
+          _ -> m
+        end
+      end)
+
+    base_checkpoint = Map.delete(task.checkpoint || %{}, "attempt_id")
+
+    sleeping_task = %{
+      task
+      | status: "sleeping",
+        wake: %{"until" => until_ms, "reason" => "pool_wait", "provider" => provider},
+        checkpoint: Map.put(base_checkpoint, "retry", retry),
+        updated_at: now
+    }
+
+    next_live =
+      case task.kind do
+        "generation" ->
+          Map.put(live || %{}, "generation", %{
+            "message" => %{"thinking" => "", "text" => "", "tool_calls" => []},
+            "retry" => retry
+          })
+
+        "compaction" ->
+          comp_live =
+            (Map.get(live || %{}, "compaction") || %{})
+            |> Map.put("task_id", to_string(task.id))
+            |> Map.put("kept_from_id", task.checkpoint["kept_from_id"])
+            |> Map.put("status", "retrying")
+            |> Map.put("retry", retry)
+
+          Map.put(live || %{}, "compaction", comp_live)
+      end
+
+    state =
+      state
+      |> State.put_task(sleeping_task)
+      |> State.put_doc(cid, "live", next_live)
+
+    writes = [
+      {:put_task, sleeping_task},
+      {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+    ]
+
+    effects = [{:watch_account_pool, provider}, {:arm_wake_timer, task.id, delay_ms}]
+    {writes, next_live, effects, state}
+  end
+
   # Internal worker & stage helpers
+
+  defp wake_sleeping_task(%{kind: "generation", id: tid} = gen_task, state, now) do
+    cid = gen_task.checkpoint["conversation_id"]
+    pending_task = %{gen_task | status: "pending", wake: nil, updated_at: now}
+
+    generation =
+      (get_in(state.docs, [cid, "live", "generation"]) || %{})
+      |> Map.put("message", %{"thinking" => "", "text" => "", "tool_calls" => []})
+      |> mark_retry_running()
+
+    next_live = Map.put(state.docs[cid]["live"] || %{}, "generation", generation)
+
+    state =
+      state
+      |> State.put_task(pending_task)
+      |> State.put_doc(cid, "live", next_live)
+
+    writes = [
+      {:put_task, pending_task},
+      {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+    ]
+
+    conv_events = %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}}
+
+    effects =
+      [{:cancel_wake_timer, tid}] ++
+        pool_unwatch_effect(gen_task) ++ [{:spawn_generation, cid, tid}]
+
+    {writes, conv_events, effects, state}
+  end
+
+  defp wake_sleeping_task(%{kind: "compaction", id: tid} = comp_task, state, now) do
+    cid = comp_task.checkpoint["conversation_id"]
+    pending_task = %{comp_task | status: "pending", wake: nil, updated_at: now}
+    live = state.docs[cid]["live"] || %{}
+
+    comp_live =
+      (Map.get(live, "compaction") || %{})
+      |> Map.put("task_id", to_string(comp_task.id))
+      |> Map.put("kept_from_id", comp_task.checkpoint["kept_from_id"])
+      |> Map.put("status", "pending")
+      |> mark_retry_running()
+
+    next_live = Map.put(live, "compaction", comp_live)
+
+    state =
+      state
+      |> State.put_task(pending_task)
+      |> State.put_doc(cid, "live", next_live)
+
+    writes = [
+      {:put_task, pending_task},
+      {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+    ]
+
+    conv_events = %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}}
+
+    effects =
+      [{:cancel_wake_timer, tid}] ++
+        pool_unwatch_effect(comp_task) ++ [{:spawn_compaction, cid, tid}]
+
+    {writes, conv_events, effects, state}
+  end
+
+  defp pool_unwatch_effect(%{wake: %{"reason" => "pool_wait", "provider" => provider}}),
+    do: [{:maybe_unwatch_account_pool, provider}]
+
+  defp pool_unwatch_effect(_task), do: []
+
+  defp provider_string(:openai_codex), do: "openai_codex"
+  defp provider_string(provider) when is_binary(provider), do: provider
+  defp provider_string(provider) when is_atom(provider), do: Atom.to_string(provider)
+  defp provider_string(_), do: nil
 
   defp mark_retry_running(activity) do
     case activity["retry"] do
@@ -777,61 +914,79 @@ defmodule H.Session.Server.Generation do
     retryable = Map.get(err, :retryable, false) == true
     retry_count = (gen_task.checkpoint["retry_count"] || 0) + 1
 
-    if retryable and replay_inference?(gen_task) and retry_count <= state.retry_limit do
-      {writes, next_live, delay_ms, state} =
-        schedule_inference_retry(
-          gen_task,
-          cid,
-          state.docs[cid]["live"],
-          retry_count,
-          state,
-          now,
-          err
-        )
+    cond do
+      Map.get(err, :pool_wait) == true ->
+        {writes, next_live, effects, state} =
+          schedule_pool_wait(gen_task, cid, state.docs[cid]["live"], state, now, err)
 
-      staged = %{
-        raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:error, err}}},
-        writes: writes,
-        conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
-        submissions: [],
-        effects: [{:arm_wake_timer, gen_task.id, delay_ms}],
-        reply_from: nil,
-        receipt: nil
-      }
+        staged = %{
+          raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:error, err}}},
+          writes: writes,
+          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          submissions: [],
+          effects: effects,
+          reply_from: nil,
+          receipt: nil
+        }
 
-      {:batch, staged, state}
-    else
-      failure = inference_failure(err, gen_task, state)
+        {:batch, staged, state}
 
-      done_task =
-        Task.complete(gen_task, %{"status" => "unanswered", "reason" => "model_error"}, now)
+      retryable and replay_inference?(gen_task) and retry_count <= state.retry_limit ->
+        {writes, next_live, delay_ms, state} =
+          schedule_inference_retry(
+            gen_task,
+            cid,
+            state.docs[cid]["live"],
+            retry_count,
+            state,
+            now,
+            err
+          )
 
-      sub_ids = gen_task.checkpoint["submission_ids"] || []
-      {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, "model_error", state, now)
+        staged = %{
+          raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:error, err}}},
+          writes: writes,
+          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          submissions: [],
+          effects: [{:arm_wake_timer, gen_task.id, delay_ms}],
+          reply_from: nil,
+          receipt: nil
+        }
 
-      next_live = %{
-        "run_failure" => Map.put(failure, "reason", "model_error")
-      }
+        {:batch, staged, state}
 
-      state =
-        state
-        |> State.put_task(done_task)
-        |> State.put_doc(cid, "live", next_live)
+      true ->
+        failure = inference_failure(err, gen_task, state)
 
-      staged = %{
-        raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:error, err}}},
-        writes:
-          [{:put_task, done_task}] ++
-            sub_writes ++
-            [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}],
-        conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
-        submissions: [],
-        effects: [],
-        reply_from: nil,
-        receipt: nil
-      }
+        done_task =
+          Task.complete(gen_task, %{"status" => "unanswered", "reason" => "model_error"}, now)
 
-      {:batch, staged, state}
+        sub_ids = gen_task.checkpoint["submission_ids"] || []
+        {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, "model_error", state, now)
+
+        next_live = %{
+          "run_failure" => Map.put(failure, "reason", "model_error")
+        }
+
+        state =
+          state
+          |> State.put_task(done_task)
+          |> State.put_doc(cid, "live", next_live)
+
+        staged = %{
+          raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:error, err}}},
+          writes:
+            [{:put_task, done_task}] ++
+              sub_writes ++
+              [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}],
+          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          submissions: [],
+          effects: [],
+          reply_from: nil,
+          receipt: nil
+        }
+
+        {:batch, staged, state}
     end
   end
 
@@ -1000,55 +1155,73 @@ defmodule H.Session.Server.Generation do
     retry_count = (comp_task.checkpoint["retry_count"] || 0) + 1
     live = state.docs[cid]["live"] || %{}
 
-    if retryable and replay_inference?(comp_task) and retry_count <= state.retry_limit do
-      {writes, next_live, delay_ms, state} =
-        schedule_inference_retry(comp_task, cid, live, retry_count, state, now, err)
+    cond do
+      Map.get(err, :pool_wait) == true ->
+        {writes, next_live, effects, state} =
+          schedule_pool_wait(comp_task, cid, live, state, now, err)
 
-      staged = %{
-        raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},
-        writes: writes,
-        conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
-        submissions: [],
-        effects: [{:arm_wake_timer, comp_task.id, delay_ms}],
-        reply_from: nil,
-        receipt: nil
-      }
+        staged = %{
+          raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},
+          writes: writes,
+          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          submissions: [],
+          effects: effects,
+          reply_from: nil,
+          receipt: nil
+        }
 
-      {:batch, staged, state}
-    else
-      failure = inference_failure(err, comp_task, state)
-      code = failure["code"]
-      message = failure["message"]
+        {:batch, staged, state}
 
-      done_task =
-        Task.complete(comp_task, %{"status" => "unanswered", "reason" => code}, now)
+      retryable and replay_inference?(comp_task) and retry_count <= state.retry_limit ->
+        {writes, next_live, delay_ms, state} =
+          schedule_inference_retry(comp_task, cid, live, retry_count, state, now, err)
 
-      sub_ids = comp_task.checkpoint["submission_ids"] || []
-      {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, code, state, now)
+        staged = %{
+          raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},
+          writes: writes,
+          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          submissions: [],
+          effects: [{:arm_wake_timer, comp_task.id, delay_ms}],
+          reply_from: nil,
+          receipt: nil
+        }
 
-      next_live =
-        compaction_failure(live, comp_task, code, message)
-        |> update_in(["compaction_failure"], &Map.merge(&1, failure))
+        {:batch, staged, state}
 
-      state =
-        state
-        |> State.put_task(done_task)
-        |> State.put_doc(cid, "live", next_live)
+      true ->
+        failure = inference_failure(err, comp_task, state)
+        code = failure["code"]
+        message = failure["message"]
 
-      staged = %{
-        raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},
-        writes:
-          [{:put_task, done_task}] ++
-            sub_writes ++
-            [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}],
-        conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
-        submissions: [],
-        effects: [],
-        reply_from: nil,
-        receipt: nil
-      }
+        done_task =
+          Task.complete(comp_task, %{"status" => "unanswered", "reason" => code}, now)
 
-      {:batch, staged, state}
+        sub_ids = comp_task.checkpoint["submission_ids"] || []
+        {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, code, state, now)
+
+        next_live =
+          compaction_failure(live, comp_task, code, message)
+          |> update_in(["compaction_failure"], &Map.merge(&1, failure))
+
+        state =
+          state
+          |> State.put_task(done_task)
+          |> State.put_doc(cid, "live", next_live)
+
+        staged = %{
+          raw_item: {:worker_done, comp_task.id, :none, {:compaction_result, {:error, err}}},
+          writes:
+            [{:put_task, done_task}] ++
+              sub_writes ++
+              [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}],
+          conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", next_live]]}}},
+          submissions: [],
+          effects: [],
+          reply_from: nil,
+          receipt: nil
+        }
+
+        {:batch, staged, state}
     end
   end
 end

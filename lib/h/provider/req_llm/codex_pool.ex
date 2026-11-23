@@ -49,13 +49,13 @@ defmodule H.Provider.ReqLLM.CodexPool do
     result =
       if policy do
         deadline = System.monotonic_time(:millisecond) + 15_000
-        result = pooled_dispatch(config, policy, model.id, dispatch, deadline, nil)
 
-        if result == {:error, :credential_unavailable} and
-             H.Accounts.codex_status(config.accounts, policy.sources) == :alias_mismatch do
-          {:error, :codex_pool_alias_mismatch}
-        else
-          result
+        case pooled_dispatch(config, policy, model.id, dispatch, deadline, nil) do
+          {:error, reason} when reason in [:pool_empty, :credential_unavailable] ->
+            resolve_pool_unavailability(config, policy, model.id, reason)
+
+          other ->
+            other
         end
       else
         with {:ok, credential} <- H.Accounts.resolve_codex(config.accounts),
@@ -84,33 +84,40 @@ defmodule H.Provider.ReqLLM.CodexPool do
   defp managed_codex?(_, _), do: false
 
   defp pooled_dispatch(config, policy, model, dispatch, deadline, rejected) do
-    with {:ok, source, credential} <- policy_credential(config, policy, model, rejected, deadline) do
-      # Dispatch owns stream cleanup. Only a typed pre-output auth rejection
-      # permits an alternate, and the rejected identity cannot be reused.
-      case dispatch.(credential) do
-        {:error, :invalid_token} = error ->
-          notified = policy_callback(policy.module, :rejected, [model, source, :invalid_token])
+    case policy_credential(config, policy, model, rejected, deadline) do
+      {:ok, source, credential} ->
+        # Dispatch owns stream cleanup. Only a typed pre-output auth rejection
+        # permits an alternate, and the rejected identity cannot be reused.
+        case dispatch.(credential) do
+          {:error, :invalid_token} = error ->
+            notified = policy_callback(policy.module, :rejected, [model, source, :invalid_token])
 
-          if is_nil(rejected) and notified == :ok do
-            pooled_dispatch(
-              config,
-              policy,
-              model,
-              dispatch,
-              deadline,
-              {source, credential.account_id}
-            )
-          else
+            if is_nil(rejected) and notified == :ok do
+              pooled_dispatch(
+                config,
+                policy,
+                model,
+                dispatch,
+                deadline,
+                {source, credential.account_id}
+              )
+            else
+              error
+            end
+
+          {:error, :rate_limited} = error ->
+            policy_callback(policy.module, :rejected, [model, source, :rate_limited])
             error
-          end
 
-        {:error, :rate_limited} = error ->
-          policy_callback(policy.module, :rejected, [model, source, :rate_limited])
-          error
+          result ->
+            result
+        end
 
-        result ->
-          result
-      end
+      {:error, :credential_unavailable} when not is_nil(rejected) ->
+        {:error, :invalid_token}
+
+      error ->
+        error
     end
   end
 
@@ -119,6 +126,12 @@ defmodule H.Provider.ReqLLM.CodexPool do
     candidates = List.delete(policy.sources, excluded)
 
     case policy_callback(policy.module, :order, [model, candidates]) do
+      [] when is_nil(rejected) ->
+        {:error, :pool_empty}
+
+      [] ->
+        {:error, :credential_unavailable}
+
       ordered when is_list(ordered) and length(ordered) <= length(candidates) ->
         if ordered -- candidates == [] do
           Enum.reduce_while(ordered, {:error, :credential_unavailable}, fn source, unavailable ->
@@ -137,6 +150,126 @@ defmodule H.Provider.ReqLLM.CodexPool do
         {:error, :account_policy_unavailable}
     end
   end
+
+  defp resolve_pool_unavailability(config, policy, model_id, reason) do
+    case H.Accounts.codex_status(config.accounts, policy.sources) do
+      :alias_mismatch ->
+        {:error, :codex_pool_alias_mismatch}
+
+      :signed_in when reason == :pool_empty ->
+        if Code.ensure_loaded?(policy.module) and
+             function_exported?(policy.module, :unavailable, 2) do
+          case policy_callback(policy.module, :unavailable, [model_id, policy.sources]) do
+            %{reason: diag_reason} = diag
+            when diag_reason in [
+                   :credits_disabled,
+                   :quota_exhausted,
+                   :workspace_blocked,
+                   :auth_cooldown,
+                   :checking_usage
+                 ] ->
+              format_pool_diagnostic(diag)
+
+            _ ->
+              {:error, :credential_unavailable}
+          end
+        else
+          {:error, :credential_unavailable}
+        end
+
+      _ ->
+        {:error, :credential_unavailable}
+    end
+  end
+
+  defp format_pool_diagnostic(%{reason: reason} = diag) do
+    now_ms = System.system_time(:millisecond)
+    wait_until_ms = if is_integer(diag[:wait_until_ms]), do: diag[:wait_until_ms], else: nil
+    {code, message} = pool_diagnostic_text(reason, wait_until_ms, now_ms)
+
+    if diag[:wait] == true do
+      {:error,
+       %{
+         code: code,
+         message: message,
+         retryable: true,
+         pool_wait: true,
+         pool_provider: "openai_codex",
+         wait_until_ms: wait_until_ms,
+         retry_after_ms: pool_fallback_delay_ms(reason, wait_until_ms, now_ms)
+       }}
+    else
+      {:error, %{code: code, message: message, retryable: false}}
+    end
+  end
+
+  defp pool_diagnostic_text(:credits_disabled, wait_until_ms, now_ms) do
+    suffix = format_wait_suffix("resets in", wait_until_ms, now_ms)
+
+    {"codex_pool_credits_disabled",
+     "Included Codex quota is exhausted on all pooled accounts#{suffix}; workspace credits are available, but allow_credits is false in extensions.json."}
+  end
+
+  defp pool_diagnostic_text(:quota_exhausted, wait_until_ms, now_ms) do
+    suffix = format_wait_suffix("resets in", wait_until_ms, now_ms)
+    {"codex_pool_quota_exhausted", "Codex quota is exhausted on all pooled accounts#{suffix}."}
+  end
+
+  defp pool_diagnostic_text(:workspace_blocked, wait_until_ms, now_ms) do
+    suffix = format_wait_suffix("resets in", wait_until_ms, now_ms)
+
+    {"codex_pool_workspace_blocked",
+     "Codex workspace spend or usage limit is reached on all pooled accounts#{suffix}."}
+  end
+
+  defp pool_diagnostic_text(:auth_cooldown, wait_until_ms, now_ms) do
+    suffix = format_wait_suffix("ready in", wait_until_ms, now_ms)
+
+    {"codex_pool_auth_cooldown",
+     "Pooled Codex accounts are cooling down after an authentication rejection#{suffix}."}
+  end
+
+  defp pool_diagnostic_text(:checking_usage, _wait_until_ms, _now_ms) do
+    {"codex_pool_checking_usage",
+     "Checking Codex account pool usage; waiting for an eligible account."}
+  end
+
+  defp format_wait_suffix(verb, wait_until_ms, now_ms)
+       when is_integer(wait_until_ms) and wait_until_ms > now_ms do
+    " (#{verb} #{format_duration_ms(wait_until_ms - now_ms)})"
+  end
+
+  defp format_wait_suffix(_verb, _wait_until_ms, _now_ms), do: ""
+
+  defp format_duration_ms(ms) when ms > 0 do
+    total_seconds = max(1, ceil(ms / 1_000))
+    hours = div(total_seconds, 3_600)
+    minutes = div(rem(total_seconds, 3_600), 60)
+    seconds = rem(total_seconds, 60)
+
+    cond do
+      hours > 0 and minutes > 0 -> "#{hours}h #{minutes}m"
+      hours > 0 -> "#{hours}h"
+      minutes > 0 and seconds > 0 -> "#{minutes}m #{seconds}s"
+      minutes > 0 -> "#{minutes}m"
+      true -> "#{seconds}s"
+    end
+  end
+
+  defp pool_fallback_delay_ms(:checking_usage, _wait_until_ms, _now_ms), do: 5_000
+
+  defp pool_fallback_delay_ms(:auth_cooldown, wait_until_ms, now_ms) do
+    remaining = (wait_until_ms || now_ms + 15_000) - now_ms
+    clamp(remaining, 1_000, 125_000)
+  end
+
+  defp pool_fallback_delay_ms(reason, wait_until_ms, now_ms)
+       when reason in [:credits_disabled, :quota_exhausted, :workspace_blocked] do
+    remaining = (wait_until_ms || now_ms + 60_000) - now_ms
+    clamp(remaining, 5_000, 300_000)
+  end
+
+  defp clamp(val, min_val, max_val), do: val |> max(min_val) |> min(max_val)
 
   defp policy_callback(module, callback, args) do
     apply(module, callback, args)
@@ -195,6 +328,10 @@ defmodule H.Provider.ReqLLM.CodexPool do
   end
 
   defp managed_result({:cancelled, _}), do: {:cancelled, %{}}
+
+  defp managed_result({:error, %{code: code, message: message} = error})
+       when is_binary(code) and is_binary(message),
+       do: {:error, error}
 
   defp managed_result({:error, :credential_unavailable}),
     do: managed_codex_error(:codex_accounts_unavailable)

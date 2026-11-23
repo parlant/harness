@@ -199,20 +199,31 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
             action: Account::List,
         } => client.login_providers().map(|providers| {
             let mut found = false;
-            for source in providers
-                .into_iter()
-                .filter(|p| p.id == "openai_codex")
-                .flat_map(|p| p.sources.into_iter().take(8))
-            {
-                if source_id(&source.id) {
-                    found = true;
-                    let status = crate::render::sanitize_single_line(&source.state);
-                    println!(
-                        "{}\t{}{}",
-                        source.id,
-                        status,
-                        if source.active { " (stock active)" } else { "" }
-                    );
+            for provider in providers.into_iter().filter(|p| p.id == "openai_codex") {
+                let pool = provider.pool.as_ref().filter(|p| p.enabled);
+                for source in provider.sources.into_iter().take(8) {
+                    if source_id(&source.id) {
+                        found = true;
+                        let status = crate::render::sanitize_single_line(&source.state);
+                        let pool_tag = pool
+                            .and_then(|p| p.sources.iter().find(|ps| ps.id == source.id))
+                            .map(|ps| {
+                                let label = ps
+                                    .eligibility
+                                    .as_deref()
+                                    .map(|e| crate::render::sanitize_single_line(&e.replace('_', " ")))
+                                    .unwrap_or_else(|| "configured".to_string());
+                                format!(" [pool: {label}]")
+                            })
+                            .unwrap_or_default();
+                        println!(
+                            "{}\t{}{}{}",
+                            source.id,
+                            status,
+                            pool_tag,
+                            if source.active { " (stock active)" } else { "" }
+                        );
+                    }
                 }
             }
             if !found {

@@ -42,11 +42,24 @@ module implements
 |---|---|
 | `order/2` | Canonical model ID and candidate aliases. Return a subset in preference order, using only cached data. No tools, transcript, transport options or token passed here. |
 | `rejected/3` | Model, alias, and a sanitized `:invalid_token` or `:rate_limited` fact. May update eligibility. Cannot approve dispatch or reinterpret the failure. |
+| `unavailable/2` *(optional)* | Model ID and candidate aliases. Returns a cached diagnostic (`:credits_disabled`, `:quota_exhausted`, `:workspace_blocked`, `:checking_usage`, or `:auth_cooldown`), whether to auto-wait (`wait: boolean()`), and an optional Unix-millisecond `wait_until_ms`. Never performs provider I/O. |
+| `pool_status/1` *(optional)* | Configured aliases. Returns cached sanitized pool settings (`allow_credits`, `wait_when_exhausted`) and per-alias eligibility (`:eligible`, `:credits_only`, `:credits_disabled`, `:quota_exhausted`, `:workspace_blocked`, `:auth_cooldown`, `:checking`, `:unavailable`) with optional Unix-millisecond `reset_at_ms`. Never exposes credentials, account IDs, emails, or balances. |
 
-These callbacks run in the provider worker, after model resolution, never in a
+These callbacks run in the provider worker or read-only status/catalog views, never in a
 session commit. MultiCodex uses bounded calls to its own supervised cache. A
 missing, invalid, or failing required policy does not fall through to stock or
-ambient auth. This is a trusted in-VM extension, not a sandbox. There is no
+ambient auth. When `order/2` returns `[]` before any dispatch is attempted and
+`unavailable/2` returns `wait: true`, H returns a typed `pool_wait` diagnostic
+(`codex_pool_credits_disabled`, `codex_pool_quota_exhausted`,
+`codex_pool_workspace_blocked`, `codex_pool_auth_cooldown`, or
+`codex_pool_checking_usage`). The session coordinator parks the task as
+`sleeping` with `wake.reason == "pool_wait"`, subscribes to
+`{:account_pool, :openai_codex}` on `H.PubSub`, arms a bounded fallback timer,
+and wakes automatically when MultiCodex broadcasts
+`{:account_pool_available, :openai_codex}` or when the conversation switches
+models. Because zero external dispatches occurred, `pool_wait` never replays an
+in-flight request; a VM crash during an active dispatch still settles as
+`interrupted`. This is a trusted in-VM extension, not a sandbox. There is no
 broad effect hook, provider-registration API, or extension-driven retry loop.
 
 [`H.Provider.ReqLLM`](../../lib/h/provider/req_llm.ex) owns dispatch:

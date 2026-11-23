@@ -10,7 +10,11 @@ defmodule H.Extension do
   contribution for aliases already configured in `accounts.json`.
   """
 
-  @type context :: %{id: String.t(), data_dir: String.t()}
+  @type context :: %{
+          required(:id) => String.t(),
+          required(:data_dir) => String.t(),
+          optional(:pubsub) => atom()
+        }
   @type contributions :: %{
           optional(:harnesses) => [module()],
           optional(:environments) => [map()],

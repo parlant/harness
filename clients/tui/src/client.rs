@@ -73,6 +73,29 @@ pub struct LoginProvider {
     pub id: String,
     pub interaction: String,
     pub sources: Vec<LoginSource>,
+    #[serde(default)]
+    pub pool: Option<LoginPool>,
+}
+
+#[derive(Deserialize)]
+pub struct LoginPool {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allow_credits: Option<bool>,
+    #[serde(default)]
+    pub wait_when_exhausted: Option<bool>,
+    #[serde(default)]
+    pub sources: Vec<LoginPoolSource>,
+}
+
+#[derive(Deserialize)]
+pub struct LoginPoolSource {
+    pub id: String,
+    #[serde(default)]
+    pub eligibility: Option<String>,
+    #[serde(default)]
+    pub reset_at_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]

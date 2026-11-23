@@ -168,7 +168,12 @@ defmodule H.Extensions do
     Enum.reduce_while(packages, {:ok, base}, fn package,
                                                 {:ok, {harnesses, envs, children, policy}} ->
       {mod, _, _} = Map.fetch!(package.beams, package.root)
-      context = %{id: package.id, data_dir: Keyword.fetch!(opts, :data_dir)}
+
+      context = %{
+        id: package.id,
+        data_dir: Keyword.fetch!(opts, :data_dir),
+        pubsub: Keyword.get(opts, :pubsub, H.PubSub)
+      }
 
       with {:ok, package_harnesses, package_envs, specs, package_policy} <-
              validate_configure(mod, package.settings, context, opts),

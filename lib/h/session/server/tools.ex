@@ -388,7 +388,8 @@ defmodule H.Session.Server.Tools do
             "phase" => "stream",
             "submission_ids" => existing_sub_ids ++ steer_sub_ids
           })
-          |> Map.delete("tool_task_ids"),
+          |> Map.delete("tool_task_ids")
+          |> Map.delete("retry"),
         updated_at: now
     }
 

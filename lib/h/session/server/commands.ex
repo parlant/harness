@@ -626,6 +626,22 @@ defmodule H.Session.Server.Commands do
         {:put_doc, {:conversation, cid, "agent"}, Document.wrap("agent", next_agent)}
       ]
 
+      wake_effects =
+        if Map.has_key?(args, :model) and next_agent["model"] != prev_agent["model"] do
+          state.tasks
+          |> Map.values()
+          |> Enum.filter(fn t ->
+            t.owner == {:conversation, cid} and
+              t.status == "sleeping" and
+              t.kind in ["generation", "compaction"] and
+              get_in(t.wake, ["reason"]) == "pool_wait"
+          end)
+          |> Enum.sort_by(& &1.id)
+          |> Enum.map(&{:arm_wake_timer, &1.id, 0})
+        else
+          []
+        end
+
       staged = %{
         raw_item:
           {:command, from,
@@ -633,7 +649,7 @@ defmodule H.Session.Server.Commands do
         writes: writes,
         conv_events: %{cid => %{entries: [], doc_ops: %{"agent" => doc_ops}}},
         submissions: [sub],
-        effects: [],
+        effects: wake_effects,
         reply_from: from,
         receipt: Submission.to_receipt(sub, state.seq)
       }

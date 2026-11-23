@@ -113,7 +113,7 @@ defmodule H.HTTP.Router do
 
   get "/api/v1/provider-logins" do
     {_daemon, opts} = daemon_config(conn)
-    send_login(conn, H.Accounts.discover(opts[:accounts]))
+    send_login(conn, H.Accounts.discover(opts[:accounts], opts[:codex_account_policy]))
   end
 
   post "/api/v1/provider-logins/start" do

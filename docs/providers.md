@@ -174,8 +174,19 @@ H is stopped) looks like this:
 
 Without configured aliases or an enabled pool, the manual credential chain is
 unchanged. An enabled MultiCodex pool can boot before its accounts exist or
-are signed in. Until a pool alias is ready, only Codex inference is unavailable;
-there is no fallback to a different billing identity. If sign-in looks healthy
+are signed in. Until a pool alias is signed in, only Codex inference is unavailable;
+there is no fallback to a different billing identity. When signed-in pool
+aliases are temporarily ineligible (for example, included quota is exhausted
+while `allow_credits: false`, a workspace spend limit is reached, an auth
+cooldown is active, or initial usage probing is still running), `/account`,
+`hi account list`, `/model`, and web **Keys & accounts** surface the cached pool
+eligibility status. By default (`wait_when_exhausted: true`), runs enter a
+background `pool_wait` state and resume automatically once a pooled account
+becomes eligible (or immediately if you switch models with `/model`, or stop
+cleanly with `Esc`/Stop). With `wait_when_exhausted: false`, runs pause
+immediately with a specific diagnostic code (`codex_pool_credits_disabled`,
+`codex_pool_quota_exhausted`, `codex_pool_workspace_blocked`,
+`codex_pool_auth_cooldown`, or `codex_pool_checking_usage`). If sign-in looks healthy
 but Codex reports `codex_pool_alias_mismatch`, compare `hi account list` with
 MultiCodex's `settings.sources` in `extensions.json`. Use the exact alias
 names, then restart the daemon. To use the stock active account instead,

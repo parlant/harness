@@ -1,5 +1,5 @@
 use crate::cli::generate_request_id;
-use crate::client::{ClientError, DaemonClient};
+use crate::client::{ClientError, DaemonClient, LoginProvider};
 use crate::protocol::{
     CommandEnvelope, CommandReceipt, CreateSessionRequest, CreateSessionResponse,
     EntriesPageResponse, SessionParent, SessionSummary,
@@ -326,23 +326,7 @@ pub fn execute(
             let providers = client.login_providers().map_err(|_| {
                 "Provider login is unavailable on this daemon. See docs/providers.md.".to_string()
             })?;
-            let choices: Vec<_> = providers
-                .into_iter()
-                .filter(|p| p.id == "openai_codex" && p.interaction == "device_code_v1")
-                .flat_map(|p| p.sources.into_iter().take(8))
-                .filter(|s| super::login::source_id(&s.id))
-                .map(|s| {
-                    let state = match s.state.as_str() {
-                        "available" => "signed in",
-                        "refreshing" => "refreshing",
-                        "refresh_needed" => "refresh needed",
-                        "reauth_required" => "sign-in required",
-                        _ => "not signed in",
-                    };
-                    let active = if s.active { " · stock active" } else { "" };
-                    (s.id.clone(), format!("{}  [{state}{active}]", s.id))
-                })
-                .collect();
+            let choices = format_codex_login_choices(&providers);
             if choices.is_empty() && !choosing {
                 Ok(Reply::Menu(
                     "Codex sources".into(),
@@ -925,6 +909,60 @@ pub fn execute(
                 labels,
             }))
         }
+    }
+}
+
+fn format_codex_login_choices(providers: &[LoginProvider]) -> Vec<(String, String)> {
+    let mut choices = Vec::new();
+    for provider in providers
+        .iter()
+        .filter(|p| p.id == "openai_codex" && p.interaction == "device_code_v1")
+    {
+        let pool_enabled = provider.pool.as_ref().is_some_and(|pool| pool.enabled);
+        for s in provider
+            .sources
+            .iter()
+            .take(8)
+            .filter(|s| super::login::source_id(&s.id))
+        {
+            let state = match s.state.as_str() {
+                "available" => "signed in",
+                "refreshing" => "refreshing",
+                "refresh_needed" => "refresh needed",
+                "reauth_required" => "sign-in required",
+                _ => "not signed in",
+            };
+            let mut tags = vec![state.to_string()];
+            if pool_enabled {
+                if let Some(pool_src) = provider
+                    .pool
+                    .as_ref()
+                    .and_then(|pool| pool.sources.iter().find(|ps| ps.id == s.id))
+                {
+                    tags.push(format_pool_eligibility(pool_src.eligibility.as_deref()));
+                }
+            }
+            if s.active {
+                tags.push("stock active".to_string());
+            }
+            choices.push((s.id.clone(), format!("{}  [{}]", s.id, tags.join(" · "))));
+        }
+    }
+    choices
+}
+
+fn format_pool_eligibility(eligibility: Option<&str>) -> String {
+    match eligibility {
+        Some("eligible") => "pool: eligible".to_string(),
+        Some("credits_only") => "pool: credits only".to_string(),
+        Some("credits_disabled") => "pool: credits disabled".to_string(),
+        Some("quota_exhausted") => "pool: quota exhausted".to_string(),
+        Some("workspace_blocked") => "pool: workspace blocked".to_string(),
+        Some("auth_cooldown") => "pool: auth cooldown".to_string(),
+        Some("checking") => "pool: checking".to_string(),
+        Some("unavailable") => "pool: unavailable".to_string(),
+        Some(other) => format!("pool: {}", sanitize_single_line(&other.replace('_', " "))),
+        None => "pool: configured".to_string(),
     }
 }
 
@@ -2558,5 +2596,50 @@ mod tests {
 
         handle.join().unwrap();
         let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn codex_login_choices_include_pool_eligibility_labels_when_pool_is_enabled() {
+        let providers: Vec<LoginProvider> = serde_json::from_value(json!([
+            {
+                "id": "openai_codex",
+                "interaction": "device_code_v1",
+                "sources": [
+                    {"id": "personal", "state": "available", "active": true},
+                    {"id": "work", "state": "available", "active": false},
+                    {"id": "backup", "state": "not_signed_in", "active": false}
+                ],
+                "pool": {
+                    "enabled": true,
+                    "allow_credits": false,
+                    "wait_when_exhausted": true,
+                    "sources": [
+                        {"id": "personal", "eligibility": "credits_disabled", "reset_at_ms": 1_800_000_000_000i64},
+                        {"id": "work", "eligibility": "eligible", "reset_at_ms": null},
+                        {"id": "backup", "eligibility": "checking", "reset_at_ms": null}
+                    ]
+                }
+            }
+        ]))
+        .unwrap();
+
+        let choices = format_codex_login_choices(&providers);
+        assert_eq!(
+            choices,
+            vec![
+                (
+                    "personal".to_string(),
+                    "personal  [signed in · pool: credits disabled · stock active]".to_string()
+                ),
+                (
+                    "work".to_string(),
+                    "work  [signed in · pool: eligible]".to_string()
+                ),
+                (
+                    "backup".to_string(),
+                    "backup  [not signed in · pool: checking]".to_string()
+                ),
+            ]
+        );
     }
 }
