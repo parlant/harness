@@ -1531,11 +1531,22 @@ defmodule HWeb.SessionLive do
   end
 
   defp fetch_user_entry_text(session_id, cid, entry_id_str) do
-    case Backend.scan_entries(session_id, cid, %{"order" => "desc", "limit" => 200}) do
-      {:ok, %{items: items}} ->
-        case Enum.find(items, &(to_string(&1[:id] || &1["id"]) == entry_id_str)) do
-          nil -> nil
-          entry -> extract_entry_plain_text(entry[:data] || entry["data"])
+    case Integer.parse(entry_id_str) do
+      {target_id, ""} when target_id > 0 ->
+        case Backend.scan_entries(session_id, cid, %{
+               "order" => "desc",
+               "cursor" => Integer.to_string(target_id + 1),
+               "limit" => 1
+             }) do
+          {:ok, %{items: [entry | _]}} ->
+            if to_string(entry[:id] || entry["id"]) == entry_id_str do
+              extract_entry_plain_text(entry[:data] || entry["data"])
+            else
+              nil
+            end
+
+          _ ->
+            nil
         end
 
       _ ->

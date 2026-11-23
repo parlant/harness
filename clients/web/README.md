@@ -103,11 +103,20 @@ workbench supports two resizable regions, not arbitrary drag-to-dock tabs.
 
 ## Conversation display
 
-The session transcript shows user messages and assistant replies. Assistant
-replies render Markdown while streaming and after commit; fenced `console`
-and shell blocks use a scrollable terminal style and are never executed.
-User text stays plain, and attached screenshots display in the transcript.
-Markdown does not render raw HTML or load images from URLs.
+The session transcript shows user messages as right-aligned bubbles (up to 80%
+width) and assistant replies as full-width Markdown prose. Assistant replies
+render Markdown while streaming and after commit; fenced `console` and shell
+blocks use a scrollable terminal style and are never executed. User text stays
+plain, and attached screenshots display in the transcript. Markdown does not
+render raw HTML or load images from URLs. Each message card places status
+indicators (`Aborted`, `Failed`, or live `Streaming…`), raw Markdown / plain-text
+copy, and `Fork` below the card.
+
+In the composer, typing `/` opens slash-command completion with inline ghost
+hints (`Tab` or `→` at end accepts; `Enter` executes single-line slash commands),
+`@` completes workspace files, `/cwd <dir>` and directory inputs complete
+directories with `Tab` chaining, and `/tree` (or **Tree** in the session bar)
+browses the turn-step tree across all conversations and branches.
 
 Consecutive tool and system activity appears in one line between messages,
 including across **Load earlier** pages. A tool call and its result count once.
