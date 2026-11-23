@@ -282,6 +282,9 @@ def main() -> int:
             pref_usr = td_path / "pref-usr-local-bin"
             pref_opt = td_path / "pref-opt-local-bin"
             pref_brew = td_path / "pref-opt-homebrew-bin"
+            unwritable_usr = td_path / "missing-root/usr-local-bin"
+            unwritable_opt = td_path / "missing-root/opt-local-bin"
+            unwritable_brew = td_path / "missing-root/homebrew-bin"
             custom_bin = td_path / "custom-user-bin"
             shims_bin = td_path / "asdf/shims"
             cargo_bin = cascade_home / ".cargo/bin"
@@ -311,11 +314,20 @@ def main() -> int:
                 assert "Add " not in res.stdout
 
                 # 8b. Non-writable first preferred dir is skipped in favor of next writable preferred dir
-                os.chmod(pref_usr, 0o555)
+                #     (In root CI containers, chmod 0555 remains writable by UID 0, so use missing-root when uid==0.)
+                if os.geteuid() != 0:
+                    os.chmod(pref_usr, 0o555)
+                    pref_list_8b = pref_list
+                    first_unwritable = pref_usr
+                else:
+                    pref_list_8b = f"{unwritable_usr}:{pref_opt}:{pref_brew}"
+                    first_unwritable = unwritable_usr
+
                 p_8b = td_path / "prefix-cascade-8b"
                 env_8b = {
                     **env_8a,
-                    "PATH": f"{pref_usr}:{pref_opt}:{home_bin}:{sys_path}",
+                    "H_PREFERRED_BIN_DIRS": pref_list_8b,
+                    "PATH": f"{first_unwritable}:{pref_opt}:{home_bin}:{sys_path}",
                 }
                 res = run_install(script, env_8b, "--prefix", str(p_8b))
                 assert res.returncode == 0, f"cascade 8b failed: {res.stderr}"
@@ -324,11 +336,17 @@ def main() -> int:
 
                 # 8c. When preferred dirs are non-writable and shims/.cargo/bin are present,
                 #     other writable PATH dir wins over ~/.bin
-                os.chmod(pref_opt, 0o555)
-                os.chmod(pref_brew, 0o555)
+                if os.geteuid() != 0:
+                    os.chmod(pref_opt, 0o555)
+                    os.chmod(pref_brew, 0o555)
+                    pref_list_8c = pref_list
+                else:
+                    pref_list_8c = f"{unwritable_usr}:{unwritable_opt}:{unwritable_brew}"
+
                 p_8c = td_path / "prefix-cascade-8c"
                 env_8c = {
                     **env_8a,
+                    "H_PREFERRED_BIN_DIRS": pref_list_8c,
                     "PATH": f".:{shims_bin}:{cargo_bin}:{home_bin}:{custom_bin}:{sys_path}",
                 }
                 res = run_install(script, env_8c, "--prefix", str(p_8c))
@@ -340,7 +358,8 @@ def main() -> int:
                 p_8d = td_path / "prefix-cascade-8d"
                 env_8d = {
                     **env_8a,
-                    "PATH": f"{pref_usr}:{shims_bin}:{cargo_bin}:{sys_path}",
+                    "H_PREFERRED_BIN_DIRS": pref_list_8c,
+                    "PATH": f"{first_unwritable}:{shims_bin}:{cargo_bin}:{sys_path}",
                 }
                 res = run_install(script, env_8d, "--prefix", str(p_8d))
                 assert res.returncode == 0, f"cascade 8d failed: {res.stderr}"

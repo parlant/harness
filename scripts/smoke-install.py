@@ -210,24 +210,26 @@ def smoke(bundle):
                 preferred=(str(pref_a), str(pref_b)),
             ) == pref_a
             os.chmod(pref_a, 0o555)
+            unwritable_a = str(home / "missing-root/pref-a") if os.access(pref_a, os.W_OK) else str(pref_a)
             assert module.select_bin_dir(
                 None,
                 home=home,
-                path_env=f"{pref_a}:{pref_b}:{home}/.bin:/usr/bin:/bin",
-                preferred=(str(pref_a), str(pref_b)),
+                path_env=f"{unwritable_a}:{pref_b}:{home}/.bin:/usr/bin:/bin",
+                preferred=(unwritable_a, str(pref_b)),
             ) == pref_b
             os.chmod(pref_b, 0o555)
+            unwritable_b = str(home / "missing-root/pref-b") if os.access(pref_b, os.W_OK) else str(pref_b)
             assert module.select_bin_dir(
                 None,
                 home=home,
-                path_env=f"{pref_a}:{home}/.bin:{custom_path_bin}:/usr/bin:/bin",
-                preferred=(str(pref_a), str(pref_b)),
+                path_env=f"{unwritable_a}:{home}/.bin:{custom_path_bin}:/usr/bin:/bin",
+                preferred=(unwritable_a, unwritable_b),
             ) == custom_path_bin
             assert module.select_bin_dir(
                 None,
                 home=home,
                 path_env="/usr/bin:/bin",
-                preferred=(str(pref_a), str(pref_b)),
+                preferred=(unwritable_a, unwritable_b),
             ) == (home / ".bin")
         finally:
             os.chmod(pref_a, 0o755)

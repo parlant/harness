@@ -312,25 +312,40 @@ defmodule HSetup.SetupTaskTest do
                preferred: preferred
              )
 
-    # 3. Non-writable first preferred dir is skipped in favor of next writable preferred dir
+    # 3. Non-writable first preferred dir is skipped in favor of next writable preferred dir.
+    #    (In root CI containers, chmod 0555 remains writable by UID 0, so also support missing/unwritable paths.)
     File.chmod!(pref1, 0o555)
+
+    unwritable_pref1 =
+      if File.stat!(pref1).access in [:read_write, :write],
+        do: Path.join(tmp_dir, "missing/usr_local_bin"),
+        else: pref1
+
+    unwritable_pref2 = Path.join(tmp_dir, "missing/opt_local_bin")
+    unwritable_pref3 = Path.join(tmp_dir, "missing/opt_homebrew_bin")
 
     assert pref2 ==
              Installer.select_bin_dir(
                home: home,
-               path: "#{pref1}:#{pref2}:#{home_bin}",
-               preferred: preferred
+               path: "#{unwritable_pref1}:#{pref2}:#{home_bin}",
+               preferred: [unwritable_pref1, pref2, pref3]
              )
 
     # 4. ~/.local/bin on PATH (creatable under writable home) wins over arbitrary PATH dirs and ~/.bin
     File.chmod!(pref2, 0o555)
     File.chmod!(pref3, 0o555)
 
+    unwritable_preferred =
+      if File.stat!(pref2).access in [:read_write, :write],
+        do: [unwritable_pref1, unwritable_pref2, unwritable_pref3],
+        else: preferred
+
     assert local_bin ==
              Installer.select_bin_dir(
                home: home,
-               path: "#{pref1}:#{pref2}:#{custom_path_bin}:#{local_bin}:#{home_bin}",
-               preferred: preferred
+               path:
+                 "#{unwritable_pref1}:#{unwritable_pref2}:#{custom_path_bin}:#{local_bin}:#{home_bin}",
+               preferred: unwritable_preferred
              )
 
     # 5. Shims / .cargo/bin / relative dirs are skipped; other writable PATH dir beats ~/.bin
@@ -338,15 +353,15 @@ defmodule HSetup.SetupTaskTest do
              Installer.select_bin_dir(
                home: home,
                path: ".:#{shim_bin}:#{cargo_bin}:#{home_bin}:#{custom_path_bin}",
-               preferred: preferred
+               preferred: unwritable_preferred
              )
 
     # 6. ~/.bin is selected when it is the only writable non-excluded dir on PATH
     assert home_bin ==
              Installer.select_bin_dir(
                home: home,
-               path: "#{pref1}:#{shim_bin}:#{cargo_bin}:#{home_bin}",
-               preferred: preferred
+               path: "#{unwritable_pref1}:#{shim_bin}:#{cargo_bin}:#{home_bin}",
+               preferred: unwritable_preferred
              )
 
     # 7. When nothing writable is on PATH and no preferred/local_bin is writable, falls back to ~/.bin last
@@ -354,7 +369,7 @@ defmodule HSetup.SetupTaskTest do
              Installer.select_bin_dir(
                home: home,
                path: "/usr/bin:/bin",
-               preferred: preferred
+               preferred: unwritable_preferred
              )
   end
 
