@@ -14,7 +14,10 @@ defmodule HWeb.ComposerAttachmentTest do
   end
 
   test "previews a screenshot, then commits it once with the message on Send", ctx do
-    assert has_element?(ctx.view, ~s(#composer-form input[type="file"][aria-label="Attach file"]))
+    assert has_element?(
+             ctx.view,
+             ~s(#composer-form input[type="file"][multiple][aria-label="Attach files"])
+           )
 
     # MIME from the browser is only a hint; the stored MIME comes from the bytes.
     upload = attachment(ctx.view, "mobile.PNG", Base.decode64!(@png), "application/octet-stream")
@@ -66,7 +69,7 @@ defmodule HWeb.ComposerAttachmentTest do
 
     assert {:error, [[_ref, :too_large]]} = render_upload(large, "large.png")
     assert has_element?(ctx.view, ".attachment-error", "Choose an image up to 2 MiB")
-    ctx.view |> element(~s(button[aria-label="Remove attachment"])) |> render_click()
+    ctx.view |> element(~s(button[aria-label="Remove large.png"])) |> render_click()
 
     for {name, bytes, error} <- [
           {"image.png", "not a screenshot", "not a valid PNG, JPEG or WebP"},
@@ -81,11 +84,110 @@ defmodule HWeb.ComposerAttachmentTest do
              |> render_submit() =~ error
 
       assert has_element?(ctx.view, ".composer-attachment", name)
-      ctx.view |> element(~s(button[aria-label="Remove attachment"])) |> render_click()
+      ctx.view |> element(~s(button[aria-label="Remove #{name}"])) |> render_click()
     end
 
     assert Fake.requests(ctx.fake) == []
     assert {:ok, %{items: []}} = Backend.scan_entries(ctx.sid, 1)
+  end
+
+  test "attaches multiple screenshots and text files, removes one, and enforces count and total limits",
+       ctx do
+    png_bytes = Base.decode64!(@png)
+
+    first_batch =
+      attachments(ctx.view, [
+        {"mobile.png", png_bytes, "image/png"},
+        {"discard.txt", "drop me", "text/plain"},
+        {"notes.txt", "Header overlaps on iOS", "text/plain"}
+      ])
+
+    render_upload(first_batch, "mobile.png")
+    render_upload(first_batch, "discard.txt")
+    render_upload(first_batch, "notes.txt")
+
+    assert has_element?(ctx.view, ".composer-attachment", "mobile.png")
+    assert has_element?(ctx.view, ".composer-attachment", "discard.txt")
+    assert has_element?(ctx.view, ".composer-attachment", "notes.txt")
+
+    ctx.view |> element(~s(button[aria-label="Remove discard.txt"])) |> render_click()
+    refute has_element?(ctx.view, ".composer-attachment", "discard.txt")
+
+    second_batch = attachment(ctx.view, "desktop.png", png_bytes, "image/png")
+    render_upload(second_batch, "desktop.png")
+
+    gate = make_ref()
+
+    Fake.push_step(
+      ctx.fake,
+      {:gate, [], self(), gate, %{content: "Reviewed all", finish_reason: "stop"}}
+    )
+
+    ctx.view
+    |> form("#composer-form", %{content: "Compare mobile and desktop"})
+    |> render_submit()
+
+    assert_receive {:gate_entered, ^gate, worker}, 2_000
+
+    assert {:ok, %{items: [%{kind: "user", data: %{"content" => blocks}}]}} =
+             Backend.scan_entries(ctx.sid, 1)
+
+    assert blocks == [
+             %{"type" => "text", "text" => "Compare mobile and desktop"},
+             %{
+               "type" => "image",
+               "media_type" => "image/png",
+               "encoding" => "base64",
+               "data" => @png
+             },
+             %{
+               "type" => "text",
+               "text" => "Attached file \"notes.txt\":\nHeader overlaps on iOS"
+             },
+             %{
+               "type" => "image",
+               "media_type" => "image/png",
+               "encoding" => "base64",
+               "data" => @png
+             }
+           ]
+
+    refute has_element?(ctx.view, ".composer-attachment")
+    send(worker, {:release, gate})
+
+    # More than max_entries (6) is rejected before upload completes.
+    too_many =
+      attachments(
+        ctx.view,
+        for i <- 1..7 do
+          {"note-#{i}.txt", "note #{i}", "text/plain"}
+        end
+      )
+
+    assert {:error, [[_ref, :too_many_files]]} = preflight_upload(too_many)
+    assert has_element?(ctx.view, ".attachment-error", "Attach up to 6 files at a time.")
+
+    for i <- 1..7 do
+      ctx.view |> element(~s(button[aria-label="Remove note-#{i}.txt"])) |> render_click()
+    end
+
+    # Five 1.8 MiB PNGs stay under per-file 2 MiB but exceed the 8 MiB combined cap.
+    padded_png = png_bytes <> :binary.copy(<<0>>, 1_800_000)
+
+    over_total =
+      attachments(
+        ctx.view,
+        for i <- 1..5 do
+          {"shot-#{i}.png", padded_png, "image/png"}
+        end
+      )
+
+    for i <- 1..5 do
+      render_upload(over_total, "shot-#{i}.png")
+    end
+
+    assert ctx.view |> form("#composer-form", %{content: "Too heavy"}) |> render_submit() =~
+             "Total attachments must be 8 MiB or smaller."
   end
 
   test "sends a text file without a message", ctx do
@@ -143,8 +245,17 @@ defmodule HWeb.ComposerAttachmentTest do
   end
 
   defp attachment(view, name, content, type) do
-    file_input(view, "#composer-form", :attachment, [
-      %{name: name, content: content, type: type, size: byte_size(content)}
-    ])
+    attachments(view, [{name, content, type}])
+  end
+
+  defp attachments(view, files) do
+    file_input(
+      view,
+      "#composer-form",
+      :attachment,
+      Enum.map(files, fn {name, content, type} ->
+        %{name: name, content: content, type: type, size: byte_size(content)}
+      end)
+    )
   end
 end

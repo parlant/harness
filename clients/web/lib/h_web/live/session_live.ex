@@ -855,23 +855,28 @@ defmodule HWeb.SessionLive do
   defp composer_destination(%{session_id: sid, conversation_id: cid}), do: "#{sid}:#{cid}"
 
   defp composer_content(socket, text) do
-    case socket.assigns.uploads.attachment do
-      %{entries: [], errors: []} ->
+    upload = socket.assigns.uploads.attachment
+    active = Enum.reject(upload.entries, & &1.cancelled?)
+
+    cond do
+      active == [] and upload.errors == [] ->
         {:ok, text}
 
-      %{entries: [%{valid?: true, done?: true, cancelled?: false} = entry], errors: []} ->
-        # Keep the upload available if the daemon rejects the message (e.g. an
-        # idle steer). The upload process cleans up the temp file on removal.
-        with {:ok, block} <-
-               consume_uploaded_entry(socket, entry, fn meta ->
-                 {:postpone, ComposerAttachment.read(meta, entry)}
-               end) do
-          prefix = if text == "", do: [], else: [%{"type" => "text", "text" => text}]
-          {:ok, prefix ++ [block]}
-        end
+      upload.errors != [] or not Enum.all?(active, &(&1.valid? and &1.done?)) ->
+        {:error, "Finish uploading or remove invalid attachments before sending."}
 
-      _ ->
-        {:error, "Finish uploading or remove the attachment before sending."}
+      true ->
+        # Keep uploads available if the daemon rejects the message (e.g. an idle
+        # steer). Upload channels clean up their temp files on removal/reset.
+        uploaded =
+          Enum.map(active, fn entry ->
+            consume_uploaded_entry(socket, entry, fn meta -> {:postpone, {meta, entry}} end)
+          end)
+
+        with {:ok, blocks} <- ComposerAttachment.read_all(uploaded) do
+          prefix = if text == "", do: [], else: [%{"type" => "text", "text" => text}]
+          {:ok, prefix ++ blocks}
+        end
     end
   end
 
@@ -889,7 +894,10 @@ defmodule HWeb.SessionLive do
   end
 
   defp upload_error(:too_large), do: "Choose an image up to 2 MiB or a text file up to 64 KiB."
-  defp upload_error(:too_many_files), do: "Attach one file at a time."
+
+  defp upload_error(:too_many_files),
+    do: "Attach up to #{ComposerAttachment.max_entries()} files at a time."
+
   defp upload_error(_), do: "Upload failed. Remove the attachment and choose it again."
 
   defp send_submit(socket, args, request_id, opts) do

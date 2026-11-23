@@ -18,13 +18,15 @@ Restart for configuration, dependency, supervision
 or engine changes. The reloader and inspector are development tools: keep the
 server on loopback, not behind a public proxy. Neither is enabled in prod.
 
-## Attach a screenshot or file in chat
+## Attach screenshots or files in chat
 
-Open **Reply**, then choose **Attach file** (+) beside the model button.
-Choose one PNG, JPEG or WebP image (up to 2 MiB), or one UTF-8 text file
-(up to 64 KiB). Review the filename and screenshot preview, then add a note
-and press **Send**. **Remove** lets you discard the selection before sending.
-If your phone saves HEIC photos, use a screenshot or export to JPEG first.
+Open **Reply**, then choose **Attach files** (paperclip icon) beside the model button.
+Attach up to 6 files per message (up to 8 MiB total): PNG, JPEG or WebP images
+(up to 2 MiB each), or UTF-8 text files (up to 64 KiB each). You can pick
+multiple files at once or add more before sending. Review the filenames and
+screenshot previews, then add a note and press **Send**. **Remove** discards
+an individual file before sending. If your phone saves HEIC photos, use a
+screenshot or export to JPEG first.
 
 For UI feedback, include your device/browser, what you did and what you expected.
 Sending adds the attachment to conversation history and submits it to the agent;

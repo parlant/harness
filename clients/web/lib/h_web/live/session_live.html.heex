@@ -581,40 +581,45 @@
           >{@composer_text}</textarea>
 
           <div
-            :for={entry <- @uploads.attachment.entries}
-            :if={not entry.cancelled?}
-            id={"composer-attachment-#{entry.ref}"}
-            class="composer-attachment"
+            :if={Enum.any?(@uploads.attachment.entries, &(not &1.cancelled?))}
+            class="composer-attachments"
           >
-            <.live_img_preview
-              :if={entry.valid? && ComposerAttachment.image_name?(entry.client_name)}
-              entry={entry}
-              class="composer-attachment-preview"
-              alt="Selected image preview"
-            />
-            <span>{entry.client_name}</span>
-            <progress
-              :if={entry.preflighted? && !entry.done?}
-              max="100"
-              value={entry.progress}
-              aria-label="Uploading attachment"
-            />
-            <button
-              type="button"
-              class="btn btn-sm"
-              phx-click="remove_attachment"
-              phx-value-ref={entry.ref}
-              aria-label="Remove attachment"
+            <div
+              :for={entry <- @uploads.attachment.entries}
+              :if={not entry.cancelled?}
+              id={"composer-attachment-#{entry.ref}"}
+              class="composer-attachment"
             >
-              Remove
-            </button>
-            <p
-              :for={error <- upload_errors(@uploads.attachment, entry)}
-              role="alert"
-              class="attachment-error"
-            >
-              {upload_error(error)}
-            </p>
+              <.live_img_preview
+                :if={entry.valid? && ComposerAttachment.image_name?(entry.client_name)}
+                entry={entry}
+                class="composer-attachment-preview"
+                alt="Selected image preview"
+              />
+              <span>{entry.client_name}</span>
+              <progress
+                :if={entry.preflighted? && !entry.done?}
+                max="100"
+                value={entry.progress}
+                aria-label="Uploading attachment"
+              />
+              <button
+                type="button"
+                class="btn btn-sm"
+                phx-click="remove_attachment"
+                phx-value-ref={entry.ref}
+                aria-label={"Remove #{entry.client_name}"}
+              >
+                Remove
+              </button>
+              <p
+                :for={error <- upload_errors(@uploads.attachment, entry)}
+                role="alert"
+                class="attachment-error"
+              >
+                {upload_error(error)}
+              </p>
+            </div>
           </div>
           <p
             :for={error <- upload_errors(@uploads.attachment)}
@@ -626,12 +631,14 @@
           <p :if={@attachment_error} role="alert" class="attachment-error">{@attachment_error}</p>
 
           <div class="composer-actions">
-            <label class="btn composer-attach" title="Attach file">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            <label class="btn composer-attach" title="Attach files">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
               <.live_file_input
                 upload={@uploads.attachment}
                 class="composer-file-input"
-                aria-label="Attach file"
+                aria-label="Attach files"
               />
             </label>
             <button

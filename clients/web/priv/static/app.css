@@ -891,7 +891,9 @@ body {
 .composer-attach {
   position: relative;
   cursor: pointer;
-  padding-inline: 8px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   background: transparent;
 }
 
@@ -903,6 +905,14 @@ body {
   height: 100%;
   opacity: 0;
   cursor: pointer;
+}
+
+.composer-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: min(11rem, 28dvh);
+  overflow-y: auto;
 }
 
 .composer-attachment {
@@ -926,6 +936,7 @@ body {
   .bar-button { min-width: 44px; }
   .app-panel select.input { min-height: 44px; }
   .reply-toggle, .reply[open] .reply-toggle, .composer-actions .btn { min-height: 44px; }
+  .composer-actions .composer-attach { width: 44px; height: 44px; padding: 0; }
   .screen .input { font-size: 16px; }
 }
 @media (max-width: 450px) {
@@ -933,6 +944,7 @@ body {
   #hdr-archived-badge { max-width: 4rem; }
   .composer-actions { gap: 2px; }
   .composer-actions .btn { padding-inline: 8px; }
+  .composer-actions .composer-attach { padding: 0; }
 }
 @media (max-height: 430px) {
   .reply[open] .reply-toggle { min-height: 30px; }
