@@ -1,32 +1,32 @@
 ---
 layout: doc
 title: 'Import pi transcripts'
-description: 'Bring pi logs into the All sessions view as read-only archives and safely repeat a partial import.'
+description: 'Import existing pi session logs into H as browsable read-only archives and rerun the importer incrementally.'
 lang: en
 permalink: /docs/guides/import/
 ---
-Import copies conversation history, not accounts, tools or a running agent. Use a store whose owner may see the prompts, attachments and tool output. The import does not modify pi files.
+Run `hi import --harness pi` to copy your existing `pi` conversation transcripts into H as read-only archives while leaving the source files in `~/.pi` untouched. Because imported transcripts contain your past prompts, attachments, and tool outputs, import them only into a data directory owned by your account.
 
 * Contents
 {:toc}
 
 ## Choose the source and destination
 
-Install the [native bundle](/docs/setup/) with its `hi` and `hi-import` binaries on `PATH`. An install of the Rust terminal client alone does not supply `hi-import`. `hi` finds executable `hi-<name>` commands in absolute `PATH` entries after checking built-ins; keep those directories trusted. With the target daemon running, choose **one** form:
+Install the [signed release bundle](/docs/setup/) so both `hi` and `hi-import` are on your `PATH`. Start your target H daemon, then run one of the import commands below:
 
 ```sh
 hi import --harness pi
 hi import --harness pi --directory /absolute/path/to/exported/sessions
 ```
 
-The first scans `~/.pi/agent/sessions` recursively. The second selects a different source directory. Set `H_DATA_DIR` or pass `--data-dir` to choose a **destination daemon**, not a source. The importer uploads complete archives over the owner's Unix socket; don't copy log files directly into `sessions/`.
+The first command recursively scans `~/.pi/agent/sessions`. The second imports from a specific directory of exported `pi` session logs. Set `H_DATA_DIR` or pass `--data-dir` when you want to import into a specific daemon store. `hi-import` parses each log and uploads the structured archive over the daemon's authenticated Unix socket `<data_dir>/api.sock`.
 
 ## Find and inspect the result
 
-Open **All** in the web or terminal inbox, not the attention queue. You can read retained branches even if the original directory is gone. No tools or model requests run in an archive, and `hi -c` skips it. Embedded attachments travel with the transcript; paths to separate files aren't followed. Opaque provider handles and extension state aren't restored.
+Switch to the **All** view in `hi inbox` or `hiweb` to browse imported archives. You can open any imported session and switch across its retained conversation branches even if the original project checkout no longer exists on disk. Imported archives stay read-only (`hi -c` skips them so it always resumes an active native session), and any inline attachments embedded in the `pi` transcript remain visible inside the archive.
 
 ## Repeat after more turns
 
-Import again after pi finishes writing. H tracks pi's session identity rather than the filename and skips unchanged size/mtime pairs. A newer revision replaces that archived snapshot, not the H session ID; older revisions are ignored. Reopen the archive to see it. After a per-file error fix the file and retry. Deleting the source doesn't remove the H archive.
+Rerun `hi import --harness pi` whenever you finish new work in `pi`. H tracks each archive by its upstream `pi` session ID and skips files whose size and modification timestamp have not changed. When an upstream log has grown, H replaces the archived snapshot in place under the same H session ID. If a malformed log file fails to parse, fix or remove that file and rerun the command.
 
 [Archive format and revision rules](https://gitlab.com/parlant-co/harness/-/blob/main/docs/hi/import.md)

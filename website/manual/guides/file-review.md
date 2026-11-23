@@ -1,28 +1,32 @@
 ---
 layout: doc
 title: 'Review a change in the browser'
-description: 'Pin a comment to the text you read, review a deleted line, or edit a working file under a revision check.'
+description: 'Pin a review comment to a specific commit and line range, inspect deleted lines, or edit a working file with a revision check.'
 lang: en
 permalink: /docs/guides/file-review/
 ---
-Use **Review files** when you want a comment to name an exact path, revision and excerpt. Reading a diff or saving a note on its own doesn't send a request to a model.
+Open **Review files** in `hiweb` to pin a review comment to an exact file path, Git revision, and line range, or to edit a file in the working tree. Browsing diffs and saving comments updates the local session store immediately without calling a model provider.
 
 * Contents
 {:toc}
 
 ## Choose where the comment belongs
 
-From a session, choose **Review files** to keep comments in that conversation (including a fork). From a workspace, **Review files** opens a dedicated review session: H reuses its latest empty review session, not a session with an existing exchange. From the inbox, **Files** uses the row's session.
+- From an open session, click **Review files** to record your comments directly in that conversation branch.
+- From **Workspaces**, click **Review files** to open a dedicated review session for that directory (H reuses your latest empty review session if one already exists).
+- From **Inbox**, click **Files** on any session row to open file review inside that session.
 
 ## Comment on a line removed by a commit
 
-1. Choose **History**. Select a local commit or jump to its hash. **Changes** compares the selected commit with its first parent; no checkout, fetch or working-tree write occurs.
-2. Pick the changed file. In **Diff**, expand a folded section for more context. Use **Parent file** to select the deleted text, or **Commit file** for the replacement.
-3. Select the lines, choose **Use selected text**, and write the concern or question. **Save comment** records the verified excerpt and commit hash without inference. **Ask agent** sends input to the session and can start or queue a paid, tool-using turn. A saved note is history and may be in context later.
-4. Return to the session to see the comment. The selection highlight was local, not a persistent inline thread.
+1. Switch the review mode to **History** and select a local commit from the list (or enter its commit hash). **Changes** compares the selected commit against its first parent directly from the Git object store.
+2. Select a modified file from the tree. In **Diff**, expand any folded context lines as needed. Click **Parent file** to select lines that the commit removed, or **Commit file** to select lines from the resulting version.
+3. Highlight the target lines, click **Use selected text**, and type your comment. Click **Save comment** to commit the excerpt, file path, and commit hash to the conversation transcript as a note, or click **Ask agent** to submit the comment as a model prompt (which starts or queues an inference turn).
+4. Click back to the conversation view to see your pinned comment in the transcript.
 
 ## Make an edit without clobbering another writer
 
-Switch back to **Working tree**. Here **HEAD** and **Diff** compare with the last commit, **not the index**. Edit a text file and save before leaving the view. Save checks the source revision and acquires the workspace writer lease; it doesn't stage or commit. If another writer changed the file, preserve your proposed text separately, discard the stale draft to reload, and reconcile it with the new contents. Never assume that a displayed historical snapshot is the current file.
+Switch the review mode to **Working tree**, where **HEAD** and **Diff** compare working files against the latest Git commit. Open a text file, make your edit, and click **Save** before leaving the page. Saving verifies that the file on disk still matches the revision you loaded and acquires the workspace writer lease before writing.
 
-Review supports UTF-8 text up to 512 KiB; browsing skips symlinks and `.git`. This is a limit on the review UI, not a sandbox around coding tools. [Web file review reference](https://gitlab.com/parlant-co/harness/-/blob/main/clients/web/README.md)
+If another process or agent turn modified the file while you were editing, `hiweb` blocks the save so you do not overwrite the newer file. Copy your draft text, reload the current file from disk, and apply your change against the updated contents.
+
+The browser file review viewer reads UTF-8 text files up to 512 KiB and skips symlinks and `.git/`. See the [web client reference](https://gitlab.com/parlant-co/harness/-/blob/main/clients/web/README.md) for implementation details.

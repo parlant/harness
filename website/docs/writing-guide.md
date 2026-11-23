@@ -1,37 +1,92 @@
 # Writing about H
 
-Write for someone with a checkout open and a coding session they would rather not lose. The first sentence should tell them what H does. The next should give them something they can see or try. For example:
+Write for someone with a checkout open and a coding session they want to keep. Tell them what H does in the first sentence. Give them something to see or try in the second:
 
-> H is a local daemon for coding-agent sessions. Branch from an earlier answer to try another approach. The original conversation is still there when you come back.
+> H is a local daemon for coding-agent sessions. Start a review in your terminal, close the client, and follow the same run in your browser.
 
-## Editorial references
+## Writing rules from `www.lukasrieder.com`
 
-Two local references informed this guide. The Jekyll template (`~/Work/Parlant/Templates/jekyll-website`, `5c9866a`) supplies the content model, not the voice. Its `docs/brief.md` asks who is reading and what they should do next. Its `docs/content-model.md` puts a page's title, description and section choices next to its Markdown, not in the renderer.
+These rules synthesize the editorial instructions in `~/Work/Parlant/www.lukasrieder.com/AGENTS.md`, `docs/style-guide.md`, `docs/content-model.md`, `docs/writing-for-spoken-language.en.md`, `.agents/skills/show-and-tell/references/article-contract.md`, and the prose checks in `scripts/verify_site.rb`. Apply them to every page, caption, table cell, figure record, and metadata description on this site.
 
-The Lukas Rieder site (`~/Work/Parlant/www.lukasrieder.com`, working copy based on `bd284d7`) supplies an editorial example. On [Work](https://www.lukasrieder.com/work/), a short introduction explains why the projects are grouped together; each description names a tool and its use. The [KMS project history](https://www.lukasrieder.com/blog/how-an-elixir-umbrella-let-kms-become-its-own-project/) starts with a storage constraint and explains why key management got its own OTP application. Borrow that order: problem, decision, consequence. Don't borrow the author's anecdotes. His `AGENTS.md` calls for full sentences, sentence-case subject headings, straight quotes and no em dashes in published prose.
+### 1. Say what happens instead of listing what it is not
+
+AI-generated technical copy defaults to defensive contrasts: *"X does Y, not Z"*, *"This is A; it is not B"*, or *"Not just X, but Y"*. When every paragraph closes by denying a hypothetical misconception, the text sounds anxious and robotic.
+
+- State positively what the software does, who owns the state, and where the data goes.
+- Replace negative definitions with the actual mechanism:
+  - Instead of: *"The daemon API lives under `/api/v1`. These are not Phoenix login or LiveView routes."*
+  - Write: *"The daemon serves its JSON and SSE API under `/api/v1` on the local Unix socket and loopback HTTP listener."*
+  - Instead of: *"An illustrated terminal, not a screenshot."*
+  - Write: *"This diagram shows the `hi` transcript above the `/tree` conversation picker."*
+  - Instead of: *"A release, a data directory and a workspace have different lifetimes. Replacing the executable does not move the conversation, its credentials or its working files."*
+  - Write: *"Upgrading the H binary leaves your data directory, credentials, and project checkouts in place."*
+- Keep an explicit boundary statement only where an operator could trigger an irreversible side effect, lose work, or misunderstand a security boundary:
+  1. Host tools run with your OS user's file and shell permissions rather than inside a sandbox.
+  2. After an unexpected crash, H marks an interrupted `write`, `edit`, or `bash` call as interrupted rather than rerunning it automatically.
+  3. Disconnecting a client (`hi` or `hiweb`) leaves the daemon running; restarting the daemon recovers from committed disk state.
+  4. Forking a conversation shares earlier history entries in the session store while both branches continue to use the same working directory on disk.
+  5. The remote execution environment adapter is an in-VM prototype; off-machine transport is not shipped yet.
+  6. External tools can queue follow-up turns through the local API; parent-child wake signals are internal to subagents.
+- State each of those six boundaries once at the point where it affects a decision, in plain positive or causal terms, rather than repeating *"it is not a..."* across every page.
+
+### 2. Cut relativizations, hedging, and mannered transitions
+
+Remove throat-clearing qualifiers and self-important commentary:
+
+- Cut hedging adverbs and qualifiers that weaken a factual statement: *"not necessarily"*, *"usually"*, *"normally"*, *"simply"*, *"merely"*, *"just"*, *"really"*, *"genuinely"*, *"arguably"*, *"in practice"*. If a condition applies, name the condition (`"When running under LaunchAgent..."`).
+- Remove mannered bridge sentences that congratulate the design: *"This distinction matters"*, *"That caveat matters"*, *"The useful question has changed"*, *"A practical design"*, *"That restraint..."*, *"This is where X becomes practical"*.
+- Do not open every paragraph with *"Suppose..."* or *"If all you need is..."*. Address the reader directly and start with the action or component.
+
+### 3. Lead with imperative actions and direct calls to action
+
+Passive descriptions tell the reader that features exist; imperative writing tells the reader how to use them and where to go next.
+
+- Turn descriptive capability summaries into direct instructions:
+  - Instead of: *"A conversation can select only tools its profile installed."*
+  - Write: *"Select from the tools installed by the session's harness profile."*
+  - Instead of: *"Catalog queries and `GET /api/v1/sessions/events` do not activate unloaded sessions."*
+  - Write: *"Query the catalog or subscribe to `GET /api/v1/sessions/events` to inspect workspace summaries without loading dormant sessions into memory."*
+- Give every section and feature an explicit, verb-led call to action (`"Follow the local setup guide"`, `"Switch clients mid-run"`, `"Inspect the terminal walkthrough"`, `"Delegate a read-only review"`, `"Configure a model provider"`).
+- On `/features/`, replace bolded summary slogans with a concrete imperative action and link that lets the reader try or inspect the capability immediately.
+
+### 4. Apply the Unslop vocabulary, syntax, and punctuation rules
+
+- **Forbidden AI vocabulary**: Never use `additionally`, `crucial`, `delve`, `enduring`, `enhance`, `fostering`, `garner`, `interplay`, `intricate`, `landscape`, `leverage`, `pivotal`, `showcase`, `tapestry`, `testament`, `underscore`, `vibrant`, `substrate`, `wedge`, `vector`, `locus`, `nexus`, `primitive`, `scaffolding`, `paradigm`, `endgame`, `north star`, `flywheel`, `seamless`, or `seamlessly`.
+- **Plain verbs**: Prefer `is`, `has`, `use`, `run`, `read`, `write`, and `help` over `serves as`, `stands as`, `boasts`, `utilize`, `facilitate`, and nominalizations ending in `-tion`, `-ment`, `-ance`, or `-ity`.
+- **Active voice and named actors**: Name the component or person acting (`"H commits the task"`, `"Run hi -r"`, `"The coordinator checks the attempt"`). Use passive voice only when the actor is unknown or irrelevant.
+- **Short sentences and close brackets**: Keep one main idea per sentence. Put known context before new information (topic before comment). Keep subjects close to their verbs and break up long chains of pre-noun modifiers.
+- **Repeat clear names**: Use the exact name (`H`, `hi`, `hiweb`, `H.Session.Server`, `extensions.json`) instead of cycling through synonyms for stylistic variety.
+- **Punctuation and typography**:
+  - Use **straight quotes** (`"` and `'`) in source files and rendered copy; never use curly quotes (`“ ” ‘ ’`) or em dashes (`—`).
+  - Do not replace em dashes with en dashes or spaced hyphens. Split the sentence or use a comma or semicolon.
+  - Use colons only before genuine lists, commands, or examples, never mid-sentence as a rhetorical pause.
+  - Write complete sentences in prose and list items. Avoid telegraphic fragments and lists where a bolded label merely repeats the sentence that follows.
+  - Use sentence-case headings (`## Install a signed release`, `## Storage and recovery`). Avoid clever slogans, balanced rhetorical contrasts, and miniature lessons in headings.
 
 ## Pages and voice
 
 | Surface | How to write it |
 | --- | --- |
-| Home | Name the object once: “H, a local coding-agent daemon”. Show the branch before explaining the process that owns it. Use a specific link such as “See the terminal demo”, not “Discover the power of H”. |
-| Client demo | Guide the reader through one small, labeled example. Show where the paths diverge, which entry each client displays, and what stayed unchanged. Mark example output as an illustration. A static page does not run the daemon. Caption a diagram with what the reader should notice; its text alternative must explain the relationship without relying on colour or motion. |
-| Setup or recipe | Address the operator as “you”. Start with a task and prerequisites. Say where to run the command, what it changes and what success looks like. If an action can send data, spend provider credit or run a tool with host permissions, tell the reader **before** the action. Finish with a check, not a slogan. |
-| Reference | Use the literal command, field or component name as the heading. Put defaults, scope and failure behaviour beside the operation. Link to the recipe rather than repeating setup. |
-| Portfolio | Write in the first person when explaining a choice the code demonstrates. Show a consequence for someone using it. No invented client, launch story, benchmark, sponsor, free tier or testimonial. A project note is not a second installation manual. |
+| Home | Open with the concrete continuity moment: start in `hi`, quit the terminal, and watch the same run in `hiweb`. Pair each selling point with a direct action link. Close with local operating prerequisites and a single route to `/docs/setup/`. |
+| Features | Lead each section with what the reader can do, explain the concrete mechanism and operating boundary, and finish with an imperative link to the relevant walkthrough or manual chapter. |
+| Client demo | Guide the reader through one labeled parser example across `/demo/`, `/demo/hi/`, and `/demo/hiweb/`. State what the figure shows and invite the reader to open each disclosure scenario. |
+| Setup or recipe | Address the operator as "you". Start with the command or decision, state prerequisites and host-permission or billing consequences before any command that triggers them, and finish with an observable verification step. |
+| Reference | Use literal component, route, command, or file names in headings and tables. Put defaults, scope, and recovery behavior next to the operation and link to the task guide. |
+| Portfolio | Write in the first person ("I") when explaining an architectural choice and its consequence in `website/docs/portfolio/h.md`. Keep it grounded in verified code facts. |
 
-### Terms that change the meaning
+## Terms that keep technical claims accurate
 
-- **H** is the product. `h-daemon` is the standalone launcher. `hi` is the native terminal client. Phoenix LiveView supplies the web client. Opening a client and starting a server are different actions.
-- Use *branch* to introduce a second path in a conversation. In instructions use the exact control: the terminal's `/fork` edits from a prompt's predecessor; `/branch` branches after an entry. Never describe a fork as cloning a directory, copying active tool calls or undoing filesystem changes. See [terminal implementation notes](../../docs/hi/build.md).
-- Say *disconnect* or *detach* for leaving a client; reserve *interrupt* for stopping work. “You can close the terminal while the daemon runs” is narrower and more useful than “your work is never lost”.
-- Say where data and effects go. History is stored locally with the file backend. A model request can go to an external provider. Host tools run with the user's permissions. A writer lease coordinates writes; it isn't a security boundary. Don't promise a sandbox, offline inference or access from another machine.
-- For recovery, name the effect. “H reports an interrupted shell command instead of running it again” is testable. “H automatically resumes everything” is false. Keep retries distinct from items needing operator attention. Check the [architecture and recovery tests](../../docs/architecture.md#storage-and-recovery) before tightening any guarantee.
+- **H** is the daemon (`:harness`). `h-daemon` is the standalone launcher, `hi` is the Rust terminal client, and `hiweb` is the Phoenix LiveView web client.
+- Use *branch* or *fork* for starting a new conversation path from an earlier entry. In terminal instructions, name the exact command: `/branch` branches after a selected entry; `/fork` edits an earlier prompt from its predecessor.
+- Use *disconnect* or *detach* (`/quit`) for closing a client while the daemon continues running. Reserve *abort* (`/abort`) or *stop* (`/stop`) for cancelling active work.
+- Name where data and side effects happen: `H.Storage.File` writes session commits to `<data_dir>` (`~/.local/share/h` by default), model requests send context to the configured provider, and host tools execute in the workspace with the OS user's permissions.
 
-## Editing and placement
+## Separation and review checklist
 
-Give a page one reader, one question and one next action from the [discovery map](discovery.md). Put its distinguishing terms early in its title and description: “Branch a conversation in the terminal” is more findable than “Branching reimagined”. Use nouns that match the screen and verbs that describe the result. Keep command names in code, preserve their case, and don't use syntax-shaped placeholders in a purported transcript.
+Keep page prose in Markdown and front matter, shared figure and navigation records in `_data/`, interface labels in `_data/i18n/en.yml`, and HTML/Liquid in `_layouts/` and `_includes/`. Keep `website/docs/` excluded from the published build.
 
-Keep page prose in Markdown; section titles and CTA labels particular to the page can live in its front matter. Put repeated records in `_data/`, shared interface labels in `_data/i18n/`, and markup and styling in layouts and includes. Link translations only when their pages exist. Keep `website/docs/` for excluded editorial material, **not** the source of a published `/docs/` route. Private paths, proposed domains and pre-launch research don't belong in metadata, generated LLM indexes or public copy.
+Before finishing any copy pass:
 
-Before review, read the headings alone. Could a reader find setup, a session fork and the host-permissions warning? Read the lead aloud; replace adjectives such as “seamless” with what actually stays connected. Compare each command with the [current setup instructions](../../README.md) and provider claims with [provider setup](../../docs/providers.md). Use the [roadmap](../../docs/roadmap.md) to spot proposals, not as proof that a feature shipped. Check links, captions and next actions in the rendered page. Leave a claim out if its only source is the design brief.
+1. Scan all Markdown and YAML files for curly quotes, em dashes, forbidden AI vocabulary, and `"not a"` / `"neither"` / `"rather than"` defensive reflexes.
+2. Read the headings and link labels alone to confirm they name clear subjects and direct actions.
+3. Run `make verify` from `website/` and update the staging build for the LAN preview if it is running.

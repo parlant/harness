@@ -1,33 +1,52 @@
 ---
 layout: doc
 title: 'Sessions and workspaces'
-description: 'Branch a conversation, find an earlier run, and move work to a different directory without rewriting its history.'
+description: 'Branch a conversation, switch between paths, move work to another directory, and manage workspace writer leases.'
 lang: en
 permalink: /docs/sessions/
 ---
-A session has a workspace (an environment and starting directory) and one or more conversations. Each client can browse an older page or another branch while the daemon continues running work.
+Each H session binds to a workspace (an execution environment and starting directory) and holds a tree of conversations. Multiple clients can browse earlier turns or switch branches while the daemon runs active tasks.
 
 * Contents
 {:toc}
 
 ## Try an alternative without losing the original
 
-In `hi`, use `/branch` and choose the entry **after which** history should diverge. For instance, branch after a code review, then ask for a minimal fix on one branch and a redesign on the other. The new conversation sees the prefix through that entry and inherits agent settings from that point. It doesn't copy running tools, queued messages or usage counters. `/tree` switches between conversations. Editing a historical prompt with `/fork` instead starts from its **predecessor**, so the original prompt isn't in context twice. Editing the very first prompt offers a new session.
+In `hi`, run `/branch` and pick the entry **after which** you want history to diverge. For example, branch after a code review so you can ask for a minimal patch on one branch and a deeper refactor on the other. The new branch inherits the visible conversation prefix and agent settings from that entry, and starts with a clean task queue. Run `/tree` at any time to switch between branches. To edit and resubmit an earlier user prompt from its **predecessor** entry, run `/fork` instead (editing the first prompt in a session offers to create a new session).
 
-A branch is not a Git checkout. Both conversations still operate on the same files. If one already wrote a file, branching before the write will not undo it. For a fork walkthrough without starting a server, try the [illustrated terminal demo](/demo/hi/).
+Conversation branches live in the H session store while both branches continue to work against the same directory on disk. When you want a branch or subagent to edit an isolated copy of the files, create a separate Git worktree first. To explore a conversation fork in your browser, open the [illustrated terminal demo](/demo/hi/).
 
 ## Move a conversation to another directory
 
-Use `/cwd` to inspect the original binding. If a checkout was deleted, the transcript can still be read, but a new model/tool run cannot start there. Prepare an existing directory, then use `/cwd /absolute/path/to/project` to fork the visible history into a **new session** there. It does not move the old session or copy the old working tree.
+Run `/cwd` in `hi` to check the session's bound workspace path. If a checkout has moved or you want to continue the conversation in a new worktree, create the target directory on disk and run:
+
+```text
+/cwd /absolute/path/to/project
+```
+
+`/cwd <path>` forks the current visible conversation history into a **new session** bound to `/absolute/path/to/project`, leaving the original session and directory untouched.
 
 ## Keep the inbox useful
 
-`hi inbox` and the web inbox group summaries by workspace without waking every session. Running, waiting for retry, failed and idle are not the same state: a retry already has work scheduled. `needs_attention` is a separate triage flag; `/attention off` dismisses the flag, not the work. In the terminal inbox, `Tab` cycles attention rows, `Space` toggles attention, `Enter` opens a session and `a` switches between Inbox and All.
+Run `hi inbox` or open the web inbox to see workspace summaries without waking dormant sessions. The catalog distinguishes four runtime states:
 
-`/abort` interrupts the current conversation; `/stop` targets **all** work in the session. `/archive` unloads an idle session rather than deleting its history. `/archive force` also stops its work. Read an archive from All; a native session can resume, whereas an [imported archive](/docs/guides/import/) stays read-only.
+- `running`: a model turn or tool call is actively executing.
+- `retrying`: a retryable provider error occurred and H has already armed a backoff timer for the next attempt.
+- `failed`: a turn stopped on an error that requires your action.
+- `idle`: no generation is active.
 
-## When a writer is waiting
+H tracks `needs_attention` as a separate triage flag so you can clear items you have reviewed (`/attention off`) without stopping active work. In `hi inbox`, press `Tab` to jump between attention rows, `Space` to toggle the attention flag, `Enter` to open the selected session, and `a` to switch between **Inbox** and **All**.
 
-Mutating coding tools, including `bash`, take a lease for the **effective** workspace. Reads can proceed. Open `/workspace` to see the holder. Dismissing the picker leaves the run queued. **Cancel wait** cancels the waiting run, not the holder. **Stop holder and acquire** requests cancellation of the identified holder; it does not steal a lock from a live writer. Use [separate worktrees](/docs/guides/subagents/) when work really should run in parallel.
+Inside a session, run `/abort` to stop the active generation on the current branch, or `/stop` to stop work across **all** branches in the session. Run `/archive` to unload an idle session from the active inbox while keeping its history in **All** (`/archive force` stops active work first). You can resume any native archived session by sending a new prompt, whereas [imported pi archives](/docs/guides/import/) remain read-only for reference.
 
-[Session and workspace semantics](https://gitlab.com/parlant-co/harness/-/blob/main/docs/protocol.md)
+## Manage workspace writer leases
+
+Mutating coding tools (`write`, `edit`, and `bash`) acquire a workspace writer lease for their target directory while read-only tools proceed concurrently. When another session holds the lease for your directory, H queues your mutating tool call and shows the active holder. Run `/workspace` to inspect the lease and choose how to proceed:
+
+- Dismiss the dialog to leave your turn queued until the current holder finishes.
+- Choose **Cancel wait** to abort your waiting turn while letting the current holder continue.
+- Choose **Stop holder and acquire** to request cancellation of the holding turn and take the lease once it exits.
+
+When two sessions need to edit files in parallel, give each session its own [Git worktree](/docs/guides/subagents/#run-parallel-edits-in-separate-worktrees).
+
+[Session and workspace protocol specification](https://gitlab.com/parlant-co/harness/-/blob/main/docs/protocol.md)

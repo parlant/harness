@@ -1,12 +1,12 @@
 ---
 layout: doc
 title: 'Architecture'
-description: 'How a command becomes a committed transition, a supervised effect and a view in two independent clients.'
+description: 'How H turns a client command into a committed disk transition, a supervised effect, and synchronized client views.'
 lang: en
 permalink: /docs/architecture/
 figure: lifetimes
 ---
-When a terminal disconnects, a worker exits or someone opens a branch, different parts of H change. The core is the `:harness` Mix application; Phoenix and the Rust terminal client depend on its session model, not the other way around.
+The `:harness` OTP application owns session state, storage, and tool execution. Both `hiweb` (Phoenix LiveView) and `hi` (Rust TUI) attach as clients to `:harness`, keeping history ancestry, active task ownership, OTP supervision, and client navigation in separate structures.
 
 * Contents
 {:toc}
@@ -15,36 +15,36 @@ When a terminal disconnects, a worker exits or someone opens a branch, different
 
 | Question | Owner | Consequence |
 |---|---|---|
-| Which entries preceded this one? | Immutable session, conversation and entry records | Forks share the visible prefix through an entry, not live work. A spawned child instead has a fresh root conversation with a launch-step anchor. |
-| Who owns the work? | Task and submission records | A generation may own tool calls. Browsing another conversation does not transfer them. |
-| What happens when a process dies? | OTP instance and per-session supervisors | The coordinator and its task supervisor restart together; repeated failures can quarantine one session. This is not persistence. |
-| What am I looking at? | Client cursor and paged transcript | Branch choice, page, scroll and unsent drafts aren't shared daemon state. |
+| Which entries preceded this one? | Immutable session, conversation, and entry records | Branches share the committed prefix through the split entry. A spawned subagent starts a fresh root conversation linked to its parent's launch entry. |
+| Who owns the work? | Task and submission records | An active generation owns its tool calls. Switching branches in a client leaves running tasks attached to the conversation that launched them. |
+| What happens when a process dies? | OTP instance and per-session supervisors | The session coordinator and its task supervisor restart together, and repeated crashes quarantine that session while durability comes from committed disk records. |
+| What am I looking at? | Client cursor and paged transcript | Each client manages its own selected branch, page cursor, scroll position, and unsent draft locally. |
 
 ## Trace one turn
 
-1. `H.Daemon` validates the command. `H.Session.Server`, the single writer for that session, stages entries, documents, tasks and submissions. Request identity plus a fingerprint distinguishes a retry from a conflicting command.
-2. The store commits intent and policy **before** any provider or tool call. Workers execute outside the commit. The coordinator checks incarnation, task and attempt before accepting an outcome; a late message cannot settle a different attempt.
-3. `H.Context` projects visible entries and tools for the provider. This can synthesize an interrupted result for an incomplete tool pair on a fork without editing history. The provider resolves credentials at dispatch.
-4. The client sees committed updates and may see earlier ephemeral progress. Only the former advance its durable cursor. `hi` uses [HTTP and SSE](/docs/protocol/); Phoenix's backend calls the daemon in-VM.
+1. `H.Daemon` validates the incoming command. `H.Session.Server`, the single writer for that session, stages entries, documents, tasks, and submissions. Request identity and a payload fingerprint allow safe command retries while rejecting conflicting payloads under the same ID.
+2. The store commits intent and replay policy to disk **before** dispatching any provider request or tool call. Workers execute outside the commit transaction. When a worker finishes, the coordinator verifies the incarnation, task ID, and attempt number before committing the outcome.
+3. `H.Context` projects visible entries and installed tools for the model provider. When a branch splits across an incomplete tool call, `H.Context` synthesizes an interrupted result for the prompt context while keeping stored history immutable. The provider adapter resolves credentials at dispatch time.
+4. Attached clients receive committed updates and ephemeral progress frames. Clients advance their durable reconnect cursor only on committed frames. `hi` connects over the [local HTTP and SSE API](/docs/protocol/), while `hiweb` calls `H.Daemon` directly inside the same BEAM VM.
 
 ## Storage and recovery
 
-One instance holds the store lock. `H.Catalog` lists workspace summaries without waking every coordinator. `H.Storage.File` keeps per-session CRC32-framed commits and rename-based snapshots; it handles a torn final frame. The in-memory backend does not survive VM exit.
+Each running daemon holds an exclusive lock on its data directory. `H.Catalog` serves workspace summaries without waking dormant session coordinators. `H.Storage.File` writes per-session CRC32-framed commits and atomic rename-based snapshots, truncating any torn final frame on recovery.
 
-On startup, H reconciles stored checkpoints. Planned shutdowns (`hi daemon stop`, `restart`, `SIGTERM`) cooperatively drain open tool calls and provider responses to a turn boundary so active sessions resume seamlessly on next boot. After an unexpected crash, safe interrupted tools such as `read` can run again, while unsafe `write`, `edit` and `bash` get an interrupted outcome with any persisted partial output, **not another execution**. The filesystem may already have changed. Check the actual files before asking for another edit. A queued workspace wait is different: intent hasn't entered execution and can requeue for its recorded directory.
+On startup, H reconciles stored session checkpoints. Planned shutdowns (`hi daemon stop`, `restart`, or `SIGTERM`) cooperatively drain active tool calls and open provider streams to a turn boundary so active sessions resume cleanly on the next boot. After an unexpected crash, H reruns repeatable read-only tools such as `read`, and records an interrupted outcome (with any captured partial output) for side-effecting tools such as `write`, `edit`, and `bash`. Because an interrupted shell command or file write may already have modified the working tree, inspect the files before running your next turn. Queued workspace lease waits that had not started executing re-enter the queue for their target directory.
 
 ## Retries belong to the coordinator
 
-For retryable provider failures, `H.Session.Server.Generation` commits a sleeping task and its deadline **before** arming a timer. Transport retries are disabled in ReqLLM. While waiting, the catalog reports `retrying`: active work, not a demand for operator attention. Abort cancels the task; a late timer cannot restart it. Dispatch limits and no-resume policies still apply on managed and named provider routes.
+When a provider returns a retryable error, `H.Session.Server.Generation` commits a sleeping task record and its backoff deadline to disk **before** arming a timer, while transport-level retries remain disabled in ReqLLM (`max_retries: 0`). During backoff, the catalog reports the session as `retrying` so operators see that recovery is already scheduled. Sending `/abort` cancels the sleeping task immediately.
 
 ## Embed the core in an OTP application
 
-Add `:harness` as a Mix dependency and configure `:harness, :data_dir` to start its supervised daemon instance inside your application’s VM. Give that instance its own data directory: don’t start a standalone daemon against the same store. The embedded instance doesn’t need HTTP or a Unix socket for in-VM calls. See [the OTP entry point](https://gitlab.com/parlant-co/harness/-/blob/main/lib/h/application.ex) and [the Phoenix backend](https://gitlab.com/parlant-co/harness/-/blob/main/clients/web/lib/h_web/backend/in_vm.ex) for a working example.
+Add `:harness` as a Mix dependency and configure `:harness, :data_dir` to run a supervised daemon instance inside your own Elixir/OTP application's BEAM VM. Point the embedded instance at a dedicated data directory and call `H.Daemon` directly in-process without opening an HTTP port or Unix socket. Inspect [the OTP application entry point](https://gitlab.com/parlant-co/harness/-/blob/main/lib/h/application.ex) and [the Phoenix in-VM backend](https://gitlab.com/parlant-co/harness/-/blob/main/clients/web/lib/h_web/backend/in_vm.ex) for a working implementation.
 
-Start with the built-in file store and host environment. For application-specific policy, [author a harness profile](/docs/extensions/#author-a-harness-profile); for a different file or command execution boundary, use the [execution environment contract](/docs/extensions/#choose-a-contract). Choose a dedicated workspace and grant it only the permissions it needs: the default host environment does not isolate tools from the embedding application’s OS identity.
+Start with the built-in file store and host execution environment. To customize agent instructions and tools for your application, [author a harness profile](/docs/extensions/#author-a-harness-profile). To control how tools read files or execute commands, implement the [`H.ExecutionEnv` behaviour](/docs/extensions/#choose-a-contract). Assign the session a dedicated workspace directory, remembering that the default host environment executes with your BEAM process's OS user permissions.
 
 ## Boundaries that aren't sandboxes
 
-A workspace lease coordinates writers for an environment and canonical directory. The host execution environment still has the daemon user's filesystem and shell access. The remote execution adapter exercises fencing and lease expiry **inside the VM**; it is not an authenticated remote service. For the difference between delegation and a fork, see [subagents](/docs/guides/subagents/).
+A workspace writer lease serializes concurrent mutating tools from H against the same environment and canonical directory. Host tools execute with the daemon OS user's filesystem and shell permissions. The built-in remote execution adapter exercises lease fencing and expiry **inside the VM** as a prototype for future remote transport. To compare history branching with child session delegation, read [delegate to a subagent](/docs/guides/subagents/).
 
 [Architecture notes](https://gitlab.com/parlant-co/harness/-/blob/main/docs/architecture.md) · [VM restart tests](https://gitlab.com/parlant-co/harness/-/blob/main/test/h/vm_restart_test.exs) · [Tool crash recovery tests](https://gitlab.com/parlant-co/harness/-/blob/main/test/h/tool_crash_recovery_test.exs)

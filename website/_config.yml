@@ -9,6 +9,7 @@ lang: en
 markdown: kramdown
 kramdown:
   toc_levels: 2..3
+  smart_quotes: ["apos", "apos", "quot", "quot"]
 plugins:
   - jekyll-llms-txt
   - jekyll-seo-tag

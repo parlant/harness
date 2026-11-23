@@ -1,49 +1,54 @@
 ---
 layout: doc
 title: 'Providers and credentials'
-description: 'Choose a model, save a write-only API key, or sign into Codex without handing credentials to a session.'
+description: 'Save write-only API keys, sign in with Codex device login, or register an OpenAI-compatible model endpoint.'
 lang: en
 permalink: /docs/providers/
 ---
-Credentials belong to the daemon. The browser and `hi` share its catalog, but model selection belongs to a conversation. Adding a credential, selecting an alias and choosing a model are three separate operations.
+H stores provider credentials in `<data_dir>/credentials/` and shares the model catalog across `hi` and `hiweb`. Connect a provider in three steps: save a key or login alias, mark that alias active for the provider, and select a model in your conversation with `/model` or the web header.
 
 * Contents
 {:toc}
 
 ## API keys
 
-In `hi`, run `/key set openai work`. Paste the key only when the **separate masked prompt** opens. `/key list` shows aliases, not key values. The first saved alias becomes active; use `/key use openai work` to select it if another alias was already active. In web **Account settings**, the same actions are write-only. Use `/model` to select the provider's model, or `/continue` after fixing a missing key for a paused input.
+In `hi`, run `/key set openai work` and paste the secret when the **masked input prompt** opens. Run `/key list` to view saved aliases. The first saved alias for a provider becomes active automatically; run `/key use openai work` to switch when you have multiple aliases. You can perform the same write-only actions in `hiweb` under **Account settings**. After saving a key, run `/model` to select a model from that provider, or run `/continue` to resume a turn that paused on a missing key.
 
-This works for `openai`, `anthropic`, `google`, `deepseek` and `openrouter`, plus registered named providers. Stored stock keys take precedence over shell keys without needing a restart; a background LaunchAgent won't normally see your shell exports. Neither saving a key nor seeing a model in the catalog verifies access or billing.
+Built-in API-key support covers `openai`, `anthropic`, `google`, `deepseek`, and `openrouter`, as well as any custom endpoints you register in `openai-compatible.json`. Keys stored in the daemon vault take effect immediately and override environment variables from the daemon's launch shell.
 
 ## ChatGPT account via Codex
 
-With H running, enable device-code login for the ChatGPT account (or ask the workspace administrator), then run:
+With the daemon running, enable device-code login for your ChatGPT account (or ask your workspace administrator to enable it), then sign in from your terminal:
 
 ```sh
 hi login
 hi account list
 ```
 
-Follow the displayed verification instructions in your browser. First login creates the `default` alias. For a separate alias, run `hi login openai_codex work`, then `hi account use work` if you want stock H to select it for subsequent requests. `/login` also works in a session. Select an `openai_codex:` model explicitly. Codex does not use an `OPENAI_API_KEY`, OpenAI API credits or a Codex executable. Device login is a local opt-in integration, not a hosted identity service.
+Open the printed verification URL in your browser and enter the device code. Your first login creates the `default` alias. To add another account, run `hi login openai_codex work`, then run `hi account use work` to make it the active alias for subsequent turns. You can also start device login from inside an active session with `/login`. Select an `openai_codex:` model in `/model` to route turns through your ChatGPT subscription.
 
-`accounts.json` records aliases, not tokens. H alone manages its private credential files. After an interrupted refresh, sign in again rather than restoring an old refresh token. Stock H uses one active alias; [MultiCodex](/extensions/multicodex/) adds an optional account selection policy.
+H records alias metadata in `accounts.json` and stores tokens in `<data_dir>/credentials/` with mode `0600`. If a token refresh fails or expires, run `hi login` again for that alias. To balance turns across two to eight authorized Codex accounts automatically, enable the [MultiCodex extension](/extensions/multicodex/).
 
 ## Gemini: Developer API or Vertex AI?
 
 | Route | Configure on the daemon |
 |---|---|
-| `google:` | `/key set google work` or `GOOGLE_API_KEY` for the Gemini Developer API |
-| `google_vertex:` with a project | `GOOGLE_CLOUD_PROJECT` and optional `GOOGLE_CLOUD_LOCATION` (default `global`); provision application-default credentials for the daemon's user and make `gcloud` available |
-| `google_vertex:` Express Mode | `GOOGLE_VERTEX_API_KEY` or `GOOGLE_CLOUD_API_KEY`; no project or region required |
+| `google:` | Run `/key set google work` or export `GOOGLE_API_KEY` for the Gemini Developer API |
+| `google_vertex:` with a Google Cloud project | Export `GOOGLE_CLOUD_PROJECT` and optional `GOOGLE_CLOUD_LOCATION` (defaults to `global`), install `gcloud`, and configure Application Default Credentials for the daemon OS user |
+| `google_vertex:` Express Mode | Export `GOOGLE_VERTEX_API_KEY` or `GOOGLE_CLOUD_API_KEY` |
 
-For interactive ADC setup, `gcloud auth application-default login` is an operator action, not something H runs on your behalf. A Developer API key does not configure Vertex.
+When using Application Default Credentials with Vertex AI, run `gcloud auth application-default login` as the OS user that runs the H daemon before starting a `google_vertex:` turn.
 
 ## Register a compatible endpoint
 
-1. Open **Providers** in the web UI. Add a *new* provider ID, the service's HTTPS base URL (including `/v1` if needed), and its exact model IDs with limits and capabilities. H appends `/chat/completions`. Don't assign another service an ID that has keys saved.
-2. Save the catalog. This stages `<data_dir>/openai-compatible.json` for next boot; it doesn't probe the endpoint or change the running registry. Alternatively, adapt the [credential-free example](https://gitlab.com/parlant-co/harness/-/blob/main/examples/providers/openai-compatible.json), preserving existing entries. The file must not be group- or world-writable.
-3. From a built checkout preflight with `bin/h-daemon --data-dir "${H_DATA_DIR:-$HOME/.local/share/h}" --check-config`. Restart the intended server **when idle**.
-4. In `hi`, for provider ID `example-router`, use `/key set example-router default` and enter the secret in the masked prompt. Choose the exact `provider:model-id` in `/model`. Named routes use only the provider's active saved key; they do not try other providers or silently resume an interrupted dispatch.
+1. Open **Providers** in `hiweb`. Enter a new provider ID, the service's HTTPS base URL (including `/v1` when required), and the exact model IDs with their context limits and capabilities. H appends `/chat/completions` to the base URL when dispatching requests.
+2. Save the provider catalog to write `<data_dir>/openai-compatible.json` for the next daemon boot, or edit `<data_dir>/openai-compatible.json` directly from the [credential-free example](https://gitlab.com/parlant-co/harness/-/blob/main/examples/providers/openai-compatible.json) (keep permissions owner-only).
+3. Validate the updated catalog before restarting:
 
-For manual Codex access tokens and the owner-only `providers.json` format see the [full provider reference](https://gitlab.com/parlant-co/harness/-/blob/main/docs/providers.md).
+```sh
+hi daemon start --check-config
+```
+
+4. Restart the daemon when idle, then save an API key for the new provider ID in `hi` (for example, `/key set example-router default`) and choose `example-router:<model-id>` in `/model`.
+
+For manual Codex token files and the owner-only `providers.json` schema, read the [provider configuration reference](https://gitlab.com/parlant-co/harness/-/blob/main/docs/providers.md).

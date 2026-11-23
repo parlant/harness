@@ -1,29 +1,33 @@
 ---
 layout: doc
 title: 'Web client'
-description: 'Navigate the Phoenix inbox, open a workspace and attach evidence to a conversation.'
+description: 'Triage workspaces in the Phoenix inbox, stream live turns, review diffs, and attach files in the browser.'
 lang: en
 permalink: /docs/web/
 ---
-The web app calls H in the same VM. Its inbox, workspace browser and conversation views operate on the same store as `hi`; you do not export a chat to switch clients.
+The `hiweb` Phoenix workbench calls H directly inside the same BEAM VM and shares the session store with `hi`. Open any session in your browser to follow live replies, inspect diffs, or attach files without exporting or migrating your chat.
 
 * Contents
 {:toc}
 
 ## From inbox to conversation
 
-For a walkthrough without a running server, try the [illustrated web demo](/demo/hiweb/). On your own daemon, sign in using the owner token for this server's store. In **Workspaces**, browse to a directory and choose **Start New Session**. In **Inbox**, use the working-directory, tag or text filter to return to an existing session. A directory filter matches one environment and directory; tag matches are exact. The URL preserves filters as you move between a session and the inbox. Use **Show subsessions** to inspect delegated work beneath the root session.
+To preview the interface before installing H, open the [illustrated browser walkthrough](/demo/hiweb/). On your own machine, open `http://127.0.0.1:4200/inbox` and sign in with the owner token from `<data_dir>/auth.token`.
+
+- Open **Workspaces**, browse to a project directory, and click **Start New Session** to launch a conversation there.
+- Open **Inbox** and filter by working directory, exact tag, or search text to return to an active session. `hiweb` keeps your active filters in the URL as you move between the inbox and a session.
+- Toggle **Show subsessions** to expand delegated subagent runs beneath their parent session.
 
 ## Follow a live turn
 
-A session view keeps the composer in place while replies stream. Scroll back or use **Load earlier** to read without chasing new output. **Latest** returns to the live end. Groups of tool and system entries appear as activity between messages; a group is a display choice, not a deleted tool result. Browser pane widths and file selections are local to the view. Selecting a branch does not change what another client is looking at.
+The session view pins the composer at the bottom while assistant replies and tool calls stream in above it. Scroll up or click **Load earlier** to read older turns at your own pace, then click **Latest** to jump back to the live stream. Consecutive tool and system entries collapse into compact activity groups that you can expand on demand. Pane widths, selected files, and your active conversation branch stay local to your browser tab, so another client attached to the same session keeps its own reading position.
 
 ## Send a screenshot or text attachment
 
-Choose **Attach file** next to **Send**. Select a PNG, JPEG or WebP up to 2 MiB, or a UTF-8 file up to 64 KiB. Review the preview, remove private information and add a note. **Remove** discards an unsent selection. **Send** adds the blocks to the conversation and can start a model run. Use a model that accepts images. This does not write a file into the workspace; an unsent attachment is lost on reload or conversation switch.
+Click **Attach file** next to **Send** and select a PNG, JPEG, or WebP image up to 2 MiB, or a UTF-8 text file up to 64 KiB. Check the preview for sensitive data, add your prompt in the composer, or click **Remove** to clear the selection. Make sure your selected model supports image inputs when attaching screenshots. Clicking **Send** commits the attachment and prompt to the conversation transcript and starts the turn.
 
-## Work with files rather than paste a diff
+## Review files and pin comments to diffs
 
-Choose **Review files** for the workspace or current conversation. Browse a working file or pinned commit, then save a revision-anchored comment. [Review a change](/docs/guides/file-review/) walks through a deleted line, a working-tree edit and the difference between saving a note and starting a run. The development-only inspector is a separate feedback workflow; see the [web development reference](https://gitlab.com/parlant-co/harness/-/blob/main/clients/web/README.md).
+Click **Review files** from a workspace or conversation to open the file browser and diff viewer. Inspect the current working tree or select a local Git commit to pin a comment to an exact file path, revision, and line range. Follow [review a change in the browser](/docs/guides/file-review/) to comment on a deleted line, edit a working-tree file with a revision check, or save a review note before starting a model turn. For contributor details on the Phoenix app, read the [web client README](https://gitlab.com/parlant-co/harness/-/blob/main/clients/web/README.md).
 
-For a separate client process, follow [build a client](/docs/guides/build-a-client/); it uses the local JSON/SSE API rather than the in-VM backend.
+To build an external client process against the HTTP and SSE API, follow [build a client](/docs/guides/build-a-client/).

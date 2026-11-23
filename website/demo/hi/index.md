@@ -2,12 +2,12 @@
 layout: demo
 lang: en
 title: Read the fork in hi.
-description: Follow the date parser discussion from the terminal. A cursor chooses what to display; it does not own the run.
-kicker: Study 02  /  Terminal
+description: Follow the date parser discussion from the terminal and switch branches or detach while the daemon keeps running.
+kicker: Study 02 / Terminal
 specimen:
   client: terminal
   label: Terminal illustration · hi
-  strip: hi  /  release-parser
+  strip: hi / release-parser
   context: Conversation · Original
   prompt: /tree
   hint: Choose a conversation
@@ -15,25 +15,25 @@ specimen:
     - label: User
       text: Keep the caller unchanged. Treat blank input as a missing date.
     - label: Assistant
-      text: I’ll add a blank-input clause that returns nil and a test for the existing caller.
-  caption: An illustrated terminal, not a screenshot. The transcript fills the screen; the command line below it opens the conversation picker.
+      text: I'll add a blank-input clause that returns nil and a test for the existing caller.
+  caption: The hi transcript fills the terminal while /tree opens the conversation picker at the bottom.
 scenarios_title: Inspect a terminal action
 scenarios:
   - title: Read another path
     entries:
       - label: Selection
-        text: Choose the branch that explores an explicit error. The shared opening entries are still visible.
+        text: Select the branch that explores an explicit error tuple. The shared opening entries remain visible at the top of the thread.
       - label: Result
-        text: The next reply explains the cost to callers. The nil discussion is on the original path, not erased.
-    note: Navigation in this terminal does not switch another reader’s browser tab.
+        text: The transcript switches to the error-tuple reply while keeping the original nil discussion saved on its own branch.
+    note: Switching branches in hi updates only this terminal's cursor. Any browser window attached to the same session stays on its own view.
   - title: Leave during a run
     entries:
       - label: Action
         code: /quit
-        text: Detach the terminal while work is underway. This is different from interrupting the run.
+        text: Detach the terminal client while the turn continues in the background daemon.
       - label: Return
         code: hi -r
-        text: Pick the same session again. Read the entries committed while the terminal was closed.
-    note: The daemon must remain running. A terminal reconnect is not a daemon restart.
+        text: Reattach to the session from the same workspace and read the entries committed while the terminal was closed.
+    note: Use /quit to close the terminal view and /abort when you want to stop an active generation.
 ---
-These are annotated terminal actions, not a shell. Open a scenario to inspect its effect on the session.
+Open a scenario below to trace how `hi` switches branches, detaches, and reattaches to a running session.

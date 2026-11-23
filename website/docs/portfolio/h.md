@@ -1,13 +1,13 @@
 ---
 title: H
-description: A local daemon for coding-agent sessions. Branch at an earlier answer and follow the same conversation in a terminal or browser.
+description: A local daemon for coding-agent sessions. Start a turn in the terminal, branch from an earlier answer, and follow the same session in the browser.
 year: 2026
 status: active
 order: 1
 ---
 
-Suppose a coding agent suggests changing the parser. Before it starts editing files, I can go back to that answer and ask whether changing the input would be simpler. H keeps both conversations. The new path refers to the entries they have in common, so branching doesn't require a copy of the transcript. It doesn't make a copy of the working directory either.
+When a coding agent proposes a parser change, I often want to test an alternative before it touches the files. In H, I branch from that earlier answer and ask whether changing the caller input would be simpler. H keeps both paths in the same session. The new branch points to the shared prefix of committed entries while both branches work against the same project checkout on disk.
 
-I put session ownership in an Elixir/OTP daemon rather than in the terminal client. That lets me start a turn in `hi`, open the session in the browser to review a file, and close the terminal without stopping the run. Selecting an earlier entry in one client doesn't move the other reader's place.
+I placed session ownership in a local Elixir/OTP daemon so the conversation lives independently of any open window. I start a turn in `hi`, open `hiweb` in the browser to inspect a diff, and quit the terminal while the run continues. Each client keeps its own scroll position and selected branch.
 
-There is a limit to what the daemon can recover. If it stops in the middle of a shell command, the command may already have changed a file. H records the interruption instead of running the command a second time. I can inspect the checkout before deciding what to do next.
+Recovery stops where external side effects become ambiguous. If the daemon crashes while a shell command is running, that command may already have modified the working tree. H records the interrupted tool call and any captured output on disk so I can inspect the checkout before deciding what to run next.

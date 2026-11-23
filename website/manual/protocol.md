@@ -1,18 +1,18 @@
 ---
 layout: doc
 title: 'Local HTTP and SSE API'
-description: 'Authenticate an owner client, submit idempotent commands and reconnect a paged conversation view.'
+description: 'Authenticate an owner client, submit idempotent commands, and stream conversation events over SSE.'
 lang: en
 permalink: /docs/protocol/
 ---
-The daemon API lives under `/api/v1`. These are not Phoenix login or LiveView routes. Use the catalog to discover sessions, the command endpoint to change one, and its conversation stream to watch results.
+The daemon serves its JSON and Server-Sent Events API under `/api/v1` on `<data_dir>/api.sock` and the loopback HTTP listener (`127.0.0.1:4100` by default). Query the catalog to list sessions, post commands to mutate a session, and subscribe to a conversation event stream to render live updates.
 
 * Contents
 {:toc}
 
 ## Read without creating a session
 
-Use `<data_dir>/api.sock` with a nonempty Host and the owner bearer token, even on Unix sockets. For example, with curl, in a private terminal with shell tracing **off**, feed the header over stdin rather than putting its value in curl's arguments:
+Send requests over `<data_dir>/api.sock` with a non-empty `Host` header and the owner bearer token from `<data_dir>/auth.token`. When testing with `curl`, turn shell tracing off and pass the header over standard input so the token stays out of process arguments:
 
 ```sh
 store="${H_DATA_DIR:-$HOME/.local/share/h}"
@@ -21,24 +21,24 @@ printf 'Authorization: Bearer %s\n' "$(cat "$store/auth.token")" |
     --header @- 'http://localhost/api/v1/sessions?include_subsessions=false'
 ```
 
-Catalog queries and `GET /api/v1/sessions/events` do not activate unloaded sessions. The latter sends a catalog snapshot, then `catalog` upserts/removals; it is not a transcript stream. For TCP use the listener's bound literal address and port in `Host` (default `127.0.0.1:4100`). Cookie-authenticated mutations require the exact listener Origin and JSON content type.
+Query `GET /api/v1/sessions` or subscribe to `GET /api/v1/sessions/events` to inspect workspace summaries without loading dormant sessions into memory. The `/api/v1/sessions/events` stream emits an initial catalog snapshot followed by `catalog` upsert and removal events. When connecting over TCP, set `Host` to the listener's bound literal address and port (`127.0.0.1:4100` by default). Cookie-authenticated POST requests must also include a matching `Origin` header and `Content-Type: application/json`.
 
 ## Submit once, even after a timeout
 
-Create with `POST /api/v1/sessions` and an absolute `cwd`. Supply a stable `session_id` if creation needs to be retried. Given a session, POST JSON with `Content-Type: application/json` to `/api/v1/sessions/:sid/commands`. This example writes a note **without inference**:
+Create a session with `POST /api/v1/sessions` and an absolute `cwd`, passing a client-generated `session_id` when you want creation retries to be idempotent. To submit work or record a note, POST a JSON command envelope to `/api/v1/sessions/:sid/commands`. This example appends a review note without starting model inference:
 
 ```json
 {"version":1,"request_id":"review-note-001","conversation_id":"1","command":"submit","args":{"type":"write","content":"Reviewed the parser change."}}
 ```
 
-For model input use `type: "input"` instead. A `200` receipt acknowledges the command, not a finished reply. If the response is lost, retry the **same** request ID and normalized payload. A different payload under that ID conflicts (`409`); inventing a new ID can submit twice. Query `GET /api/v1/sessions/:sid/submissions/:request_id` for the submission's durable outcome. A sequence-guarded configuration conflict is different: refresh the view and decide whether the edit still applies.
+Use `type: "input"` to start or steer a model turn. An HTTP `200` receipt confirms that the coordinator accepted the command. If your connection drops before you receive the receipt, retry the request with the **same** `request_id` and normalized payload. H returns the existing receipt for a matching retry and returns `409 Conflict` if the payload changed under the same `request_id`. Poll `GET /api/v1/sessions/:sid/submissions/:request_id` to inspect the submission's committed outcome. When a sequence-guarded configuration command returns a conflict, refresh your view state before reapplying the change.
 
 ## Resume a conversation stream
 
-Subscribe to `GET /api/v1/sessions/:sid/conversations/:cid/events`:
+Subscribe to `GET /api/v1/sessions/:sid/conversations/:cid/events` and handle three event types:
 
-- `snapshot`: replace the window and documents; set the cursor to `seq`. Page earlier history through the corresponding `entries` route.
-- `commit`: ignore a stale frame. Require `prev_seq` to match your cursor, apply appended entries and document operations, then advance to `seq`. Sequence numbers are **session-wide**; don't require them to be consecutive in one conversation.
-- `ephemeral`: apply progress only against a matching `base_seq`; do **not** advance the cursor. It may disappear after interruption.
+- `snapshot`: replace the current transcript window and document state, and set your durable reconnect cursor to `seq`. Fetch earlier pages through the `entries` endpoint.
+- `commit`: verify that `prev_seq` matches your current cursor, apply the appended entries and document operations, and advance your cursor to `seq`. Sequence numbers increment across the whole session, so commits on one branch can advance by more than one.
+- `ephemeral`: render streaming deltas and tool progress only when `base_seq` matches your committed cursor, and leave your committed cursor unchanged.
 
-Reconnect with `Last-Event-ID` set to the last committed cursor. Accept a replacement snapshot when ring replay is unavailable; on a mismatch request a fresh snapshot. Closing a subscription never means abort. Use the [route and command tables](https://gitlab.com/parlant-co/harness/-/blob/main/docs/protocol.md) for paging limits, busy policies, workspace waits, lifecycle codes and auth flows.
+To reconnect after a disconnect, send `Last-Event-ID` with your last committed `seq`. H replays missed commits from its ring buffer or sends a fresh `snapshot` when the cursor has aged out. Closing an SSE stream leaves active session work running. See the [protocol specification](https://gitlab.com/parlant-co/harness/-/blob/main/docs/protocol.md) for paging parameters, busy policies, workspace lease waits, and error codes.

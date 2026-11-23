@@ -1,18 +1,18 @@
 ---
 layout: doc
 title: 'MultiCodex'
-description: 'Build or enable the optional Codex account policy, configure aliases, and diagnose an empty or mismatched pool.'
+description: 'Build or enable the MultiCodex account-selection policy, configure your alias pool, and verify account eligibility.'
 lang: en
 permalink: /extensions/multicodex/
 ---
-MultiCodex ranks authorized Codex accounts using cached usage observations. It does not log users in, keep refresh grants, change a session's model, or dispatch inference. H owns those operations. For a single account use [stock device login](/docs/providers/#chatgpt-account-via-codex) instead.
+MultiCodex polls usage windows for two to eight authorized Codex accounts and ranks eligible candidates for H's Codex provider adapter. H continues to manage device sign-in, token refresh, conversation model selection, and request dispatch. When you use a single Codex account, sign in directly with [stock device login](/docs/providers/#chatgpt-account-via-codex).
 
 * Contents
 {:toc}
 
 ## Locate the artifact
 
-The native bundle includes a matching artifact in its `extensions/multicodex` directory. Point to that **artifact**, not the repository source directory with the same name. To build your own from the matching H checkout:
+Point `<data_dir>/extensions.json` at the compiled `extensions/multicodex` artifact included in the native release bundle, or build the artifact from a matching H source checkout:
 
 ```sh
 cd extensions/multicodex
@@ -22,11 +22,11 @@ mix test
 mix extension.build
 ```
 
-The default new output is `dist/multicodex` **under the extension project**, containing `extension.json` and `ebin/`. Use the same Elixir/OTP versions as the daemon. If building outside the H repository, set `H_SOURCE` to the matching H checkout.
+`mix extension.build` writes the artifact to `dist/multicodex` inside the extension directory, containing `extension.json` and compiled BEAM files under `ebin/`. Build with the same Elixir and Erlang/OTP versions that run your daemon. When building outside the H repository tree, set `H_SOURCE` to the matching H checkout path.
 
 ## Configure the pool
 
-Merge the entry into `<data_dir>/extensions.json`, substituting the absolute built path:
+Add the compiled artifact path and your alias list to `<data_dir>/extensions.json`:
 
 ```json
 {
@@ -44,16 +44,28 @@ Merge the entry into `<data_dir>/extensions.json`, substituting the absolute bui
 }
 ```
 
-List two to eight distinct aliases you are authorized to use together. `poll_ms` accepts 30000–600000 milliseconds; the default is 60000. No secrets belong here. Restart the daemon when idle, then sign in the configured aliases with `hi login openai_codex personal` and `hi login openai_codex work`. Check `hi account list` for the exact names. Missing aliases can be created at login without another restart. Select a Codex model for the conversation.
+List two to eight distinct aliases that you are authorized to use in `settings.sources`. Set `poll_ms` between `30000` and `600000` milliseconds (`60000` by default). Keep credentials out of `extensions.json`; H stores tokens in its private credential vault.
+
+Restart the daemon when idle, then authenticate each alias and verify the pool:
+
+```sh
+hi login openai_codex personal
+hi login openai_codex work
+hi account list
+```
+
+You can log in missing aliases after startup without restarting the daemon again. Choose an `openai_codex:` model in your conversation to use the pool.
 
 ## How selection and rejection work
 
-The supervised package polls usage serially in the background. When H asks for candidates, the package reads its cache: fresh quota headroom first, least used first, ties in configuration order. With `allow_credits: true` an explicit credit capacity can qualify after quota-backed accounts. Unknown, expired or workspace-blocked observations don't qualify. Observations are neither reservations nor a spending cap, even when credit-only candidates are excluded.
+MultiCodex polls usage for each configured alias serially in the background. When a turn requests a Codex model, MultiCodex ranks candidates from its cache: accounts with fresh quota headroom come first, ordered from lowest usage to highest, breaking ties by the order in `settings.sources`. When you set `allow_credits: true`, accounts with explicit credit capacity qualify after quota-backed accounts. Accounts with unknown, expired, or workspace-blocked observations are excluded.
 
-Only the adapter can authorize a second dispatch: at most one alternate on a structured HTTP `401 invalid_token` **before any inference output**, after closing the rejected stream and cooling down the source. A `429` invalidates cached observations, not permission to reroute the in-flight request. Timeout, EOF, cancellation and unknown failures do not switch accounts. The provider's first-party device and usage APIs may change; run this integration locally, not as a hosted sign-in or rate-limit workaround.
+If the first candidate returns a structured HTTP `401 invalid_token` before streaming any output, H's Codex adapter closes that stream, cools down the rejected alias, and tries at most one alternate candidate from the pool. An HTTP `429` marks the cached usage observation stale for the next poll, while timeouts, EOFs, and cancellations end the attempt immediately.
 
-## If sign-in works but no alias is eligible
+## Troubleshoot an empty or mismatched pool
 
-Wait for a polling cycle after startup or sign-in. The daemon may boot with no signed-in pool aliases; Codex inference fails without dispatch until an eligible account exists. Other providers aren't disabled. If H reports `codex_pool_alias_mismatch`, compare `hi account list` with `settings.sources`, correct the names and restart. `/account` only changes stock selection, not a loaded policy.
+Wait one polling cycle after daemon startup or after signing in a new alias. Until at least one configured alias reports eligible quota, H stops Codex turns before dispatch while other providers continue to run.
 
-To return to stock mode, disable the entry (`"enabled": false`) and restart; for diagnosis, `--no-extensions` bypasses **all** configured packages without deleting accounts. Consult the [package README](https://gitlab.com/parlant-co/harness/-/blob/main/extensions/multicodex/README.md), [selection code](https://gitlab.com/parlant-co/harness/-/blob/main/extensions/multicodex/lib/multicodex.ex) and [provider boundary](https://gitlab.com/parlant-co/harness/-/blob/main/docs/extensions/providers.md).
+If H reports `codex_pool_alias_mismatch`, compare the output of `hi account list` against `settings.sources`, update `extensions.json` so the names match, and restart the daemon. While MultiCodex is active, it replaces the single-alias `/account` selector.
+
+To return to single-account mode, set `"enabled": false` on the MultiCodex entry in `extensions.json` and restart the daemon, or start the foreground daemon with `--no-extensions` to bypass all extensions temporarily. For implementation details, read the [package README](https://gitlab.com/parlant-co/harness/-/blob/main/extensions/multicodex/README.md), [selection module](https://gitlab.com/parlant-co/harness/-/blob/main/extensions/multicodex/lib/multicodex.ex), and [provider policy contract](https://gitlab.com/parlant-co/harness/-/blob/main/docs/extensions/providers.md).

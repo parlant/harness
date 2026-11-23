@@ -1,32 +1,32 @@
 ---
 layout: doc
 title: 'Practical guides'
-description: 'Recipes for resuming work, reviewing diffs, importing transcripts and delegating to a child session.'
+description: 'Step-by-step guides for switching clients mid-run, reviewing diffs, delegating to subagents, importing pi archives, and extending H.'
 lang: en
 permalink: /docs/guides/
 ---
-The daily workflows below use an existing local daemon. If `hi daemon status` cannot find it, follow [setup](/docs/setup/) first. None of these workflows needs another server for the same store.
+Each guide below walks through a complete task against your local H daemon. Confirm your server is running with `hi daemon status`, or complete [Set up H](/docs/setup/) first.
 
 * Contents
 {:toc}
 
 ## Daily workflows
 
-- [Resume a turn in another client](/docs/guides/resume/): keep the session ID and the conversation ID, not the process ID.
-- [Review a change](/docs/guides/file-review/): leave a comment on a pinned commit or save an edit without overwriting a changed file.
-- [Delegate to a subagent](/docs/guides/subagents/): use a fresh child context for read-only review or an isolated worktree for parallel edits.
-- [Import a pi archive](/docs/guides/import/): inspect old branches in H without changing the source logs.
+- [Resume a turn in another client](/docs/guides/resume/): start a prompt in `hi`, follow the active stream in `hiweb`, and reattach from the terminal.
+- [Review a change in the browser](/docs/guides/file-review/): pin a comment to a specific commit and line range, or edit a working file with a revision check.
+- [Delegate to a subagent](/docs/guides/subagents/): spawn a focused child session for read-only review or parallel edits in a separate Git worktree.
+- [Import pi transcripts](/docs/guides/import/): bring existing `pi` session logs into H as browsable read-only archives.
 
 ## Configuration recipes
 
-- [Set up a provider](/docs/providers/): save an API key for a background service, sign in to Codex, or register a compatible endpoint.
-- [Adjust the terminal footer](/docs/terminal/#configure-the-terminal-footer): add a local reminder without changing the shared session.
-- [Install and upgrade on macOS](/docs/daemon/): activate a versioned release only after the current daemon is idle.
-- [Build a local extension](/docs/extensions/): start with a no-tools profile and a disposable store before installing trusted code in your own daemon.
+- [Set up a provider](/docs/providers/): save write-only API keys, sign in with Codex device login, or register an OpenAI-compatible endpoint.
+- [Configure the terminal footer](/docs/terminal/#configure-the-terminal-footer): append custom status lines and reload keybindings in `hi`.
+- [Install and upgrade the daemon](/docs/daemon/): register a per-user background service and drain active turns during upgrades.
+- [Build a local extension](/docs/extensions/): compile an API 1 startup package and verify it against a disposable data directory.
 
 ## Development recipes
 
-- [Build a client](/docs/guides/build-a-client/): start with a read-only transcript, then test a saved note and a lost receipt.
-- [Author a harness](/docs/extensions/#author-a-harness-profile): choose the starting instructions and available tools without replacing the session runtime.
-- [Hooking into core](/docs/extensions/#hooking-into-core): distinguish existing behaviour contracts from proposed observers.
-- [Extend the hi CLI](/docs/guides/extend-hi/): add a standalone subcommand without putting code inside H.
+- [Build a client](/docs/guides/build-a-client/): connect to `/api/v1`, stream conversation events over SSE, and verify idempotent command retries.
+- [Author a harness profile](/docs/extensions/#author-a-harness-profile): define custom agent instructions and tool sets for new sessions.
+- [Hooking into core](/docs/extensions/#hooking-into-core): choose between SSE streams, `H.ExecutionEnv`, and startup contracts.
+- [Extend the hi CLI](/docs/guides/extend-hi/): add a standalone `hi-<name>` subcommand on your `PATH`.

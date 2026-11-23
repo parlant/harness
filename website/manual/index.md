@@ -1,26 +1,26 @@
 ---
 layout: doc
 title: 'H manual'
-description: 'Run a local coding session, share it between clients, and understand what happens when a turn is interrupted.'
+description: 'Set up H locally, connect a model provider, switch between terminal and browser clients, and extend the daemon.'
 lang: en
 permalink: /docs/
 ---
-H keeps a coding conversation in a local daemon, not in a browser tab or terminal. Start a turn in `hi`, inspect the files in the web app, and come back to the same session after disconnecting.
+H runs your coding sessions in a local daemon and stores committed history on disk. Start a turn in `hi`, inspect the working tree in `hiweb`, and reconnect to the same session at any time.
 
 * Contents
 {:toc}
 
 ## Run your first session
 
-1. [Set up H](/docs/setup/) with one server and one data directory. A native bundle includes the web inbox, terminal client and Erlang runtime.
-2. [Connect a provider](/docs/providers/). A Codex device login and an OpenAI API key are different credentials. Choosing a credential does not select a model.
-3. Run `hi` in a project directory you trust. Use `/model` to choose a model and send a small question about the project. This can invoke a paid provider and tools with your user's access.
-4. Open the same session in the [web inbox](/docs/web/). Use `/quit` to leave the terminal without stopping work.
+1. [Set up H](/docs/setup/) with a single daemon instance for your data directory. The signed release bundle includes the Erlang runtime, the `hi` terminal client, and the `hiweb` browser workbench.
+2. [Connect a provider](/docs/providers/) by saving an API key or signing in with Codex device login.
+3. Open a project checkout you trust and run `hi`. Use `/model` to select a model for the conversation, then submit a prompt. Note that model turns send context to your selected provider and allow tools to run with your OS user's permissions.
+4. Open the same session in the [web client](/docs/web/) at `http://127.0.0.1:4200/inbox`. Run `/quit` in `hi` to close the terminal while the turn continues in the background.
 
 ## Work with a project
 
-Use the [configuration reference](/docs/configuration/) to find which file, command or UI owns a setting. The [session guide](/docs/sessions/) explains when to fork history, start a new workspace or stop a run. The [terminal reference](/docs/terminal/) covers steering, follow-ups and local settings. For step-by-step tasks, see the [recipe index](/docs/guides/).
+Check [configuration](/docs/configuration/) to see which command, file, or UI control manages each setting. Read [sessions and workspaces](/docs/sessions/) to branch a conversation, move work to another directory, or resolve a workspace writer wait. Use the [terminal client reference](/docs/terminal/) for steering, queued follow-ups, and status bar templates, or browse the [practical guides](/docs/guides/) for step-by-step workflows.
 
-## Operate or change H
+## Operate or extend H
 
-Read the [security boundaries](/docs/security/) before granting workspace or network access. [Daemon management](/docs/daemon/) covers upgrades, services and busy restarts. For client implementations, start with [build a client](/docs/guides/build-a-client/), the [architecture](/docs/architecture/) and [local API](/docs/protocol/). For optional code, browse the [extensions](/extensions/) or [contribute a change](/docs/contributing/).
+Review the [security boundaries](/docs/security/) before exposing a network listener or running tools in an unfamiliar directory. Follow [manage the daemon](/docs/daemon/) to register a user service, drain active work, and upgrade releases. When building on H, start with [architecture](/docs/architecture/), the [local HTTP and SSE API](/docs/protocol/), and [build a client](/docs/guides/build-a-client/). To add startup modules or contribute upstream, read [build a local extension](/docs/extensions/), browse the [extension directory](/extensions/), or follow [contribute a change](/docs/contributing/).

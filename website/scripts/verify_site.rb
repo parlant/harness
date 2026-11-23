@@ -47,5 +47,18 @@ files.each do |route, html|
 end
 errors << "Internal planning was published" if root.glob("**/{brief.md,discovery.md,writing-guide.md,Gemfile,package-lock.json}").any?
 errors << "Template text in machine context" if [llms, full].any? { |s| s.match?(/example\.com\/about|Site title|{%/) }
+
+slop_terms = %w[
+  additionally crucial delve enduring enhance fostering garner interplay intricate landscape
+  leverage pivotal showcase tapestry testament underscore vibrant substrate wedge vector
+  locus nexus primitive scaffolding paradigm endgame flywheel seamless seamlessly
+]
+files.each do |route, html|
+  text = html.gsub(/<script\b[^>]*>.*?<\/script>/m, "").gsub(/<style\b[^>]*>.*?<\/style>/m, "").gsub(/<[^>]+>/, " ")
+  errors << "#{route}: contains forbidden punctuation (em dash or curly quotes)" if text.match?(/[—“”‘’]/)
+  found_slop = slop_terms.select { |term| text.match?(/\b#{Regexp.escape(term)}\b/i) }
+  errors << "#{route}: retains AI slop vocabulary (#{found_slop.join(', ')})" unless found_slop.empty?
+end
+
 abort errors.uniq.join("\n") unless errors.empty?
 puts "Verified #{files.size} pages, internal links and fragments, sitemap and both LLM indexes."

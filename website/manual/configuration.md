@@ -1,33 +1,45 @@
 ---
 layout: doc
 title: 'Configuration'
-description: 'Find the owner and lifetime of each setting before editing a store, changing a model or restarting a service.'
+description: 'Find the command, file, or UI control that owns each setting and check when changes take effect.'
 lang: en
 permalink: /docs/configuration/
 ---
-First identify the daemon you are configuring. A project checkout is the working directory for tools; it isn't where H looks for provider credentials or startup packages. `H_DATA_DIR` selects the store, defaulting to `~/.local/share/h`.
+Configure H through its data directory (`H_DATA_DIR`, which defaults to `~/.local/share/h`). Your project checkout serves as the working directory for coding tools, while provider credentials, listener settings, and startup extensions live in `<data_dir>`.
 
 * Contents
 {:toc}
 
 ## Settings by owner
 
-All paths below are relative to the selected data directory. Omit optional files when you don't need the feature.
+All file paths below resolve relative to your selected `<data_dir>`. Create optional JSON files only when you want to override the defaults.
 
 | Setting | Where to change it | When it takes effect |
 |---|---|---|
-| Current conversation model and thinking | `/model` and `/thinking`, or the web session controls | Configure the conversation; changing a key does not select a model |
-| Stock API-key alias or managed Codex login | `/key set`, `/key use`, `/login`, `/account` or web **Account settings** | Daemon-managed, for subsequent requests; don't edit live vault files |
-| Manual provider settings and new-session default model | Private `providers.json` (regular file, mode `0600`) | Read on demand; an existing conversation retains its model |
-| Named Chat Completions routes and model catalog | Web **Providers** or `openai-compatible.json` | Next daemon boot; keep credentials out of this file |
-| Trusted local package paths | `extensions.json` | Next daemon boot; client-side `/reload` does not load code |
-| Standalone listener addresses | `network.json`; launcher environment for `H_WEB_PORT` or `H_WEB` | Next standalone boot |
-| Terminal appearance and shortcuts | `hi.json` and `hi-keybindings.json` | `/reload` in `hi`; no shared session mutation |
+| Current conversation model and thinking level | `/model` and `/thinking` in `hi`, or the web session controls | Immediately for that conversation |
+| API-key alias or Codex login | `/key set`, `/key use`, `/login`, `/account` in `hi`, or web **Account settings** | Immediately for subsequent requests through the daemon credential vault |
+| Manual provider defaults and new-session default model | Private `providers.json` (regular file, mode `0600`) | Read on demand for new sessions while existing conversations keep their selected model |
+| Custom Chat Completions endpoints and model catalog | Web **Providers** page or `openai-compatible.json` | Next daemon boot (save API keys separately via `/key set`) |
+| Trusted local startup packages | `extensions.json` | Next daemon boot |
+| Standalone listener addresses and web port | `network.json`, `H_WEB_PORT`, or `H_WEB` | Next standalone daemon boot |
+| Terminal status bar and keybindings | `hi.json` and `hi-keybindings.json` | Immediately when you run `/reload` in `hi` |
 
 ## Project instructions and tools
 
-The `coding` harness collects `AGENTS.md` instructions from the workspace and its ancestors through the execution environment at session bootstrap unless instructions were explicitly overridden. Use this for review conventions, not for secrets or for installing code. A conversation can select only tools its profile installed; selecting none is different from promising in a prompt not to use them. A one-call directory override does not change the session's instruction source.
+When a session starts, the `coding` harness profile loads `AGENTS.md` instructions from the workspace directory and its parent directories through the execution environment. Keep repository conventions and build commands in `AGENTS.md`. Select active tools for a conversation from the set installed by its harness profile; passing a one-call `cwd` override to a tool leaves the session's workspace binding and `AGENTS.md` source unchanged.
 
 ## Apply and check a change
 
-For keys and accounts, follow [providers and credentials](/docs/providers/) and inspect alias names, never the secret value. For startup data, use the built launcher's `--check-config` with the intended `--data-dir`, then [restart when idle](/docs/daemon/). A successful preflight verifies startup configuration, not provider access, available billing or complete recovery of a live store. For client-only settings see [terminal preferences](/docs/terminal/#configure-the-terminal-footer).
+Manage API keys and Codex logins through [providers and credentials](/docs/providers/) and verify them by alias name. After editing `openai-compatible.json`, `extensions.json`, or `network.json`, validate the configuration before restarting:
+
+```sh
+hi daemon start --check-config
+```
+
+Or from a source checkout:
+
+```sh
+bin/h-daemon --data-dir "${H_DATA_DIR:-$HOME/.local/share/h}" --check-config
+```
+
+Once `--check-config` succeeds, [restart the daemon](/docs/daemon/#choose-the-right-restart). For client-only display settings, see [configure the terminal footer](/docs/terminal/#configure-the-terminal-footer).

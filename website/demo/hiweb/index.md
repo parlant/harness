@@ -2,12 +2,12 @@
 layout: demo
 lang: en
 title: Review the session in hiweb.
-description: Follow the same parser discussion into the Phoenix web workbench. Use the inbox to find the session, then inspect the conversation or its files.
-kicker: Study 03  /  Browser
+description: Open the same parser session in the Phoenix web workbench, switch between conversation branches, and inspect the working tree.
+kicker: Study 03 / Browser
 specimen:
   client: browser
   label: Browser illustration · hiweb
-  strip: Workspace  /  release-parser
+  strip: Workspace / release-parser
   sidebar: Conversations
   items:
     - label: Original
@@ -19,22 +19,22 @@ specimen:
       text: Try the explicit error instead. What changes for callers?
     - label: Assistant
       text: Each caller needs to handle the error tuple before formatting the date.
-  caption: An illustrated workbench, not a screenshot. The conversation list sits beside the transcript. This reader is on the branch while the terminal reader stays on the original.
+  caption: The conversation list sits beside the active transcript. The browser displays the error-tuple branch while the terminal remains on the original path.
 scenarios_title: Inspect a workbench action
 scenarios:
   - title: Compare the transcript
     entries:
       - label: Original
-        text: Read the plan to return nil for blank input. The assistant proposes a test for the existing caller.
+        text: Select Original in the sidebar to read the nil-return plan and its proposed caller test.
       - label: Branch
-        text: Switch to the other conversation and read the plan for explicit errors. Switching does not start another generation.
-    note: The web workbench and hi are clients of the same daemon, not copies of a session.
+        text: Select Branch to read the explicit-error plan immediately from committed history.
+    note: Both hiweb and hi read from the same daemon session store and keep independent view state.
   - title: Check the actual file
     entries:
       - label: File review
-        text: Open the parser in the working tree. A plan in the transcript is not proof that the file changed.
+        text: Open Review files to inspect the parser in the working tree and verify whether a tool call has modified the file on disk.
       - label: Comparison
-        text: Select a pinned Git snapshot to inspect its version. That selection belongs to this view, not to conversation ancestry.
-    note: A conversation branch does not create a Git branch or a second working tree.
+        text: Pick a local Git commit in History to compare the file against its parent revision and pin a review comment to exact lines.
+    note: Conversation branches live in the H session store while file review reads your Git checkout on disk.
 ---
-Open a scenario to distinguish what the browser shows from what the daemon stores. No local files are read by this page.
+Open a scenario below to see how `hiweb` switches between conversation branches and inspects files in the workspace.
