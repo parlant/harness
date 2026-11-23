@@ -243,12 +243,12 @@ defmodule H.ExecutionEnv.Host.Exec do
 
   defp reap_pgid(os_pid) when is_integer(os_pid) do
     if pgid_alive?(os_pid) do
-      System.cmd("/bin/kill", ["-TERM", "-#{os_pid}"], stderr_to_stdout: true)
+      System.cmd("/bin/kill", ["-TERM", "--", "-#{os_pid}"], stderr_to_stdout: true)
 
       if wait_pgid_exit(os_pid, @term_grace_ms) do
         :ok
       else
-        System.cmd("/bin/kill", ["-KILL", "-#{os_pid}"], stderr_to_stdout: true)
+        System.cmd("/bin/kill", ["-KILL", "--", "-#{os_pid}"], stderr_to_stdout: true)
         wait_pgid_exit(os_pid, 200)
         :ok
       end
@@ -258,7 +258,7 @@ defmodule H.ExecutionEnv.Host.Exec do
   end
 
   defp pgid_alive?(os_pid) do
-    case System.cmd("/bin/kill", ["-0", "-#{os_pid}"], stderr_to_stdout: true) do
+    case System.cmd("/bin/kill", ["-0", "--", "-#{os_pid}"], stderr_to_stdout: true) do
       {_, 0} -> true
       _ -> false
     end

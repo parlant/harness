@@ -17,7 +17,9 @@ defmodule H.CompatibleProviderTest do
 
   setup %{tmp_dir: dir} do
     File.chmod!(dir, 0o700)
-    File.cp!(@example, Path.join(dir, "openai-compatible.json"))
+    dest = Path.join(dir, "openai-compatible.json")
+    File.cp!(@example, dest)
+    File.chmod!(dest, 0o600)
     assert {:ok, opts} = Compatible.load(data_dir: dir)
     assert {:ok, _, [{Accounts, child}]} = Accounts.boot(opts)
     accounts = start_supervised!({Accounts, Keyword.delete(child, :name)})

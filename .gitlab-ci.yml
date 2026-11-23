@@ -3,7 +3,7 @@
 # Targets GitLab SaaS shared runners:
 #   - Linux x86_64 : saas-linux-medium-amd64
 #   - Linux arm64  : saas-linux-medium-arm64
-#   - macOS arm64  : saas-macos-large-m2pro
+#   - macOS arm64  : saas-macos-medium-m1
 #
 # Release builds run automatically on version tags (`v*`) and can be triggered
 # manually on `main` or feature branches for pre-release verification.
@@ -17,12 +17,11 @@ stages:
 variables:
   ELIXIR_IMAGE: "hexpm/elixir:1.20.5-erlang-29.1.2-ubuntu-jammy-20261110"
   RUST_IMAGE: "rust:1-bookworm"
-  JEKYLL_BUILD_IMAGE: "registry.gitlab.com/parlant-co/jekyll-website/jekyll-build@sha256:fbc3170424a8a0f60adb61c9b036f1392d9372ff1f8fac4601c7ae8ee47511a3"
+  RUBY_IMAGE: "ruby:3.3-bookworm"
   RUST_VERSION: "stable"
   NODE_MAJOR: "22"
   MIX_ENV: "test"
   CARGO_TERM_COLOR: "always"
-  BUNDLE_FROZEN: "true"
   BUNDLE_JOBS: "4"
   BUNDLE_RETRY: "3"
 
@@ -41,6 +40,8 @@ test:elixir:
   tags: [saas-linux-medium-amd64]
   image: ${ELIXIR_IMAGE}
   before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git python3
     - mix local.hex --force
     - mix local.rebar --force
   script:
@@ -70,19 +71,25 @@ test:rust:
 test:website:
   stage: test
   tags: [saas-linux-medium-amd64]
-  image: ${JEKYLL_BUILD_IMAGE}
+  image: ${RUBY_IMAGE}
   rules:
     - exists:
         - website/scripts/verify_site.rb
       when: on_success
     - when: never
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg openssh-client python3
+    - curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+    - apt-get install -y -qq --no-install-recommends nodejs
   script:
     - python3 scripts/test-install-sh.py
     - diff -u scripts/install.sh website/install.sh
     - |
       cd website
       npm ci --prefer-offline --ignore-scripts --no-audit --fund=false
-      bundle check || bundle install
+      bundle config set --local frozen true
+      bundle install
       make verify
 
 # ---------------------------------------------------------------------------
@@ -164,7 +171,7 @@ bundle:linux-arm64:
 
 bundle:darwin-arm64:
   stage: build
-  tags: [saas-macos-large-m2pro]
+  tags: [saas-macos-medium-m1]
   extends: .bundle_rules
   variables:
     MIX_ENV: "prod"
@@ -259,18 +266,24 @@ release:publish:
 pages:
   stage: pages
   tags: [saas-linux-medium-amd64]
-  image: ${JEKYLL_BUILD_IMAGE}
+  image: ${RUBY_IMAGE}
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       exists:
         - website/scripts/verify_site.rb
       when: on_success
     - when: never
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg
+    - curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+    - apt-get install -y -qq --no-install-recommends nodejs
   script:
     - |
       cd website
       npm ci --prefer-offline --ignore-scripts --no-audit --fund=false
-      bundle check || bundle install
+      bundle config set --local frozen true
+      bundle install
       make build DESTINATION="../public"
       ruby scripts/verify_site.rb ../public
   artifacts:
