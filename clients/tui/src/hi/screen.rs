@@ -425,6 +425,7 @@ enum ModeState {
 pub(super) enum EditorOverlay<'a> {
     None,
     Picker(&'a [String]),
+    Tree(&'a [String]),
     Completion(&'a [String]),
 }
 
@@ -909,7 +910,7 @@ fn render_editor_area(
     overlay: EditorOverlay<'_>,
     completion_height: u16,
 ) -> Option<Position> {
-    if let EditorOverlay::Picker(lines) = overlay {
+    if let EditorOverlay::Picker(lines) | EditorOverlay::Tree(lines) = overlay {
         render_option_lines(buf, area_x, editor_y, total_width, editor_height, lines);
         return None;
     }
@@ -1430,6 +1431,10 @@ fn compute_layout(
         EditorOverlay::None => {}
         EditorOverlay::Picker(lines) => {
             editor_height = (lines.len().clamp(1, 7) as u16).min(available);
+        }
+        EditorOverlay::Tree(lines) => {
+            let max_tree = ((usize::from(total_height) * 6 / 10).clamp(7, 16)) as u16;
+            editor_height = (lines.len().clamp(1, max_tree as usize) as u16).min(available);
         }
         EditorOverlay::Completion(lines) => {
             completion_height =

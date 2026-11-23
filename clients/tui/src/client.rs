@@ -2,7 +2,8 @@ use crate::config::{DaemonTarget, LoopbackHost, SecretToken};
 use crate::protocol::{
     CommandEnvelope, CommandReceipt, CreateSessionRequest, CreateSessionResponse,
     EntriesPageResponse, EnvironmentInfo, EnvironmentsResponse, ErrorResponse, ModelInfo,
-    ModelsResponse, SessionDetailResponse, SessionSummary, SessionsResponse, SseEvent, SseParser,
+    ModelsResponse, SessionDetailResponse, SessionSummary, SessionTreeResponse, SessionsResponse,
+    SseEvent, SseParser,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -471,6 +472,12 @@ impl DaemonClient {
     ) -> Result<SessionDetailResponse, ClientError> {
         validate_path_segment("session_id", session_id)?;
         let path = format!("/api/v1/sessions/{}", percent_encode(session_id));
+        self.get_json(&path)
+    }
+
+    pub fn get_session_tree(&self, session_id: &str) -> Result<SessionTreeResponse, ClientError> {
+        validate_path_segment("session_id", session_id)?;
+        let path = format!("/api/v1/sessions/{}/tree", percent_encode(session_id));
         self.get_json(&path)
     }
 

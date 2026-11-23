@@ -110,8 +110,12 @@ class FakeDaemon:
         self._catalog_seq = 1
         self._next_entry_id = 1
         self._next_sub_id = 1
+        self._next_conv_id = 2
         self._snapshot_limit = 50
         self._entries: list[dict[str, Any]] = []
+        self._conversations: dict[str, dict[str, Any]] = {
+            "1": {"id": "1", "parent": None, "owner": "ownerless"}
+        }
         self._active = False
         self._aborted = False
         self._active_gate: threading.Event | None = None
@@ -269,10 +273,138 @@ class FakeDaemon:
             )
         with self._lock:
             self._entries = entries
+            self._conversations = {"1": {"id": "1", "parent": None, "owner": "ownerless"}}
+            self._next_conv_id = 2
             self._snapshot_limit = snapshot_limit
             self._next_entry_id = count + 1
             self._seq = max(1, count)
             self._cond.notify_all()
+
+    def _visible_entries_for_conv_locked(
+        self, sid: str, cid: str
+    ) -> list[dict[str, Any]]:
+        all_entries = (
+            self._entries
+            if not sid or sid == self.session_id
+            else self._extra_entries.get(sid, [])
+        )
+        if sid and sid != self.session_id:
+            return list(all_entries)
+        conv = self._conversations.get(cid)
+        if conv is None:
+            return []
+        chain: list[tuple[str, int | None]] = []
+        cur_cid: str | None = cid
+        cap_entry_id: int | None = None
+        seen: set[str] = set()
+        while cur_cid is not None and cur_cid not in seen:
+            seen.add(cur_cid)
+            c = self._conversations.get(cur_cid)
+            if c is None:
+                break
+            chain.append((cur_cid, cap_entry_id))
+            parent = c.get("parent")
+            if isinstance(parent, dict):
+                cur_cid = str(parent["conversation_id"])
+                cap_entry_id = int(parent["at"])
+            else:
+                cur_cid = None
+                cap_entry_id = None
+        chain.reverse()
+        visible: list[dict[str, Any]] = []
+        for seg_cid, cap in chain:
+            for e in all_entries:
+                if str(e.get("conversation_id", "1")) != seg_cid:
+                    continue
+                if cap is not None and int(e["id"]) > cap:
+                    continue
+                visible.append(e)
+        visible.sort(key=lambda e: int(e["id"]))
+        return visible
+
+    def _build_session_tree_locked(self, sid: str, session_wire: dict[str, Any]) -> dict[str, Any]:
+        all_entries = (
+            self._entries
+            if sid == self.session_id
+            else self._extra_entries.get(sid, [])
+        )
+        convs_map = (
+            self._conversations
+            if sid == self.session_id
+            else {"1": {"id": "1", "parent": None, "owner": "ownerless"}}
+        )
+        by_cid: dict[str, list[dict[str, Any]]] = {}
+        for e in sorted(all_entries, key=lambda x: int(x["id"])):
+            by_cid.setdefault(str(e.get("conversation_id", "1")), []).append(e)
+
+        parent_by_id: dict[str, str | None] = {}
+        wired_convs: list[dict[str, Any]] = []
+        for cid in sorted(convs_map.keys(), key=lambda c: int(c) if c.isdigit() else 0):
+            conv = convs_map[cid]
+            own = by_cid.get(cid, [])
+            parent = conv.get("parent")
+            prev_id = str(parent["at"]) if isinstance(parent, dict) else None
+            for e in own:
+                eid = str(e["id"])
+                parent_by_id[eid] = prev_id
+                prev_id = eid
+            leaf_id = str(own[-1]["id"]) if own else (str(parent["at"]) if isinstance(parent, dict) else None)
+            wired_convs.append(
+                {
+                    "id": cid,
+                    "parent": parent,
+                    "owner": conv.get("owner", "ownerless"),
+                    "leaf_entry_id": leaf_id,
+                }
+            )
+
+        nodes: list[dict[str, Any]] = []
+        for e in sorted(all_entries, key=lambda x: int(x["id"])):
+            eid = str(e["id"])
+            kind = str(e.get("kind", "unknown"))
+            data = e.get("data") if isinstance(e.get("data"), dict) else {}
+            if kind == "user_shell":
+                prefix = "!" if data.get("include_in_context", True) else "!!"
+                preview = f"{prefix}{data.get('command', '')}".strip()
+                has_text = bool(data.get("command"))
+                tool_name = None
+                aborted = bool(data.get("cancelled", False))
+                is_error = bool(data.get("is_error", False))
+            elif kind == "tool_result":
+                tool_name = data.get("tool_name") or data.get("name")
+                preview = f"[{tool_name or 'tool'}]"
+                has_text = False
+                aborted = False
+                is_error = bool(data.get("is_error", False))
+            else:
+                text = extract_content_text(data.get("content")).replace("\n", " ").strip()
+                preview = text[:200]
+                has_text = bool(preview)
+                tool_name = None
+                aborted = bool(data.get("aborted", False))
+                is_error = bool(data.get("is_error", False))
+            nodes.append(
+                {
+                    "id": eid,
+                    "parent_id": parent_by_id.get(eid),
+                    "conversation_id": str(e.get("conversation_id", "1")),
+                    "kind": kind,
+                    "preview": preview,
+                    "has_text": has_text,
+                    "tool_name": tool_name,
+                    "aborted": aborted,
+                    "is_error": is_error,
+                    "error": is_error,
+                    "created_at": e.get("created_at"),
+                }
+            )
+
+        return {
+            "session": session_wire,
+            "conversations": wired_convs,
+            "nodes": nodes,
+            "truncated": False,
+        }
 
     def arm_auto_stream(self, *, chunks: list[str]) -> None:
         with self._lock:
@@ -732,7 +864,12 @@ class FakeDaemon:
         command = raw.get("command")
         cid_raw = raw.get("conversation_id")
         args = raw.get("args") or {}
-        if raw.get("version") != 1 or not isinstance(req_id, str) or cid_raw != 1:
+        cid_str = str(cid_raw) if isinstance(cid_raw, int) else ""
+        if (
+            raw.get("version") != 1
+            or not isinstance(req_id, str)
+            or cid_str not in self._conversations
+        ):
             return 422, {"error": "invalid command envelope"}
 
         self.recorded_commands.append(
@@ -821,6 +958,30 @@ class FakeDaemon:
                 "status": "placed",
             }
 
+        if command == "fork":
+            at_entry_id = args.get("at_entry_id")
+            if not isinstance(at_entry_id, int) or at_entry_id <= 0:
+                return 422, {"error": "invalid at_entry_id"}
+            visible = self._visible_entries_for_conv_locked(self.session_id, cid_str)
+            if not any(int(e["id"]) == at_entry_id for e in visible):
+                return 422, {"error": "entry not visible in conversation"}
+            new_cid = str(self._next_conv_id)
+            self._next_conv_id += 1
+            self._conversations[new_cid] = {
+                "id": new_cid,
+                "parent": {"conversation_id": cid_str, "at": str(at_entry_id)},
+                "owner": "ownerless",
+            }
+            self._seq += 1
+            self._cond.notify_all()
+            return 200, {
+                "version": 1,
+                "request_id": req_id,
+                "seq": self._seq,
+                "conversation_id": new_cid,
+                "status": "forked",
+            }
+
         if command == "abort":
             self._aborted = True
             self._active = False
@@ -906,25 +1067,52 @@ class FakeDaemon:
                         self._send_json(404, {"error": "not found"})
                         return
                     if len(parts) == 1:
+                        with daemon._lock:
+                            convs = (
+                                [
+                                    dict(daemon._conversations[c])
+                                    for c in sorted(
+                                        daemon._conversations.keys(),
+                                        key=lambda x: int(x) if x.isdigit() else 0,
+                                    )
+                                ]
+                                if sid == daemon.session_id
+                                else [{"id": "1", "parent": None, "owner": "ownerless"}]
+                            )
                         self._send_json(
                             200,
                             {
                                 "session": session_wire,
-                                "conversations": [{"id": "1", "parent": None, "owner": "ownerless"}],
+                                "conversations": convs,
                                 "tasks": [],
                             },
                         )
                         return
-                    if len(parts) == 4 and parts[1] == "conversations" and parts[2] == "1":
+                    if len(parts) == 2 and parts[1] == "tree":
+                        with daemon._lock:
+                            payload = daemon._build_session_tree_locked(sid, session_wire)
+                        self._send_json(200, payload)
+                        return
+                    if len(parts) == 4 and parts[1] == "conversations":
+                        cid = urllib.parse.unquote(parts[2])
+                        with daemon._lock:
+                            valid_cid = (
+                                cid in daemon._conversations
+                                if sid == daemon.session_id
+                                else cid == "1"
+                            )
+                        if not valid_cid:
+                            self._send_json(404, {"error": "conversation not found"})
+                            return
                         if parts[3] == "entries":
-                            self._handle_entries(parsed.query, sid=sid)
+                            self._handle_entries(parsed.query, sid=sid, cid=cid)
                             return
                         if parts[3] == "events":
-                            self._handle_sse(sid=sid)
+                            self._handle_sse(sid=sid, cid=cid)
                             return
                 self._send_json(404, {"error": "not found"})
 
-            def _handle_entries(self, query: str, *, sid: str = "") -> None:
+            def _handle_entries(self, query: str, *, sid: str = "", cid: str = "1") -> None:
                 qs = urllib.parse.parse_qs(query, keep_blank_values=False)
                 order = qs.get("order", ["desc"])[0]
                 if order not in ("asc", "desc"):
@@ -946,11 +1134,7 @@ class FakeDaemon:
                     return
 
                 with daemon._lock:
-                    entries = (
-                        daemon._entries
-                        if not sid or sid == daemon.session_id
-                        else daemon._extra_entries.get(sid, [])
-                    )
+                    entries = daemon._visible_entries_for_conv_locked(sid, cid)
                     n = len(entries)
                     if order == "desc":
                         end = (
@@ -1334,14 +1518,14 @@ class FakeDaemon:
                 finally:
                     sub.close()
 
-            def _handle_sse(self, *, sid: str = "") -> None:
+            def _handle_sse(self, *, sid: str = "", cid: str = "1") -> None:
                 target_sid = sid or daemon.session_id
-                sub = _SseSubscriber(target_sid, "1")
+                sub = _SseSubscriber(target_sid, cid)
                 with daemon._lock:
                     daemon._subscribers.append(sub)
                     daemon.sse_connect_count += 1
                     if target_sid == daemon.session_id:
-                        all_entries = daemon._entries
+                        all_entries = daemon._visible_entries_for_conv_locked(target_sid, cid)
                         seq = daemon._seq
                         docs = daemon._docs
                     else:
@@ -1362,7 +1546,7 @@ class FakeDaemon:
                     snap = {
                         "version": 1,
                         "session_id": target_sid,
-                        "conversation_id": "1",
+                        "conversation_id": cid,
                         "seq": seq,
                         "before_entry_id": before_entry_id,
                         "has_more": has_more,

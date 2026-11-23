@@ -15,5 +15,6 @@ pub mod screen;
 mod status;
 pub mod stream;
 pub mod theme;
+pub mod tree;
 
 mod secret;

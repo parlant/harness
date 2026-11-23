@@ -361,6 +361,53 @@ class HiPtyAcceptanceTests(unittest.TestCase):
                 self.assertTrue(pty.is_cooked_mode())
                 self.assertEqual(daemon.abort_commands(), [])
 
+    def test_tree_opens_step_tree_filters_and_branches_from_earlier_step(self) -> None:
+        with FakeDaemon(transport="uds", cwd=self.workdir, session_id="demo") as daemon:
+            daemon.seed_history(4)
+            with PtySession(
+                [self.hi_bin, "-s", "demo"],
+                env=daemon.env(),
+                cwd=self.workdir,
+                rows=28,
+                cols=100,
+            ) as pty:
+                daemon.wait_for_sse_connect()
+                pty.wait_for_raw_mode()
+                pty.wait_for_output("Ready")
+
+                # Open /tree and verify turn steps and branch badge render
+                pty.send_text("/tree")
+                pty.send_enter()
+                pty.wait_for_output("Tree [default]")
+                pty.wait_for_output("User turn 1")
+                pty.wait_for_output("[#1 *]")
+
+                # Cycle filter via Tab -> no-tools -> user-only
+                pty.send_bytes(b"\t")
+                pty.wait_for_output("Tree [no-tools]")
+                pty.send_bytes(b"\t")
+                pty.wait_for_output("Tree [user-only]")
+                # Cycle back to default (user-only -> all -> default)
+                pty.send_bytes(b"\t")
+                pty.wait_for_output("Tree [all]")
+                pty.send_bytes(b"\t")
+                pty.wait_for_output("Tree [default]")
+
+                # Move Up from #3 (restored after user-only filter) -> #2 (assistant) and press Enter to branch after #2
+                pty.send_bytes(b"\x1b[A")
+                pty.wait_for_output("> • #2 assistant")
+                pty.send_enter()
+
+                fork_cmd = daemon.wait_for_command(lambda c: c["command"] == "fork")
+                self.assertEqual(fork_cmd["conversation_id"], 1)
+                self.assertEqual(fork_cmd["args"].get("at_entry_id"), 2)
+                daemon.wait_for_sse_connect(min_count=2)
+
+                pty.send_text("/quit")
+                pty.send_enter()
+                self.assertEqual(pty.wait(), 0)
+                self.assertTrue(pty.is_cooked_mode())
+
 
 if __name__ == "__main__":
     unittest.main()

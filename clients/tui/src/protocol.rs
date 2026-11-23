@@ -284,6 +284,48 @@ pub struct ConversationInfo {
     pub parent: Option<ConversationParent>,
     #[serde(default)]
     pub owner: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_string_or_u64"
+    )]
+    pub leaf_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TreeNode {
+    #[serde(deserialize_with = "de_string_or_u64")]
+    pub id: String,
+    #[serde(default, deserialize_with = "de_opt_string_or_u64")]
+    pub parent_id: Option<String>,
+    #[serde(deserialize_with = "de_string_or_u64")]
+    pub conversation_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub has_text: bool,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub aborted: bool,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub error: bool,
+    #[serde(default)]
+    pub created_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SessionTreeResponse {
+    pub session: SessionSummary,
+    #[serde(default)]
+    pub conversations: Vec<ConversationInfo>,
+    #[serde(default)]
+    pub nodes: Vec<TreeNode>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

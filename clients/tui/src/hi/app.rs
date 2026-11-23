@@ -14,6 +14,7 @@ use super::{
     screen::{EditorOverlay, Screen},
     status::{StatusFields, StatusMetadata},
     stream::{Subscription, Update},
+    tree::{TreeChoice, TreeSelection, TreeSelector},
 };
 use crate::{
     cli::generate_request_id,
@@ -57,7 +58,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/new", "New session"),
     ("/name", "Show or rename session title"),
-    ("/tree", "Conversations and branch history"),
+    ("/tree", "Browse turn-step tree across branches"),
     ("/fork", "Edit an earlier prompt on a new branch"),
     ("/branch", "Branch after a visible entry"),
     ("/earlier", "Page older entries"),
@@ -99,7 +100,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/discard-retry", "Forget a pending submission retry"),
     ("/conv", "Switch to a conversation by ID"),
     ("/files", "Browse session workspace files"),
-    ("/branches", "Alias for /tree"),
+    ("/branches", "List conversations in this session"),
     ("/sessions", "Alias for /resume"),
     ("/session", "Alias for /status"),
     ("/exit", "Alias for /quit"),
@@ -121,6 +122,7 @@ enum PickerKind {
     WorkspaceFiles,
     WorkspaceWait,
     Search,
+    TreeAction,
     Info,
 }
 
@@ -129,6 +131,18 @@ struct PickerState {
     picker: Picker,
     scope: Option<(String, String)>,
     workspace_wait: Option<WorkspaceWaitInfo>,
+    tree_selection: Option<TreeSelection>,
+}
+
+struct TreeState {
+    selector: TreeSelector,
+    scope: (String, String),
+}
+
+struct PendingTreeForkEdit {
+    source_sid: String,
+    target_cid: String,
+    entry_id: String,
 }
 
 struct ForkEdit {
@@ -188,12 +202,14 @@ struct Ui {
     draft: Draft,
     saved: HashMap<(String, String), Draft>,
     picker: Option<PickerState>,
+    tree: Option<TreeState>,
     login: Option<Login>,
     secret: Option<SecretInput>,
     completion: Option<Completion>,
     path_lookup: Option<PathLookup>,
     pending_root_fork: Option<PendingRootFork>,
     pending_cwd_fork: Option<PendingCwdFork>,
+    pending_tree_fork_edit: Option<PendingTreeForkEdit>,
     config: UserConfig,
     status_metadata: StatusMetadata,
     data_dir: PathBuf,
@@ -246,12 +262,14 @@ pub fn run(
         draft: Draft::default(),
         saved: HashMap::new(),
         picker: None,
+        tree: None,
         login: None,
         secret: None,
         completion: None,
         path_lookup: None,
         pending_root_fork: None,
         pending_cwd_fork: None,
+        pending_tree_fork_edit: None,
         config,
         status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
@@ -306,12 +324,14 @@ pub fn run_inbox(
         draft: Draft::default(),
         saved: HashMap::new(),
         picker: None,
+        tree: None,
         login: None,
         secret: None,
         completion: None,
         path_lookup: None,
         pending_root_fork: None,
         pending_cwd_fork: None,
+        pending_tree_fork_edit: None,
         config,
         status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
@@ -398,8 +418,13 @@ fn run_loop(
                         {
                             ui.login = None;
                         }
-                    } else if ui.draft.editor.is_searching_history() && ui.picker.is_none() {
+                    } else if ui.draft.editor.is_searching_history()
+                        && ui.picker.is_none()
+                        && ui.tree.is_none()
+                    {
                         ui.draft.editor.key(k);
+                    } else if ui.tree.is_some() {
+                        ui.tree_key(k, &mut screen);
                     } else if ui.picker.is_some() {
                         ui.pick_key(k, &mut screen);
                     } else if ui.config.keys.action(k) == Some("external")
@@ -432,7 +457,9 @@ fn run_loop(
                         secret.paste(&s);
                     }
                 }
-                Event::Paste(s) if ui.picker.is_none() && ui.login.is_none() => {
+                Event::Paste(s)
+                    if ui.picker.is_none() && ui.tree.is_none() && ui.login.is_none() =>
+                {
                     ui.dismiss_completion();
                     if s.len() > super::files::MAX_TEXT_BYTES {
                         ui.note = "Paste exceeds 1 MiB; use a smaller excerpt".into();
@@ -558,10 +585,12 @@ impl Ui {
             self.saved.insert(key, std::mem::take(&mut self.draft));
         }
         self.picker = None;
+        self.tree = None;
         self.login = None;
         self.secret = None;
         self.pending_root_fork = None;
         self.pending_cwd_fork = None;
+        self.pending_tree_fork_edit = None;
         self.historical = None;
         self.sub = None;
         self.catalog_sub = None;
@@ -775,9 +804,16 @@ impl Ui {
                 &self.config.theme,
             ));
         }
-        let width = crossterm::terminal::size().map_or(0, |(width, _)| width);
+        let (width, height) = crossterm::terminal::size().unwrap_or((0, 0));
         if width > 0 {
             self.draft.editor.set_width(usize::from(width));
+        }
+        if let Some(tree) = &mut self.tree {
+            if height > 0 {
+                let max_tree = (usize::from(height) * 6 / 10).clamp(7, 16);
+                tree.selector
+                    .set_max_visible(max_tree.saturating_sub(2).max(1));
+            }
         }
         if self.rows_dirty {
             self.cached_rows = cards::styled_rows(
@@ -798,6 +834,9 @@ impl Ui {
         } else if let Some(flow) = &self.login {
             lines = flow.lines();
             EditorOverlay::Picker(&lines)
+        } else if let Some(tree) = &self.tree {
+            lines = tree.selector.lines();
+            EditorOverlay::Tree(&lines)
         } else if let Some(picker) = &self.picker {
             lines = picker.picker.lines();
             EditorOverlay::Picker(&lines)
@@ -867,6 +906,13 @@ impl Ui {
                         } else {
                             self.note = "Ready · /help".into();
                         }
+                        if let Some(pending) = self.pending_tree_fork_edit.take() {
+                            if pending.source_sid == self.target.sid
+                                && pending.target_cid == self.target.cid
+                            {
+                                self.begin_fork_edit(&pending.entry_id);
+                            }
+                        }
                     }
                     ServerFrame::Commit(c) => {
                         if self.state.apply_commit(c) == CommitOutcome::Gap {
@@ -897,6 +943,7 @@ impl Ui {
                 if wait != previous_wait {
                     if wait.is_some()
                         && self.picker.is_none()
+                        && self.tree.is_none()
                         && self.login.is_none()
                         && self.secret.is_none()
                     {
@@ -936,20 +983,24 @@ impl Ui {
     }
     fn menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
         self.dismiss_completion();
+        self.tree = None;
         self.picker = Some(PickerState {
             kind,
             picker: Picker::new(title, choices),
             scope: None,
             workspace_wait: None,
+            tree_selection: None,
         });
     }
     fn scoped_menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
         self.dismiss_completion();
+        self.tree = None;
         self.picker = Some(PickerState {
             kind,
             picker: Picker::new(title, choices),
             scope: Some((self.target.sid.clone(), self.target.cid.clone())),
             workspace_wait: None,
+            tree_selection: None,
         });
     }
     fn current_view(&self) -> &TranscriptState {
@@ -1015,6 +1066,23 @@ impl Ui {
                     {
                         self.draft.retry = Some((text, envelope));
                         self.note.push_str(" · /retry uses same request");
+                    }
+                }
+            }
+            Ok(Reply::Tree(tree)) => {
+                if source_target != (self.target.sid.clone(), self.target.cid.clone()) {
+                    self.note = "Ignored stale tree after branch switch".into();
+                } else {
+                    self.dismiss_completion();
+                    self.picker = None;
+                    let selector = TreeSelector::new(*tree, &self.target.cid);
+                    if selector.total_len() == 0 {
+                        self.note = "No entries in this session yet".into();
+                    } else {
+                        self.tree = Some(TreeState {
+                            selector,
+                            scope: (self.target.sid.clone(), self.target.cid.clone()),
+                        });
                     }
                 }
             }
@@ -1257,8 +1325,16 @@ impl Ui {
         if self.picker.as_ref().is_some_and(|p| p.scope.is_some()) {
             self.picker = None;
         }
+        self.tree = None;
         self.pending_root_fork = None;
         self.pending_cwd_fork = None;
+        if self
+            .pending_tree_fork_edit
+            .as_ref()
+            .is_some_and(|p| p.source_sid != t.sid || p.target_cid != t.cid)
+        {
+            self.pending_tree_fork_edit = None;
+        }
         self.historical = None;
         self.state = TranscriptState::new(Some(t.sid.clone()), Some(t.cid.clone()));
         self.sub = Some(Subscription::start(
@@ -2098,7 +2174,8 @@ impl Ui {
                     self.start(Effect::Rename(Some(arg.to_owned())), None);
                 }
             }
-            "/tree" | "/branches" => self.start(Effect::Branches, None),
+            "/tree" => self.start(Effect::Tree, None),
+            "/branches" => self.start(Effect::Branches, None),
             "/conv" if arg.parse::<u64>().is_ok() => {
                 self.start(Effect::Branch(arg.to_owned()), None)
             }
@@ -2326,6 +2403,274 @@ impl Ui {
             Err(e) => e.to_string(),
         };
     }
+    fn tree_key(&mut self, key: KeyEvent, screen: &mut Screen) {
+        let Some(state) = self.tree.as_mut() else {
+            return;
+        };
+        let choice = state.selector.key(key);
+        let scope = state.scope.clone();
+        match choice {
+            TreeChoice::Stay => {}
+            TreeChoice::Cancel => {
+                self.tree = None;
+            }
+            TreeChoice::Select(sel) => {
+                self.tree = None;
+                if scope != (self.target.sid.clone(), self.target.cid.clone()) {
+                    self.note = "Stale tree selection ignored after branch/session switch".into();
+                    return;
+                }
+                self.handle_tree_selection(*sel, screen);
+            }
+        }
+    }
+    fn handle_tree_selection(&mut self, sel: TreeSelection, screen: &mut Screen) {
+        if self.job.is_some() {
+            self.note = "Wait for pending command".into();
+            return;
+        }
+        let node = &sel.node;
+        let is_user = node.kind == "user";
+
+        // 1. Read-only imported archives: only allow switching branches to inspect history.
+        if self.target.labels.is_imported_archive() {
+            let target_cid = sel
+                .leaf_conversations
+                .iter()
+                .find(|cid| *cid != &self.target.cid)
+                .cloned()
+                .or_else(|| {
+                    (node.conversation_id != self.target.cid).then(|| node.conversation_id.clone())
+                });
+            if let Some(cid) = target_cid {
+                self.switch(
+                    Target {
+                        cid,
+                        ..self.target.clone()
+                    },
+                    screen,
+                );
+            } else {
+                self.note = format!(
+                    "Imported archive (read-only) · viewing #{} on #{}",
+                    sanitize_single_line(&node.id),
+                    sanitize_single_line(&self.target.cid)
+                );
+            }
+            return;
+        }
+
+        // 2. Direct switch if this step is the exact tip of another existing conversation
+        //    (e.g. a branch leaf with no children, or an existing empty fork at this cut).
+        if let Some(other_cid) = sel
+            .leaf_conversations
+            .iter()
+            .find(|cid| *cid != &self.target.cid)
+            .cloned()
+        {
+            if !sel.has_children || sel.empty_fork_conversations.contains(&other_cid) {
+                self.switch(
+                    Target {
+                        cid: other_cid,
+                        ..self.target.clone()
+                    },
+                    screen,
+                );
+                return;
+            }
+        }
+
+        // 3. Current conversation's own latest non-user step: nothing to fork or switch.
+        if !is_user
+            && sel
+                .leaf_conversations
+                .iter()
+                .any(|cid| cid == &self.target.cid)
+            && !sel.has_children
+        {
+            self.note = format!(
+                "Already at latest step #{} on #{}",
+                sanitize_single_line(&node.id),
+                sanitize_single_line(&self.target.cid)
+            );
+            return;
+        }
+
+        // 4. Offer clear, durable actions for earlier steps or user prompts.
+        let mut choices: Vec<(String, String)> = Vec::new();
+        let clean_id = sanitize_single_line(&node.id);
+        let clean_cid = sanitize_single_line(&node.conversation_id);
+
+        if is_user {
+            choices.push((
+                "edit_before".to_string(),
+                format!("Edit & re-submit from before #{clean_id}"),
+            ));
+            choices.push((
+                "branch_after".to_string(),
+                format!("Branch after #{clean_id} (keep prompt, new conversation)"),
+            ));
+            if node.conversation_id != self.target.cid {
+                choices.push((
+                    format!("switch:{}", node.conversation_id),
+                    format!("Switch to #{clean_cid}"),
+                ));
+            }
+        } else {
+            for cid in &sel.empty_fork_conversations {
+                if cid != &self.target.cid {
+                    choices.push((
+                        format!("switch:{cid}"),
+                        format!("Switch to existing branch #{}", sanitize_single_line(cid)),
+                    ));
+                }
+            }
+            choices.push((
+                "branch_after".to_string(),
+                format!("Branch after #{clean_id} (new conversation)"),
+            ));
+            if node.conversation_id != self.target.cid {
+                choices.push((
+                    format!("switch:{}", node.conversation_id),
+                    format!("View #{clean_cid}"),
+                ));
+            }
+        }
+
+        // If only a single branch_after action exists on a non-user step, execute directly.
+        if !is_user && choices.len() == 1 && choices[0].0 == "branch_after" {
+            self.fork_from_tree_node(node);
+            return;
+        }
+
+        let title = format!(
+            "Step #{clean_id} ({}) on #{clean_cid}",
+            sanitize_single_line(&node.kind)
+        );
+        self.scoped_menu(PickerKind::TreeAction, &title, choices);
+        if let Some(p) = self.picker.as_mut() {
+            p.tree_selection = Some(sel);
+        }
+    }
+    fn fork_from_tree_node(&mut self, node: &crate::protocol::TreeNode) {
+        if !self.check_writable_workspace(false) {
+            return;
+        }
+        let Ok(source_cid) = node.conversation_id.trim().parse::<u64>() else {
+            self.note = format!(
+                "Invalid conversation ID '{}'",
+                sanitize_single_line(&node.conversation_id)
+            );
+            return;
+        };
+        let Ok(at_entry_id) = node.id.trim().parse::<u64>() else {
+            self.note = format!("Invalid entry ID '{}'", sanitize_single_line(&node.id));
+            return;
+        };
+        if source_cid == 0 || at_entry_id == 0 {
+            self.note = "Invalid branch target".into();
+            return;
+        }
+        self.start(
+            Effect::ForkFrom {
+                cid: source_cid,
+                at_entry_id,
+            },
+            None,
+        );
+    }
+    fn begin_tree_user_edit(&mut self, node: &crate::protocol::TreeNode, screen: &mut Screen) {
+        if !self.check_writable_workspace(false) {
+            return;
+        }
+        if self.draft.retry.is_some() {
+            self.note = "Resolve previous submit (/retry or /discard-retry) before /fork".into();
+            return;
+        }
+        if node.conversation_id == self.target.cid
+            && self.current_view().entries.iter().any(|e| e.id == node.id)
+        {
+            self.begin_fork_edit(&node.id);
+            return;
+        }
+        // Root user prompt has no predecessor: offer new session directly without inventing entry 0.
+        if node.parent_id.is_none() {
+            self.pending_root_fork = Some(PendingRootFork {
+                source_sid: self.target.sid.clone(),
+                source_cid: self.target.cid.clone(),
+                entry_id: node.id.clone(),
+                text: node.preview.clone(),
+                attachments: Vec::new(),
+            });
+            self.scoped_menu(
+                PickerKind::RootFork,
+                &format!(
+                    "Root prompt #{} has no predecessor",
+                    sanitize_single_line(&node.id)
+                ),
+                vec![
+                    (
+                        "new_session".to_string(),
+                        "Start new session with this prompt (keeps old session & files)"
+                            .to_string(),
+                    ),
+                    (
+                        "cancel".to_string(),
+                        "Cancel (stay here and keep current draft)".to_string(),
+                    ),
+                ],
+            );
+            return;
+        }
+        if node.conversation_id != self.target.cid {
+            // Switch to the owning branch and open fork-edit as soon as its snapshot arrives.
+            self.pending_tree_fork_edit = Some(PendingTreeForkEdit {
+                source_sid: self.target.sid.clone(),
+                target_cid: node.conversation_id.clone(),
+                entry_id: node.id.clone(),
+            });
+            self.switch(
+                Target {
+                    cid: node.conversation_id.clone(),
+                    ..self.target.clone()
+                },
+                screen,
+            );
+            return;
+        }
+        // Entry is on the current branch but older than the loaded snapshot window:
+        // stage fork-edit directly using the tree's authoritative parent_id and preview.
+        let Some(pred_id) = node
+            .parent_id
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|&n| n > 0)
+        else {
+            self.note = format!(
+                "Predecessor for #{} is invalid; run /earlier and /fork",
+                sanitize_single_line(&node.id)
+            );
+            return;
+        };
+        let stashed_draft = match self.draft.fork_edit.take() {
+            Some(existing) => existing.stashed_draft,
+            None => Box::new(std::mem::take(&mut self.draft)),
+        };
+        self.draft = Draft::default();
+        self.draft.editor.set(&node.preview);
+        self.draft.fork_edit = Some(ForkEdit {
+            source_sid: self.target.sid.clone(),
+            source_cid: self.target.cid.clone(),
+            selected_entry_id: node.id.clone(),
+            predecessor_id: pred_id,
+            stashed_draft,
+        });
+        self.note = format!(
+            "Editing #{} (will fork at #{}; Esc cancels)",
+            sanitize_single_line(&node.id),
+            pred_id
+        );
+    }
     fn pick_key(&mut self, key: KeyEvent, screen: &mut Screen) {
         let Some(state) = self.picker.as_mut() else {
             return;
@@ -2334,6 +2679,7 @@ impl Ui {
         let kind = state.kind;
         let scope = state.scope.clone();
         let workspace_wait = state.workspace_wait.clone();
+        let tree_selection = state.tree_selection.clone();
         match choice {
             Choice::Stay => {}
             Choice::Cancel => {
@@ -2449,6 +2795,27 @@ impl Ui {
                     PickerKind::AccountSources => self.start(Effect::ActivateAccount(id), None),
                     PickerKind::LoginSources => {
                         self.login = Some(Login::start(self.client.clone(), id));
+                    }
+                    PickerKind::TreeAction => {
+                        if let Some(sel) = tree_selection {
+                            if id == "edit_before" {
+                                self.begin_tree_user_edit(&sel.node, screen);
+                            } else if id == "branch_after" {
+                                self.fork_from_tree_node(&sel.node);
+                            } else if let Some(cid) = id.strip_prefix("switch:") {
+                                if self.job.is_some() {
+                                    self.note = "Wait for pending command".into();
+                                } else {
+                                    self.switch(
+                                        Target {
+                                            cid: cid.to_string(),
+                                            ..self.target.clone()
+                                        },
+                                        screen,
+                                    );
+                                }
+                            }
+                        }
                     }
                     PickerKind::Info => {}
                 }
@@ -2724,12 +3091,14 @@ mod tests {
             draft: Draft::default(),
             saved: HashMap::new(),
             picker: None,
+            tree: None,
             login: None,
             secret: None,
             completion: None,
             path_lookup: None,
             pending_root_fork: None,
             pending_cwd_fork: None,
+            pending_tree_fork_edit: None,
             config: UserConfig::default(),
             status_metadata: StatusMetadata::default(),
             data_dir: std::env::temp_dir().join("hi-app-nonexistent-config"),
@@ -3338,6 +3707,7 @@ mod tests {
             picker: Picker::new("fork", vec![("12".into(), "#12 second".into())]),
             workspace_wait: None,
             scope: Some(("sess-1".into(), "1".into())),
+            tree_selection: None,
         });
         press_enter(&mut ui, &mut screen);
         assert!(ui.note.contains("Stale picker ignored"), "note={}", ui.note);
@@ -4846,5 +5216,151 @@ mod tests {
         assert_eq!(ui.completion.as_ref().unwrap().lines().len(), 2);
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn tree_command_fetches_step_tree_branches_from_sibling_and_keeps_branches_list() {
+        let (srv, client) = TestServer::bind("tree-flow");
+        let listener = srv.listener.try_clone().unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+        let posted = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let posted_srv = Arc::clone(&posted);
+
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let (head, body) = read_http_request(&mut stream);
+                        if head.starts_with("GET /api/v1/sessions/sess-1/tree ") {
+                            let resp = json!({
+                                "session": {
+                                    "session_id": "sess-1",
+                                    "cwd": "/tmp/proj",
+                                    "root_conversation_id": "1",
+                                    "active": false
+                                },
+                                "conversations": [
+                                    {"id": "1", "parent": null, "owner": "ownerless", "leaf_entry_id": "4"},
+                                    {"id": "2", "parent": {"conversation_id": "1", "at": "2"}, "owner": "ownerless", "leaf_entry_id": "6"}
+                                ],
+                                "nodes": [
+                                    {"id": "1", "parent_id": null, "conversation_id": "1", "kind": "user", "preview": "Root", "has_text": true},
+                                    {"id": "2", "parent_id": "1", "conversation_id": "1", "kind": "assistant", "preview": "Shared", "has_text": true},
+                                    {"id": "3", "parent_id": "2", "conversation_id": "1", "kind": "user", "preview": "Main step", "has_text": true},
+                                    {"id": "4", "parent_id": "3", "conversation_id": "1", "kind": "assistant", "preview": "Main leaf", "has_text": true},
+                                    {"id": "5", "parent_id": "2", "conversation_id": "2", "kind": "user", "preview": "Sibling prompt", "has_text": true},
+                                    {"id": "6", "parent_id": "5", "conversation_id": "2", "kind": "assistant", "preview": "Sibling leaf", "has_text": true}
+                                ],
+                                "truncated": false
+                            });
+                            write_json_response(&mut stream, "200 OK", &resp.to_string());
+                        } else if head.starts_with("GET /api/v1/sessions/sess-1 ") {
+                            let resp = json!({
+                                "session": {
+                                    "session_id": "sess-1",
+                                    "cwd": "/tmp/proj",
+                                    "root_conversation_id": "1",
+                                    "active": false
+                                },
+                                "conversations": [
+                                    {"id": "1", "parent": null, "owner": "ownerless"},
+                                    {"id": "2", "parent": {"conversation_id": "1", "at": "2"}, "owner": "ownerless"}
+                                ],
+                                "tasks": []
+                            });
+                            write_json_response(&mut stream, "200 OK", &resp.to_string());
+                        } else if head.starts_with("POST /api/v1/sessions/sess-1/commands ") {
+                            let val: Value = serde_json::from_str(&body).unwrap();
+                            posted_srv.lock().unwrap().push(val);
+                            let receipt = json!({
+                                "version": 1,
+                                "request_id": "r-fork",
+                                "seq": 9,
+                                "conversation_id": "3",
+                                "status": "forked"
+                            });
+                            write_json_response(&mut stream, "200 OK", &receipt.to_string());
+                        } else {
+                            write_json_response(&mut stream, "404 Not Found", "{}");
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        load_snapshot(
+            &mut ui,
+            4,
+            vec![
+                user_entry("1", "Root"),
+                assistant_entry("2", "Shared"),
+                user_entry("3", "Main step"),
+                assistant_entry("4", "Main leaf"),
+            ],
+            false,
+        );
+
+        // 1. /branches still opens flat conversation picker
+        ui.command("/branches");
+        wait_job_complete(&mut ui, &mut screen);
+        assert_eq!(
+            ui.picker.as_ref().map(|p| p.kind),
+            Some(PickerKind::Branches)
+        );
+        ui.pick_key(KeyEvent::new(KeyCode::Esc, Mod::NONE), &mut screen);
+        assert!(ui.picker.is_none());
+
+        // 2. /tree opens step TreeSelector focused on current leaf #4
+        ui.command("/tree");
+        wait_job_complete(&mut ui, &mut screen);
+        assert!(ui.tree.is_some());
+        assert_eq!(
+            ui.tree
+                .as_ref()
+                .and_then(|t| t.selector.selected_node())
+                .map(|n| n.id.as_str()),
+            Some("4")
+        );
+
+        // 3. Move down to sibling user step #5 (owned by conversation #2, NOT active #1)
+        ui.tree_key(KeyEvent::new(KeyCode::Down, Mod::NONE), &mut screen);
+        assert_eq!(
+            ui.tree
+                .as_ref()
+                .and_then(|t| t.selector.selected_node())
+                .map(|n| n.id.as_str()),
+            Some("5")
+        );
+        // Enter opens TreeAction picker for user step #5
+        ui.tree_key(KeyEvent::new(KeyCode::Enter, Mod::NONE), &mut screen);
+        assert!(ui.tree.is_none());
+        assert_eq!(
+            ui.picker.as_ref().map(|p| p.kind),
+            Some(PickerKind::TreeAction)
+        );
+        // Move down to "Branch after #5 (keep prompt, new conversation)" and confirm
+        ui.pick_key(KeyEvent::new(KeyCode::Down, Mod::NONE), &mut screen);
+        ui.pick_key(KeyEvent::new(KeyCode::Enter, Mod::NONE), &mut screen);
+        wait_job_complete(&mut ui, &mut screen);
+
+        // Verify fork command targeted conversation_id = 2 (owner of #5), not active #1!
+        let cmds = posted.lock().unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0]["command"], "fork");
+        assert_eq!(cmds[0]["conversation_id"], 2);
+        assert_eq!(cmds[0]["args"]["at_entry_id"], 5);
+        assert_eq!(ui.target.cid, "3");
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(ui);
+        let _ = handle.join();
     }
 }

@@ -2,7 +2,7 @@ use crate::cli::generate_request_id;
 use crate::client::{ClientError, DaemonClient, LoginProvider};
 use crate::protocol::{
     CommandEnvelope, CommandReceipt, CreateSessionRequest, CreateSessionResponse,
-    EntriesPageResponse, SessionParent, SessionSummary,
+    EntriesPageResponse, SessionParent, SessionSummary, SessionTreeResponse,
 };
 use crate::render::sanitize_single_line;
 use serde_json::{json, Map, Value};
@@ -84,6 +84,7 @@ pub enum Effect {
     ActivateAccount(String),
     AddAccount(String),
     Branches,
+    Tree,
     Earlier(String),
     Attach(String),
     AttachConversation {
@@ -96,6 +97,10 @@ pub enum Effect {
         cwd: String,
     },
     Fork(u64),
+    ForkFrom {
+        cid: u64,
+        at_entry_id: u64,
+    },
     Configure(String, String),
     Abort,
     WorkspaceWait {
@@ -149,6 +154,7 @@ pub enum Reply {
         receipt: CommandReceipt,
     },
     Menu(String, Vec<(String, String)>),
+    Tree(Box<SessionTreeResponse>),
     Page(EntriesPageResponse),
     Target(Target),
     Message(String),
@@ -447,6 +453,16 @@ pub fn execute(
             Ok(Reply::Menu("branches".to_string(), choices))
         }
 
+        Effect::Tree => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot load session tree: missing session_id".to_string());
+            }
+            let tree = client
+                .get_session_tree(&target.sid)
+                .map_err(|e| format_client_error(&e))?;
+            Ok(Reply::Tree(Box::new(tree)))
+        }
+
         Effect::Earlier(cursor) => {
             if target.sid.trim().is_empty() || target.cid.trim().is_empty() {
                 return Err(
@@ -492,19 +508,17 @@ pub fn execute(
                 return Err("cannot fork: missing session_id".to_string());
             }
             let cid_num = parse_cid(&target.cid)?;
-            let envelope = CommandEnvelope::fork(generate_request_id(), cid_num, at_entry_id);
-            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
-            let new_cid = receipt
-                .conversation_id
-                .filter(|c| !c.trim().is_empty())
-                .ok_or_else(|| "fork receipt missing conversation_id".to_string())?;
-            Ok(Reply::Target(Target {
-                sid: target.sid.clone(),
-                cid: new_cid,
-                cwd: target.cwd.clone(),
-                env_id: target.env_id.clone(),
-                labels: target.labels.clone(),
-            }))
+            execute_fork(client, target, cid_num, at_entry_id)
+        }
+
+        Effect::ForkFrom { cid, at_entry_id } => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot fork: missing session_id".to_string());
+            }
+            if cid == 0 {
+                return Err("invalid conversation_id '0'".to_string());
+            }
+            execute_fork(client, target, cid, at_entry_id)
         }
 
         Effect::Configure(key, val) => {
@@ -910,6 +924,27 @@ pub fn execute(
             }))
         }
     }
+}
+
+fn execute_fork(
+    client: &DaemonClient,
+    target: &Target,
+    source_cid: u64,
+    at_entry_id: u64,
+) -> Result<Reply, String> {
+    let envelope = CommandEnvelope::fork(generate_request_id(), source_cid, at_entry_id);
+    let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+    let new_cid = receipt
+        .conversation_id
+        .filter(|c| !c.trim().is_empty())
+        .ok_or_else(|| "fork receipt missing conversation_id".to_string())?;
+    Ok(Reply::Target(Target {
+        sid: target.sid.clone(),
+        cid: new_cid,
+        cwd: target.cwd.clone(),
+        env_id: target.env_id.clone(),
+        labels: target.labels.clone(),
+    }))
 }
 
 fn format_codex_login_choices(providers: &[LoginProvider]) -> Vec<(String, String)> {
@@ -2609,10 +2644,7 @@ mod tests {
                     "work".to_string(),
                     "work  [signed in · busy\\x1b[31m\\nnext]".to_string()
                 ),
-                (
-                    "backup".to_string(),
-                    "backup  [not signed in]".to_string()
-                ),
+                ("backup".to_string(), "backup  [not signed in]".to_string()),
             ]
         );
     }
