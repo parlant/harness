@@ -529,7 +529,16 @@ defmodule HSetup.Installer do
       hi = Path.join(current_link, "bin/hi")
       launcher = Path.join(current_link, "bin/h-daemon")
 
-      case System.cmd(hi, ["daemon", "install-service", "--launcher", launcher],
+      args =
+        case System.cmd(hi, ["daemon", "check-service", "--data-dir", data_dir],
+               env: [{"H_DATA_DIR", data_dir}],
+               stderr_to_stdout: true
+             ) do
+          {_, 0} -> ["daemon", "restart-service"]
+          _ -> ["daemon", "install-service", "--launcher", launcher]
+        end
+
+      case System.cmd(hi, args,
              env: [{"H_DATA_DIR", data_dir}],
              stderr_to_stdout: true
            ) do
@@ -538,7 +547,7 @@ defmodule HSetup.Installer do
           :ok
 
         {out, code} ->
-          {:error, "hi daemon install-service exited #{code}: #{String.trim(out)}"}
+          {:error, "hi #{Enum.join(args, " ")} exited #{code}: #{String.trim(out)}"}
       end
     end
   end
@@ -557,7 +566,8 @@ defmodule HSetup.Installer do
          :ok <- File.write(unit_path, systemd_unit_text(launcher, data_dir)),
          :ok <- File.chmod(unit_path, 0o600),
          :ok <- run_systemctl(["--user", "daemon-reload"]),
-         :ok <- run_systemctl(["--user", "enable", "--now", "harness-daemon.service"]) do
+         :ok <- run_systemctl(["--user", "enable", "harness-daemon.service"]),
+         :ok <- run_systemctl(["--user", "restart", "harness-daemon.service"]) do
       log.("Installed systemd user service: #{unit_path}")
       :ok
     end
@@ -583,6 +593,7 @@ defmodule HSetup.Installer do
     WorkingDirectory=#{data_dir}
     Restart=on-failure
     RestartSec=5
+    TimeoutStopSec=300
 
     [Install]
     WantedBy=default.target

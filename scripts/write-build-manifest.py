@@ -30,7 +30,7 @@ def detect_target() -> str:
 
 def read_mix_version(mix_exs: Path) -> str:
     text = mix_exs.read_text(encoding="utf-8")
-    match = re.search(r'version:\s*"([^"]+)"', text)
+    match = re.search(r'(?:@version\s+|version:\s*)"([^"]+)"', text)
     if not match:
         raise SystemExit(f"Could not parse version from {mix_exs}")
     return match.group(1)

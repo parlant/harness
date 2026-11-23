@@ -269,13 +269,20 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func installCommandLineTools() {
         let binDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin", isDirectory: true)
+            .appendingPathComponent(".bin", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
             for (name, target) in [("hi", hiPath), ("hi-import", hiImportPath)] {
                 let linkURL = binDir.appendingPathComponent(name)
-                if FileManager.default.fileExists(atPath: linkURL.path)
-                    || (try? FileManager.default.attributesOfItem(atPath: linkURL.path)) != nil {
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: linkURL.path) {
+                    let fileType = attrs[.type] as? FileAttributeType
+                    if fileType != .typeSymbolicLink {
+                        presentAlert(
+                            title: "Refusing to overwrite existing file",
+                            message: "\(linkURL.path) already exists and is not a symbolic link."
+                        )
+                        return
+                    }
                     try FileManager.default.removeItem(at: linkURL)
                 }
                 try FileManager.default.createSymbolicLink(atPath: linkURL.path, withDestinationPath: target)

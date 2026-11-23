@@ -2,7 +2,36 @@
 
 H is a local Elixir/OTP daemon for coding-agent sessions. A session can branch without copying its transcript. The Phoenix LiveView app and native terminal client can work on the same conversation; disconnecting one does not stop a run.
 
-## Start here
+## Install a release
+
+Prebuilt signed releases are published for **macOS (`darwin-arm64`)** and **Linux (`linux-arm64`, `linux-x86_64`)** on [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases) (mirrored at [github.com/parlant/harness](https://github.com/parlant/harness)). Every release embeds a `BUILD_MANIFEST.json` tied to its exact Git commit and is signed with OpenSSH (`packaging/keys/release-signers`).
+
+### Shell installer (`macOS` and `Linux`)
+
+Review [`scripts/install.sh`](scripts/install.sh) (also served at `/install.sh` on the project website), then run:
+
+```sh
+curl -fsSL https://gitlab.com/parlant-co/harness/-/raw/main/scripts/install.sh | sh -s -- --service
+```
+
+The script verifies `SHA256SUMS.sig` with `ssh-keygen -Y verify`, checks the archive SHA-256, installs the bundle under `~/.local/opt/harness/current`, symlinks `hi` and `hi-import` into `~/.bin` (override with `--bin-dir`), and optionally registers a per-user macOS LaunchAgent or Linux `systemd --user` service (`--service`).
+
+### Elixir / Hex archive (`mix h.setup`)
+
+If Elixir and Mix are already installed, install the zero-dependency `h_setup` archive and run `mix h.setup`:
+
+```sh
+mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
+mix h.setup --service
+```
+
+Once published on Hex.pm, `mix archive.install hex h_setup` installs the same task.
+
+### macOS application bundle (`H.app`)
+
+On macOS (`arm64`), download `H-v<version>-darwin-arm64.dmg` from the [latest release](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest), drag **`H.app`** to `/Applications`, and open it. `H.app` starts its embedded daemon on `~/.local/share/h`, opens the web workbench at `http://127.0.0.1:4200/inbox`, and provides `[H]` menu-bar actions to copy your owner sign-in token, link `hi` into `~/.bin`, or cooperatively drain and restart the daemon.
+
+## Build from source
 
 Development target: Elixir 1.20 / OTP 29, plus Rust for `clients/tui` and Node/npm to build the Monaco editor assets.
 
@@ -67,8 +96,8 @@ The installer puts `hi` in
 This installs a versioned bundle and a per-user macOS service. `hi` resolves
 its sibling `h-daemon`; `H_DAEMON_BIN` or `--launcher` can override
 it. On macOS, `hi daemon install-service` registers a per-user LaunchAgent.
-Use `mix h.build` for a development build of all three applications. See
-[local daemon management](docs/hi/management.md) for idle-only restarts and
+Use `mix h.build` for a development build of all three applications. On shutdown (`hi daemon stop`, `restart`, `restart-service`, `mix h.install`, or `SIGTERM`), the daemon cooperatively drains open tools and provider streams without starting new tools or turns, then resumes active sessions on next boot. See
+[local daemon management](docs/hi/management.md) for cooperative restarts, `--idle-only` guards, and
 resuming the same conversation with `/restart-ui`.
 
 Import pi transcripts as read-only sessions with `hi import --harness pi`.

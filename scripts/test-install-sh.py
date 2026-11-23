@@ -269,10 +269,12 @@ def main() -> int:
             unit_text = unit_file.read_text()
             assert f'ExecStart="{linux_prefix}/current/bin/h-daemon" --data-dir "{linux_data}"' in unit_text
             assert "Restart=on-failure" in unit_text
+            assert "TimeoutStopSec=300" in unit_text
             sc_calls = systemctl_log.read_text().splitlines()
             assert sc_calls == [
                 "--user daemon-reload",
-                "--user enable --now harness-daemon.service",
+                "--user enable harness-daemon.service",
+                "--user restart harness-daemon.service",
             ]
         finally:
             server.shutdown()

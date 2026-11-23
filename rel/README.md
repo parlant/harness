@@ -31,9 +31,12 @@ trusted, encrypted networks; these listeners serve plain HTTP.
 
 On macOS, `bin/hi daemon install-service` installs a per-user LaunchAgent. Move
 the bundle to a stable path before installing the service. `daemon restart-service` and
-`daemon uninstall-service` manage that job. The job starts at login and after
-abnormal exits. `daemon start-service` starts it after an intentional stop. `daemon restart` is for a standalone
-foreground daemon and refuses to stop a busy instance.
+`daemon uninstall-service` cooperatively drain in-flight work before stopping that job (pass `--idle-only` to refuse when busy). The job starts at login and after
+abnormal exits. `daemon start-service` starts it after an intentional stop. `daemon restart` restarts a standalone
+foreground daemon after cooperative drain.
+
+`BUILD_MANIFEST.json` records the source commit, version, target architecture,
+and bundled OTP/Elixir versions for this build.
 
 `extensions/multicodex` is an optional artifact; it is not enabled by the
 bundle. Existing configurations are left intact. `bin/hi daemon start

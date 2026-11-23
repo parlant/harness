@@ -1,7 +1,7 @@
 ---
 layout: doc
 title: 'Set up H'
-description: 'Build a native bundle or run one development server, then connect both clients to the same store.'
+description: 'Install a signed release via shell script, Mix archive, or macOS app bundle, or build from source.'
 lang: en
 permalink: /docs/setup/
 ---
@@ -10,9 +10,35 @@ Choose **one** of the server options below. Phoenix already runs the daemon in i
 * Contents
 {:toc}
 
-## Build a bundle (terminal and web)
+## Install a signed release
 
-These source build instructions assume you already have access to the [H source checkout on GitLab](https://gitlab.com/parlant-co/harness/-/blob/main/README.md); anonymous requests currently return 404. Start at the repository root on macOS or Linux. Building requires Elixir 1.20 / Erlang/OTP 29, Rust with Cargo, Node with npm for the editor assets, and Python 3 for packaging and smoke checks. The resulting bundle targets the build machine's OS and architecture. Keep the entire directory together; running it does not require Mix, Node or Cargo.
+Prebuilt releases are published for **macOS (`darwin-arm64`)** and **Linux (`linux-arm64`, `linux-x86_64`)** on [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases) and mirrored on [GitHub](https://github.com/parlant/harness). Each release archive embeds a `BUILD_MANIFEST.json` tied to its source commit and is signed with OpenSSH (`packaging/keys/release-signers`).
+
+- **Shell installer**: review the [short POSIX installer script](/install.sh), then run it to verify the OpenSSH signature and SHA-256 digest, unpack `~/.local/opt/harness/current`, link `hi` and `hi-import` into `~/.bin` (override with `--bin-dir`), and optionally register a per-user macOS LaunchAgent or Linux `systemd --user` service (`--service`):
+
+```sh
+curl -fsSL https://gitlab.com/parlant-co/harness/-/raw/main/scripts/install.sh | sh -s -- --service
+```
+
+- **Local Mix / Hex archive**: if Elixir and Mix are on your machine, install the zero-dependency `h_setup` archive (or `mix archive.install hex h_setup` once published on Hex.pm) and run `mix h.setup`:
+
+```sh
+mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
+mix h.setup --service
+```
+
+- **macOS application bundle (`H.app`)**: download `H-v<version>-darwin-arm64.dmg` from the [latest release](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest), drag `H.app` to `/Applications`, and open it. `H.app` starts its embedded daemon on `~/.local/share/h`, opens `http://127.0.0.1:4200/inbox`, and exposes menu-bar controls to copy the owner sign-in token, link `hi` into `~/.bin`, or cooperatively drain and restart the daemon.
+
+To verify a downloaded release manually before extracting, check `SHA256SUMS.sig` against [`packaging/keys/release-signers`](https://gitlab.com/parlant-co/harness/-/blob/main/packaging/keys/release-signers):
+
+```sh
+ssh-keygen -Y verify -f release-signers -I l.rieder@gmail.com -n file -s SHA256SUMS.sig < SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+```
+
+## Build a bundle from source (terminal and web)
+
+Start at the [H source checkout on GitLab](https://gitlab.com/parlant-co/harness) (mirrored on [GitHub](https://github.com/parlant/harness)) on macOS or Linux. Building requires Elixir 1.20 / Erlang/OTP 29, Rust with Cargo, Node with npm for the editor assets, and Python 3 for packaging and smoke checks. The resulting bundle targets the build machine's OS and architecture. Keep the entire directory together; running it does not require Mix, Node or Cargo.
 
 ```sh
 mix h.build --release

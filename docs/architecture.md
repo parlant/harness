@@ -56,14 +56,8 @@ endpoint can receive an existing provider's key.
 
 ## Planned shutdown
 
-The standalone launcher accepts an owner-authenticated, idle-only shutdown.
-The boot process tracks command admission; closing the gate fences new writes
-at both the daemon and session coordinator. Shutdown is refused during an
-admitted mutation or any known unfinished session work. The launcher stops its
-own instance in supervision order; the caller does not signal an OS PID.
-Client reexec restores terminal modes and attaches with the same session and
-conversation IDs. Neither mechanism changes how crash recovery treats external
-effects.
+The standalone launcher supports both cooperative draining shutdown (the default for `hi daemon stop`, `restart`, `restart-service`, `mix h.install`, and OS `SIGTERM`) and idle-only shutdown (`--idle-only` or `{"mode":"idle"}`).
+`H.Daemon.Boot` tracks command admission; closing the gate fences new writes at both the daemon and session coordinator. In cooperative drain mode (`{"mode":"drain"}` or `SIGTERM` via `H.Daemon.SignalHandler`), in-flight tool workers, open model/compaction streams, admitted `user_shell` commands, and active account token refreshes run to completion and commit their results, while new tool spawns, subsequent generation turns, retry wake timers, and workspace-wait handoffs remain parked as durable `pending`, `sleeping`, or `waiting` checkpoints. Once active workers reach zero, the daemon closes open SSE streams, stops its own instance in supervision order, and exits `0` without any caller signaling an OS PID from a manifest. On next startup, `H.Daemon.recover_active_sessions/1` resumes all active sessions from their persisted turn boundaries. Client reexec restores terminal modes and attaches with the same session and conversation IDs. Crash recovery for unexpected termination continues to treat unsafe interrupted effects without replay.
 
 ## Workspace boundary
 

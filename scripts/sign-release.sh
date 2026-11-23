@@ -80,7 +80,7 @@ git_commit = os.environ.get("H_GIT_COMMIT", "").strip() or git_out("rev-parse", 
 git_tree = os.environ.get("H_GIT_TREE", "").strip() or git_out("rev-parse", f"{git_commit}^{{tree}}") if git_commit else ""
 git_tag = os.environ.get("H_GIT_TAG", "").strip() or git_out("describe", "--tags", "--exact-match")
 
-mix_match = re.search(r'version:\s*"([^"]+)"', (root / "mix.exs").read_text(encoding="utf-8"))
+mix_match = re.search(r'(?:@version\s+|version:\s*)"([^"]+)"', (root / "mix.exs").read_text(encoding="utf-8"))
 mix_version = mix_match.group(1) if mix_match else ""
 version = os.environ.get("H_RELEASE_VERSION", "").strip() or mix_version
 

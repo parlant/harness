@@ -102,14 +102,18 @@ printf 'Installed %s -> %s\n' "$RELEASE_ID" "$CURRENT"
 if [ "$INSTALL_SERVICE" = 1 ]; then
   mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR"
   if [ "$OS" = "darwin" ]; then
-    H_DATA_DIR="$DATA_DIR" "$CURRENT/bin/hi" daemon install-service --launcher "$CURRENT/bin/h-daemon"
+    if "$CURRENT/bin/hi" daemon check-service --data-dir "$DATA_DIR" >/dev/null 2>&1; then
+      H_DATA_DIR="$DATA_DIR" "$CURRENT/bin/hi" daemon restart-service
+    else
+      H_DATA_DIR="$DATA_DIR" "$CURRENT/bin/hi" daemon install-service --launcher "$CURRENT/bin/h-daemon"
+    fi
   else
     UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
     mkdir -p "$UNIT_DIR"
-    printf '[Unit]\nDescription=Harness (H) Daemon\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart="%s" --data-dir "%s"\nWorkingDirectory=%s\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n' \
+    printf '[Unit]\nDescription=Harness (H) Daemon\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart="%s" --data-dir "%s"\nWorkingDirectory=%s\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=300\n\n[Install]\nWantedBy=default.target\n' \
       "$CURRENT/bin/h-daemon" "$DATA_DIR" "$DATA_DIR" > "$UNIT_DIR/harness-daemon.service"
     chmod 600 "$UNIT_DIR/harness-daemon.service"
-    systemctl --user daemon-reload && systemctl --user enable --now harness-daemon.service
+    systemctl --user daemon-reload && systemctl --user enable harness-daemon.service && systemctl --user restart harness-daemon.service
   fi
 fi
 case ":${PATH:-}:" in *":$BIN_DIR:"*) ;; *) printf 'Add %s to PATH in your shell profile, then run: hi\n' "$BIN_DIR" ;; esac

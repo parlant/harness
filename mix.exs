@@ -1,16 +1,34 @@
 defmodule H.MixProject do
   use Mix.Project
 
+  @version "0.1.0"
+  @source_url "https://gitlab.com/parlant-co/harness"
+
   def project do
     [
       app: :harness,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: [test: "test --no-start"],
       releases: [harness: [include_erts: true]],
+      description: "Local Elixir/OTP coding-agent daemon with durable branched sessions",
+      source_url: @source_url,
+      homepage_url: @source_url,
+      package: package(),
       deps: deps()
+    ]
+  end
+
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{
+        "GitLab" => @source_url,
+        "GitHub" => "https://github.com/parlant/harness"
+      },
+      files: ~w(lib .formatter.exs mix.exs README.md LICENSE)
     ]
   end
 

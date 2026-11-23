@@ -263,10 +263,12 @@ defmodule HSetup.SetupTaskTest do
              ~s(ExecStart="#{Path.join(prefix, "current/bin/h-daemon")}" --data-dir "#{data_dir}")
 
     assert unit_text =~ "Restart=on-failure"
+    assert unit_text =~ "TimeoutStopSec=300"
 
     assert File.read!(log_file) |> String.split("\n", trim: true) == [
              "--user daemon-reload",
-             "--user enable --now harness-daemon.service"
+             "--user enable harness-daemon.service",
+             "--user restart harness-daemon.service"
            ]
   end
 

@@ -31,7 +31,7 @@ When a terminal disconnects, a worker exits or someone opens a branch, different
 
 One instance holds the store lock. `H.Catalog` lists workspace summaries without waking every coordinator. `H.Storage.File` keeps per-session CRC32-framed commits and rename-based snapshots; it handles a torn final frame. The in-memory backend does not survive VM exit.
 
-On startup, H reconciles stored checkpoints. Safe interrupted tools such as `read` can run again. Unsafe `write`, `edit` and `bash` get an interrupted outcome with any persisted partial output, **not another execution**. The filesystem may already have changed. Check the actual files before asking for another edit. A queued workspace wait is different: intent hasn't entered execution and can requeue for its recorded directory.
+On startup, H reconciles stored checkpoints. Planned shutdowns (`hi daemon stop`, `restart`, `SIGTERM`) cooperatively drain open tool calls and provider responses to a turn boundary so active sessions resume seamlessly on next boot. After an unexpected crash, safe interrupted tools such as `read` can run again, while unsafe `write`, `edit` and `bash` get an interrupted outcome with any persisted partial output, **not another execution**. The filesystem may already have changed. Check the actual files before asking for another edit. A queued workspace wait is different: intent hasn't entered execution and can requeue for its recorded directory.
 
 ## Retries belong to the coordinator
 

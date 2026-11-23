@@ -14,7 +14,7 @@ first word, e.g. `hi account list --data-dir /path/to/store`.
 | `hi account use <alias>` | `/account <alias>`, or **Use in stock mode**. |
 | `hi daemon status` | Authenticated liveness check; no session created. Exits nonzero and reports “not running” if the endpoint is missing or refuses the connection. |
 | `hi daemon start [--launcher PATH] [--no-extensions]` | Starts in the foreground. |
-| `hi daemon stop` / `hi daemon restart` | Standalone only; refuses while any session has unfinished work. |
+| `hi daemon stop [--idle-only] [--timeout SECS]` / `hi daemon restart [...]` | Standalone only; cooperatively drains in-flight tools and open responses before stopping (pass `--idle-only` to refuse when busy). |
 | `hi -s ID --conversation CID` | `/restart-ui [path/to/hi]` reexecs into the same session and branch. |
 
 For API-key profiles in the LaunchAgent, use `/key set <provider> <alias>`
@@ -75,9 +75,11 @@ move it aside once it is no longer in use. Older candidates remain under
 For an explicit artifact directory, `mix h.bundle dist/NAME` still requires
 that the target not exist and does not change `dist/harness`.
 
-Activation refuses if the existing service is busy. It validates startup
-configuration, then stops the old daemon via its guarded endpoint, switches
-`current` atomically, and starts the registered service. The old bundle stays
+Activation preflights startup configuration (`--check-config`), then cooperatively
+drains the existing service (`hi daemon stop`, which finishes in-flight tools and
+open responses without starting new tools or turns), waits for launchd to confirm
+process exit, switches `current` atomically, and starts the registered service
+so active sessions automatically resume from their persisted checkpoints. The old bundle stays
 installed. The task prints the previous release ID for explicit rollback:
 `mix h.install --activate <id>`. A readiness failure is reported, not forcibly
 rolled back; inspect the daemon log before deciding whether to switch back.
@@ -121,16 +123,19 @@ position or unsaved local drafts; it refuses to restart while a draft,
 attachment, ambiguous submission, or client command still needs attention.
 
 On restart the candidate validates startup configuration before the old daemon
-is asked to stop. The old daemon fences new commands only after admission is
-clear, checks live sessions and catalog work, and refuses if busy. On success
-it exits through OTP shutdown. The client waits for its listener to close
-and its store lock to be released before launching the replacement with the
-**same** store; it never kills a PID
-from a manifest. The preflight is not a full boot rehearsal of the live store
-or an automatic rollback. Keep the prior bundle; if startup fails, start the
-known-good launcher again after correcting the issue. An older standalone
-launcher or an embedded Phoenix VM does not support this operation. For the
-first upgrade, stop that daemon manually once after work finishes.
+is asked to stop. By default, the old daemon closes command admission and
+cooperatively drains in-flight workers (running tools, open provider streams,
+and active token refreshes) without spawning subsequent tools or turns; pass
+`--idle-only` to refuse immediately when busy. Once active workers finish, it
+exits through OTP shutdown (normal `SIGTERM` follows the same cooperative drain).
+The client waits for its listener to close and its store lock to be released
+before launching the replacement with the **same** store, where active sessions
+resume automatically; it never kills a PID from a manifest. The preflight is not
+a full boot rehearsal of the live store or an automatic rollback. Keep the prior
+bundle; if startup fails, start the known-good launcher again after correcting
+the issue. An older standalone launcher or an embedded Phoenix VM does not
+support this operation. For the first upgrade from an embedded server, stop it
+manually once after work finishes.
 
 An autonomous *restart later* request from an agent is not implemented. It
 would need an out-of-process supervisor to own the handoff, readiness check
@@ -194,13 +199,34 @@ network such as a private VPN; don't expose these ports to the internet.
 For a source checkout without the bundle, use `hi daemon start --launcher
 "$PWD/bin/h-daemon"` after `mix compile`.
 
-## GitLab artifact
+## Releases, signing, and GitLab CI
 
-The optional manual `bundle` job in `.gitlab-ci.yml` runs `mix h.bundle` and
-retains the native output as an artifact. Assign the `h-native` tag to a runner
-with the build tools installed; its OS and architecture determine the artifact.
-It does not deploy or restart any daemon. The job has not been run against a
-GitLab instance here.
+Prebuilt signed releases target `darwin-arm64`, `linux-arm64`, and `linux-x86_64`:
+
+- **Shell installer (`scripts/install.sh`, hosted at `/install.sh`)**: verifies
+  `SHA256SUMS.sig` with `ssh-keygen -Y verify` against `packaging/keys/release-signers`,
+  verifies the archive SHA-256, extracts to `~/.local/opt/harness/releases/<id>`,
+  switches `current` atomically, and links `hi` and `hi-import` into `~/.bin`
+  (with optional `--service` for macOS LaunchAgent or Linux `systemd --user`).
+- **Mix archive installer (`installer/`, `h_setup`)**: zero-dependency Mix
+  archive (`mix archive.install hex h_setup` or `mix archive.install <url>/h_setup.ez`)
+  providing `mix h.setup`, which verifies the same Ed25519 OpenSSH signature and
+  SHA-256 in pure Erlang/OTP `:crypto`.
+- **macOS application bundle (`H.app`, packaged as `.dmg` and `.app.zip`)**:
+  built by `scripts/build-macos-app.sh` from a tested `darwin-arm64` bundle,
+  embedding `Contents/Resources/harness` with a menu-bar controller for web UI
+  launch, owner token copy, CLI linking, and cooperative daemon restart.
+- **Multi-arch Linux builds (`Dockerfile.release`, `scripts/build-linux-bundles.sh`)**:
+  uses `docker buildx` on a glibc 2.35 baseline, vendors `libcrypto.so.3` and
+  `libtinfo.so.6` into `native/` with relative `$ORIGIN` `RUNPATH` (leaving host
+  `LD_LIBRARY_PATH` untouched), runs `scripts/smoke-bundle.py`, and verifies
+  artifacts in clean Debian runtime containers.
+- **GitLab CI (`.gitlab-ci.yml`)**: runs Elixir, Rust, installer, and website
+  checks on every push, builds native `linux-x86_64`, `linux-arm64`,
+  `darwin-arm64`, and `h_setup.ez` release artifacts on `v*` tags (or manually on
+  branches), signs and verifies `SHA256SUMS` + `release-manifest.json`, and
+  publishes to GitLab Releases (plus optional GitHub Release mirroring to
+  `parlant/harness`).
 
 ## macOS per-user service
 
@@ -215,9 +241,9 @@ hi daemon restart-service
 hi daemon uninstall-service
 ```
 
-`restart-service` uses guarded shutdown before asking launchd to start the
-registered executable again. It does not change the registered bundle path.
-Uninstall also refuses to stop a busy daemon. Stop any manually started daemon first; `hi` does not take over or signal a PID from a manifest. The service uses
+`restart-service` and `uninstall-service` cooperatively drain in-flight work
+before stopping the service (pass `--idle-only` to refuse when busy) and wait for
+`launchctl print` to confirm process exit before kickstarting or unloading. Stop any manually started daemon first; `hi` does not take over or signal a PID from a manifest. The service uses
 that user's `~/Library/LaunchAgents`, runs at login and after abnormal exits, and writes a private log to
 `<data_dir>/h-daemon.log`. It captures absolute PATH entries for the launcher,
 not credential variables or build overrides from the calling shell. The data

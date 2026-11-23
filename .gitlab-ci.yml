@@ -17,10 +17,14 @@ stages:
 variables:
   ELIXIR_IMAGE: "hexpm/elixir:1.20.5-erlang-29.1.2-ubuntu-jammy-20261110"
   RUST_IMAGE: "rust:1-bookworm"
+  JEKYLL_BUILD_IMAGE: "registry.gitlab.com/parlant-co/jekyll-website/jekyll-build@sha256:fbc3170424a8a0f60adb61c9b036f1392d9372ff1f8fac4601c7ae8ee47511a3"
   RUST_VERSION: "stable"
   NODE_MAJOR: "22"
   MIX_ENV: "test"
   CARGO_TERM_COLOR: "always"
+  BUNDLE_FROZEN: "true"
+  BUNDLE_JOBS: "4"
+  BUNDLE_RETRY: "3"
 
 workflow:
   rules:
@@ -49,6 +53,11 @@ test:elixir:
       mix deps.get --check-locked
       mix compile --warnings-as-errors
       mix test
+    - |
+      cd installer
+      mix format --check-formatted
+      mix compile --warnings-as-errors
+      mix test
 
 test:rust:
   stage: test
@@ -61,14 +70,20 @@ test:rust:
 test:website:
   stage: test
   tags: [saas-linux-medium-amd64]
-  image: ruby:3.3-bookworm
+  image: ${JEKYLL_BUILD_IMAGE}
   rules:
     - exists:
         - website/scripts/verify_site.rb
       when: on_success
     - when: never
   script:
-    - cd website && ruby scripts/verify_site.rb
+    - python3 scripts/test-install-sh.py
+    - diff -u scripts/install.sh website/install.sh
+    - |
+      cd website
+      npm ci --prefer-offline --ignore-scripts --no-audit --fund=false
+      bundle check || bundle install
+      make verify
 
 # ---------------------------------------------------------------------------
 # Stage 2: Native Multi-Platform Bundles
@@ -117,6 +132,29 @@ bundle:linux-x86_64:
   tags: [saas-linux-medium-amd64]
   variables:
     H_RELEASE_TARGET: "linux-x86_64"
+
+bundle:installer-archive:
+  stage: build
+  tags: [saas-linux-medium-amd64]
+  image: ${ELIXIR_IMAGE}
+  extends: .bundle_rules
+  variables:
+    MIX_ENV: "prod"
+  before_script:
+    - mix local.hex --force
+    - mix local.rebar --force
+  script:
+    - mkdir -p dist/release
+    - |
+      cd installer
+      mix compile --warnings-as-errors
+      mix archive.build --force -o ../dist/release/h_setup.ez
+      cp ../dist/release/h_setup.ez "../dist/release/h_setup-v$(mix run -e 'IO.write(Mix.Project.config()[:version])').ez"
+  artifacts:
+    name: "h-setup-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - dist/release/h_setup*.ez
+    expire_in: 14 days
 
 bundle:linux-arm64:
   extends: .linux_bundle_template
@@ -179,6 +217,8 @@ release:publish:
       artifacts: true
     - job: bundle:darwin-arm64
       artifacts: true
+    - job: bundle:installer-archive
+      artifacts: true
   rules:
     - if: $CI_COMMIT_TAG =~ /^v/
   before_script:
@@ -219,7 +259,7 @@ release:publish:
 pages:
   stage: pages
   tags: [saas-linux-medium-amd64]
-  image: ruby:3.3-bookworm
+  image: ${JEKYLL_BUILD_IMAGE}
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       exists:
@@ -227,9 +267,12 @@ pages:
       when: on_success
     - when: never
   script:
-    - cd website && ruby scripts/verify_site.rb
-    - mkdir -p ../public
-    - cp -a _site/. ../public/ 2>/dev/null || cp -a public/. ../public/ 2>/dev/null || cp -a . ../public/
+    - |
+      cd website
+      npm ci --prefer-offline --ignore-scripts --no-audit --fund=false
+      bundle check || bundle install
+      make build DESTINATION="../public"
+      ruby scripts/verify_site.rb ../public
   artifacts:
     paths:
       - public
