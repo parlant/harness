@@ -1,6 +1,33 @@
 defmodule H do
   @moduledoc """
-  Top-level entry point for `:harness` (`H`).
+  Elixir/OTP core for H (`hiness` on Hex, `:harness` OTP application).
+
+  H runs coding-agent sessions in a supervised local daemon with branched
+  conversations, file-backed WAL commits, and synchronized terminal (`hi`) and
+  browser (`hiweb`) clients.
+
+  ## Start or embed the daemon
+
+    * Call `H.serve/1` to start a standalone daemon instance with loopback HTTP,
+      a private Unix domain socket (`api.sock`), and owner-token authentication.
+    * Configure `config :harness, data_dir: "/path/to/store"` to start the
+      supervised daemon instance inside an existing OTP application (see
+      `H.Application`) and call `H.Daemon` directly in the same BEAM VM.
+    * Implement `H.Extension`, `H.Harness`, `H.Tool`, `H.ExecutionEnv`,
+      `H.Storage`, or `H.Provider` to extend H at startup.
+
+  ## Operator manual and installation
+
+  This HexDocs package documents the Elixir module API, typespecs, and behaviour
+  contracts. Read the operator manual, walkthroughs, and signed binary release
+  guides on [hiness.dev](https://hiness.dev):
+
+    * [Install H (`hi`, `h-daemon`, `H.app`)](https://hiness.dev/docs/setup/)
+    * [Architecture and recovery](https://hiness.dev/docs/architecture/)
+    * [Local HTTP and SSE protocol](https://hiness.dev/docs/protocol/)
+    * [Write a startup extension](https://hiness.dev/docs/extensions/)
+    * [Build a custom client](https://hiness.dev/docs/guides/build-a-client/)
+    * [Manage the background daemon](https://hiness.dev/docs/daemon/)
   """
 
   @max_unix_socket_bytes 100
@@ -29,9 +56,10 @@ defmodule H do
     * `:port` - HTTP port (default `4100`)
     * `:bind_addresses` - IPv4 tuples (default from `<data_dir>/network.json`, or loopback)
     * `:api_socket` - bind local Unix domain socket (default `true`)
+    * `:idle_session_timeout_ms` - unload quiet local file-backed sessions (default `300_000`; `:infinity` disables)
     * `:provider` - `H.Provider` module (default `H.Provider.ReqLLM`)
     * `:provider_config` - map forwarded to provider (default `%{}`)
-    * `:auto_compaction` - scoped input token thresholds (see `docs/protocol.md`)
+    * `:auto_compaction` - scoped input token thresholds (see [Local HTTP and SSE protocol](https://hiness.dev/docs/protocol/))
     * `:environments` - optional map/list of `H.EnvRegistry` specs
     * `:harnesses` - optional trusted `H.Harness` registrations
     * `:no_extensions` - bypass `<data_dir>/extensions.json` and all path packages

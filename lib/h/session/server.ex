@@ -27,6 +27,7 @@ defmodule H.Session.Server do
   }
 
   @max_drain 31
+  @idle_timeout_ms :timer.minutes(5)
 
   # Client API
 
@@ -124,9 +125,17 @@ defmodule H.Session.Server do
       {:ok, store} ->
         case Recovery.init_from_store(store, opts, session_id) do
           {:ok, state, effects} ->
-            state = apply_effects_list(effects, state)
+            state =
+              state
+              |> Map.merge(%{
+                idle_timer: nil,
+                idle_exit: opts[:idle_exit],
+                idle_timeout_ms: idle_timeout(opts, storage_mod)
+              })
+              |> then(&apply_effects_list(effects, &1))
+
             State.report_catalog_active(state)
-            {:ok, state}
+            {:ok, update_idle_timer(state)}
 
           {:error, reason} ->
             Storage.close(store)
@@ -136,10 +145,21 @@ defmodule H.Session.Server do
   end
 
   @impl true
-  def handle_call(:get_detail, _from, state) do
+  def handle_call(probe, from, state)
+      when probe in [:idle, :drained, :active_worker_count, :max_worker_remaining_ms],
+      do: dispatch_call(probe, from, state)
+
+  def handle_call(request, from, state) do
+    case dispatch_call(request, from, cancel_idle_timer(state)) do
+      {:reply, reply, next_state} -> {:reply, reply, update_idle_timer(next_state)}
+      result -> result
+    end
+  end
+
+  defp dispatch_call(:get_detail, _from, state) do
     detail = %{
       session_meta: state.session_meta,
-      seq: state.seq,
+      seq: state.idle_resume_seq || state.seq,
       cwd_exists: State.cwd_available?(state),
       conversations: state.conversations |> Map.values() |> Enum.sort_by(& &1.id),
       tasks: state.tasks |> Map.values() |> Enum.sort_by(& &1.id)
@@ -148,7 +168,7 @@ defmodule H.Session.Server do
     {:reply, {:ok, detail}, state}
   end
 
-  def handle_call(:get_tree, _from, state) do
+  defp dispatch_call(:get_tree, _from, state) do
     case Storage.list_entries(state.store) do
       {:ok, entries, next_store} ->
         {conversations, nodes, truncated} =
@@ -169,14 +189,14 @@ defmodule H.Session.Server do
     end
   end
 
-  def handle_call(:idle, _from, state), do: {:reply, not State.session_active?(state), state}
+  defp dispatch_call(:idle, _from, state), do: {:reply, not State.session_active?(state), state}
 
-  def handle_call(:drained, _from, state), do: {:reply, map_size(state.workers) == 0, state}
+  defp dispatch_call(:drained, _from, state), do: {:reply, map_size(state.workers) == 0, state}
 
-  def handle_call(:active_worker_count, _from, state),
+  defp dispatch_call(:active_worker_count, _from, state),
     do: {:reply, map_size(state.workers), state}
 
-  def handle_call(:max_worker_remaining_ms, _from, state) do
+  defp dispatch_call(:max_worker_remaining_ms, _from, state) do
     now_mono = System.monotonic_time(:millisecond)
 
     remaining =
@@ -192,11 +212,11 @@ defmodule H.Session.Server do
     {:reply, remaining, state}
   end
 
-  def handle_call(:get_seq, _from, state) do
-    {:reply, {:ok, state.seq}, state}
+  defp dispatch_call(:get_seq, _from, state) do
+    {:reply, {:ok, state.idle_resume_seq || state.seq}, state}
   end
 
-  def handle_call({:scan_entries, cid, query}, _from, state) do
+  defp dispatch_call({:scan_entries, cid, query}, _from, state) do
     if Map.has_key?(state.conversations, cid) do
       full_query = Map.put(query, :conversation_id, cid)
 
@@ -212,7 +232,7 @@ defmodule H.Session.Server do
     end
   end
 
-  def handle_call({:snapshot_or_replay, cid, last_event_id}, _from, state) do
+  defp dispatch_call({:snapshot_or_replay, cid, last_event_id}, _from, state) do
     if Map.has_key?(state.conversations, cid) do
       case Stream.snapshot_or_replay(state, cid, last_event_id) do
         {:ok, payload, next_state} -> {:reply, {:ok, payload}, next_state}
@@ -223,7 +243,7 @@ defmodule H.Session.Server do
     end
   end
 
-  def handle_call({:get_submission_outcome, request_id}, _from, state) do
+  defp dispatch_call({:get_submission_outcome, request_id}, _from, state) do
     case Submissions.lookup(state, request_id) do
       {:not_found, next_state} ->
         {:reply, {:error, :not_found}, next_state}
@@ -234,7 +254,7 @@ defmodule H.Session.Server do
     end
   end
 
-  def handle_call({:verify_visible_entry, cid, entry_id}, _from, state) do
+  defp dispatch_call({:verify_visible_entry, cid, entry_id}, _from, state) do
     if Map.has_key?(state.conversations, cid) do
       case State.verify_visible_entry(state, cid, entry_id) do
         {:ok, entry, next_state} ->
@@ -248,19 +268,19 @@ defmodule H.Session.Server do
     end
   end
 
-  def handle_call({:command, cmd}, from, state) do
+  defp dispatch_call({:command, cmd}, from, state) do
     process_with_drain({:command, from, cmd}, state)
   end
 
-  def handle_call({:abort_all, reason}, from, state) do
+  defp dispatch_call({:abort_all, reason}, from, state) do
     process_with_drain({:abort_all, from, reason}, state)
   end
 
-  def handle_call({:seed_entries, cid, entries}, from, state) do
+  defp dispatch_call({:seed_entries, cid, entries}, from, state) do
     process_with_drain({:seed_entries, from, cid, entries}, state)
   end
 
-  def handle_call({:export_branch, cid, at_entry_id}, _from, state) do
+  defp dispatch_call({:export_branch, cid, at_entry_id}, _from, state) do
     if Map.has_key?(state.conversations, cid) do
       case do_export_branch(state, cid, at_entry_id) do
         {:ok, payload, next_state} -> {:reply, {:ok, payload}, next_state}
@@ -305,7 +325,7 @@ defmodule H.Session.Server do
   end
 
   def handle_info({:emit_ephemeral, cid}, state) do
-    {:noreply, Stream.flush_ephemeral_broadcast(state, cid)}
+    {:noreply, state |> Stream.flush_ephemeral_broadcast(cid) |> update_idle_timer()}
   end
 
   def handle_info({:flush_live, cid}, state) do
@@ -330,7 +350,7 @@ defmodule H.Session.Server do
 
   def handle_info({:workspace_lease_granted, token}, state) do
     {effects, state} = WorkspaceWait.granted(token, state)
-    {:noreply, apply_effects_list(effects, state)}
+    {:noreply, effects |> apply_effects_list(state) |> update_idle_timer()}
   end
 
   def handle_info({:workspace_lease_blocked, token, holder, lease_id}, state) do
@@ -348,7 +368,7 @@ defmodule H.Session.Server do
 
       {attempt_id, worker} ->
         if reason in [:normal, :shutdown] do
-          {:noreply, %{state | workers: Map.delete(state.workers, attempt_id)}}
+          {:noreply, update_idle_timer(%{state | workers: Map.delete(state.workers, attempt_id)})}
         else
           process_with_drain({:worker_crashed, worker.task_id, attempt_id, reason}, state)
         end
@@ -357,7 +377,24 @@ defmodule H.Session.Server do
 
   def handle_info(:enter_drain, state) do
     Enum.each(state.wake_timers, fn {_tid, ref} -> Process.cancel_timer(ref) end)
-    {:noreply, %{state | wake_timers: %{}}}
+    {:noreply, cancel_idle_timer(%{state | wake_timers: %{}})}
+  end
+
+  def handle_info({:idle_timeout, token}, %{idle_timer: {_, token}} = state) do
+    state = %{state | idle_timer: nil}
+
+    if unloadable?(state) do
+      case Recovery.checkpoint_idle(state) do
+        {:ok, store} ->
+          :atomics.put(state.idle_exit, 1, 1)
+          {:stop, {:shutdown, :idle_unload}, %{state | store: store}}
+
+        {:error, reason} ->
+          {:stop, {:shutdown, {:storage_failed, reason}}, %{state | storage_failed: true}}
+      end
+    else
+      {:noreply, state}
+    end
   end
 
   def handle_info({:stop_storage_failed, io_err}, state) do
@@ -371,7 +408,8 @@ defmodule H.Session.Server do
     State.terminate_all_workers(state)
     State.release_all_leases(state)
 
-    if Recovery.clean_shutdown_reason?(reason) and not state.storage_failed do
+    if reason != {:shutdown, :idle_unload} and Recovery.clean_shutdown_reason?(reason) and
+         not state.storage_failed do
       Recovery.persist_clean_close(state)
     end
 
@@ -379,11 +417,72 @@ defmodule H.Session.Server do
     :ok
   end
 
+  # Arm only at a committed, quiescent boundary. A tagged message is needed
+  # because a cancelled timer may already be in the mailbox.
+  defp idle_timeout(opts, H.Storage.File) do
+    # A remote/custom execution environment may not be re-bindable when a
+    # viewer returns. Enable eviction only for the standard local host binding.
+    if is_reference(opts[:idle_exit]) and opts[:env_id] == "host" and
+         match?(
+           {mod, _} when mod in [H.ExecutionEnv.Host, H.ExecutionEnv.Local],
+           opts[:execution_env]
+         ) do
+      case Keyword.get(opts, :idle_session_timeout_ms, @idle_timeout_ms) do
+        ms when is_integer(ms) and ms > 0 -> ms
+        :infinity -> nil
+        _ -> raise ArgumentError, "idle_session_timeout_ms must be positive or :infinity"
+      end
+    end
+  end
+
+  defp idle_timeout(_opts, _storage_mod), do: nil
+
+  defp unloadable?(state) do
+    state.idle_timeout_ms != nil and not state.storage_failed and not State.draining?(state) and
+      map_size(state.workers) == 0 and map_size(state.wake_timers) == 0 and
+      map_size(state.subagent_watches) == 0 and MapSet.size(state.wait_watches) == 0 and
+      map_size(state.held_leases) == 0 and map_size(state.workspace_waits) == 0 and
+      not State.session_active?(state) and
+      Enum.all?(state.docs, fn {_cid, docs} -> docs["inbox"] == [] end) and
+      Enum.all?(state.ephemeral, fn {_cid, eph} ->
+        not eph.dirty and eph.pending_ops == [] and is_nil(eph.emit_timer) and
+          is_nil(eph.flush_timer)
+      end)
+  end
+
+  defp update_idle_timer(%{idle_timeout_ms: nil} = state), do: state
+
+  defp update_idle_timer(state) do
+    case {state.idle_timer, unloadable?(state)} do
+      {nil, true} ->
+        token = make_ref()
+        timer = Process.send_after(self(), {:idle_timeout, token}, state.idle_timeout_ms)
+        %{state | idle_timer: {timer, token}}
+
+      {_, false} ->
+        cancel_idle_timer(state)
+
+      _ ->
+        state
+    end
+  end
+
+  defp cancel_idle_timer(%{idle_timer: nil} = state), do: state
+
+  defp cancel_idle_timer(%{idle_timer: {timer, _}} = state) do
+    Process.cancel_timer(timer)
+    %{state | idle_timer: nil}
+  end
+
   # Drain-batch execution loop
 
   defp process_with_drain(first_item, state) do
     items = [first_item | drain_mailbox(@max_drain, [])]
-    run_items(items, state)
+
+    case run_items(items, state) do
+      {:noreply, next_state} -> {:noreply, update_idle_timer(next_state)}
+      result -> result
+    end
   end
 
   defp drain_mailbox(0, acc), do: Enum.reverse(acc)
@@ -440,7 +539,8 @@ defmodule H.Session.Server do
           state_after_accepted =
             Stream.apply_committed_batches(accepted_staged, seqs, %{
               working_state
-              | store: committed_store
+              | store: committed_store,
+                idle_resume_seq: if(stored > 0, do: nil, else: working_state.idle_resume_seq)
             })
 
           if accepted_staged != [] and is_nil(refused) do

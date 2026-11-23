@@ -1,0 +1,13 @@
+{% assign proof = site.data.figures.session %}
+<figure class="session-plate">
+  <div class="session-top"><span>{{ proof.label }}</span><strong>{{ proof.name }}</strong></div>
+  <ol class="session-sequence" role="list">
+    {% for event in proof.steps %}
+    <li>
+      <span class="session-point" aria-hidden="true"></span>
+      <p class="session-event"><span>{{ event.surface }}</span><strong>{{ event.action }}</strong></p>
+    </li>
+    {% endfor %}
+  </ol>
+  <figcaption><strong>{{ proof.outcome }}</strong><span>{{ proof.caption }}</span></figcaption>
+</figure>

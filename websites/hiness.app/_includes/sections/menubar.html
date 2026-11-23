@@ -1,0 +1,27 @@
+{% assign sec = include.section %}
+<section id="{{ sec.id | default: 'menubar' }}" class="manual-section app-menubar-section" aria-labelledby="menubar-heading">
+  <div class="manual-intro">
+    <p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ sec.kicker }}</p>
+    <h2 id="menubar-heading" class="manual-title">{{ sec.title }}</h2>
+    {% if sec.motto %}<p class="royal-motto">{{ sec.motto }}</p>{% endif %}
+    <p>{{ sec.body }}</p>
+    {% if sec.artwork %}
+    <div style="margin-top: 1.4rem; max-width: 19rem;">
+      {% include gallery-card.html artwork=sec.artwork hook=sec.artwork_hook wide=sec.artwork_wide %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="menubar-cards">
+    {% for item in sec.items %}
+    <article class="menubar-card">
+      <div class="menubar-card-head">
+        <span class="manual-folio">0{{ forloop.index }}</span>
+        <h3>{{ item.title | escape }}</h3>
+        {% if item.shortcut %}<kbd>{{ item.shortcut | escape }}</kbd>{% endif %}
+      </div>
+      <p>{{ item.body | escape }}</p>
+      {% if item.code %}<code>{{ item.code | escape }}</code>{% endif %}
+    </article>
+    {% endfor %}
+  </div>
+</section>

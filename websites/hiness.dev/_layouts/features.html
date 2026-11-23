@@ -1,0 +1,20 @@
+---
+layout: default
+---
+<article class="wrap feature-page">
+  <header class="manual-head">
+    {% if page.kicker %}<p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ page.kicker | escape }}</p>{% endif %}
+    <h1>{{ page.title | escape }}</h1>
+    {% if page.lead %}<p>{{ page.lead | escape }}</p>{% endif %}
+  </header>
+  <div class="feature-grid">
+    <div class="prose manual-prose">{{ content }}</div>
+    {% if page.gallery %}
+    <aside class="feature-gallery-rail" aria-label="Curated museum plates">
+      {% for item in page.gallery %}
+        {% include gallery-card.html artwork=item.artwork hook=item.hook wide=item.wide %}
+      {% endfor %}
+    </aside>
+    {% endif %}
+  </div>
+</article>

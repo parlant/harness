@@ -1,6 +1,0 @@
-<header class="masthead"><div class="wrap mast-row">
-  <a class="wordmark" href="{{ '/' | relative_url }}"><img src="{{ '/assets/mark.svg' | relative_url }}" width="32" height="32" alt="{{ include.t.brand }}"><span>{{ include.t.brand_descriptor }}</span></a>
-  <nav aria-label="{{ include.t.navigation }}" class="primary-links">
-    {% for link in site.data.navigation.main %}<a href="{{ link.url | relative_url }}" {% if page.url == link.url %}aria-current="page"{% elsif page.url contains link.url %}aria-current="location"{% endif %}>{{ link.title }}</a>{% endfor %}
-  </nav>
-</div></header>

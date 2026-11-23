@@ -1,0 +1,39 @@
+{% assign sec = include.section %}
+<section id="{{ sec.id | default: 'anatomy' }}" class="houses-section bundle-tree-section" aria-labelledby="anatomy-heading">
+  <div class="houses-header">
+    <div>
+      <p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ sec.kicker }}</p>
+      <h2 id="anatomy-heading" class="manual-title">{{ sec.title }}</h2>
+    </div>
+    <p>{{ sec.body }}</p>
+  </div>
+  <div class="bundle-anatomy-grid">
+    <pre class="bundle-tree-code" aria-label="H.app directory layout"><code>H.app/
+└── Contents/
+    ├── Info.plist              # co.parlant.harness · LSMinimumSystemVersion 14.0 · LSUIElement
+    ├── MacOS/
+    │   └── HApp                # Native Swift / AppKit status-bar supervisor
+    └── Resources/
+        ├── AppIcon.icns        # High-resolution macOS icon set
+        └── harness/            # Self-contained relocatable OTP 29 + Rust bundle
+            ├── BUILD_MANIFEST.json
+            ├── bin/
+            │   ├── h-daemon    # Local OTP coding-agent daemon + hiweb listener
+            │   ├── hi          # Native Rust terminal client
+            │   └── hi-import   # Transcript archive importer
+            ├── erts-*/         # Embedded BEAM runtime (no Homebrew Erlang needed)
+            └── releases/       # Compiled :harness + :h_web release</code></pre>
+    <div class="bundle-pillars">
+      {% for pillar in sec.pillars %}
+      <article class="bundle-pillar">
+        <span class="house-status">{{ pillar.tag | escape }}</span>
+        <h3>{{ pillar.title | escape }}</h3>
+        <p>{{ pillar.body | escape }}</p>
+      </article>
+      {% endfor %}
+      {% if sec.cta %}
+      <a class="manual-secondary" href="{{ sec.cta.url | relative_url }}">{{ sec.cta.label }} <span aria-hidden="true">→</span></a>
+      {% endif %}
+    </div>
+  </div>
+</section>

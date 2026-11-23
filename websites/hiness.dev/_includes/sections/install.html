@@ -1,0 +1,70 @@
+{% assign install = include.section %}
+<section id="{{ install.id | default: 'install' }}" class="manual-section manual-install" aria-labelledby="{{ install.id | default: 'install' }}-heading">
+  <div class="manual-intro">
+    <p class="manual-kicker">{{ install.kicker }}</p>
+    <h2 id="{{ install.id | default: 'install' }}-heading" class="manual-title">{{ install.title }}</h2>
+    <p>{{ install.body }}</p>
+    {% if install.note %}<p class="install-note">{{ install.note }}</p>{% endif %}
+    {% if install.links %}
+    <ul class="principle-links">
+      {% for link in install.links %}
+      <li><a class="manual-secondary" href="{{ link.url | relative_url }}">{{ link.label }} <span aria-hidden="true">→</span></a></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  <div class="install-tabs" data-install-tabs>
+    {% for tab in install.tabs %}
+    <input
+      class="install-radio"
+      type="radio"
+      name="install-method"
+      id="install-tab-{{ tab.id }}"
+      value="{{ tab.id }}"
+      {% if forloop.first %}checked{% endif %}>
+    {% endfor %}
+    <div class="install-tablist" aria-label="{{ install.tablist_label | default: 'Installation methods' }}">
+      {% for tab in install.tabs %}
+      <label class="install-tab" for="install-tab-{{ tab.id }}" data-tab="{{ tab.id }}">
+        <span class="install-tab-name">{{ tab.label | escape }}</span>
+        <span class="install-tab-meta">{{ tab.meta | escape }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    <div class="install-panels">
+      {% for tab in install.tabs %}
+      <div class="install-panel" data-panel="{{ tab.id }}">
+        <div class="install-panel-head">
+          <h3>{{ tab.heading | escape }}</h3>
+          <span class="install-panel-meta">{{ tab.platform | escape }}</span>
+        </div>
+        {% if tab.command %}
+        <pre class="install-code"><code>{{ tab.command | strip | escape }}</code></pre>
+        {% endif %}
+        {% if tab.alt_command %}
+        <p class="install-alt-label">{{ tab.alt_label }}</p>
+        <pre class="install-code"><code>{{ tab.alt_command | strip | escape }}</code></pre>
+        {% endif %}
+        <p class="install-summary">{{ tab.body }}</p>
+        {% if tab.verify %}
+        <p class="install-verify"><strong>Verify:</strong> <code>{{ tab.verify | escape }}</code></p>
+        {% endif %}
+        {% if tab.links %}
+        <ul class="install-panel-links">
+          {% for link in tab.links %}
+          <li>
+            {% assign is_external = link.url | slice: 0, 4 %}
+            {% if is_external == "http" %}
+            <a class="manual-secondary" href="{{ link.url }}">{{ link.label }} <span aria-hidden="true">→</span></a>
+            {% else %}
+            <a class="manual-secondary" href="{{ link.url | relative_url }}">{{ link.label }} <span aria-hidden="true">→</span></a>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>

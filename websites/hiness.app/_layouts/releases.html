@@ -1,0 +1,12 @@
+---
+layout: default
+---
+<article class="wrap single-page releases-page">
+  <p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ page.kicker | default: "Synchronized Royal Ledger · News & Releases" }}</p>
+  <h1>{{ page.title | escape }}</h1>
+  {% if page.lead %}<p class="manual-lead">{{ page.lead | escape }}</p>{% endif %}
+  <div class="prose">
+    {{ content }}
+    {% include release-feed.html %}
+  </div>
+</article>

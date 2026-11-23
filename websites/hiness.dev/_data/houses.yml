@@ -1,0 +1,48 @@
+kicker: Royal Houses / Harness Profiles
+title: Choose the royal house that governs the session.
+body: Each session binds one H.Harness profile at creation and keeps that profile fixed for its lifetime. Start with the built-in coding house, compile the starter extension template, or author a custom BEAM profile for your own domain.
+entries:
+  - house: House of Habsburg
+    status: Built-in default
+    profile_id: coding
+    module: H.Harness.Coding
+    artwork: margarita_khm
+    motto: Full sovereign authority in your checkout
+    tools: read, write, edit, bash, search_history, subagent
+    summary: Ships inside the core daemon. Discovers hierarchical AGENTS.md files through the workspace adapter and enables child subagents while session_depth remains below max_subagent_depth.
+    cta:
+      label: Inspect H.Harness.Coding
+      url: /docs/architecture/
+  - house: House of Bonaparte
+    status: Starter template
+    profile_id: example.greeting.v1
+    module: H.Extension + H.Harness
+    artwork: charlotte_bonaparte
+    motto: Paint your own royal commission
+    tools: Custom H.Tool list + bootstrap_agent/3
+    summary: Copy examples/extension_template, compile a standalone artifact with mix extension.build, and register its path in extensions.json to test startup validation before adding custom tools.
+    cta:
+      label: Build the greeting template
+      url: /docs/extensions/#build-the-greeting-template
+  - house: House of Stuart
+    status: Custom steward profile
+    profile_id: custom.audit.v1
+    module: "@behaviour H.Harness"
+    artwork: charles_i_ngi
+    motto: Read the realm, withhold the seal
+    tools: read, search_history (author-selected)
+    summary: Author a read-only review or triage profile by returning only inspection tools from tools/1 and setting custom system instructions in bootstrap_agent/3.
+    cta:
+      label: Author a harness profile
+      url: /docs/extensions/#author-a-harness-profile
+  - house: House of Wittelsbach
+    status: Embedded OTP profile
+    profile_id: app.domain.v1
+    module: ":harness + H.ExecutionEnv"
+    artwork: louise_hollandine
+    motto: Hold court inside your own BEAM VM
+    tools: Domain tools + custom H.ExecutionEnv
+    summary: Embed the supervised :harness application inside an Elixir release and pair a domain profile with your own workspace boundary, or enable MultiCodex for multi-account quota routing.
+    cta:
+      label: Embed H in an OTP app
+      url: /docs/architecture/#embed-the-core-in-an-otp-application

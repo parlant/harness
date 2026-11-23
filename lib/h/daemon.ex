@@ -4,7 +4,9 @@ defmodule H.Daemon do
   SSE subscriptions, and idempotent commands.
 
   Every function accepts `opts \\ []` so isolated `--no-start` tests and the
-  full `H.HTTP` daemon share the exact same contract.
+  full `H.HTTP` daemon share the exact same contract. Read
+  [Local HTTP and SSE API on hiness.dev](https://hiness.dev/docs/protocol/) for
+  wire formats, idempotent `request_id` retries, and SSE cursor rules.
   """
 
   require Logger
@@ -593,40 +595,40 @@ defmodule H.Daemon do
           {:ok, requested_at_entry_id}
 
         :ok ->
-          case ensure_session_started(parent_entry, opts, nil) do
-            {:ok, server} when server == self() ->
-              {:ok, requested_at_entry_id}
+          call_session(parent_entry, opts, fn server ->
+            cond do
+              server == self() ->
+                {:ok, requested_at_entry_id}
 
-            {:ok, server} ->
-              if is_nil(requested_at_entry_id) do
+              is_nil(requested_at_entry_id) ->
                 case Server.scan_entries(server, parent_cid, %{order: :desc, limit: 1}) do
                   {:ok, %{items: [latest | _]}} ->
                     {:ok, latest.id}
 
-                  {:ok, %{items: []}} ->
-                    {:ok, nil}
-
                   {:error, :not_found} ->
                     {:error, {:bad_request, "parent conversation not found: #{parent_cid}"}}
 
-                  {:error, _} ->
+                  _ ->
                     {:ok, nil}
                 end
-              else
-                case Server.verify_visible_entry(server, parent_cid, requested_at_entry_id) do
-                  {:ok, _entry} ->
-                    {:ok, requested_at_entry_id}
 
+              true ->
+                case Server.verify_visible_entry(server, parent_cid, requested_at_entry_id) do
                   {:error, :not_found} ->
                     {:error, {:bad_request, "parent conversation not found: #{parent_cid}"}}
 
                   {:error, :entry_not_visible} ->
                     {:error, {:bad_request, "parent at_entry_id not visible"}}
-                end
-              end
 
-            {:error, _} ->
-              {:ok, requested_at_entry_id}
+                  _ ->
+                    {:ok, requested_at_entry_id}
+                end
+            end
+          end)
+          |> case do
+            {:error, {:bad_request, _}} = error -> error
+            {:error, _} -> {:ok, requested_at_entry_id}
+            result -> result
           end
       end
     end
@@ -646,8 +648,7 @@ defmodule H.Daemon do
   end
 
   defp session_result(entry, opts, initial_agent) do
-    with {:ok, server} <- ensure_session_started(entry, opts, initial_agent),
-         {:ok, seq} <- Server.get_seq(server) do
+    with {:ok, seq} <- call_session(entry, opts, &Server.get_seq/1, initial_agent: initial_agent) do
       table = Keyword.get(opts, :catalog_table, @default_catalog_table)
 
       latest_entry =
@@ -660,7 +661,7 @@ defmodule H.Daemon do
     end
   end
 
-  @doc "Updates a session’s `needs_attention` flag or `tags` without waking it."
+  @doc "Updates a session's `needs_attention` flag or `tags` without waking it."
   @spec triage_session(String.t(), map(), keyword()) ::
           {:ok, %{session: map()}}
           | {:error, :not_found | {:bad_request, String.t()} | term()}
@@ -715,22 +716,8 @@ defmodule H.Daemon do
            if(entry.status == "archived",
              do: {:error, {:conflict, "session is archived"}},
              else: :ok
-           ) do
-      case lookup_live_server(registry, session_id) do
-        {:ok, pid} ->
-          {:ok, _} = Server.abort_all(pid, reason)
-
-        :not_running ->
-          if entry.active or entry.attention in ["running", "sleeping", "retrying"] do
-            Catalog.report_runtime(catalog, session_id, %{
-              active: false,
-              attention: "idle",
-              activity_kind: nil,
-              activity_label: nil
-            })
-          end
-      end
-
+           ),
+         :ok <- stop_runtime(lookup_live_server(registry, session_id), entry, reason, catalog) do
       latest =
         case Catalog.get_session(session_id, table) do
           {:ok, cur} -> cur
@@ -739,6 +726,27 @@ defmodule H.Daemon do
 
       {:ok, %{session: wire_session(latest, opts)}}
     end
+  end
+
+  defp stop_runtime({:ok, pid, marker}, _entry, reason, _catalog) do
+    case call_live(pid, marker, &Server.abort_all(&1, reason)) do
+      {:ok, _} -> :ok
+      :idle_unload -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp stop_runtime(:not_running, entry, _reason, catalog) do
+    if entry.active or entry.attention in ["running", "sleeping", "retrying"] do
+      Catalog.report_runtime(catalog, entry.session_id, %{
+        active: false,
+        attention: "idle",
+        activity_kind: nil,
+        activity_label: nil
+      })
+    end
+
+    :ok
   end
 
   @doc "Archives (and unloads from RAM) or unarchives a session."
@@ -784,7 +792,7 @@ defmodule H.Daemon do
 
         busy? =
           case live_server do
-            {:ok, pid} ->
+            {:ok, pid, _marker} ->
               try do
                 not GenServer.call(pid, :idle)
               catch
@@ -802,7 +810,7 @@ defmodule H.Daemon do
           true ->
             if busy? do
               case live_server do
-                {:ok, pid} ->
+                {:ok, pid, _marker} ->
                   {:ok, _} = Server.abort_all(pid, "archived")
 
                 :not_running ->
@@ -907,9 +915,10 @@ defmodule H.Daemon do
 
       case Catalog.insert_session(catalog, attrs) do
         {:ok, new_entry} ->
-          with {:ok, new_server} <- ensure_session_started(new_entry, opts, bootstrapped),
-               {:ok, _} <- Server.seed_entries(new_server, exported_entries, 1),
-               {:ok, seq} <- Server.get_seq(new_server) do
+          with {:ok, %{seq: seq}} <-
+                 call_session(new_entry, opts, &Server.seed_entries(&1, exported_entries, 1),
+                   initial_agent: bootstrapped
+                 ) do
             latest_new_entry =
               case Catalog.get_session(new_entry.session_id, table) do
                 {:ok, latest} -> latest
@@ -945,9 +954,9 @@ defmodule H.Daemon do
         cold_default_model(opts)
       )
     else
-      with {:ok, source_server} <- ensure_session_started_preserving_archive(source_entry, opts) do
-        Server.export_branch(source_server, cid, at_entry_id)
-      end
+      call_session(source_entry, opts, &Server.export_branch(&1, cid, at_entry_id),
+        preserve_archive: true
+      )
     end
   end
 
@@ -991,8 +1000,7 @@ defmodule H.Daemon do
   end
 
   defp live_session_detail(entry, opts, table) do
-    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts),
-         {:ok, detail} <- Server.get_detail(server) do
+    with {:ok, detail} <- call_session(entry, opts, &Server.get_detail/1, preserve_archive: true) do
       session_id = entry.session_id
 
       session_entry =
@@ -1053,8 +1061,7 @@ defmodule H.Daemon do
   end
 
   defp live_session_tree(entry, opts, table) do
-    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts),
-         {:ok, tree} <- Server.get_tree(server) do
+    with {:ok, tree} <- call_session(entry, opts, &Server.get_tree/1, preserve_archive: true) do
       session_id = entry.session_id
 
       session_entry =
@@ -1115,9 +1122,8 @@ defmodule H.Daemon do
   end
 
   defp scan_live_entries(entry, cid, query, opts) do
-    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts),
-         {:ok, %{items: items, next_cursor: next_cursor}} <-
-           Server.scan_entries(server, cid, query) do
+    with {:ok, %{items: items, next_cursor: next_cursor}} <-
+           call_session(entry, opts, &Server.scan_entries(&1, cid, query), preserve_archive: true) do
       {:ok,
        %{
          items: Enum.map(items, &wire_entry/1),
@@ -1242,28 +1248,23 @@ defmodule H.Daemon do
   end
 
   defp subscribe_live(entry, cid, subscriber_pid, last_event_id, pubsub, opts) do
-    with {:ok, server} <- ensure_session_started_preserving_archive(entry, opts) do
-      topic = {:conversation, entry.session_id, cid}
+    topic = {:conversation, entry.session_id, cid}
 
-      already_registered? =
-        subscriber_pid == self() and not is_nil(pubsub) and
-          topic in Registry.keys(pubsub, self())
+    newly_registered? =
+      subscriber_pid == self() and not is_nil(pubsub) and
+        topic not in Registry.keys(pubsub, self())
 
-      if subscriber_pid == self() and not is_nil(pubsub) and not already_registered? do
-        Registry.register(pubsub, topic, nil)
-      end
+    if newly_registered?, do: Registry.register(pubsub, topic, nil)
 
-      case Server.snapshot_or_replay(server, cid, last_event_id) do
-        {:ok, result} ->
-          {:ok, result}
+    case call_session(entry, opts, &Server.snapshot_or_replay(&1, cid, last_event_id),
+           preserve_archive: true
+         ) do
+      {:ok, result} ->
+        {:ok, result}
 
-        {:error, reason} ->
-          if subscriber_pid == self() and not is_nil(pubsub) and not already_registered? do
-            Registry.unregister(pubsub, topic)
-          end
-
-          {:error, reason}
-      end
+      {:error, reason} ->
+        if newly_registered?, do: Registry.unregister(pubsub, topic)
+        {:error, reason}
     end
   end
 
@@ -1279,9 +1280,8 @@ defmodule H.Daemon do
     with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          :ok <- validate_request_id(request_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- Validation.ensure_not_quarantined(entry),
-         {:ok, server} <- ensure_session_started(entry, opts, nil) do
-      Server.get_submission_outcome(server, request_id)
+         :ok <- Validation.ensure_not_quarantined(entry) do
+      call_session(entry, opts, &Server.get_submission_outcome(&1, request_id))
     end
   end
 
@@ -1309,8 +1309,7 @@ defmodule H.Daemon do
     with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
          :ok <- validate_request_id(request_id),
          {:ok, entry} <- Catalog.get_session(session_id, table),
-         :ok <- Validation.ensure_not_quarantined(entry),
-         {:ok, server} <- ensure_session_started(entry, opts, nil) do
+         :ok <- Validation.ensure_not_quarantined(entry) do
       topic = {:submission, session_id, request_id}
 
       can_register? =
@@ -1323,7 +1322,7 @@ defmodule H.Daemon do
         Registry.register(pubsub, topic, nil)
       end
 
-      case Server.get_submission_outcome(server, request_id) do
+      case call_session(entry, opts, &Server.get_submission_outcome(&1, request_id)) do
         {:ok, %{status: status} = outcome} when status in @terminal_submission_statuses ->
           if newly_registered?, do: Registry.unregister(pubsub, topic)
           {:ok, {:settled, outcome}}
@@ -1398,9 +1397,8 @@ defmodule H.Daemon do
              do: {:error, {:conflict, "session is archived"}},
              else: :ok
            ),
-         {:ok, envelope} <- Validation.validate_envelope(raw_envelope),
-         {:ok, server} <- ensure_session_started(entry, opts, nil) do
-      Server.execute_command(server, envelope)
+         {:ok, envelope} <- Validation.validate_envelope(raw_envelope) do
+      call_session(entry, opts, &Server.execute_command(&1, envelope))
     end
   end
 
@@ -1418,7 +1416,7 @@ defmodule H.Daemon do
     |> Enum.each(fn entry ->
       if entry.active and entry.status == "ok" do
         case ensure_session_started(entry, opts, nil) do
-          {:ok, _pid} ->
+          {:ok, _pid, _marker} ->
             :ok
 
           {:error, reason} ->
@@ -1453,6 +1451,65 @@ defmodule H.Daemon do
     end
   end
 
+  # Retry only a coordinator's explicit idle retirement. A call that timed out
+  # or lost its server to a crash may have committed (or already run an effect).
+  defp call_session(entry, opts, fun, call_opts \\ [], retries \\ 2) do
+    initial_agent = call_opts[:initial_agent]
+
+    started =
+      if call_opts[:preserve_archive] do
+        ensure_session_started_preserving_archive(entry, opts, initial_agent)
+      else
+        ensure_session_started(entry, opts, initial_agent)
+      end
+
+    with {:ok, pid, marker} <- started do
+      case call_live(pid, marker, fun) do
+        :idle_unload when retries > 0 ->
+          table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+          with :ok <- ensure_runtime_open(opts),
+               {:ok, current} <- Catalog.get_session(entry.session_id, table),
+               :ok <- Validation.ensure_not_quarantined(current),
+               :ok <- ensure_archive_unchanged(retry_origin(entry, call_opts), current) do
+            call_session(current, opts, fun, call_opts, retries - 1)
+          end
+
+        :idle_unload ->
+          {:error, :session_start_failed}
+
+        result ->
+          result
+      end
+    end
+  end
+
+  defp retry_origin(entry, call_opts) do
+    if call_opts[:preserve_archive], do: entry, else: %{entry | archived: false}
+  end
+
+  defp call_live(pid, marker, fun) do
+    fun.(pid)
+  catch
+    :exit, {{:shutdown, :idle_unload}, {GenServer, :call, [^pid | _]}} ->
+      :idle_unload
+
+    :exit, {:noproc, {GenServer, :call, [^pid | _]}} = reason ->
+      if Supervisor.idly_retired?(marker), do: :idle_unload, else: exit(reason)
+  end
+
+  defp ensure_runtime_open(opts) do
+    if opts[:maintenance_table] &&
+         not :ets.lookup_element(opts[:maintenance_table], :open, 2, false),
+       do: {:error, :daemon_draining},
+       else: :ok
+  end
+
+  defp ensure_archive_unchanged(%{archived: archived}, %{archived: archived}), do: :ok
+
+  defp ensure_archive_unchanged(_before, _after),
+    do: {:error, {:conflict, "session archive changed"}}
+
   defp ensure_session_started(entry, opts, initial_agent) do
     catalog = Keyword.get(opts, :catalog, @default_catalog)
 
@@ -1465,7 +1522,7 @@ defmodule H.Daemon do
       end
     end
 
-    ensure_session_started_preserving_archive(entry, opts, initial_agent)
+    ensure_session_started_preserving_archive(%{entry | archived: false}, opts, initial_agent)
   end
 
   defp cold_default_model(opts) do
@@ -1473,72 +1530,93 @@ defmodule H.Daemon do
     Recovery.resolve_default_model(opts[:default_model], provider_mod, provider_config(opts))
   end
 
-  defp ensure_session_started_preserving_archive(entry, opts, initial_agent \\ nil) do
-    session_id = entry.session_id
+  defp ensure_session_started_preserving_archive(entry, opts, initial_agent) do
+    ensure_runtime(entry, opts, initial_agent, System.monotonic_time(:millisecond) + 5_000)
+  end
+
+  defp ensure_runtime(entry, opts, initial_agent, deadline) do
+    sid = entry.session_id
     registry = Keyword.get(opts, :registry, @default_registry)
-    runtime_sup = Keyword.get(opts, :runtime_sup, @default_runtime_sup)
 
-    case Registry.lookup(registry, {:session, session_id}) do
-      [{pid, _}] ->
-        if Process.alive?(pid) do
-          {:ok, pid}
+    case lookup_live_server(registry, sid) do
+      {:ok, _pid, _marker} = live ->
+        live
+
+      :not_running ->
+        # Wait for the old wrapper to finish its exit notification, or for a
+        # coordinator that is starting under an already-registered wrapper.
+        wrapper = GenServer.whereis({:via, Registry, {registry, {:session_supervisor, sid}}})
+
+        if is_pid(wrapper) and Process.alive?(wrapper) do
+          await_runtime(entry, opts, initial_agent, deadline)
         else
-          Process.sleep(10)
-          ensure_session_started_preserving_archive(entry, opts, initial_agent)
-        end
-
-      [] ->
-        with {:ok, sup_opts} <- build_session_sup_opts(entry, opts, initial_agent),
-             {:ok, pid} <- start_session(runtime_sup, registry, session_id, sup_opts) do
-          catalog = Keyword.get(opts, :catalog, @default_catalog)
-
-          if not is_nil(catalog) and GenServer.whereis(catalog) != nil do
-            try do
-              Catalog.broadcast_live_state(catalog, session_id)
-            catch
-              :exit, _ -> :ok
-            end
-          end
-
-          {:ok, pid}
+          start_runtime(entry, opts, initial_agent, deadline)
         end
     end
+  end
+
+  defp start_runtime(entry, opts, initial_agent, deadline) do
+    runtime_sup = Keyword.get(opts, :runtime_sup, @default_runtime_sup)
+    registry = Keyword.get(opts, :registry, @default_registry)
+
+    with :ok <- ensure_runtime_open(opts),
+         {:ok, sup_opts} <- build_session_sup_opts(entry, opts, initial_agent) do
+      case DynamicSupervisor.start_child(runtime_sup, {Supervisor, sup_opts}) do
+        {:ok, _sup_pid} ->
+          case lookup_live_server(registry, entry.session_id) do
+            {:ok, _pid, _marker} = live ->
+              broadcast_loaded(opts, entry.session_id)
+              live
+
+            :not_running ->
+              await_runtime(entry, opts, initial_agent, deadline)
+          end
+
+        {:error, {:already_started, _}} ->
+          await_runtime(entry, opts, initial_agent, deadline)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp await_runtime(entry, opts, initial_agent, deadline) do
+    if System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(5)
+      table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+      with {:ok, current} <- Catalog.get_session(entry.session_id, table),
+           :ok <- Validation.ensure_not_quarantined(current),
+           :ok <- ensure_archive_unchanged(entry, current) do
+        ensure_runtime(current, opts, initial_agent, deadline)
+      end
+    else
+      {:error, :session_start_failed}
+    end
+  end
+
+  defp broadcast_loaded(opts, sid) do
+    if catalog = Keyword.get(opts, :catalog, @default_catalog) do
+      Catalog.broadcast_live_state(catalog, sid)
+    end
+  catch
+    :exit, _ -> :ok
   end
 
   defp lookup_live_server(registry, session_id) do
     if is_atom(registry) and not is_nil(registry) and Process.whereis(registry) != nil do
       case Registry.lookup(registry, {:session, session_id}) do
-        [{pid, _}] when is_pid(pid) ->
-          if Process.alive?(pid), do: {:ok, pid}, else: :not_running
+        [{pid, marker}] when is_pid(pid) ->
+          if Process.alive?(pid) and not Supervisor.idly_retired?(marker),
+            do: {:ok, pid, marker},
+            else: :not_running
 
         _ ->
           :not_running
       end
     else
       :not_running
-    end
-  end
-
-  defp start_session(runtime_sup, registry, session_id, sup_opts) do
-    case DynamicSupervisor.start_child(runtime_sup, {Supervisor, sup_opts}) do
-      {:ok, _sup_pid} ->
-        lookup_started_server(registry, session_id)
-
-      {:error, {:already_started, _}} ->
-        lookup_started_server(registry, session_id)
-
-      {:error, {:shutdown, {:failed_to_start_child, H.Session.Server, {:already_started, pid}}}} ->
-        {:ok, pid}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp lookup_started_server(registry, session_id) do
-    case Registry.lookup(registry, {:session, session_id}) do
-      [{pid, _}] -> {:ok, pid}
-      [] -> {:error, :session_start_failed}
     end
   end
 
@@ -1608,6 +1686,7 @@ defmodule H.Daemon do
         |> maybe_copy_kw(opts, :default_model)
         |> maybe_copy_kw(opts, :persist_within_ms)
         |> maybe_copy_kw(opts, :ephemeral_interval_ms)
+        |> maybe_copy_kw(opts, :idle_session_timeout_ms)
         |> maybe_copy_kw(opts, :retry_limit)
         |> maybe_copy_kw(opts, :retry_backoff_ms)
         |> maybe_copy_kw(opts, :restart_limit)

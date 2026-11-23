@@ -123,6 +123,7 @@ defmodule H.Session.Server.Recovery do
           :explicit_tools,
           :persist_within_ms,
           :ephemeral_interval_ms,
+          :idle_session_timeout_ms,
           :retry_limit,
           :retry_backoff_ms,
           :restart_limit,
@@ -179,7 +180,8 @@ defmodule H.Session.Server.Recovery do
             parent: parent,
             role: role,
             incarnation: incarnation,
-            clean_close: false
+            clean_close: false,
+            idle_checkpoint: nil
           }),
         conversations: conversations,
         tasks: tasks,
@@ -194,6 +196,7 @@ defmodule H.Session.Server.Recovery do
         workspace_waits: %{},
         replay_rings: %{},
         ring_base_seq: %{},
+        idle_resume_seq: nil,
         conv_last_seq: Map.new(Map.keys(conversations), fn cid -> {cid, bootstrap.seq || 0} end),
         storage_failed: false,
         registry: Keyword.get(opts, :registry, H.Registry),
@@ -231,19 +234,28 @@ defmodule H.Session.Server.Recovery do
 
       case Storage.commit(recovered_state.store, [all_writes]) do
         {:ok, %{seqs: [batch_seq]}, committed_store} ->
-          conv_last_seq =
-            Enum.reduce(
-              Map.keys(recovered_state.conversations),
-              recovered_state.conv_last_seq,
-              fn cid, acc ->
-                if Map.get(acc, cid, 0) == 0, do: Map.put(acc, cid, batch_seq), else: acc
-              end
-            )
+          {idle_resume_seq, conv_last_seq} =
+            case {meta[:idle_checkpoint], init_doc_writes, recovery_writes} do
+              {%{"seq" => seq, "wal_seq" => wal_seq, "conversations" => cursors}, [], []}
+              when is_integer(seq) and is_integer(wal_seq) and wal_seq + 1 == bootstrap.seq and
+                     is_map(cursors) ->
+                {seq,
+                 Map.new(recovered_state.conversations, fn {cid, _} ->
+                   {cid, Map.get(cursors, Integer.to_string(cid), bootstrap.seq)}
+                 end)}
+
+              _ ->
+                {nil,
+                 Map.new(recovered_state.conv_last_seq, fn {cid, seq} ->
+                   {cid, if(seq == 0, do: batch_seq, else: seq)}
+                 end)}
+            end
 
           final_state = %{
             recovered_state
             | store: committed_store,
               seq: batch_seq,
+              idle_resume_seq: idle_resume_seq,
               conv_last_seq: conv_last_seq,
               ring_base_seq: conv_last_seq
           }
@@ -439,6 +451,24 @@ defmodule H.Session.Server.Recovery do
   def clean_shutdown_reason?({:shutdown, {:storage_failed, _}}), do: false
   def clean_shutdown_reason?({:shutdown, _}), do: true
   def clean_shutdown_reason?(_), do: false
+
+  def checkpoint_idle(state) do
+    # The WAL sequence also counts metadata-only commits. Preserve the public
+    # cursors across idle close/open, without retaining the live replay ring.
+    checkpoint = %{
+      "seq" => state.idle_resume_seq || state.seq,
+      "wal_seq" => state.seq,
+      "conversations" => Map.new(state.conv_last_seq, fn {cid, seq} -> {to_string(cid), seq} end)
+    }
+
+    meta = Map.merge(state.session_meta, %{clean_close: true, idle_checkpoint: checkpoint})
+
+    case Storage.commit(state.store, [[{:put_session_meta, meta}]]) do
+      {:ok, %{stored: 1}, store} -> {:ok, store}
+      {:ok, %{refused: reason}, _store} -> {:error, reason}
+      {:error, _} = error -> error
+    end
+  end
 
   def persist_clean_close(state) do
     now = System.system_time(:millisecond)

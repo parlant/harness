@@ -29,6 +29,7 @@ defmodule H.Session.Supervisor do
   def start_link(opts) when is_list(opts) do
     session_id = Keyword.fetch!(opts, :session_id)
     registry = Keyword.get(opts, :registry, H.Registry)
+    idle_exit = :atomics.new(1, [])
 
     gen_opts =
       if is_atom(registry) and not is_nil(registry) and Process.whereis(registry) != nil do
@@ -37,7 +38,7 @@ defmodule H.Session.Supervisor do
         []
       end
 
-    GenServer.start_link(__MODULE__, opts, gen_opts)
+    GenServer.start_link(__MODULE__, {opts, idle_exit}, gen_opts)
   end
 
   @doc """
@@ -120,7 +121,7 @@ defmodule H.Session.Supervisor do
   end
 
   @impl true
-  def init(opts) do
+  def init({opts, idle_exit}) do
     Process.flag(:trap_exit, true)
 
     session_id = Keyword.fetch!(opts, :session_id)
@@ -130,12 +131,17 @@ defmodule H.Session.Supervisor do
     max_seconds = Keyword.get(opts, :max_seconds, 5)
 
     task_sup_name = {:via, Registry, {registry, {:session_tasks, session_id}}}
-    server_name = {:via, Registry, {registry, {:session, session_id}}}
+
+    # OTP uses :shutdown both for significant-child exit and exhausted restarts.
+    # Only the coordinator can mark a successfully checkpointed idle exit. The
+    # Registry value lets a caller distinguish a retired PID from a crashed one.
+    server_name = {:via, Registry, {registry, {:session, session_id}, idle_exit}}
 
     server_opts =
       opts
       |> Keyword.put(:name, server_name)
       |> Keyword.put(:task_sup, task_sup_name)
+      |> Keyword.put(:idle_exit, idle_exit)
 
     children = [
       %{
@@ -162,7 +168,7 @@ defmodule H.Session.Supervisor do
 
     case Supervisor.start_link(children, sup_opts) do
       {:ok, sup_pid} ->
-        {:ok, %{sup: sup_pid, session_id: session_id, catalog: catalog}}
+        {:ok, %{sup: sup_pid, session_id: session_id, catalog: catalog, idle_exit: idle_exit}}
 
       {:error, reason} ->
         quarantine_reason = unwrap_start_error(reason)
@@ -171,11 +177,22 @@ defmodule H.Session.Supervisor do
     end
   end
 
+  @doc false
+  def idly_retired?(marker) when is_reference(marker), do: :atomics.get(marker, 1) == 1
+  def idly_retired?(_marker), do: false
+
   @impl true
   def handle_info({:EXIT, sup_pid, reason}, %{sup: sup_pid} = state) do
-    if reason != :normal do
-      quarantine_reason = unwrap_exit_reason(reason)
-      safe_quarantine(state.catalog, state.session_id, quarantine_reason)
+    cond do
+      reason == :shutdown and idly_retired?(state.idle_exit) ->
+        broadcast_unloaded(state.catalog, state.session_id)
+
+      reason != :normal ->
+        quarantine_reason = unwrap_exit_reason(reason)
+        safe_quarantine(state.catalog, state.session_id, quarantine_reason)
+
+      true ->
+        :ok
     end
 
     {:stop, :normal, %{state | sup: nil}}
@@ -206,6 +223,16 @@ defmodule H.Session.Supervisor do
   defp unwrap_exit_reason(:shutdown), do: "max_restarts_exceeded"
   defp unwrap_exit_reason({:shutdown, reason}), do: reason
   defp unwrap_exit_reason(reason), do: reason
+
+  defp broadcast_unloaded(nil, _session_id), do: :ok
+
+  defp broadcast_unloaded(catalog, session_id) do
+    # The coordinator is gone, but this wrapper still owns its name. A new
+    # coordinator cannot register until the unloaded event has been published.
+    H.Catalog.broadcast_live_state(catalog, session_id)
+  catch
+    :exit, _ -> :ok
+  end
 
   defp safe_quarantine(nil, _session_id, _reason), do: :ok
 

@@ -4,6 +4,8 @@ defmodule H.Harness do
 
   A harness defines the profile descriptor, tool modules, and workspace context
   bootstrapping (such as `AGENTS.md` discovery through `H.ExecutionEnv`).
+  Follow [Author a harness profile on hiness.dev](https://hiness.dev/docs/extensions/#author-a-harness-profile)
+  to register a custom profile.
   """
 
   alias H.ExecutionEnv

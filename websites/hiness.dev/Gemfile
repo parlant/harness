@@ -1,0 +1,8 @@
+source "https://rubygems.org"
+
+gem "jekyll", "~> 4.3"
+gem "jekyll-llms-txt", git: "https://gitlab.com/parlant-co/jekyll-llms-txt.git", tag: "v0.1.1"
+gem "jekyll-feed"
+gem "jekyll-seo-tag"
+gem "jekyll-sitemap"
+gem "webrick"

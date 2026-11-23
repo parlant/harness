@@ -124,7 +124,7 @@ Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST
 - `tags`: case-sensitive labels, default `[]`. At most 32 tags, each 1–64 characters without commas or control characters. Surrounding whitespace is trimmed and duplicates are removed. Set `tags: []` to clear all tags.
 - `needs_attention`: boolean triage flag persisted in `H.Catalog` (`true` on creation and when a run settles to `"idle"`, `"error"`, or `"quarantined"`; `false` while `"running"`/`"sleeping"`/`"retrying"`, when `archived == true`, or when manually dismissed via `POST /sessions/:sid/triage`).
 - `archived`: boolean persisted in `H.Catalog` (`false` by default).
-- `loaded`: live boolean indicating whether the session's `H.Session.Server` coordinator is currently running in OTP RAM (never persisted to disk).
+- `loaded`: live boolean indicating whether the session's coordinator is running (never persisted). After five quiet minutes, eligible local file-backed sessions transition to `loaded: false` without changing `archived`, `needs_attention`, or history. A subsequent session read or command can load them again. Conversation streams stay subscribed across these transitions.
 - `cwd`: the original session working directory, not a turn-scoped tool override.
 - `cwd_exists`: live boolean indicating whether the session's original working directory currently exists (`false` when a host `cwd` was deleted).
 

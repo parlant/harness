@@ -1,0 +1,58 @@
+session:
+  label: Royal ledger · Active session
+  name: Parser review
+  steps:
+    - {surface: 'Terminal · hi', action: 'Summon Your Hiness on a code review'}
+    - {surface: 'Terminal · /quit', action: 'Retire the terminal view'}
+    - {surface: 'Browser · hiweb', action: 'Watch the same reply stream live'}
+  outcome: One reign. Two chambers.
+  caption: The daemon holds court on disk while you switch between hi and hiweb.
+lifetimes:
+  number: Plate II · Succession & Authority
+  title: Four separate lines of authority
+  intro: H keeps history ancestry, active task ownership, process supervision, and client reading position in four distinct structures.
+  instruction: Open a row to inspect what each structure governs.
+  entries:
+    - name: History ancestry
+      shape: branch
+      question: Which entries can I see?
+      body: A conversation inherits its parent's visible prefix through the selected entry. Appending new turns extends the branch while leaving the parent path intact.
+    - name: Work ownership
+      shape: tasks
+      question: Which run owns the work?
+      body: An active generation owns its in-flight tool calls. When you fork at an earlier entry, running tasks continue under the conversation that started them.
+    - name: OTP supervision
+      shape: supervision
+      question: Which processes restart together?
+      body: A per-session supervisor groups the session coordinator and its workers. When a process restarts, the coordinator reloads committed state from disk and flags any interrupted shell command for your review.
+    - name: Client cursor
+      shape: cursor
+      question: Where am I reading?
+      body: Each client tracks its own selected session, branch, and page cursor. Scrolling or switching branches in one window leaves stored history and other attached clients where they are.
+demo:
+  label: Demo index
+  status: Illustrated walkthrough
+  status_note: Static examples from a sample parser session.
+  pages:
+    - title: Conversation
+      url: /demo/
+    - title: hi · Terminal
+      url: /demo/hi/
+    - title: hiweb · Browser
+      url: /demo/hiweb/
+  setup: Set up H locally
+  setup_url: /docs/setup/
+extension:
+  number: Fig. 03
+  title: From package to session
+  steps:
+    - title: Build the package
+      artifact: 'extension.json + ebin/'
+      note: Compile the extension project into a standalone directory containing its manifest and BEAM modules.
+    - title: Enable at startup
+      artifact: extensions.json
+      note: List the built artifact path in the daemon data directory so H loads it with daemon authority on boot.
+    - title: Select in a session
+      artifact: harness_id
+      note: Request the registered profile when creating a session while the session coordinator retains commit and recovery control.
+  caption: Compile the artifact, enable its path in extensions.json, and select its registered ID when starting a session.

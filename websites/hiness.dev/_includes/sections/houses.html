@@ -1,0 +1,39 @@
+{% assign houses = site.data.houses %}
+<section id="{{ include.section.id | default: 'houses' }}" class="houses-section" aria-labelledby="houses-heading">
+  <div class="houses-header">
+    <div>
+      <p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ houses.kicker }}</p>
+      <h2 id="houses-heading" class="manual-title">{{ houses.title }}</h2>
+    </div>
+    <p>{{ houses.body }}</p>
+  </div>
+  <div class="houses-grid">
+    {% for h in houses.entries %}
+    {% assign art = site.data.artworks[h.artwork] %}
+    <article class="house-card">
+      {% if art %}
+      <div class="house-portrait">
+        <img
+          src="{{ art.src | relative_url }}"
+          width="{{ art.width }}"
+          height="{{ art.height }}"
+          decoding="async"
+          alt="{{ art.alt | escape }}">
+      </div>
+      {% endif %}
+      <span class="house-status">{{ h.status | escape }}</span>
+      <h3 class="house-name">{{ h.house | escape }}</h3>
+      <p class="house-motto">{{ h.motto | escape }}</p>
+      <div class="house-meta">
+        <div><span>Profile</span><code>{{ h.profile_id | escape }}</code></div>
+        <div><span>Contract</span><code>{{ h.module | escape }}</code></div>
+      </div>
+      <p class="house-summary">{{ h.summary | escape }}</p>
+      {% if art %}
+      <div class="house-plaque">{{ art.sitter | escape }} · {{ art.museum_short | escape }}</div>
+      {% endif %}
+      <a class="manual-secondary" href="{{ h.cta.url | relative_url }}">{{ h.cta.label | escape }} <span aria-hidden="true">→</span></a>
+    </article>
+    {% endfor %}
+  </div>
+</section>

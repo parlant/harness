@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.H.Local do
   use Mix.Task
 
+  @moduledoc false
   @shortdoc "Builds, smoke-tests, and installs the local release"
   @switches [service: :boolean, data_dir: :string, bin_dir: :string]
 

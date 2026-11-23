@@ -458,19 +458,7 @@ impl InboxState {
         }
         match self.filter {
             InboxFilter::All => true,
-            InboxFilter::Inbox => {
-                if session.is_subsession() {
-                    !session.effective_archived()
-                } else {
-                    !session.effective_archived()
-                        && (session.effective_loaded()
-                            || session.effective_needs_attention()
-                            || matches!(
-                                session.effective_attention(),
-                                "running" | "sleeping" | "retrying" | "quarantined"
-                            ))
-                }
-            }
+            InboxFilter::Inbox => !session.effective_archived(),
         }
     }
 
@@ -717,7 +705,7 @@ impl InboxState {
             "  loading sessions…".to_string()
         } else if total == 0 {
             match self.filter {
-                InboxFilter::Inbox => "  no active sessions (press a for all)".to_string(),
+                InboxFilter::Inbox => "  no unarchived sessions (press a for all)".to_string(),
                 InboxFilter::All => "  no sessions".to_string(),
             }
         } else {
@@ -1536,12 +1524,13 @@ mod tests {
             s_imported,
         ]));
 
-        // Default Inbox filter hides s-cold (unloaded + !needs_attention), s-arch, and s-imp,
-        // while keeping s-cold-attn (unloaded + needs_attention) and ordering by Tier 0..3.
-        assert_eq!(
-            inbox.ordered_session_ids(),
-            vec!["s-err", "s-cold-attn", "s-run", "s-dismiss"]
-        );
+        // Idle unloading changes residency, not inbox visibility or ordering.
+        let inbox_ids = vec!["s-err", "s-cold-attn", "s-run", "s-dismiss", "s-cold"];
+        assert_eq!(inbox.ordered_session_ids(), inbox_ids);
+        let mut s_unloaded = s_dismissed.clone();
+        s_unloaded.loaded = Some(false);
+        inbox.apply(CatalogUpdate::Upsert(Box::new(s_unloaded)));
+        assert_eq!(inbox.ordered_session_ids(), inbox_ids);
 
         let rendered_inbox = inbox.render(&Theme::dark());
         let joined_inbox = rendered_inbox
@@ -1570,7 +1559,7 @@ mod tests {
         assert!(inbox.cycle_attention(true));
         assert_eq!(inbox.selected_id(), Some("s-err"));
 
-        // Toggle filter to All: reveals cold unloaded, user-archived, and imported archives in Tier 3 & 4
+        // Toggle filter to All: reveal user-archived sessions and imported archives in Tier 4.
         assert_eq!(inbox.toggle_filter(), InboxFilter::All);
         assert_eq!(
             inbox.ordered_session_ids(),

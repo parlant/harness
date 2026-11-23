@@ -1,0 +1,29 @@
+<header class="masthead"><div class="wrap mast-row">
+  <a class="wordmark" href="{{ '/' | relative_url }}">
+    <img src="{{ '/assets/mark.svg' | relative_url }}" width="34" height="34" alt="{{ include.t.brand }}">
+    <span class="wordmark-copy">
+      <span class="wordmark-title">{{ include.t.brand }}<em>for macOS</em></span>
+      <span class="wordmark-sub">{{ include.t.brand_descriptor }}</span>
+    </span>
+  </a>
+  <div class="mast-right">
+    <nav aria-label="{{ include.t.navigation }}" class="primary-links">
+      {% for link in site.data.navigation.main %}<a href="{{ link.url | relative_url }}" {% if page.url == link.url %}aria-current="page"{% elsif link.url != "/" and page.url contains link.url %}aria-current="location"{% endif %}>{{ link.title }}</a>{% endfor %}
+    </nav>
+    <div class="mast-meta" aria-label="Companion domain and source repositories">
+      {% if site.data.navigation.companion %}
+      <a class="companion-pill" href="{{ site.data.navigation.companion.url }}">
+        <span>{{ site.data.navigation.companion.label }} · {{ site.data.navigation.companion.sub }}</span>
+      </a>
+      {% endif %}
+      <a class="forge-link" href="{{ site.data.navigation.github }}" aria-label="{{ include.t.github }} repository" title="{{ include.t.github }} (mirror)">
+        {% include forge-icons.html forge="github" size=16 %}
+        <span class="forge-label">{{ include.t.github }}</span>
+      </a>
+      <a class="forge-link" href="{{ site.data.navigation.gitlab }}" aria-label="{{ include.t.gitlab }} repository" title="{{ include.t.gitlab }} (origin)">
+        {% include forge-icons.html forge="gitlab" size=16 %}
+        <span class="forge-label">{{ include.t.gitlab }}</span>
+      </a>
+    </div>
+  </div>
+</div></header>

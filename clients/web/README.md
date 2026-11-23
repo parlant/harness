@@ -77,6 +77,11 @@ with `:sidebar` and `:main` slots; the separator is draggable or keyboard adjust
 (arrows, Home, End). Width is per view and browser tab. On narrow screens **Browse**
 switches between the tree and the editor rather than stacking two scroll areas.
 
+**Inbox** lists unarchived sessions, including dismissed sessions that have been
+unloaded while idle. Unloading doesn't move a session to **Archived**, which
+only lists archived sessions. **Attention** remains the view for sessions that
+need you to act.
+
 The Inbox filter panel and session details share working-directory, tag, and text filters.
 The filters travel in the URL: opening a row, jumping to the next session
 needing attention, switching branches, and returning to the Inbox preserve

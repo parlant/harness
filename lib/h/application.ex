@@ -1,7 +1,9 @@
 defmodule H.Application do
   @moduledoc """
   OTP application entry point. Embedded hosts can opt into the same daemon
-  instance as `H.serve/1` by configuring `:harness, :data_dir`.
+  instance as `H.serve/1` by configuring `:harness, :data_dir`. Read
+  [Embed the core in an OTP application on hiness.dev](https://hiness.dev/docs/architecture/#embed-the-core-in-an-otp-application)
+  for store isolation and workspace boundaries.
   """
   use Application
 

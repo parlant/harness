@@ -1,7 +1,7 @@
 #!/bin/sh
 # Upload signed release artifacts to the GitLab Generic Package Registry and
 # create (or update) the GitLab Release with permanent public download links.
-# Optionally mirrors the release assets to GitHub Releases when
+# Mirrors the release metadata and assets idempotently to GitHub Releases when
 # GITHUB_RELEASE_TOKEN is configured.
 #
 # Usage: scripts/ci/gitlab-release.sh <release-dir>
@@ -98,6 +98,9 @@ for name in files:
 
 desc = (
     f"H (`:harness`) release `v{version}` built from commit `{commit}`.\n\n"
+    "- Documentation & CLI installer: https://hiness.dev\n"
+    "- macOS `H.app` bundle: https://hiness.app\n"
+    "- Synchronized release notes: https://hiness.dev/releases/\n\n"
     "Verify downloads with OpenSSH using `packaging/keys/release-signers`:\n\n"
     "```sh\n"
     "ssh-keygen -Y verify -f packaging/keys/release-signers \\\n"
@@ -115,23 +118,59 @@ print(json.dumps({
 PY
 )
 
-echo "==> Creating GitLab Release for ${CI_COMMIT_TAG}"
-http_code=$(curl --silent --show-error --output /tmp/gl-release-resp.json --write-out '%{http_code}' \
-  --request POST \
+echo "==> Creating or updating GitLab Release for ${CI_COMMIT_TAG}"
+encoded_tag=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CI_COMMIT_TAG")
+existing_gl_code=$(curl --silent --output /tmp/gl-existing.json --write-out '%{http_code}' \
   --header "$auth_header" \
-  --header "Content-Type: application/json" \
-  --data "$payload" \
-  "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases")
+  "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/${encoded_tag}")
 
-if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-  echo "GitLab Release API returned HTTP $http_code:" >&2
-  cat /tmp/gl-release-resp.json >&2
-  exit 1
+if [ "$existing_gl_code" = "200" ]; then
+  update_payload=$(python3 -c 'import json, sys; d=json.loads(sys.argv[1]); print(json.dumps({"name": d["name"], "description": d["description"]}))' "$payload")
+  http_code=$(curl --silent --show-error --output /tmp/gl-release-resp.json --write-out '%{http_code}' \
+    --request PUT \
+    --header "$auth_header" \
+    --header "Content-Type: application/json" \
+    --data "$update_payload" \
+    "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/${encoded_tag}")
+  if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+    echo "GitLab Release PUT returned HTTP $http_code:" >&2
+    cat /tmp/gl-release-resp.json >&2
+    exit 1
+  fi
+  # Ensure every asset link exists on the release
+  python3 - "$payload" "/tmp/gl-existing.json" <<'PY' | while IFS="$(printf '\t')" read -r link_json; do
+import json, sys
+desired = json.loads(sys.argv[1])["assets"]["links"]
+existing = {l["name"] for l in json.loads(open(sys.argv[2]).read()).get("assets", {}).get("links", [])}
+for link in desired:
+    if link["name"] not in existing:
+        print(json.dumps(link))
+PY
+    [ -n "$link_json" ] || continue
+    curl --fail --silent --show-error \
+      --request POST \
+      --header "$auth_header" \
+      --header "Content-Type: application/json" \
+      --data "$link_json" \
+      "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/${encoded_tag}/assets/links" >/dev/null
+  done
+else
+  http_code=$(curl --silent --show-error --output /tmp/gl-release-resp.json --write-out '%{http_code}' \
+    --request POST \
+    --header "$auth_header" \
+    --header "Content-Type: application/json" \
+    --data "$payload" \
+    "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases")
+  if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+    echo "GitLab Release POST returned HTTP $http_code:" >&2
+    cat /tmp/gl-release-resp.json >&2
+    exit 1
+  fi
 fi
-rm -f /tmp/gl-release-resp.json
+rm -f /tmp/gl-existing.json /tmp/gl-release-resp.json
 echo "GitLab Release ${CI_COMMIT_TAG} published."
 
-# Optional GitHub Releases mirror
+# GitHub Releases mirror (idempotent upsert + asset replacement)
 if [ -n "${GITHUB_RELEASE_TOKEN:-}" ]; then
   gh_repo="${GITHUB_RELEASE_REPO:-parlant/harness}"
   echo "==> Mirroring release ${CI_COMMIT_TAG} to GitHub (${gh_repo})"
@@ -145,28 +184,78 @@ tag = sys.argv[2]
 manifest = json.loads((rel_dir / "release-manifest.json").read_text(encoding="utf-8"))
 commit = manifest.get("git_commit", "")
 version = manifest.get("version", tag.lstrip("v"))
-print(json.dumps({
+body = (
+    f"H (`:harness`) release `v{version}` built from commit `{commit}`.\n\n"
+    "- Documentation & CLI installer: https://hiness.dev\n"
+    "- macOS `H.app` bundle: https://hiness.app\n"
+    "- Synchronized release notes: https://hiness.dev/releases/\n\n"
+    "Verify downloads with OpenSSH using `packaging/keys/release-signers`:\n\n"
+    "```sh\n"
+    "ssh-keygen -Y verify -f packaging/keys/release-signers \\\n"
+    "  -I bingboombam@parlant.xyz -n file -s SHA256SUMS.sig < SHA256SUMS\n"
+    "sha256sum -c SHA256SUMS\n"
+    "```"
+)
+payload = {
     "tag_name": tag,
-    "target_commitish": commit or None,
     "name": f"H v{version}",
-    "body": f"H (`:harness`) release `v{version}` built from commit `{commit}`.\n\nVerify with `scripts/verify-release.sh` or `ssh-keygen -Y verify` using `packaging/keys/release-signers`.",
+    "body": body,
     "draft": False,
     "prerelease": "-" in version,
-}))
+}
+if commit:
+    payload["target_commitish"] = commit
+print(json.dumps(payload))
 PY
   )
 
-  gh_resp=$(curl --fail --silent --show-error \
-    --request POST \
+  gh_existing_code=$(curl --silent --output /tmp/gh-release.json --write-out '%{http_code}' \
     --header "Authorization: Bearer ${GITHUB_RELEASE_TOKEN}" \
     --header "Accept: application/vnd.github+json" \
     --header "X-GitHub-Api-Version: 2022-11-28" \
-    --data "$gh_payload" \
-    "https://api.github.com/repos/${gh_repo}/releases")
+    "https://api.github.com/repos/${gh_repo}/releases/tags/${encoded_tag}")
 
-  upload_url=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["upload_url"].split("{", 1)[0])' "$gh_resp")
+  if [ "$gh_existing_code" = "200" ]; then
+    gh_release_id=$(python3 -c 'import json; print(json.load(open("/tmp/gh-release.json"))["id"])')
+    gh_patch_payload=$(python3 -c 'import json, sys; d=json.loads(sys.argv[1]); d.pop("target_commitish", None); print(json.dumps(d))' "$gh_payload")
+    curl --fail --silent --show-error --output /tmp/gh-release.json \
+      --request PATCH \
+      --header "Authorization: Bearer ${GITHUB_RELEASE_TOKEN}" \
+      --header "Accept: application/vnd.github+json" \
+      --header "X-GitHub-Api-Version: 2022-11-28" \
+      --data "$gh_patch_payload" \
+      "https://api.github.com/repos/${gh_repo}/releases/${gh_release_id}"
+  else
+    curl --fail --silent --show-error --output /tmp/gh-release.json \
+      --request POST \
+      --header "Authorization: Bearer ${GITHUB_RELEASE_TOKEN}" \
+      --header "Accept: application/vnd.github+json" \
+      --header "X-GitHub-Api-Version: 2022-11-28" \
+      --data "$gh_payload" \
+      "https://api.github.com/repos/${gh_repo}/releases"
+  fi
+
+  upload_url=$(python3 -c 'import json; print(json.load(open("/tmp/gh-release.json"))["upload_url"].split("{", 1)[0])')
 
   for fname in $files; do
+    existing_asset_id=$(python3 - "$fname" <<'PY'
+import json, sys
+name = sys.argv[1]
+for asset in json.load(open("/tmp/gh-release.json")).get("assets", []):
+    if asset.get("name") == name:
+        print(asset["id"])
+        break
+PY
+    )
+    if [ -n "$existing_asset_id" ]; then
+      echo "  replacing existing GitHub asset $fname (id=$existing_asset_id)"
+      curl --fail --silent --show-error \
+        --request DELETE \
+        --header "Authorization: Bearer ${GITHUB_RELEASE_TOKEN}" \
+        --header "Accept: application/vnd.github+json" \
+        --header "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/repos/${gh_repo}/releases/assets/${existing_asset_id}" >/dev/null
+    fi
     echo "  mirroring $fname to GitHub"
     curl --fail --silent --show-error \
       --request POST \
@@ -176,5 +265,6 @@ PY
       --data-binary "@$rel_dir/$fname" \
       "${upload_url}?name=${fname}" >/dev/null
   done
+  rm -f /tmp/gh-release.json
   echo "GitHub Release ${CI_COMMIT_TAG} mirrored."
 fi

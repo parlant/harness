@@ -17,6 +17,8 @@ first word, e.g. `hi account list --data-dir /path/to/store`.
 | `hi daemon stop [--idle-only] [--timeout SECS]` / `hi daemon restart [...]` | Standalone only; cooperatively drains in-flight tools and open responses before stopping (pass `--idle-only` to refuse when busy; default 300s timeout automatically extends to cover longer running tool deadlines plus 30s commit grace unless `--timeout` is explicitly passed). |
 | `hi -s ID --conversation CID` | `/restart-ui [path/to/hi]` reexecs into the same session and branch. |
 
+A local file-backed session unloads from memory after five quiet minutes and keeps its archive and attention settings. Opening it or sending it a command loads it again. An open stream does not keep an idle session resident and can still receive the next update. See the [session performance study](session-performance.md).
+
 For API-key profiles in the LaunchAgent, use `/key set <provider> <alias>`
 with its masked prompt or Phoenix **Account settings**. The daemon need not
 inherit provider secrets from your shell. See [API-key setup](../providers.md#api-keys-for-a-background-daemon).

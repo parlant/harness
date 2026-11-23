@@ -47,6 +47,7 @@ test:elixir:
     - mix format --check-formatted
     - mix compile --warnings-as-errors
     - mix test
+    - MIX_ENV=dev mix docs --warnings-as-errors --output /tmp/hiness-docs
     - |
       (
         cd clients/web
@@ -60,6 +61,8 @@ test:elixir:
         mix format --check-formatted
         mix compile --warnings-as-errors
         mix test
+        MIX_ENV=docs mix deps.get --check-locked
+        MIX_ENV=docs mix docs --warnings-as-errors --output /tmp/h-setup-docs
       )
 
 test:rust:
@@ -70,13 +73,14 @@ test:rust:
     - cargo test --locked --manifest-path clients/tui/Cargo.toml
     - cargo test --locked --manifest-path clients/import/Cargo.toml
 
-test:website:
+test:websites:
   stage: test
   tags: [saas-linux-medium-amd64]
   image: ${RUBY_IMAGE}
   rules:
     - exists:
-        - website/scripts/verify_site.rb
+        - websites/hiness.dev/scripts/verify_site.rb
+        - websites/hiness.app/scripts/verify_site.rb
       when: on_success
     - when: never
   before_script:
@@ -86,13 +90,18 @@ test:website:
     - apt-get install -y -qq --no-install-recommends nodejs
   script:
     - python3 scripts/test-install-sh.py
-    - diff -u scripts/install.sh website/install.sh
+    - diff -u scripts/install.sh websites/hiness.dev/install.sh
     - |
-      cd website
-      npm ci --prefer-offline --ignore-scripts --no-audit --fund=false
-      bundle config set --local frozen true
-      bundle install
-      make verify
+      for site in websites/hiness.dev websites/hiness.app; do
+        (
+          cd "$site"
+          npm ci --prefer-offline --ignore-scripts --no-audit --fund=false
+          bundle config set --local frozen true
+          bundle install
+          make verify
+          make verify-prod
+        )
+      done
 
 # ---------------------------------------------------------------------------
 # Stage 2: Native Multi-Platform Bundles
@@ -265,18 +274,42 @@ release:publish:
       - dist/release/release-manifest.json.sig
     expire_in: 90 days
 
+release:hex:
+  stage: release
+  tags: [saas-linux-medium-amd64]
+  image: ${ELIXIR_TEST_IMAGE}
+  needs:
+    - job: release:publish
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+  before_script:
+    - mix local.hex --force
+    - mix local.rebar --force
+  script:
+    - |
+      if [ -n "${HEX_API_KEY:-}" ]; then
+        MIX_ENV=dev mix deps.get --check-locked
+        MIX_ENV=dev mix hex.publish --yes
+        (
+          cd installer
+          MIX_ENV=docs mix deps.get --check-locked
+          MIX_ENV=docs mix hex.publish --yes
+        )
+      else
+        echo "HEX_API_KEY not configured; skipping automated Hex publish"
+      fi
+
 # ---------------------------------------------------------------------------
-# Stage 4: Pages (optional static site publish when website/ exists)
+# Stage 4: Websites (Cloudflare Pages deploy for hiness.dev & hiness.app)
 # ---------------------------------------------------------------------------
 
-pages:
+.cloudflare_site_deploy:
   stage: pages
   tags: [saas-linux-medium-amd64]
   image: ${RUBY_IMAGE}
+  resource_group: ${CF_PAGES_PROJECT}
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      exists:
-        - website/scripts/verify_site.rb
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CLOUDFLARE_API_TOKEN'
       when: on_success
     - when: never
   before_script:
@@ -286,12 +319,27 @@ pages:
     - apt-get install -y -qq --no-install-recommends nodejs
   script:
     - |
-      cd website
+      cd "${SITE_DIR}"
       npm ci --prefer-offline --ignore-scripts --no-audit --fund=false
       bundle config set --local frozen true
       bundle install
-      make build DESTINATION="../public"
-      ruby scripts/verify_site.rb ../public
-  artifacts:
-    paths:
-      - public
+      make verify-prod DESTINATION=_site
+      npx --yes wrangler@4 pages deploy _site --project-name="${CF_PAGES_PROJECT}" --branch="${CI_COMMIT_BRANCH}"
+
+deploy:hiness-dev:
+  extends: .cloudflare_site_deploy
+  variables:
+    SITE_DIR: "websites/hiness.dev"
+    CF_PAGES_PROJECT: "hiness-dev"
+  environment:
+    name: hiness.dev
+    url: https://hiness.dev
+
+deploy:hiness-app:
+  extends: .cloudflare_site_deploy
+  variables:
+    SITE_DIR: "websites/hiness.app"
+    CF_PAGES_PROJECT: "hiness-app"
+  environment:
+    name: hiness.app
+    url: https://hiness.app

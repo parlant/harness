@@ -71,7 +71,7 @@ defmodule H.Session.UserShell do
         {:immediate, from,
          {:error, {:bad_request, "expected_seq must be a non-negative integer"}}, [], state}
 
-      expected_seq != conv_seq and expected_seq != state.seq ->
+      expected_seq not in [conv_seq, state.seq, Map.get(state, :idle_resume_seq)] ->
         {:immediate, from, {:error, {:conflict, "expected_seq mismatch"}}, [], state}
 
       busy?(state, cid) ->

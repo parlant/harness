@@ -1,0 +1,13 @@
+main:
+  - {title: Features, url: /features/}
+  - {title: Demo, url: /demo/}
+  - {title: Documentation, url: /docs/}
+  - {title: Extensions, url: /extensions/}
+  - {title: Releases, url: /releases/}
+companion:
+  label: hiness.app
+  sub: macOS app
+  url: https://hiness.app
+github: https://github.com/parlant/harness
+gitlab: https://gitlab.com/parlant-co/harness
+source: https://github.com/parlant/harness

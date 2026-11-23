@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.H.Bundle do
   use Mix.Task
 
+  @moduledoc false
   @shortdoc "Builds and smoke-tests a native bundle (default: dist/harness)"
 
   @impl true

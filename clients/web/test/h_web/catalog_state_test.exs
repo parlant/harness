@@ -3,6 +3,31 @@ defmodule HWeb.CatalogStateTest do
 
   alias HWeb.CatalogState
 
+  describe "apply_frame/3" do
+    test "keeps a dismissed idle session in Inbox when an upsert unloads it" do
+      session = %{
+        session_id: "dismissed",
+        attention: "idle",
+        needs_attention: false,
+        archived: false,
+        loaded: true
+      }
+
+      state = CatalogState.from_list([session], 1)
+      unloaded = %{session | loaded: false}
+      upsert = JSON.encode!(%{type: "upsert", session: unloaded})
+
+      assert {:ok, %{seq: 2, sessions: [row] = sessions}} =
+               CatalogState.apply_frame(state, 2, upsert)
+
+      assert row == %{state.by_id["dismissed"] | loaded: false}
+      assert CatalogState.filter_sessions(sessions, "inbox") == [row]
+      assert CatalogState.filter_sessions(sessions, "archived") == []
+      assert CatalogState.filter_sessions(sessions, "attention") == []
+      assert %{inbox: 1, archived: 0, attention: 0} = CatalogState.counts(sessions)
+    end
+  end
+
   describe "normalize_session/1" do
     test "parses parent with atom keys and role" do
       session =
@@ -246,7 +271,7 @@ defmodule HWeb.CatalogStateTest do
             attention: "idle",
             needs_attention: true,
             archived: false,
-            loaded: true,
+            loaded: false,
             updated_at: 700
           },
           %{
@@ -262,24 +287,24 @@ defmodule HWeb.CatalogStateTest do
         |> Enum.map(&CatalogState.normalize_session/1)
 
       counts = CatalogState.counts(sessions)
-      assert counts.inbox == 4
+      assert counts.inbox == 5
       assert counts.attention == 2
       assert counts.error == 1
       assert counts.idle == 1
       assert counts.processing == 1
       assert counts.running == 1
       assert counts.sleeping == 0
-      assert counts.archived == 2
+      assert counts.archived == 1
       assert counts.all == 6
 
-      assert Enum.map(CatalogState.filter_sessions(sessions, "inbox"), & &1.session_id) --
-               ["s-cleared", "s-running", "s-idle-na", "s-error-na"] == []
+      assert Enum.map(CatalogState.filter_sessions(sessions, "inbox"), & &1.session_id) ==
+               ["s-cleared", "s-cold", "s-running", "s-idle-na", "s-error-na"]
 
-      assert Enum.map(CatalogState.filter_sessions(sessions, "attention"), & &1.session_id) --
-               ["s-idle-na", "s-error-na"] == []
+      assert Enum.map(CatalogState.filter_sessions(sessions, "attention"), & &1.session_id) ==
+               ["s-idle-na", "s-error-na"]
 
-      assert Enum.map(CatalogState.filter_sessions(sessions, "archived"), & &1.session_id) --
-               ["s-archived", "s-cold"] == []
+      assert Enum.map(CatalogState.filter_sessions(sessions, "archived"), & &1.session_id) ==
+               ["s-archived"]
 
       assert length(CatalogState.filter_sessions(sessions, "all")) == 6
 
@@ -339,6 +364,20 @@ defmodule HWeb.CatalogStateTest do
         |> Enum.map(& &1.session_id)
 
       assert attention_ids == ["other-root"]
+    end
+
+    test "retains the unarchived root as context for a matching archived subsession" do
+      sessions =
+        [
+          %{session_id: "parent", loaded: false, needs_attention: false},
+          %{session_id: "child", archived: true, parent: %{session_id: "parent"}}
+        ]
+        |> Enum.map(&CatalogState.normalize_session/1)
+
+      assert [%{session_id: "parent"}, %{session_id: "child"}] =
+               CatalogState.filter_sessions(sessions, "archived", "child",
+                 include_subsessions: true
+               )
     end
 
     test "keeps subsessions of an attention-needing root when filter_mode is attention and include_subsessions is true" do

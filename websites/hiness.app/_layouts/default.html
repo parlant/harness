@@ -1,0 +1,19 @@
+<!doctype html>
+{% assign lang = page.lang | default: site.lang %}
+{% assign t = site.data.i18n[lang] %}
+<html lang="{{ lang }}" data-theme="luxury">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% if site.preview %}<meta name="robots" content="noindex, nofollow">{% endif %}
+    {% seo %}
+    <link rel="icon" href="{{ '/assets/mark.svg' | relative_url }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ '/assets/css/main.css' | relative_url }}">
+  </head>
+  <body>
+    <a class="skip" href="#content">{{ t.skip }}</a>
+    {% include header.html t=t %}
+    <main id="content" tabindex="-1">{{ content }}</main>
+    {% include footer.html t=t %}
+  </body>
+</html>

@@ -1,8 +1,10 @@
 defmodule Mix.Tasks.H.Setup do
-  @shortdoc "Downloads, verifies, and installs a signed Harness (H) release bundle"
+  @shortdoc "Downloads, verifies, and installs a signed H release bundle"
   @moduledoc """
-  Downloads, cryptographically verifies (Ed25519 SSHSIG + SHA-256), and installs
-  a signed Harness (`hi`, `h-daemon`, `hi-import`) release bundle.
+  Downloads, verifies (OpenSSH Ed25519 signature + SHA-256), and installs a
+  signed H (`hi`, `h-daemon`, `hi-import`) release bundle.
+
+  Read the post-install setup and provider guides on [hiness.dev](https://hiness.dev/docs/setup/).
 
   ## Usage
 

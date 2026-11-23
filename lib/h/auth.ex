@@ -80,7 +80,7 @@ defmodule H.Auth do
   @doc """
   Validates the HTTP `Host` header against the listener's literal `:bind_address`
   (defaults to loopback literals when omitted). Pass `allow_localhost: true`
-  to additionally allow `localhost:<port>`.
+  to also accept `localhost:<port>`.
   """
   @spec allowed_host?(term(), pos_integer(), keyword()) :: boolean()
   def allowed_host?(host_header, port, opts \\ [])

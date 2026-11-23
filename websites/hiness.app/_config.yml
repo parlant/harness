@@ -1,0 +1,39 @@
+title: H.app
+tagline: Your Hiness for macOS · Menu-bar daemon & local workbench
+description: H.app (hiness.app) packages the H local coding-agent daemon, hiweb workbench, and hi CLI into a single macOS Apple Silicon application bundle.
+# Preview origin only. Set https://hiness.app in a launch override (see README).
+url: http://localhost:8082
+baseurl: ""
+preview: true
+lang: en
+markdown: kramdown
+kramdown:
+  toc_levels: 2..3
+  smart_quotes: ["apos", "apos", "quot", "quot"]
+plugins:
+  - jekyll-llms-txt
+  - jekyll-seo-tag
+  - jekyll-sitemap
+llms_txt:
+  sections:
+    - title: H.app for macOS
+      paths: ["/", "/bundle/", "/ios/"]
+    - title: News, releases, and changelog
+      paths: ["/releases/"]
+    - title: Legal and privacy
+      paths: ["/legal-notice/", "/privacy/"]
+exclude:
+  - AGENTS.md
+  - README.md
+  - _config.prod.yml
+  - docs
+  - Gemfile
+  - Gemfile.lock
+  - Makefile
+  - node_modules
+  - package.json
+  - package-lock.json
+  - scripts
+  - assets/css/input.css
+  - assets/css/site.css
+  - vendor

@@ -1,0 +1,81 @@
+{% assign c = site.data.company %}
+<p><strong>As at: {{ c.effective_date_en }} · Version {{ c.version }}</strong></p>
+
+<p>This privacy policy informs you pursuant to Art. 12 to 14 of the General Data Protection Regulation (GDPR) about how personal data is processed when visiting the static websites <strong>hiness.dev</strong> and <strong>hiness.app</strong>.</p>
+
+<h2 id="controller">1. Controller</h2>
+
+<p><strong>{{ c.company_name }}</strong><br>
+{{ c.street }}<br>
+{{ c.postal_city }}<br>
+{{ c.country_en }}</p>
+
+<p>Phone: <a href="tel:{{ c.phone_tel }}">{{ c.phone_display }}</a><br>
+Email: <a href="mailto:{{ c.email_legal }}">{{ c.email_legal }}</a><br>
+Authorised managing director: {{ c.managing_director }}<br>
+Commercial register: {{ c.register_court }}, {{ c.register_number }}</p>
+
+<p>No data protection officer is required by law or appointed. Send data protection enquiries directly to <a href="mailto:{{ c.email_legal }}">{{ c.email_legal }}</a>.</p>
+
+<h2 id="general-information">2. General information and local software boundary</h2>
+
+<p>Both <strong>hiness.dev</strong> and <strong>hiness.app</strong> are static, informational websites. We run zero advertising trackers, set zero first-party analytics cookies, and load zero third-party web fonts or runtime scripts from external CDNs.</p>
+
+<p>The downloadable H software (<code>h-daemon</code>, <code>hi</code>, <code>hiweb</code>, and <code>H.app</code>) executes locally on your own computer and stores its session data in your local filesystem (<code>~/.local/share/h</code> by default). {{ c.company_name }} receives zero telemetry, transcripts, prompts, or credentials from your local H installation. When you configure an external model provider inside H, your local daemon sends model requests directly to the provider endpoint you selected under that provider's terms.</p>
+
+<h2 id="cloudflare-hosting">3. Website delivery and Cloudflare</h2>
+
+<p>These websites are delivered through the content delivery network and DNS edge of Cloudflare, Inc., 101 Townsend St, San Francisco, CA 94107, USA ("Cloudflare"). When your browser requests a page or asset, Cloudflare processes technical connection data required to transmit the response and defend the service against abuse:</p>
+
+<ul>
+  <li>IP address of the requesting device</li>
+  <li>Date and time of the request</li>
+  <li>Requested URL, referrer header, and HTTP status code</li>
+  <li>Bytes transferred, browser user-agent, and operating system</li>
+</ul>
+
+<p>Processing is based on our legitimate interest in secure, fast, and reliable delivery of public documentation and release metadata pursuant to <strong>Art. 6(1)(f) GDPR</strong>. {{ c.company_name }} does not store per-visitor server access logs or profile visitors.</p>
+
+<p>We have concluded a Data Processing Addendum with Cloudflare pursuant to <strong>Art. 28 GDPR</strong>. Cloudflare, Inc. is certified under the <strong>EU-US Data Privacy Framework</strong> (adequacy decision pursuant to Art. 45 GDPR) and incorporates the European Commission's Standard Contractual Clauses (Art. 46 GDPR). Read more at <a href="https://www.cloudflare.com/privacypolicy/">https://www.cloudflare.com/privacypolicy/</a>.</p>
+
+<h2 id="cookies">4. Cookies and TDDDG</h2>
+
+<p>We set zero marketing, profiling, or analytics cookies on hiness.dev or hiness.app. Cloudflare may set strictly necessary security identifiers when mitigating automated attacks or bot abuse; where applicable, such storage or access relies on <strong>Section 25(2) no. 2 TDDDG</strong> because it is strictly necessary to deliver the service expressly requested by you.</p>
+
+<h2 id="external-repositories-and-downloads">5. Source repositories and release downloads</h2>
+
+<p>Links to source files, issue trackers, Hex packages, and binary release downloads lead to external platforms operated under their respective controllers' privacy policies, including GitHub, Inc. (<code>github.com/parlant/harness</code>), GitLab Inc. (<code>gitlab.com/parlant-co/harness</code>), and Six Colors AB / Hex.pm (<code>hex.pm</code>, <code>hexdocs.pm</code>). Your browser connects to those platforms only when you follow an external link or run an installation command that downloads artifacts from them.</p>
+
+<h2 id="email-contact">6. Contact by email</h2>
+
+<p>When you contact us by email, we process your email address, message content, and metadata to handle your request. The legal basis is <strong>Art. 6(1)(b) GDPR</strong> (pre-contractual or contractual communication) or <strong>Art. 6(1)(f) GDPR</strong> (legitimate interest in answering enquiries). Messages are deleted once the enquiry is resolved, subject to statutory commercial or tax retention duties (Art. 6(1)(c) GDPR).</p>
+
+<h2 id="data-subject-rights">7. Rights of data subjects</h2>
+
+<p>Under the statutory conditions of the GDPR, you hold the following rights regarding your personal data:</p>
+
+<ul>
+  <li>Right of access (Art. 15 GDPR)</li>
+  <li>Right to rectification (Art. 16 GDPR)</li>
+  <li>Right to erasure (Art. 17 GDPR)</li>
+  <li>Right to restriction of processing (Art. 18 GDPR)</li>
+  <li>Right to data portability (Art. 20 GDPR)</li>
+  <li>Right to object to processing based on Art. 6(1)(f) GDPR (Art. 21 GDPR)</li>
+</ul>
+
+<p>To exercise any of these rights, email <a href="mailto:{{ c.email_legal }}">{{ c.email_legal }}</a>.</p>
+
+<h2 id="supervisory-authority">8. Right to lodge a complaint</h2>
+
+<p>Pursuant to <strong>Art. 77 GDPR</strong>, you have the right to lodge a complaint with a data protection supervisory authority. The supervisory authority responsible for {{ c.company_name }} in Berlin is:</p>
+
+<p>{{ c.supervisory_authority.name }}<br>
+{{ c.supervisory_authority.street }}<br>
+{{ c.supervisory_authority.postal_city }}, {{ c.supervisory_authority.country_en }}<br>
+Phone: {{ c.supervisory_authority.phone }}<br>
+Email: <a href="mailto:{{ c.supervisory_authority.email }}">{{ c.supervisory_authority.email }}</a><br>
+Website: <a href="{{ c.supervisory_authority.url }}">{{ c.supervisory_authority.url }}</a></p>
+
+<h2 id="updates">9. Changes to this policy</h2>
+
+<p>We update this privacy policy when hosting infrastructure, legal requirements, or site features change. Current version: <strong>{{ c.version }}</strong>.</p>

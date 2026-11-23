@@ -1,0 +1,27 @@
+{% assign c = site.data.company %}
+<footer class="site-foot">
+  <div class="wrap foot-grid">
+    <div class="foot-brand">
+      <p class="foot-brand-title"><strong>hiness.app</strong> <span>by <a href="{{ c.company_url }}">{{ c.company_name }}</a></span></p>
+      <p class="foot-note">{{ include.t.footer_note }}</p>
+      <p class="foot-copy">© {{ 'now' | date: '%Y' }} {{ c.company_name }} · {{ c.postal_city }}, {{ c.country_en }} · {{ include.t.footer_brand }}</p>
+    </div>
+    <div class="foot-columns">
+      <nav aria-label="Ecosystem and repositories" class="foot-col">
+        <span class="foot-col-label">Sites &amp; Forges</span>
+        <a href="https://hiness.app">{% include forge-icons.html forge="apple" size=13 %} hiness.app · macOS Bundle</a>
+        <a href="https://hiness.dev">hiness.dev · CLI &amp; Manual</a>
+        <a href="{{ site.data.navigation.github }}">{% include forge-icons.html forge="github" size=14 %} GitHub Mirror</a>
+        <a href="{{ site.data.navigation.gitlab }}">{% include forge-icons.html forge="gitlab" size=14 %} GitLab Origin</a>
+      </nav>
+      <nav aria-label="Legal and indexes" class="foot-col">
+        <span class="foot-col-label">Legal &amp; Indexes</span>
+        <a href="{{ '/releases/' | relative_url }}">{{ include.t.releases }}</a>
+        <a href="{{ '/legal-notice/' | relative_url }}">{{ include.t.legal_notice }}</a>
+        <a href="{{ '/privacy/' | relative_url }}">{{ include.t.privacy }}</a>
+        <a href="{{ '/llms.txt' | relative_url }}">{{ include.t.context }}</a>
+        <a href="{{ '/sitemap.xml' | relative_url }}">{{ include.t.sitemap }}</a>
+      </nav>
+    </div>
+  </div>
+</footer>

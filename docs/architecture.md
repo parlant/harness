@@ -28,6 +28,12 @@ The engine is the root Mix application (`:harness`, `H.*`). It owns session stat
 
 `H.Storage.File` uses a CRC32-framed commit log and rename-based snapshots. It recovers a torn final frame. `H.Storage.Memory` implements the same interface without disk persistence. Domain records must be plain data: runtime handles and provider credentials do not belong in records or client views.
 
+### Idle session residency
+
+A supervised file-backed session in the standard local `host` environment unloads after five minutes without requests or unfinished work. The coordinator owns the timer and rechecks eligibility after all commits and effects for the current message. Nonterminal tasks (including sleeping retries and waits), queued inputs, worker and lease ownership, and unflushed output prevent unloading. Catalog lookups, maintenance probes, and an open conversation event stream do not keep it loaded. Memory-backed stores and custom or remote execution environments are excluded.
+
+Idle unload checkpoints the conversation cursors before closing the session store. It changes only the runtime `loaded` state in the catalog, not archive or attention flags. A request that needs the coordinator wakes the same session; a request racing its idle exit can retry the coordinator call once the old supervisor has released ownership. Timeouts and crashes are not retried by that path. Conversation subscriptions belong to the client-side process in PubSub and keep receiving updates with the same cursor after a wake; reconnects can request a snapshot if older replay frames have been freed. Embedded callers can set `idle_session_timeout_ms` to a positive timeout or `:infinity` to disable it.
+
 Supervision alone cannot recover an effect. On startup the daemon consults the catalog for active sessions; the coordinator reconciles stored checkpoints. Interrupted model calls have retry accounting. Interrupted safe tools (`read`, `search_history`) can run again; unsafe tools (`write`, `edit`, `bash`) return an interrupted result with any persisted partial output instead. This is **not** exactly-once external execution. See the [file storage](../test/h/storage_file_test.exs), [tool recovery](../test/h/tool_crash_recovery_test.exs) and [VM restart](../test/h/vm_restart_test.exs) tests.
 
 ## Account boundary

@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.H.Restart do
   use Mix.Task
 
+  @moduledoc false
   @shortdoc "Starts a built candidate after cooperative daemon shutdown"
 
   @impl true

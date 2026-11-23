@@ -1,0 +1,11 @@
+{% assign operating = include.section %}
+<section class="manual-section operating-note" aria-labelledby="operating-heading">
+  <div>
+    <p class="manual-kicker">{{ operating.kicker }}</p>
+    <h2 class="manual-title" id="operating-heading">{{ operating.title }}</h2>
+  </div>
+  <div>
+    <p class="manual-lead">{{ operating.body }}</p>
+    <a class="manual-secondary" href="{{ operating.link.url | relative_url }}">{{ operating.link.label }} <span aria-hidden="true">→</span></a>
+  </div>
+</section>

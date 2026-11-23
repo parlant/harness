@@ -1,6 +1,0 @@
-main:
-  - {title: Features, url: /features/}
-  - {title: Demo, url: /demo/}
-  - {title: Documentation, url: /docs/}
-  - {title: Extensions, url: /extensions/}
-source: https://gitlab.com/parlant-co/harness

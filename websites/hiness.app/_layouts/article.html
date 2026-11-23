@@ -1,0 +1,34 @@
+---
+layout: default
+---
+{% assign art = site.data.artworks[page.artwork] %}
+<div class="wrap feature-page">
+  <div class="feature-grid">
+    <article class="manual-page">
+      <header class="manual-head">
+        <p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ page.kicker }}</p>
+        <h1>{{ page.title | escape }}</h1>
+        {% if page.lead %}<p>{{ page.lead | escape }}</p>{% endif %}
+      </header>
+      <div class="prose manual-prose">{{ content }}</div>
+    </article>
+    <aside class="feature-gallery-rail" aria-label="Curated museum portrait and bundle quickfacts">
+      {% if art %}
+        {% include gallery-card.html artwork=page.artwork hook=page.artwork_hook wide=page.artwork_wide %}
+      {% endif %}
+      {% if page.specs %}
+      <div class="app-spec-card">
+        <span class="app-spec-title">{{ page.specs_title | default: "Bundle specification" }}</span>
+        <dl class="app-spec-list">
+          {% for s in page.specs %}
+          <div>
+            <dt>{{ s.label | escape }}</dt>
+            <dd><code>{{ s.value | escape }}</code></dd>
+          </div>
+          {% endfor %}
+        </dl>
+      </div>
+      {% endif %}
+    </aside>
+  </div>
+</div>

@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.H.Install do
   use Mix.Task
 
+  @moduledoc false
   @shortdoc "Installs and activates a prebuilt bundle (default: dist/harness)"
 
   @impl true

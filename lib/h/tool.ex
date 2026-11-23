@@ -4,6 +4,8 @@ defmodule H.Tool do
 
   The coordinator binds the built-in coding tools' working directory before
   acquiring a lease or calling `execute/2`. Workers use the bound `context.env`.
+  Read [Security boundaries on hiness.dev](https://hiness.dev/docs/security/)
+  before exposing host tools to external context.
   """
 
   @type context :: %{

@@ -1,0 +1,9 @@
+---
+layout: default
+---
+<div class="field-manual wrap">
+  {% for section in page.sections %}
+    {% assign section_layout = section.layout %}
+    {% include sections/{{ section_layout }}.html section=section %}
+  {% endfor %}
+</div>

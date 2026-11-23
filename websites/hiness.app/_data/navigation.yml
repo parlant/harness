@@ -1,0 +1,13 @@
+main:
+  - {title: Download, url: "/#download"}
+  - {title: Menu Bar, url: "/#menubar"}
+  - {title: Inside H.app, url: /bundle/}
+  - {title: iOS Companion, url: /ios/}
+  - {title: Releases, url: /releases/}
+companion:
+  label: hiness.dev
+  sub: CLI & Manual
+  url: https://hiness.dev
+github: https://github.com/parlant/harness
+gitlab: https://gitlab.com/parlant-co/harness
+source: https://github.com/parlant/harness

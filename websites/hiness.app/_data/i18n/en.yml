@@ -1,0 +1,17 @@
+brand: H.app
+brand_descriptor: hiness.app · macOS Application Bundle
+brand_domain: hiness.app
+dev_domain: hiness.dev
+navigation: Main navigation
+skip: Skip to content
+source: GitHub
+github: GitHub
+gitlab: GitLab
+legal_notice: Legal notice
+privacy: Privacy
+releases: Releases
+home: Home
+footer_brand: "hiness is a brand of Parlant GmbH, Berlin."
+footer_note: "H.app (hiness.app) packages the H local coding-agent daemon, hiweb browser workbench, and hi CLI for macOS Apple Silicon. Companion CLI reference and manual live at hiness.dev."
+sitemap: Sitemap
+context: llms.txt

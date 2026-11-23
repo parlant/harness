@@ -1,0 +1,67 @@
+{% assign rel = site.data.releases %}
+<div class="releases-ledger">
+  <section class="releases-news" aria-labelledby="news-dispatches-heading">
+    <h2 id="news-dispatches-heading">Court dispatches and news</h2>
+    <p>Both <strong>hiness.dev</strong> and <strong>hiness.app</strong> build from the same synchronized release ledger in the H repository.</p>
+    <div class="news-grid">
+      {% for item in rel.news %}
+      <article class="news-card" id="news-{{ item.id }}">
+        <div class="news-meta">
+          <span class="news-tag">{{ item.tag | escape }}</span>
+          <time datetime="{{ item.date | escape }}">{{ item.date | escape }}</time>
+        </div>
+        <h3>{{ item.title | escape }}</h3>
+        <p>{{ item.summary | escape }}</p>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="releases-changelog" aria-labelledby="changelog-heading">
+    <h2 id="changelog-heading">Signed releases and changelog</h2>
+    <p>Every tag publishes identical signed artifacts to <a href="{{ rel.github_releases }}">GitHub Releases</a> and <a href="{{ rel.gitlab_releases }}">GitLab Releases</a>. Verify downloads against <code>{{ rel.signer_identity | escape }}</code> before installation.</p>
+    {% for entry in rel.entries %}
+    <article class="release-entry" id="v{{ entry.version | replace: '.', '-' }}">
+      <div class="release-entry-head">
+        <div>
+          <span class="release-badge">{{ entry.status | escape }}</span>
+          <h3>H {{ entry.tag | escape }} · {{ entry.title | escape }}</h3>
+        </div>
+        <div class="release-entry-links">
+          <time datetime="{{ entry.date | escape }}">{{ entry.date | escape }}</time>
+          <a href="{{ rel.github_releases }}/tag/{{ entry.tag | url_encode }}">{% include forge-icons.html forge="github" size=14 %} GitHub {{ entry.tag | escape }}</a>
+          <a href="{{ rel.gitlab_releases }}/{{ entry.tag | url_encode }}">{% include forge-icons.html forge="gitlab" size=14 %} GitLab {{ entry.tag | escape }}</a>
+        </div>
+      </div>
+      <p>{{ entry.summary | escape }}</p>
+      <h4>Changes in {{ entry.tag | escape }}</h4>
+      <ul>
+        {% for point in entry.highlights %}
+        <li>{{ point | escape }}</li>
+        {% endfor %}
+      </ul>
+      <h4>Published artifacts</h4>
+      <div class="release-artifacts-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Artifact</th>
+              <th>Platform</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for art in entry.artifacts %}
+            <tr>
+              <td><code>{{ art.name | escape }}</code></td>
+              <td>{{ art.platform | escape }}</td>
+              <td>{{ art.kind | escape }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+</div>

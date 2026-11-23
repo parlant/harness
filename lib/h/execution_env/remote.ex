@@ -3,7 +3,7 @@ defmodule H.ExecutionEnv.Remote do
   Cooperative remote `H.ExecutionEnv` adapter backed by a `H.RemoteAgent` handle.
 
   Delegates all path resolution, directory listing (including project markers), file I/O,
-  and process execution to the target remote agent—never invoking local `Path.expand/2`,
+  and process execution to the target remote agent without calling local `Path.expand/2`,
   `File`, or `System` directly.
 
   ## Future Network Transport

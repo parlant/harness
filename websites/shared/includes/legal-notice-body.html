@@ -1,0 +1,77 @@
+{% assign c = site.data.company %}
+<p><strong>As at: {{ c.effective_date_en }} · Version {{ c.version }}</strong></p>
+
+<p>Information pursuant to Section 5 of the German Digital Services Act (Digitale-Dienste-Gesetz, DDG). A German version (<a href="#impressum-de">Impressum</a>) appears below.</p>
+
+<h2 id="service-provider">Service provider</h2>
+
+<p><strong>{{ c.company_name }}</strong><br>
+{{ c.street }}<br>
+{{ c.postal_city }}<br>
+{{ c.country_en }}</p>
+
+<p>{{ c.brand_statement }} This legal notice applies to both <strong>hiness.dev</strong> and <strong>hiness.app</strong>.</p>
+
+<p>Authorised managing director: <strong>{{ c.managing_director }}</strong></p>
+
+<h2 id="contact">Contact</h2>
+
+<p>Phone: <a href="tel:{{ c.phone_tel }}">{{ c.phone_display }}</a><br>
+Email for general, legal, and regulatory enquiries: <a href="mailto:{{ c.email_legal }}">{{ c.email_legal }}</a><br>
+Corporate website: <a href="{{ c.company_url }}">{{ c.company_url }}</a></p>
+
+<h2 id="register-and-vat">Register and VAT</h2>
+
+<p>Register court: {{ c.register_court }}<br>
+Commercial register: <strong>{{ c.register_number }}</strong><br>
+VAT identification number pursuant to Section 27a UStG: <strong>{{ c.vat_id }}</strong></p>
+
+<h2 id="editorial-responsibility">Editorial responsibility</h2>
+
+<p>Responsible for journalistic and editorial content pursuant to Section 18(2) of the German Interstate Media Treaty (Medienstaatsvertrag, MStV):</p>
+
+<p>{{ c.managing_director }}<br>
+{{ c.company_name }}<br>
+{{ c.street }}<br>
+{{ c.postal_city }}</p>
+
+<h2 id="digital-services-act">Points of contact under the Digital Services Act</h2>
+
+<p>The single point of contact for authorities, the European Commission, and the European Board for Digital Services pursuant to Art. 11 DSA, and for users pursuant to Art. 12 DSA, is <a href="mailto:{{ c.email_legal }}">{{ c.email_legal }}</a>.</p>
+
+<p>Communication is possible in German and English. Reports of unlawful content should state the affected URL, a clear description, and supporting evidence.</p>
+
+<h2 id="dispute-resolution">Consumer dispute resolution</h2>
+
+<p>{{ c.company_name }} does not participate in dispute resolution proceedings before a consumer arbitration board and has no statutory obligation to do so unless required in an individual case. The European Union's former online dispute resolution platform has been discontinued.</p>
+
+<h2 id="external-links-and-artworks">External links and museum artworks</h2>
+
+<p>The operators of linked external pages are responsible for their content. When we become aware of specific legal violations, we remove the affected links after review. Historical portraits displayed on hiness.dev and hiness.app reproduce public-domain works held by Kunsthistorisches Museum Wien, National Gallery of Ireland, Museo Nacional del Prado, Gallerie degli Uffizi, Rijksmuseum, and Princeton University Art Museum.</p>
+
+<hr>
+
+<h2 id="impressum-de">Impressum (Deutsch)</h2>
+
+<p><strong>Stand: {{ c.effective_date_de }} · Version {{ c.version }}</strong></p>
+
+<p>Angaben gemäß § 5 Digitale-Dienste-Gesetz (DDG) für <strong>hiness.dev</strong> und <strong>hiness.app</strong>.</p>
+
+<p><strong>{{ c.company_name }}</strong><br>
+{{ c.street }}<br>
+{{ c.postal_city }}<br>
+{{ c.country_de }}</p>
+
+<p>hiness ist eine Marke der {{ c.company_name }}.<br>
+Vertretungsberechtigter Geschäftsführer: <strong>{{ c.managing_director }}</strong></p>
+
+<p>Telefon: <a href="tel:{{ c.phone_tel }}">{{ c.phone_display }}</a><br>
+E-Mail für allgemeine, rechtliche und behördliche Anfragen: <a href="mailto:{{ c.email_legal }}">{{ c.email_legal }}</a></p>
+
+<p>Registergericht: {{ c.register_court }}<br>
+Handelsregister: <strong>{{ c.register_number }}</strong><br>
+Umsatzsteuer-Identifikationsnummer gemäß § 27a UStG: <strong>{{ c.vat_id }}</strong></p>
+
+<p>Verantwortlich für journalistisch-redaktionelle Inhalte gemäß § 18 Abs. 2 Medienstaatsvertrag (MStV): {{ c.managing_director }}, {{ c.company_name }}, {{ c.street }}, {{ c.postal_city }}.</p>
+
+<p>Zentrale Kontaktstelle gemäß Art. 11 und Art. 12 DSA (Deutsch und Englisch): <a href="mailto:{{ c.email_legal }}">{{ c.email_legal }}</a>. {{ c.company_name }} nimmt nicht an Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle teil, soweit keine gesetzliche Pflicht im Einzelfall besteht.</p>

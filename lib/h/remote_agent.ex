@@ -2,14 +2,14 @@ defmodule H.RemoteAgent do
   @moduledoc """
   In-VM cooperative remote execution agent GenServer (`H.ExecutionEnv.Remote` transport seam).
 
-  Owns a host-backed `H.ExecutionEnv.t()` (typically `H.ExecutionEnv.Host`) and an explicit
-  plain environment descriptor (`%{id: id, kind: "remote", cwd: cwd}`). This process is
-  ephemeral—never durable and never storing credentials or auth secrets.
+  Owns a host-backed `H.ExecutionEnv.t()` (`H.ExecutionEnv.Host`) and an explicit
+  plain environment descriptor (`%{id: id, kind: "remote", cwd: cwd}`). Process state
+  lives in memory for the duration of the run and excludes credentials or auth secrets.
 
-  ## Future Network Transport
+  ## Future network transport
 
-  This module serves as the local in-VM RPC endpoint proving fencing, lease-TTL heartbeats,
-  bounded execution output, and process-group reaping semantics. A future Slice 8 network
+  This module implements the local in-VM RPC endpoint proving fencing, lease-TTL heartbeats,
+  bounded execution output, and process-group reaping semantics. A future network
   adapter (authenticated mTLS WebSocket/HTTPS or SSH subsystem) will replace the `GenServer`
   call/message framing while preserving this protocol contract.
   """

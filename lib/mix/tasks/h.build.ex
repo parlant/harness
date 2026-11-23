@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.H.Build do
   use Mix.Task
 
+  @moduledoc false
   @shortdoc "Builds all clients; --release publishes a tested installable bundle"
 
   @impl true

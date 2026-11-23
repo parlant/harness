@@ -1,0 +1,44 @@
+title: H
+tagline: Your Hiness · A local coding-agent harness
+description: H (hiness.dev / hiness.app) is a local coding-agent daemon with durable sessions, synchronized terminal and web clients, and a lean Elixir/OTP core you can extend.
+# Preview origin only. Set the real HTTPS origin in a launch override (see README).
+url: http://localhost:8080
+baseurl: ""
+preview: true
+lang: en
+markdown: kramdown
+kramdown:
+  toc_levels: 2..3
+  smart_quotes: ["apos", "apos", "quot", "quot"]
+plugins:
+  - jekyll-llms-txt
+  - jekyll-seo-tag
+  - jekyll-sitemap
+llms_txt:
+  sections:
+    - title: Start here
+      paths: ["/", "/demo/**", "/releases/"]
+      content_paths: ["specimen.caption"]
+    - title: Features
+      paths: ["/features/"]
+    - title: Manual
+      paths: ["/docs/**"]
+    - title: Extension directory
+      paths: ["/extensions/**"]
+    - title: Legal and privacy
+      paths: ["/legal-notice/", "/privacy/"]
+exclude:
+  - AGENTS.md
+  - README.md
+  - _config.prod.yml
+  - docs
+  - Gemfile
+  - Gemfile.lock
+  - Makefile
+  - node_modules
+  - package.json
+  - package-lock.json
+  - scripts
+  - assets/css/input.css
+  - assets/css/site.css
+  - vendor

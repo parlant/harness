@@ -596,7 +596,7 @@ defmodule HWeb.InboxLiveTest do
   end
 
   describe "triage, stop, archive/unload, and missing-cwd recovery" do
-    test "toggling needs_attention moves a loaded session to bottom of its group, removes data-needs-attention, excludes from Next ->, and Archived filter shows/restores archived sessions",
+    test "dismissing attention keeps the session in Inbox but excludes it from Next; Archived shows and restores archived sessions",
          %{
            conn: conn,
            projects_dir: projects_dir,
@@ -643,7 +643,7 @@ defmodule HWeb.InboxLiveTest do
         ) and has_element?(view, "#inbox-filter-attention", "1")
       end)
 
-      # Still visible in Inbox (loaded), but pushed to the bottom of the workspace group (after s1)
+      # Still visible in Inbox, but pushed to the bottom of the workspace group (after s1)
       assert has_element?(view, "#inbox-filter-inbox", "2")
       html = render(view)
       {s1_pos, _} = :binary.match(html, ~s(data-session-id="#{s1.session_id}"))

@@ -16,6 +16,7 @@ defmodule H.Storage.Engine do
     "root_conversation_id" => :root_conversation_id,
     "incarnation" => :incarnation,
     "clean_close" => :clean_close,
+    "idle_checkpoint" => :idle_checkpoint,
     "created_at" => :created_at,
     "updated_at" => :updated_at,
     "active" => :active,

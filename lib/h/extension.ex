@@ -8,6 +8,9 @@ defmodule H.Extension do
   initialization must not replay work just because a process started again.
   `:codex_account_policy` is an optional, unique `H.Provider.AccountPolicy`
   contribution for aliases already configured in `accounts.json`.
+
+  Follow [Write a startup extension on hiness.dev](https://hiness.dev/docs/extensions/)
+  to build and register an extension artifact.
   """
 
   @type context :: %{

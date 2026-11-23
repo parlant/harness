@@ -4,32 +4,32 @@ H is a local Elixir/OTP daemon for coding-agent sessions. A session can branch w
 
 ## Install a release
 
-Prebuilt signed releases are published for **macOS (`darwin-arm64`)** and **Linux (`linux-arm64`, `linux-x86_64`)** on [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases) (mirrored at [github.com/parlant/harness](https://github.com/parlant/harness)). Every release embeds a `BUILD_MANIFEST.json` tied to its exact Git commit and is signed with OpenSSH (`packaging/keys/release-signers`).
+Prebuilt signed releases are published for **macOS (`darwin-arm64`)** and **Linux (`linux-arm64`, `linux-x86_64`)** on [GitHub Releases](https://github.com/parlant/harness/releases) and [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases), with full documentation on **[hiness.dev](https://hiness.dev)** and the macOS `H.app` bundle showcase on **[hiness.app](https://hiness.app)**. Every release embeds a `BUILD_MANIFEST.json` tied to its exact Git commit and is signed with OpenSSH (`packaging/keys/release-signers`).
 
 ### Shell installer (`macOS` and `Linux`)
 
-Review [`scripts/install.sh`](scripts/install.sh) (also served at `/install.sh` on the project website), then run:
+Review [`scripts/install.sh`](scripts/install.sh) (also served at [`https://hiness.dev/install.sh`](https://hiness.dev/install.sh)), then run:
 
 ```sh
-curl -fsSL https://gitlab.com/parlant-co/harness/-/raw/main/scripts/install.sh | sh -s -- --service
+curl -fsSL https://hiness.dev/install.sh | sh -s -- --service
 ```
 
 The script verifies `SHA256SUMS.sig` with `ssh-keygen -Y verify` (`bingboombam@parlant.xyz` in `packaging/keys/release-signers`), checks the archive SHA-256, installs the bundle under `~/.local/opt/harness/current`, cascades writable `PATH` locations (preferring `/usr/local/bin`, `/opt/local/bin`, `/opt/homebrew/bin`, `~/.local/bin`, or other writable `PATH` directories, falling back to `~/.bin` last; override with `--bin-dir`), and optionally registers a per-user macOS LaunchAgent or Linux `systemd --user` service (`--service`).
 
 ### Elixir / Hex archive (`mix h.setup`)
 
-If Elixir and Mix are already installed, install the zero-dependency `h_setup` archive and run `mix h.setup`:
+If Elixir and Mix are already installed, install the zero-dependency `h_setup` archive from Hex and run `mix h.setup`:
 
 ```sh
-mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
+mix archive.install hex h_setup
 mix h.setup --service
 ```
 
-Once published on Hex.pm, `mix archive.install hex h_setup` installs the same task.
+To embed the `:harness` OTP application in your own Elixir project, add `{:hiness, "~> 0.2.0"}` to `mix.exs` and consult [HexDocs (`hiness`)](https://hexdocs.pm/hiness) and [hiness.dev](https://hiness.dev).
 
 ### macOS application bundle (`H.app`)
 
-On macOS (`arm64`), download `H-v<version>-darwin-arm64.dmg` from the [latest release](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest), drag **`H.app`** to `/Applications`, and open it. `H.app` starts its embedded daemon on `~/.local/share/h`, opens the web workbench at `http://127.0.0.1:4200/inbox`, and provides `[H]` menu-bar actions to copy your owner sign-in token, link `hi` into the first writable standard `PATH` bin directory (falling back to `~/.bin` last), or cooperatively drain and restart the daemon.
+On macOS (`arm64`), visit **[hiness.app](https://hiness.app)** or download `H-v<version>-darwin-arm64.dmg` from [GitHub Releases](https://github.com/parlant/harness/releases) / [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest), drag **`H.app`** to `/Applications`, and open it. `H.app` starts its embedded daemon on `~/.local/share/h`, opens the web workbench at `http://127.0.0.1:4200/inbox`, and provides `[H]` menu-bar actions to copy your owner sign-in token, link `hi` into the first writable standard `PATH` bin directory (falling back to `~/.bin` last), or cooperatively drain and restart the daemon.
 
 ## Build from source
 
@@ -117,8 +117,9 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 - [Roadmap](docs/roadmap.md) — implemented milestones and remaining work
 - [hi build and cutover status](docs/hi/build.md) — shipped workflows, verification and ordered remaining batches
 - [hi status lines](docs/hi/status.md) — user templates, available fields and `/reload`
+- [Session performance](docs/hi/session-performance.md) — catalog scale, tool latency, and idle memory
 - [hi design and parity target](docs/hi.md) — interaction parity, Rust choices and durable differences
 - [Extensions](docs/extensions.md) — daemon packages, profiles, environments, providers and clients
 - [Design references](docs/references.md)
 
-The [project website](website/README.md) builds separately with Jekyll. Its demos are static walkthroughs; no running daemon or provider account is required.
+The project websites ([`websites/hiness.dev`](websites/hiness.dev/README.md) and [`websites/hiness.app`](websites/hiness.app/README.md)) build separately with Jekyll and share synchronized release and legal records under `websites/shared/`. Their demos are static walkthroughs; no running daemon or provider account is required.

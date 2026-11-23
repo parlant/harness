@@ -1,41 +1,24 @@
-# `h_setup` — Mix Archive Installer for Harness (H)
+# `h_setup` Mix Archive Installer
 
-Zero-dependency Mix archive providing `mix h.setup` to download, cryptographically verify
-(Ed25519 OpenSSH `SSHSIG` signature + SHA-256 via Erlang `:crypto`), and install signed
-Harness (`hi`, `h-daemon`, `hi-import`) release bundles on macOS and Linux.
+`h_setup` is a zero-dependency Mix archive that downloads, verifies, and installs signed release bundles for **H** (`hi`, `h-daemon`, `hi-import`) on macOS (`darwin-arm64`) and Linux (`linux-arm64`, `linux-x86_64`).
 
-## Installation
+Read the H operator manual, client walkthroughs, and alternative installation methods on **[hiness.dev](https://hiness.dev)** (and macOS `H.app` details on **[hiness.app](https://hiness.app)**).
 
-From Hex (once published):
+## Install H with `mix h.setup`
+
+Install the `h_setup` archive from Hex, then run `mix h.setup`:
 
 ```sh
 mix archive.install hex h_setup
+mix h.setup --service
+hi daemon status
 ```
 
-From a prebuilt release `.ez` archive:
+`mix h.setup` verifies the OpenSSH Ed25519 signature (`bingboombam@parlant.xyz`) and SHA-256 digest in Erlang `:crypto`, unpacks the self-contained OTP release under `~/.local/opt/harness/current`, symlinks `hi` and `hi-import` into the first writable directory on `PATH` (`/usr/local/bin`, `/opt/local/bin`, `/opt/homebrew/bin`, or `~/.local/bin`, falling back to `~/.bin`), and registers a per-user macOS LaunchAgent or Linux `systemd --user` service when `--service` is passed.
 
-```sh
-mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
-```
+## Next steps on hiness.dev
 
-From Git (sparse checkout of `installer/`):
-
-```sh
-mix archive.install git https://github.com/parlant/harness.git --sparse installer
-```
-
-Or locally from a checkout:
-
-```sh
-cd installer
-mix do archive.build + archive.install
-```
-
-## Usage
-
-```sh
-mix h.setup
-mix h.setup --version 0.1.0
-mix h.setup --bin-dir ~/.local/bin --prefix ~/.local/opt/harness
-mix h.setup --service --data-dir ~/.local/share/h
-```
+- [Set up H and make the first connection](https://hiness.dev/docs/setup/)
+- [Configure model providers (`/login` and `/key set`)](https://hiness.dev/docs/providers/)
+- [Manage and upgrade the background daemon](https://hiness.dev/docs/daemon/)
+- [Embed `:harness` in an Elixir/OTP application (`hiness` on HexDocs)](https://hexdocs.pm/hiness)

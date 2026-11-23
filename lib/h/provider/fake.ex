@@ -13,7 +13,7 @@ defmodule H.Provider.Fake do
   use GenServer
 
   defmodule UnscriptedRequestError do
-    @moduledoc false
+    @moduledoc "Raised when `H.Provider.Fake` receives a turn after its scripted steps are exhausted."
     defexception [:message, :request]
   end
 

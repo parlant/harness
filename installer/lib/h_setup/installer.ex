@@ -273,7 +273,7 @@ defmodule HSetup.Installer do
 
     with :ok <- validate_url_scheme(uri) do
       http_opts = build_http_opts(uri)
-      headers = [{~c"user-agent", ~c"h_setup/0.1.0"}]
+      headers = [{~c"user-agent", ~c"h_setup/0.2.0"}]
 
       case :httpc.request(:get, {String.to_charlist(url), headers}, http_opts,
              body_format: :binary

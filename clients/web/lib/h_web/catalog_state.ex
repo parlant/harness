@@ -229,22 +229,9 @@ defmodule HWeb.CatalogState do
   def processing?(%{attention: att}) when att in ["running", "sleeping", "retrying"], do: true
   def processing?(_), do: false
 
-  @doc "Returns true if a session belongs in the active `/inbox` view."
+  @doc "Returns true if the session is unarchived, whether loaded or not."
   @spec active_inbox?(session()) :: boolean()
-  def active_inbox?(%{archived: true}), do: false
-
-  def active_inbox?(session) when is_map(session) do
-    session.loaded or session.needs_attention or processing?(session) or
-      session.attention == "quarantined"
-  end
-
-  @doc "Returns true if a session belongs in the `archived` filter view (archived or cold unloaded)."
-  @spec archived_or_unloaded?(session()) :: boolean()
-  def archived_or_unloaded?(%{archived: true}), do: true
-
-  def archived_or_unloaded?(session) when is_map(session) do
-    not session.loaded and not session.needs_attention and not processing?(session)
-  end
+  def active_inbox?(%{archived: archived}), do: not archived
 
   @doc """
   Computes live inbox / attention / processing / archived / total counts over root
@@ -292,7 +279,7 @@ defmodule HWeb.CatalogState do
       else
         acc = %{acc | all: acc.all + 1}
         acc = if active_inbox?(s), do: %{acc | inbox: acc.inbox + 1}, else: acc
-        acc = if archived_or_unloaded?(s), do: %{acc | archived: acc.archived + 1}, else: acc
+        acc = if s.archived, do: %{acc | archived: acc.archived + 1}, else: acc
 
         cond do
           needs_attention?(s) and s.attention in ["error", "quarantined"] ->
@@ -511,7 +498,7 @@ defmodule HWeb.CatalogState do
 
   defp mode_matches?(s, "inbox"), do: active_inbox?(s)
   defp mode_matches?(s, "attention"), do: needs_attention?(s)
-  defp mode_matches?(s, "archived"), do: archived_or_unloaded?(s)
+  defp mode_matches?(s, "archived"), do: s.archived
   defp mode_matches?(_s, _), do: true
 
   defp query_matches?(_s, ""), do: true

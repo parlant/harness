@@ -598,7 +598,8 @@ defmodule H.Session.Server.Commands do
     expected_seq = Map.get(args, :expected_seq)
     conv_seq = Map.get(state.conv_last_seq, cid, state.seq)
 
-    if not is_nil(expected_seq) and expected_seq != conv_seq and expected_seq != state.seq do
+    if not is_nil(expected_seq) and
+         expected_seq not in [conv_seq, state.seq, state.idle_resume_seq] do
       {:immediate, from, {:error, {:conflict, "expected_seq mismatch"}}, [], state}
     else
       now = System.system_time(:millisecond)
@@ -929,7 +930,7 @@ defmodule H.Session.Server.Commands do
   defp stage_rename(from, cid, req_id, fp, args, state) do
     expected_seq = Map.get(args, :expected_seq)
 
-    if not is_nil(expected_seq) and expected_seq != state.seq do
+    if not is_nil(expected_seq) and expected_seq not in [state.seq, state.idle_resume_seq] do
       {:immediate, from, {:error, {:conflict, "expected_seq mismatch"}}, [], state}
     else
       now = System.system_time(:millisecond)
@@ -989,7 +990,7 @@ defmodule H.Session.Server.Commands do
         {:immediate, from,
          {:error, {:bad_request, "expected_seq must be a non-negative integer"}}, [], state}
 
-      expected_seq != conv_seq and expected_seq != state.seq ->
+      expected_seq not in [conv_seq, state.seq, state.idle_resume_seq] ->
         {:immediate, from, {:error, {:conflict, "expected_seq mismatch"}}, [], state}
 
       State.conversation_busy?(state, cid) or inbox != [] ->
