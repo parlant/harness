@@ -14,7 +14,7 @@ Run one H server for each data directory. The bundled daemon and the Phoenix dev
 
 Download a prebuilt release for **macOS (`darwin-arm64`)** or **Linux (`linux-arm64`, `linux-x86_64`)** from [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases) or the [GitHub mirror](https://github.com/parlant/harness). Every release archive includes a `BUILD_MANIFEST.json` pinned to its source commit and an OpenSSH signature verified against `packaging/keys/release-signers`.
 
-- **Install with the POSIX shell script**: review [`/install.sh`](/install.sh), then run it to verify the OpenSSH signature and SHA-256 digest, unpack `~/.local/opt/harness/current`, symlink `hi` and `hi-import` into `~/.bin` (or `--bin-dir`), and register a per-user macOS LaunchAgent or Linux `systemd --user` service with `--service`:
+- **Install with the POSIX shell script**: review [`/install.sh`](/install.sh), then run it to verify the OpenSSH signature and SHA-256 digest, unpack `~/.local/opt/harness/current`, symlink `hi` and `hi-import` into the first writable directory on `PATH` (preferring `/usr/local/bin`, `/opt/local/bin`, `/opt/homebrew/bin`, and `~/.local/bin`, falling back to `~/.bin` last, or overriding with `--bin-dir`), and register a per-user macOS LaunchAgent or Linux `systemd --user` service with `--service`:
 
 ```sh
 curl -fsSL https://gitlab.com/parlant-co/harness/-/raw/main/scripts/install.sh | sh -s -- --service
@@ -27,12 +27,12 @@ mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/l
 mix h.setup --service
 ```
 
-- **Install the macOS application bundle (`H.app`)**: download `H-v<version>-darwin-arm64.dmg` from the [latest release](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest), drag `H.app` to `/Applications`, and launch it. `H.app` starts its embedded daemon on `~/.local/share/h`, opens `http://127.0.0.1:4200/inbox`, and provides menu-bar commands to copy the owner sign-in token, link `hi` into `~/.bin`, or drain and restart the daemon.
+- **Install the macOS application bundle (`H.app`)**: download `H-v<version>-darwin-arm64.dmg` from the [latest release](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest), drag `H.app` to `/Applications`, and launch it. `H.app` starts its embedded daemon on `~/.local/share/h`, opens `http://127.0.0.1:4200/inbox`, and provides menu-bar commands to copy the owner sign-in token, link `hi` into a writable directory on `PATH`, or drain and restart the daemon.
 
 To verify a release archive manually before extracting, check `SHA256SUMS.sig` against [`packaging/keys/release-signers`](https://gitlab.com/parlant-co/harness/-/blob/main/packaging/keys/release-signers):
 
 ```sh
-ssh-keygen -Y verify -f release-signers -I l.rieder@gmail.com -n file -s SHA256SUMS.sig < SHA256SUMS
+ssh-keygen -Y verify -f release-signers -I bingboombam@parlant.xyz -n file -s SHA256SUMS.sig < SHA256SUMS
 shasum -a 256 -c SHA256SUMS
 ```
 

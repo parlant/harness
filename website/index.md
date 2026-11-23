@@ -10,11 +10,80 @@ sections:
     emphasis: Your agent keeps working.
     body: H runs your coding-agent sessions in a local daemon. Start a code review in your terminal, quit the client, and follow the active run in your browser while H writes every turn to disk.
     primary:
+      label: Install H
+      url: "#install"
+    secondary:
       label: Switch clients mid-run
       url: /docs/guides/resume/
-    secondary:
-      label: Set up H locally
-      url: /docs/setup/
+  - layout: install
+    id: install
+    kicker: Install H
+    title: Pick your installation method.
+    body: Install a signed release bundle for macOS or Linux, run the Mix archive, drag the macOS app to Applications, or compile from a checkout. Every release verifies its OpenSSH signature and SHA-256 checksum before activating ~/.local/opt/harness/current.
+    tablist_label: Installation methods
+    links:
+      - label: Read the full setup guide
+        url: /docs/setup/
+      - label: Manage the background daemon
+        url: /docs/daemon/
+    tabs:
+      - id: shell
+        label: Shell script
+        meta: macOS & Linux
+        heading: Install with the POSIX shell script
+        platform: darwin-arm64 · linux-arm64 · linux-x86_64
+        command: |
+          curl -fsSL https://gitlab.com/parlant-co/harness/-/raw/main/scripts/install.sh | sh -s -- --service
+        body: The script verifies the OpenSSH Ed25519 signature (bingboombam@parlant.xyz) and SHA-256 digest, unpacks the release under ~/.local/opt/harness/current, links hi and hi-import into the first writable directory on PATH (/usr/local/bin, /opt/local/bin, /opt/homebrew/bin, or ~/.local/bin, falling back to ~/.bin), and registers a per-user macOS LaunchAgent or Linux systemd --user service.
+        verify: hi daemon status
+        links:
+          - label: Review /install.sh
+            url: /install.sh
+          - label: Verify release signatures manually
+            url: /docs/setup/#install-a-signed-release
+      - id: hex
+        label: Hex / Mix
+        meta: Elixir 1.18+
+        heading: Install with the h_setup Mix archive
+        platform: Erlang :crypto verification
+        command: |
+          mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
+          mix h.setup --service
+          hi daemon status
+        alt_label: "Or install the archive from Hex:"
+        alt_command: |
+          mix archive.install hex h_setup
+        body: The Mix task verifies the same Ed25519 signature and SHA-256 checksum in Erlang :crypto, installs the self-contained runtime bundle under ~/.local/opt/harness/current so H runs independently of your project's Elixir version, and links hi onto PATH.
+        links:
+          - label: Configure providers after setup
+            url: /docs/providers/
+      - id: macos-app
+        label: macOS app
+        meta: Apple Silicon
+        heading: Install H.app from the disk image
+        platform: H-v0.1.0-darwin-arm64.dmg
+        body: Download H-v0.1.0-darwin-arm64.dmg from GitLab Releases (or the GitHub Releases mirror), drag H.app to /Applications, and open it. H.app starts the bundled daemon on ~/.local/share/h, opens hiweb at http://127.0.0.1:4200/inbox, and adds the H menu-bar item to copy your sign-in token, link hi onto PATH, or drain and restart the daemon.
+        links:
+          - label: Download from GitLab Releases
+            url: https://gitlab.com/parlant-co/harness/-/releases/permalink/latest
+          - label: View GitHub Releases mirror
+            url: https://github.com/parlant/harness/releases
+      - id: source
+        label: From source
+        meta: Elixir 1.20 / OTP 29 + Rust
+        heading: Build and install from a checkout
+        platform: macOS & Linux
+        command: |
+          git clone https://gitlab.com/parlant-co/harness.git
+          cd harness
+          mix h.local --service
+          hi daemon status
+        body: This task compiles the OTP daemon, hiweb assets, and Rust hi client, runs the offline smoke suite, and activates the bundle under ~/.local/opt/harness/current. You can also clone from the GitHub mirror at https://github.com/parlant/harness.git.
+        links:
+          - label: Follow source build steps
+            url: /docs/setup/#build-a-bundle-from-source-terminal-and-web
+          - label: Run the live Phoenix dev server
+            url: /docs/setup/#develop-from-source-instead
   - layout: principle
     id: recovery
     kicker: 01 / Durable sessions
