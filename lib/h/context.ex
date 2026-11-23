@@ -9,6 +9,8 @@ defmodule H.Context do
   alias ReqLLM.ToolCall
 
   @interrupted_tool_text "Tool call interrupted by conversation fork."
+  @tool_wire_id ~r/\A[A-Za-z0-9_-]{1,64}\z/
+  @pi_historical_messages ~w(custom hookMessage branchSummary compactionSummary)
 
   @type tool_descriptor :: %{
           required(:name) => String.t(),
@@ -70,6 +72,7 @@ defmodule H.Context do
     req_messages =
       request_map
       |> fetch(:messages, [])
+      |> normalize_wire_call_ids()
       |> Enum.map(&to_req_llm_message/1)
 
     req_context = %ReqLLM.Context{
@@ -159,9 +162,17 @@ defmodule H.Context do
 
   # Entry projection
 
-  defp aborted_assistant?(entry) do
-    entry_kind(entry) == "assistant" and fetch(entry_data(entry), :aborted) == true
+  @doc false
+  def aborted_assistant?(entry) do
+    data = entry_data(entry)
+
+    entry_kind(entry) == "assistant" and
+      (fetch(data, :aborted) == true or
+         (pi_assistant?(data) and fetch(data, :finish_reason) in ["aborted", "error"]))
   end
+
+  defp pi_assistant?(data),
+    do: fetch(data, :role) == "assistant" and is_binary(fetch(data, :api))
 
   defp project_entries(entries) do
     Enum.flat_map(entries, &project_entry/1)
@@ -176,7 +187,7 @@ defmodule H.Context do
         [%{role: "user", content: extract_content_blocks(data)} |> maybe_put_meta(data)]
 
       "system" ->
-        [%{role: "system", content: extract_content_blocks(data)} |> maybe_put_meta(data)]
+        project_system_entry(data)
 
       "assistant" ->
         tool_calls = normalize_tool_calls(fetch(data, :tool_calls, []))
@@ -191,7 +202,11 @@ defmodule H.Context do
           |> maybe_put_field(:reasoning_details, fetch(data, :reasoning_details))
           |> maybe_put_meta(data)
 
-        [msg]
+        if tool_calls == [] and msg.content == [] and pi_assistant?(data) do
+          []
+        else
+          [msg]
+        end
 
       "tool_result" ->
         call_id = fetch(data, :tool_call_id)
@@ -222,6 +237,47 @@ defmodule H.Context do
         []
     end
   end
+
+  defp project_system_entry(data) do
+    cond do
+      pi_transcript_only?(data) ->
+        []
+
+      pi_system_context?(data) ->
+        # Pi supplies custom messages and branch summaries as historical user
+        # context. In Codex, system messages would become live instructions.
+        case extract_content_blocks(data) do
+          [] -> []
+          blocks -> [%{role: "user", content: blocks}]
+        end
+
+      true ->
+        [%{role: "system", content: extract_content_blocks(data)} |> maybe_put_meta(data)]
+    end
+  end
+
+  defp pi_system_context?(%{"source_data" => %{"type" => "branch_summary"}}), do: true
+  defp pi_system_context?(%{"custom_type" => _, "content" => _}), do: true
+
+  defp pi_system_context?(%{"role" => role}) when role in @pi_historical_messages,
+    do: true
+
+  defp pi_system_context?(_), do: false
+
+  # Bookkeeping records can occur between a call and its result. They and
+  # system-like roles imported from old pi logs are not live H instructions.
+  @doc false
+  def pi_transcript_only?(%{"source_data" => %{"type" => type}, "text" => "pi: " <> type}),
+    do: true
+
+  def pi_transcript_only?(%{"text" => "pi: custom extension state omitted", "custom_type" => _}),
+    do: true
+
+  def pi_transcript_only?(%{"archive_fragment" => fragment}) when is_integer(fragment), do: true
+
+  def pi_transcript_only?(%{"role" => role}) when role not in @pi_historical_messages, do: true
+
+  def pi_transcript_only?(_), do: false
 
   defp format_user_shell_text(data) do
     command = fetch(data, :command) || ""
@@ -383,10 +439,16 @@ defmodule H.Context do
     end
   end
 
-  defp normalize_tool_calls(nil), do: []
-
   defp normalize_tool_calls(tool_calls) when is_list(tool_calls) do
-    Enum.map(tool_calls, fn tc ->
+    tool_calls
+    |> Enum.filter(fn
+      tc when is_map(tc) ->
+        is_binary(fetch(tc, :id)) and is_binary(fetch(tc, :name)) and fetch(tc, :name) != ""
+
+      _ ->
+        false
+    end)
+    |> Enum.map(fn tc ->
       arguments =
         case fetch(tc, :arguments, %{}) do
           json when is_binary(json) ->
@@ -409,7 +471,10 @@ defmodule H.Context do
       }
       |> maybe_put_field(:metadata, fetch(tc, :metadata))
     end)
+    |> Enum.uniq_by(& &1.id)
   end
+
+  defp normalize_tool_calls(_), do: []
 
   # Fork tool-call pairing
 
@@ -423,14 +488,22 @@ defmodule H.Context do
        when is_list(tool_calls) and tool_calls != [] do
     {tool_window, remaining} = split_until_next_turn(rest)
 
-    present_ids =
-      tool_window
-      |> Enum.filter(&(&1.role == "tool"))
-      |> MapSet.new(& &1.tool_call_id)
+    expected_ids = MapSet.new(tool_calls, & &1.id)
+
+    {tool_window, pending_ids} =
+      Enum.map_reduce(tool_window, expected_ids, fn tool, pending ->
+        if MapSet.member?(pending, tool.tool_call_id) do
+          {tool, MapSet.delete(pending, tool.tool_call_id)}
+        else
+          {nil, pending}
+        end
+      end)
+
+    tool_window = Enum.reject(tool_window, &is_nil/1)
 
     synthetic =
       tool_calls
-      |> Enum.reject(fn tc -> MapSet.member?(present_ids, tc.id) end)
+      |> Enum.filter(fn tc -> MapSet.member?(pending_ids, tc.id) end)
       |> Enum.map(fn tc ->
         %{
           role: "tool",
@@ -448,6 +521,11 @@ defmodule H.Context do
 
     do_inject_tool_results(remaining, acc)
   end
+
+  # A cutoff or an interrupted imported turn can leave an output without a call.
+  # Sending it as a tool response would be invalid; it stays in the transcript.
+  defp do_inject_tool_results([%{role: "tool"} | rest], acc),
+    do: do_inject_tool_results(rest, acc)
 
   defp do_inject_tool_results([msg | rest], acc) do
     do_inject_tool_results(rest, [msg | acc])
@@ -491,6 +569,60 @@ defmodule H.Context do
   end
 
   # ReqLLM conversion
+
+  # Pi saves a combined call|item ID; Responses takes only a bounded call ID
+  # (and ReqLLM does not need the old item ID). Hash the full original instead
+  # of truncating or splitting, which could collapse distinct calls. Reserve
+  # existing valid IDs so an imported alias never takes a native call's ID.
+  defp normalize_wire_call_ids(messages) do
+    ids =
+      Enum.flat_map(messages, fn
+        %{role: "assistant"} = msg -> Enum.map(fetch(msg, :tool_calls, []), &fetch(&1, :id))
+        %{role: "tool"} = msg -> [fetch(msg, :tool_call_id)]
+        _ -> []
+      end)
+      |> Enum.filter(&is_binary/1)
+      |> Enum.uniq()
+
+    {valid, invalid} = Enum.split_with(ids, &Regex.match?(@tool_wire_id, &1))
+
+    {aliases, _used} =
+      Enum.reduce(invalid, {%{}, MapSet.new(valid)}, fn id, {aliases, used} ->
+        alias_id = unused_wire_call_id(id, used, 0)
+        {Map.put(aliases, id, alias_id), MapSet.put(used, alias_id)}
+      end)
+
+    if map_size(aliases) == 0 do
+      messages
+    else
+      Enum.map(messages, fn
+        %{role: "assistant", tool_calls: calls} = msg ->
+          %{msg | tool_calls: Enum.map(calls, &replace_call_id(&1, :id, aliases))}
+
+        %{role: "tool"} = msg ->
+          replace_call_id(msg, :tool_call_id, aliases)
+
+        msg ->
+          msg
+      end)
+    end
+  end
+
+  defp replace_call_id(map, key, aliases) do
+    case Map.fetch(aliases, fetch(map, key)) do
+      {:ok, id} -> Map.put(map, key, id)
+      :error -> map
+    end
+  end
+
+  defp unused_wire_call_id(id, used, salt) do
+    digest = :crypto.hash(:sha256, [Integer.to_string(salt), <<0>>, id])
+    alias_id = "call_h_" <> Base.url_encode64(digest, padding: false)
+
+    if MapSet.member?(used, alias_id),
+      do: unused_wire_call_id(id, used, salt + 1),
+      else: alias_id
+  end
 
   defp to_req_llm_tool(tool) do
     schema = fetch_any(tool, [:parameters_schema, :parameter_schema]) || []

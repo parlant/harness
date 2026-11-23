@@ -36,3 +36,21 @@ fragments rather than overflowing a transcript page. Only import logs into a
 store whose owner you trust: transcripts can contain private prompts, tool
 output, and attachments. No pi account or credential stores are read.
 Opaque extension state and deferred provider handles are not imported.
+
+## Continue a pi conversation in H
+
+Fork a branch into an existing workspace to continue it as a native H session.
+The archive and fork retain the original history. When building a provider
+request, H gives oversized or nonportable historical tool IDs bounded aliases
+and uses the same alias for the call and its result. Pi bookkeeping, prior
+system instructions, and failed assistant turns stay visible in history but
+are not sent as live context. Pi custom messages and branch summaries are
+included as historical user context, not as system instructions. Missing
+results get an interruption marker. Unpaired outputs and numbered fragments
+of oversized records stay in the transcript. None of this reruns historical
+tools or restores old provider state.
+
+This also applies to pi forks created before the compatibility fix. After
+upgrading the daemon, use **Continue** or `/continue` to resume a paused turn;
+there is no need to re-import the session. Model context limits and attachment
+support still depend on the selected model.

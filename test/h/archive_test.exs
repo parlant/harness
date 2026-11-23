@@ -123,6 +123,126 @@ defmodule H.ArchiveTest do
     assert H.Daemon.list_sessions(ctx.opts) == []
   end
 
+  test "a fork continues from stored pi calls without carrying pi IDs onto the wire", ctx do
+    alias H.Daemon
+    alias H.Provider.Fake
+    alias ReqLLM.Providers.OpenAI.ResponsesAPI
+
+    raw_id = "call_" <> String.duplicate("a", 39) <> "|fc_" <> String.duplicate("b", 43)
+
+    rows = [
+      entry(nil, "Find the file"),
+      %{
+        parent: 2,
+        kind: "assistant",
+        created_at: 103,
+        data: %{
+          role: "assistant",
+          api: "openai-codex-responses",
+          tool_calls: [%{id: raw_id, name: "read", arguments: %{path: "old.txt"}}]
+        }
+      },
+      %{
+        parent: 4,
+        kind: "system",
+        created_at: 104,
+        data: %{text: "pi: model_change", source_data: %{type: "model_change"}}
+      },
+      %{
+        parent: 6,
+        kind: "tool_result",
+        created_at: 105,
+        data: %{tool_call_id: raw_id, name: "read", content: "historical file contents"}
+      },
+      %{
+        parent: 8,
+        kind: "system",
+        created_at: 106,
+        data: %{text: "pi: session_info", source_data: %{type: "session_info"}}
+      }
+    ]
+
+    assert %{"session_id" => archive_id} = upload(ctx, 1, rows)
+    owner = self()
+
+    fake =
+      start_supervised!(
+        {Fake,
+         script: [
+           fn request, _emit ->
+             {context, _tools} = H.Context.to_req_llm(request)
+             wire = ResponsesAPI.encode_input_items(context, "gpt-6.1-sol", :openai_codex, true)
+             send(owner, {:provider_wire, wire})
+             {:ok, %{content: [%{type: "text", text: "I can continue."}], finish_reason: "stop"}}
+           end
+         ]}
+      )
+
+    id = System.unique_integer([:positive])
+    registry = :"archive_resume_reg_#{id}"
+    pubsub = :"archive_resume_pubsub_#{id}"
+    start_supervised!({Registry, keys: :unique, name: registry})
+
+    start_supervised!(
+      Supervisor.child_spec({Registry, keys: :duplicate, name: pubsub}, id: pubsub)
+    )
+
+    runtime = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
+    lease = start_supervised!({H.WorkspaceLease, name: nil})
+
+    opts =
+      Keyword.merge(ctx.opts,
+        registry: registry,
+        pubsub: pubsub,
+        runtime_sup: runtime,
+        workspace_lease: lease,
+        provider: Fake,
+        default_model: "fake:coder",
+        provider_config: %{server: fake},
+        storage_mod: H.Storage.File
+      )
+
+    assert {:ok, %{session: %{session_id: session_id}}} =
+             Daemon.fork_session(archive_id, %{"cwd" => ctx.opts[:data_dir]}, opts)
+
+    assert Fake.requests(fake) == []
+    Registry.register(pubsub, {:submission, session_id, "resume"}, nil)
+
+    assert {:ok, _} =
+             Daemon.execute_command(
+               session_id,
+               %{
+                 "version" => 1,
+                 "request_id" => "resume",
+                 "conversation_id" => "1",
+                 "command" => "submit",
+                 "args" => %{"type" => "continue"}
+               },
+               opts
+             )
+
+    assert_receive {:provider_wire, wire}, 2_000
+    assert_receive {:submission_settled, %{status: "done", answer_text: "I can continue."}}, 2_000
+    assert [_] = Fake.requests(fake)
+
+    assert [
+             %{"type" => "function_call", "call_id" => call_id},
+             %{
+               "type" => "function_call_output",
+               "call_id" => call_id,
+               "output" => "historical file contents"
+             }
+           ] = Enum.filter(wire, &Map.has_key?(&1, "call_id"))
+
+    assert byte_size(call_id) <= 64
+    refute call_id == raw_id
+
+    assert {:ok, %{items: items}} = Daemon.scan_entries(session_id, "1", %{}, opts)
+
+    assert [%{data: %{"tool_call_id" => ^raw_id}}] =
+             Enum.filter(items, &(&1.kind == "tool_result"))
+  end
+
   defp upload(ctx, rev, rows) do
     response = request(ctx, rev, rows, ctx.token)
     assert response.status == 200, response.resp_body

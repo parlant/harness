@@ -145,6 +145,44 @@ defmodule H.Provider.ReqLLMTest do
       assert_received :closed
     end
 
+    test "reports wrapped HTTP rejections without serializing response headers" do
+      request = Context.build_request([], %{model: "openai:gpt-5.4"})
+
+      stream_fn = fn model, ctx, _opts ->
+        {:ok, metadata} = MetadataHandle.start_link(fn -> %{} end)
+
+        failure = %ReqLLM.Error.API.Request{
+          status: 400,
+          provider_code: "string_above_max_length",
+          reason: "call_id is too long",
+          headers: [{"set-cookie", "fixture-private-cookie"}],
+          retryable: false
+        }
+
+        {:ok,
+         %StreamResponse{
+           model: model,
+           context: ctx,
+           metadata_handle: metadata,
+           stream:
+             Stream.map([failure], fn cause ->
+               raise %ReqLLM.Error.API.Stream{
+                 reason: "Stream failed: #{inspect(cause)}",
+                 cause: cause
+               }
+             end),
+           cancel: fn -> :ok end
+         }}
+      end
+
+      assert {:error,
+              %{
+                code: "string_above_max_length",
+                message: "API request failed (400): call_id is too long",
+                retryable: false
+              }} = Adapter.stream_turn(%{stream_fn: stream_fn}, request, fn _ -> :ok end)
+    end
+
     test "injects google_vertex provider_options from H.Credentials" do
       test_pid = self()
 

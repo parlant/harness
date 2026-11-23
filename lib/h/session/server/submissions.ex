@@ -5,7 +5,7 @@ defmodule H.Session.Server.Submissions do
   `H.Session.Server` and `H.Session.UserShell`.
   """
 
-  alias H.{Storage, Submission, Task}
+  alias H.{Context, Storage, Submission, Task}
   alias H.Session.Server.State
 
   @max_recent_submissions 256
@@ -192,7 +192,10 @@ defmodule H.Session.Server.Submissions do
         |> Enum.find(fn e ->
           cond do
             e.kind == "assistant" ->
-              Map.get(e.data, "aborted", Map.get(e.data, :aborted)) != true
+              not Context.aborted_assistant?(e)
+
+            e.kind == "system" ->
+              not Context.pi_transcript_only?(e.data)
 
             e.kind == "user_shell" ->
               Map.get(e.data, "include_in_context", Map.get(e.data, :include_in_context)) == true

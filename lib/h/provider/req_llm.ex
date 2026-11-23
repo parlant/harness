@@ -749,6 +749,14 @@ defmodule H.Provider.ReqLLM do
     }
   end
 
+  # The stream wrapper's message can inspect the entire HTTP exception, including
+  # response headers. Use only the same normalized fields as a direct failure.
+  defp normalize_error(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Request{} = request}),
+    do: normalize_error(request)
+
+  defp normalize_error(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Response{} = response}),
+    do: normalize_error(response)
+
   defp normalize_error(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Timeout{} = timeout}),
     do: normalize_error(timeout)
 

@@ -89,6 +89,29 @@ defmodule H.ContextTest do
              ] = reset_req.messages
     end
 
+    test "keeps pi custom messages and branch summaries as historical user context" do
+      entries = [
+        %{kind: "system", data: %{"content" => "Custom context", "custom_type" => "test"}},
+        %{
+          kind: "system",
+          data: %{"text" => "Earlier branch", "source_data" => %{"type" => "branch_summary"}}
+        },
+        %{
+          kind: "system",
+          data: %{"archive_fragment" => 1, "text" => "Historical JSON fragment"}
+        },
+        %{kind: "system", data: %{"text" => "Native instruction"}}
+      ]
+
+      assert %{
+               messages: [
+                 %{role: "user", content: [%{text: "Custom context"}]},
+                 %{role: "user", content: [%{text: "Earlier branch"}]},
+                 %{role: "system", content: [%{text: "Native instruction"}]}
+               ]
+             } = Context.build_request(entries, %{})
+    end
+
     test "injects synthetic interrupted tool_result when fork leaves tool_calls unpaired" do
       agent = %{model: "anthropic:claude-sonnet-4-5"}
 
@@ -352,6 +375,103 @@ defmodule H.ContextTest do
   end
 
   describe "to_req_llm/1" do
+    test "encodes pi compound IDs as distinct bounded call IDs and keeps outputs paired" do
+      prefix = "call_" <> String.duplicate("a", 39)
+      first = prefix <> "|fc_" <> String.duplicate("b", 43)
+      second = prefix <> "|fc_" <> String.duplicate("c", 43)
+      assert byte_size(first) == 91
+
+      historical = [
+        %{
+          kind: "assistant",
+          data: %{
+            "role" => "assistant",
+            "api" => "openai-codex-responses",
+            "tool_calls" => [
+              %{"id" => first, "name" => "read", "arguments" => %{"path" => "one"}},
+              %{"id" => second, "name" => "read", "arguments" => %{"path" => "two"}}
+            ]
+          }
+        },
+        %{
+          kind: "system",
+          data: %{"text" => "pi: model_change", "source_data" => %{"type" => "model_change"}}
+        },
+        %{
+          kind: "system",
+          data: %{"role" => "system", "content" => "Previous harness instructions"}
+        },
+        %{kind: "tool_result", data: %{"tool_call_id" => first, "content" => "first result"}},
+        %{kind: "tool_result", data: %{"tool_call_id" => first, "content" => "duplicate result"}},
+        %{kind: "tool_result", data: %{"tool_call_id" => "orphan", "content" => "orphan result"}},
+        %{
+          kind: "assistant",
+          data: %{
+            "role" => "assistant",
+            "api" => "openai-codex-responses",
+            "finish_reason" => "error"
+          }
+        },
+        %{kind: "user", data: %{text: "Continue"}}
+      ]
+
+      request = Context.build_request(historical, %{})
+      assert [%{tool_calls: [%{id: ^first}, %{id: ^second}]} | _] = request.messages
+      {ctx, []} = Context.to_req_llm(request)
+      assert {^ctx, []} = Context.to_req_llm(request)
+
+      assert [
+               %{"type" => "function_call", "call_id" => a, "arguments" => ~s({"path":"one"})},
+               %{"type" => "function_call", "call_id" => b, "arguments" => ~s({"path":"two"})},
+               %{"type" => "function_call_output", "call_id" => a, "output" => "first result"},
+               %{
+                 "type" => "function_call_output",
+                 "call_id" => b,
+                 "output" => "Tool call interrupted by conversation fork."
+               },
+               %{"role" => "user"}
+             ] =
+               ReqLLM.Providers.OpenAI.ResponsesAPI.encode_input_items(
+                 ctx,
+                 "gpt-6.1-sol",
+                 :openai_codex,
+                 true
+               )
+
+      refute a == b
+      assert Enum.all?([a, b], &Regex.match?(~r/\A[A-Za-z0-9_-]{1,64}\z/, &1))
+
+      assert %{
+               messages: [
+                 %{role: "assistant", tool_calls: [%{id: ^a}, %{id: ^b}]},
+                 %{role: "tool", tool_call_id: ^a},
+                 %{role: "tool", tool_call_id: ^b},
+                 %{role: "user"}
+               ]
+             } = ReqLLM.Provider.Defaults.encode_context_to_openai_format(ctx, "gpt-4o")
+
+      # A legal ID already in the request wins, even if it equals a generated alias.
+      native_call = %{role: "assistant", content: [], tool_calls: [%{id: a, name: "read"}]}
+      native_result = %{role: "tool", tool_call_id: a, content: [%{type: "text", text: "native"}]}
+
+      {with_native, []} =
+        Context.to_req_llm(%{
+          request
+          | messages: request.messages ++ [native_call, native_result]
+        })
+
+      assert [
+               %{tool_calls: [%{id: distinct}, %{id: ^b}]},
+               %{tool_call_id: distinct},
+               %{tool_call_id: ^b},
+               %{role: :user},
+               %{tool_calls: [%{id: ^a}]},
+               %{tool_call_id: ^a}
+             ] = with_native.messages
+
+      refute distinct in [a, b]
+    end
+
     test "decodes explicitly base64-encoded transcript images only at the provider boundary" do
       bytes = <<255, 216, 255, 224, 255, 217>>
 
