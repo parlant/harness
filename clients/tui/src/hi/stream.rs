@@ -449,7 +449,7 @@ mod tests {
         try_write_sse_chunk(stream, payload).unwrap();
     }
 
-    fn try_write_sse_chunk(stream: &mut impl Write, payload: &str) -> io::Result<()> {
+    fn try_write_sse_chunk(stream: &mut impl Write, payload: &str) -> std::io::Result<()> {
         write!(stream, "{:x}\r\n{}\r\n", payload.len(), payload)?;
         stream.flush()
     }
