@@ -73,10 +73,18 @@ fn edit_with(
         file.flush()?;
     }
 
-    let status = Command::new(&program)
-        .args(&argv)
-        .arg(&file_path)
-        .status()?;
+    let status = {
+        let mut attempt = 0u32;
+        loop {
+            match Command::new(&program).args(&argv).arg(&file_path).status() {
+                Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy && attempt < 5 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                res => break res?,
+            }
+        }
+    };
     if !status.success() {
         let detail = match status.code() {
             Some(code) => format!("external editor exited with status {code}"),

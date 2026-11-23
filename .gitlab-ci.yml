@@ -14,6 +14,7 @@ stages:
   - pages
 
 variables:
+  ELIXIR_TEST_IMAGE: "elixir:1.20.5-otp-29"
   ELIXIR_IMAGE: "hexpm/elixir:1.20.5-erlang-29.1.2-ubuntu-jammy-20261110"
   RUST_IMAGE: "rust:1-bookworm"
   RUBY_IMAGE: "ruby:3.3-bookworm"
@@ -37,12 +38,8 @@ workflow:
 test:elixir:
   stage: test
   tags: [saas-linux-medium-amd64]
-  image: ${ELIXIR_IMAGE}
-  variables:
-    DEBIAN_FRONTEND: "noninteractive"
+  image: ${ELIXIR_TEST_IMAGE}
   before_script:
-    - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends build-essential ca-certificates curl git python3
     - mix local.hex --force
     - mix local.rebar --force
   script:
