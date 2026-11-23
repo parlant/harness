@@ -309,9 +309,10 @@ defmodule H.Extensions do
 
   defp implements?(mod, behaviour) do
     is_atom(mod) and Code.ensure_loaded?(mod) and
-      Enum.all?(behaviour.behaviour_info(:callbacks), fn {name, arity} ->
-        function_exported?(mod, name, arity)
-      end)
+      Enum.all?(
+        behaviour.behaviour_info(:callbacks) -- behaviour.behaviour_info(:optional_callbacks),
+        fn {name, arity} -> function_exported?(mod, name, arity) end
+      )
   end
 
   defp id?(id), do: is_binary(id) and Regex.match?(@id, id)

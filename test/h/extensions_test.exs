@@ -38,6 +38,30 @@ defmodule H.ExtensionsTest do
     end
   end
 
+  describe "CLI.main/1 --check-config" do
+    test "accepts a path policy with only the required callbacks", ctx do
+      compile_fixture(ctx.package)
+      configure(ctx, [policy_entry("required_only", ["personal", "work"])])
+
+      assert {"H startup configuration OK (no services started)\n", 0} = check_config(ctx)
+    end
+
+    test "rejects a path policy missing required callbacks or a valid pool", ctx do
+      compile_fixture(ctx.package)
+
+      for entry <- [
+            policy_entry("missing_callbacks", ["personal", "work"]),
+            policy_entry("required_only", ["personal"]),
+            policy_entry("required_only", ["work", "work"])
+          ] do
+        configure(ctx, [entry])
+
+        assert {"Invalid H startup configuration: {:extensions, {\"fixture.boot\", :invalid_codex_account_policy}}\n",
+                1} = check_config(ctx)
+      end
+    end
+  end
+
   describe "daemon startup" do
     test "rejects missing, incompatible, duplicate and corrupt packages before serving", ctx do
       configure(ctx, [%{"path" => "../pkg"}])
@@ -415,6 +439,13 @@ defmodule H.ExtensionsTest do
   end
 
   defp package_entry(text), do: %{"path" => "../pkg", "settings" => %{"instructions" => text}}
+
+  defp policy_entry(policy, sources),
+    do: %{"path" => "../pkg", "settings" => %{"policy" => policy, "sources" => sources}}
+
+  defp check_config(ctx) do
+    launch("H.Daemon.CLI.main(System.argv())", ["--check-config", "--data-dir", ctx.data_dir])
+  end
 
   defp compile_fixture(dir) do
     manifest(dir, 1)

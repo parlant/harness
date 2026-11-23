@@ -23,7 +23,22 @@ defmodule Fixture.BootExtension do
      }}
   end
 
+  def configure(%{"policy" => policy, "sources" => sources}, _context) do
+    module = if policy == "required_only", do: __MODULE__.Policy, else: __MODULE__
+    {:ok, %{codex_account_policy: %{module: module, sources: sources}}}
+  end
+
   def configure(_, _), do: {:error, :invalid_settings}
+
+  defmodule Policy do
+    @behaviour H.Provider.AccountPolicy
+
+    @impl true
+    def order(_, candidates), do: candidates
+
+    @impl true
+    def rejected(_, _, _), do: :ok
+  end
 
   defmodule Probe do
     use Agent
