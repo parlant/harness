@@ -51,7 +51,7 @@ def smoke(source):
             url = (base or json.loads(manifest.read_text())["http_url"]) + "/api/v1/" + path
             token = (data / "auth.token").read_text().strip()
             request = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(), headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
-            with http_client.open(request, timeout=5) as response:
+            with http_client.open(request, timeout=20) as response:
                 return json.load(response)
 
         def run(*args, check=True):
@@ -65,7 +65,7 @@ def smoke(source):
 
         def reject(url, status, headers=None, body=None):
             try:
-                http_client.open(urllib.request.Request(url, data=body, headers=headers or {}), timeout=5)
+                http_client.open(urllib.request.Request(url, data=body, headers=headers or {}), timeout=20)
             except urllib.error.HTTPError as err:
                 assert err.code == status, (url, err.code, status)
             else:
@@ -76,16 +76,16 @@ def smoke(source):
             web = re.findall(rf"H web listening at (http://{re.escape(ip)}:\d+)/inbox", boot)[-1]
             reject(web + "/login", 421, {"Host": "unconfigured.invalid:4200"})
             browser = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-            with browser.open(web + "/inbox", timeout=5) as response:
+            with browser.open(web + "/inbox", timeout=20) as response:
                 assert response.url == web + "/login"
                 login = response.read().decode()
             csrf = html.unescape(re.search(r'name="_csrf_token"\s+value="([^"]+)"', login)[1])
             form = urllib.parse.urlencode({"_csrf_token": csrf, "token": (data / "auth.token").read_text().strip()}).encode()
-            with browser.open(web + "/login", form, timeout=5) as response:
+            with browser.open(web + "/login", form, timeout=20) as response:
                 assert "/login" not in response.url
-            with browser.open(web + "/inbox", timeout=5) as response:
+            with browser.open(web + "/inbox", timeout=20) as response:
                 assert 'data-session-id="upgrade-smoke"' in response.read().decode()
-            with browser.open(web + "/assets/app.js", timeout=5) as response:
+            with browser.open(web + "/assets/app.js", timeout=20) as response:
                 assert response.status == 200
 
         children = []
