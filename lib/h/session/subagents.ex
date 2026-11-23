@@ -1064,12 +1064,12 @@ defmodule H.Session.Subagents do
         t.kind == "tool_call" and t.checkpoint["name"] == "subagent" and
           t.memos["child_session_id"] == target_sid and
           is_binary(t.memos["child_request_id"]) and
-          t.memos["mode"] in ["start", "wait", "steer"]
+          t.memos["mode"] in ["start", "wait", "steer"] and
+          get_in(t.outcome || %{}, ["is_error"]) != true
       end)
       |> Enum.sort_by(& &1.id, :desc)
 
-    preferred =
-      Enum.find(candidates, &(&1.memos["mode"] in ["start", "wait"])) || List.first(candidates)
+    preferred = List.first(candidates)
 
     if preferred, do: preferred.memos["child_request_id"], else: nil
   end
@@ -1083,6 +1083,7 @@ defmodule H.Session.Subagents do
       "answer_entry_id" =>
         if(outcome.answer_entry_id, do: to_string(outcome.answer_entry_id), else: nil),
       "status" => outcome.status,
+      "mode" => memos["mode"],
       "cwd" => memos["cwd"],
       "model" => memos["model"],
       "read_only" => memos["read_only"] == true,

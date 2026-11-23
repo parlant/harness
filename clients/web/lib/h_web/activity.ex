@@ -32,9 +32,17 @@ defmodule HWeb.Activity do
     end
   end
 
-  @doc "Returns activity attached to an otherwise visible assistant reply, if any."
+  @doc "Returns activity attached to an otherwise visible message, if any."
   def after_message(%{"kind" => "assistant", "data" => data} = entry) do
-    if call_ids(data) != [], do: from_entry(entry)
+    non_subagent_calls =
+      for call <- List.wrap(data["tool_calls"]),
+          is_map(call),
+          call["name"] != "subagent",
+          do: call
+
+    if non_subagent_calls != [] do
+      from_entry(put_in(entry["data"]["tool_calls"], non_subagent_calls))
+    end
   end
 
   def after_message(_), do: nil
@@ -74,6 +82,7 @@ defmodule HWeb.Activity do
     activity = add_calls(tail || %__MODULE__{}, calls)
     activity = %{activity | other: activity.other + extra}
     count = count(activity)
+    waiting_subagents? = active_subagents?(live["tools"])
 
     status =
       cond do
@@ -92,6 +101,9 @@ defmodule HWeb.Activity do
         calls != [] or extra > 0 ->
           :working
 
+        waiting_subagents? ->
+          :waiting
+
         !streaming_text? and (live["run"] || live["generation"]) ->
           :working
 
@@ -103,6 +115,7 @@ defmodule HWeb.Activity do
       end
 
     cond do
+      status == :waiting and waiting_subagents? and count == 0 -> nil
       status in [:working, :retrying, :waiting] and count == 0 -> %{count: 1, status: status}
       count > 0 -> %{count: count, status: status}
       true -> nil
@@ -111,11 +124,22 @@ defmodule HWeb.Activity do
 
   defp outcome(data) do
     cond do
-      data["aborted"] || data["cancelled"] || data["diagnostic"] == "aborted" -> :stopped
-      data["interrupted"] || data["diagnostic"] == "interrupted" -> :interrupted
-      data["is_error"] || data["error"] || data["status"] in ~w(error failed) -> :failed
-      is_integer(data["exit_code"]) and data["exit_code"] != 0 -> :failed
-      true -> :complete
+      data["aborted"] || data["cancelled"] || data["diagnostic"] == "aborted" ->
+        :stopped
+
+      data["interrupted"] || data["diagnostic"] == "interrupted" ->
+        :interrupted
+
+      data["is_error"] || data["error"] ||
+        data["status"] in ~w(error failed) ||
+          data["finish_reason"] in ~w(error content_filter) ->
+        :failed
+
+      is_integer(data["exit_code"]) and data["exit_code"] != 0 ->
+        :failed
+
+      true ->
+        :complete
     end
   end
 
@@ -131,12 +155,32 @@ defmodule HWeb.Activity do
   end
 
   defp active_tools(tools) when is_map(tools) do
-    for {id, %{"status" => status}} <- tools, status in @active_slots, do: id
+    for {id, %{"status" => status} = slot} <- tools,
+        status in @active_slots,
+        slot["name"] != "subagent",
+        do: id
   end
 
   defp active_tools(tools) when is_list(tools) do
-    for %{"status" => status} = slot <- tools, status in @active_slots, do: slot["id"]
+    for %{"status" => status} = slot <- tools,
+        status in @active_slots,
+        slot["name"] != "subagent",
+        do: slot["id"]
   end
 
   defp active_tools(_), do: []
+
+  defp active_subagents?(tools) when is_map(tools) do
+    Enum.any?(tools, fn {_id, slot} ->
+      is_map(slot) and slot["name"] == "subagent" and slot["status"] in @active_slots
+    end)
+  end
+
+  defp active_subagents?(tools) when is_list(tools) do
+    Enum.any?(tools, fn slot ->
+      is_map(slot) and slot["name"] == "subagent" and slot["status"] in @active_slots
+    end)
+  end
+
+  defp active_subagents?(_), do: false
 end

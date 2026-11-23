@@ -52,7 +52,7 @@ defmodule H.Session.Server.Submissions do
   def settle([], _mode, _val, state, _now), do: {[], state}
 
   def settle(sub_ids, mode, val, state, now) do
-    by_id = Map.new(state.recent_submissions, fn {_rid, s} -> {s.id, s} end)
+    {by_id, state} = load_submissions_by_id(sub_ids, state)
 
     Enum.reduce(sub_ids, {[], state}, fn sid, {acc_w, acc_s} ->
       case Map.get(by_id, sid) do
@@ -70,6 +70,31 @@ defmodule H.Session.Server.Submissions do
           {acc_w ++ [{:put_submission, updated}], %{acc_s | recent_submissions: next_cache}}
       end
     end)
+  end
+
+  defp load_submissions_by_id(sub_ids, state) do
+    cached_by_id = Map.new(state.recent_submissions, fn {_rid, s} -> {s.id, s} end)
+    missing = Enum.reject(sub_ids, &Map.has_key?(cached_by_id, &1))
+
+    if missing == [] do
+      {cached_by_id, state}
+    else
+      case Storage.read_bootstrap(state.store) do
+        {:ok, %{submissions: raw_subs}, next_store} when is_map(raw_subs) ->
+          missing_set = MapSet.new(missing)
+
+          recovered =
+            Enum.reduce(raw_subs, cached_by_id, fn {_rid, raw}, acc ->
+              sub = Submission.from_storage(raw)
+              if MapSet.member?(missing_set, sub.id), do: Map.put(acc, sub.id, sub), else: acc
+            end)
+
+          {recovered, %{state | store: next_store}}
+
+        _ ->
+          {cached_by_id, state}
+      end
+    end
   end
 
   def drain_inbox(cid, state, now, filter_mode) do

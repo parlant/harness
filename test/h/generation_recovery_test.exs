@@ -549,5 +549,48 @@ defmodule H.GenerationRecoveryTest do
         if length(items) == 2, do: items, else: nil
       end)
     end
+
+    test "continue recovers a historical conversation ending in an empty content-filtered assistant entry" do
+      %{opts: opts, cwd: cwd} =
+        start_env([
+          {:reply, [], %{content: [%{type: "text", text: "Recovered after historical filter"}]}}
+        ])
+
+      {:ok, _} = Daemon.create_session(%{"session_id" => "s-hist-empty", "cwd" => cwd}, opts)
+      [{server, _}] = Registry.lookup(opts[:registry], {:session, "s-hist-empty"})
+
+      {:ok, _} =
+        H.Session.Server.seed_entries(server, [
+          %{kind: "user", data: %{"content" => [%{"type" => "text", "text" => "Do work"}]}},
+          %{
+            kind: "assistant",
+            data: %{
+              "content" => [],
+              "tool_calls" => [],
+              "finish_reason" => "content_filter",
+              "provider_meta" => %{"finish_reason_raw" => "PROHIBITED_CONTENT"}
+            }
+          }
+        ])
+
+      assert {:ok, %{status: "placed"}} =
+               Daemon.execute_command(
+                 "s-hist-empty",
+                 cmd("c-hist-rec", "submit", "1", %{"type" => "continue"}),
+                 opts
+               )
+
+      items =
+        wait_until(fn ->
+          {:ok, %{items: items}} =
+            Daemon.scan_entries("s-hist-empty", "1", %{"order" => "asc"}, opts)
+
+          if length(items) == 3, do: items, else: nil
+        end)
+
+      assert List.last(items).data["content"] == [
+               %{"type" => "text", "text" => "Recovered after historical filter"}
+             ]
+    end
   end
 end

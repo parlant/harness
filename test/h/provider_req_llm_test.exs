@@ -717,6 +717,117 @@ defmodule H.Provider.ReqLLMTest do
       assert_receive {:DOWN, ^monitor_ref, :process, ^worker_pid, :killed}, 1_000
       assert_receive {:closed_on_kill, ^closed_ref}, 1_000
     end
+
+    test "rejects empty content_filter and empty stop responses instead of returning silent empty turns" do
+      request =
+        Context.build_request(
+          [%{id: 1, kind: "user", data: %{text: "Inspect env"}}],
+          %{model: "google:gemini-4-carbon"}
+        )
+
+      # 1. Google Vertex PROHIBITED_CONTENT / content_filter with 0 output tokens -> non-retryable error
+      filter_stream_fn = fn model, ctx, _opts ->
+        {:ok, metadata_handle} =
+          MetadataHandle.start_link(fn ->
+            %{
+              finish_reason: :content_filter,
+              usage: %{input_tokens: 100, output_tokens: 0, total_tokens: 100}
+            }
+          end)
+
+        {:ok,
+         %StreamResponse{
+           stream: [
+             StreamChunk.meta(%{
+               finish_reason: "content_filter",
+               finish_reason_raw: "PROHIBITED_CONTENT",
+               finish_message: "The model output could not be generated.",
+               terminal?: true
+             })
+           ],
+           metadata_handle: metadata_handle,
+           cancel: fn -> :ok end,
+           model: model,
+           context: ctx
+         }}
+      end
+
+      assert {:error,
+              %{
+                code: "content_filter",
+                message: "PROHIBITED_CONTENT: The model output could not be generated.",
+                retryable: false
+              }} =
+               Adapter.stream_turn(
+                 %{stream_fn: filter_stream_fn, credentials_opts: [api_key: "fixture-key"]},
+                 request,
+                 fn _ -> :ok end
+               )
+
+      # 2. Spurious empty stop (0 output tokens, no text, no tool_calls) -> retryable empty_response!
+      empty_stop_fn = fn model, ctx, _opts ->
+        {:ok, metadata_handle} =
+          MetadataHandle.start_link(fn ->
+            %{
+              finish_reason: :stop,
+              usage: %{input_tokens: 100, output_tokens: 0, total_tokens: 100}
+            }
+          end)
+
+        {:ok,
+         %StreamResponse{
+           stream: [StreamChunk.thinking("internal thought only")],
+           metadata_handle: metadata_handle,
+           cancel: fn -> :ok end,
+           model: model,
+           context: ctx
+         }}
+      end
+
+      assert {:error,
+              %{
+                code: "empty_response",
+                message: "Provider returned an empty response with no text or tool calls",
+                retryable: true
+              }} =
+               Adapter.stream_turn(
+                 %{stream_fn: empty_stop_fn, credentials_opts: [api_key: "fixture-key"]},
+                 request,
+                 fn _ -> :ok end
+               )
+
+      # 3. Partial text cut off mid-stream by content_filter still preserves the partial text
+      partial_filter_fn = fn model, ctx, _opts ->
+        {:ok, metadata_handle} =
+          MetadataHandle.start_link(fn ->
+            %{
+              finish_reason: :content_filter,
+              provider_meta: %{finish_reason_raw: "SAFETY"},
+              usage: %{input_tokens: 100, output_tokens: 5}
+            }
+          end)
+
+        {:ok,
+         %StreamResponse{
+           stream: [StreamChunk.text("Visible prefix before filter")],
+           metadata_handle: metadata_handle,
+           cancel: fn -> :ok end,
+           model: model,
+           context: ctx
+         }}
+      end
+
+      assert {:ok,
+              %{
+                content: [%{type: "text", text: "Visible prefix before filter"}],
+                finish_reason: "content_filter"
+              }} =
+               Adapter.stream_turn(
+                 %{stream_fn: partial_filter_fn, credentials_opts: [api_key: "fixture-key"]},
+                 request,
+                 fn _ -> :ok end
+               )
+    end
   end
 
   describe "list_models/1" do

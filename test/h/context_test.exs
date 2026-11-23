@@ -372,6 +372,41 @@ defmodule H.ContextTest do
       refute rendered =~ "missing_flag"
       refute rendered =~ "SHOULD_NOT_LEAK"
     end
+
+    test "omits historical empty or content-filtered assistant entries without visible output or tool calls" do
+      entries = [
+        %{id: 1, kind: "user", data: %{text: "First prompt"}},
+        %{
+          id: 2,
+          kind: "assistant",
+          data: %{
+            "content" => [],
+            "tool_calls" => [],
+            "finish_reason" => "content_filter",
+            "provider_meta" => %{"finish_reason_raw" => "PROHIBITED_CONTENT"}
+          }
+        },
+        %{
+          id: 3,
+          kind: "assistant",
+          data: %{
+            "content" => [%{"type" => "thinking", "text" => "only internal thinking"}],
+            "tool_calls" => [],
+            "finish_reason" => "stop"
+          }
+        },
+        %{id: 4, kind: "user", data: %{text: "Follow-up prompt"}}
+      ]
+
+      req = Context.build_request(entries, %{model: "google:gemini-4-carbon"})
+
+      assert [
+               %{role: "user", content: [%{type: "text", text: "First prompt"}]},
+               %{role: "user", content: [%{type: "text", text: "Follow-up prompt"}]}
+             ] = req.messages
+
+      assert Enum.all?(Enum.slice(entries, 1, 2), &Context.aborted_assistant?/1)
+    end
   end
 
   describe "to_req_llm/1" do

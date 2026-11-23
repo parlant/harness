@@ -151,10 +151,17 @@ defmodule H.Storage.Engine do
   end
 
   def max_seen_id(state) do
+    submission_ids =
+      state.submissions
+      |> Map.values()
+      |> Enum.map(&(Map.get(&1, :id) || Map.get(&1, "id")))
+      |> Enum.filter(&is_integer/1)
+
     [
       Map.keys(state.conversations),
       Map.keys(state.entries),
-      Map.keys(state.tasks)
+      Map.keys(state.tasks),
+      submission_ids
     ]
     |> Enum.concat()
     |> Enum.max(fn -> 1 end)

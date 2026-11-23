@@ -49,9 +49,17 @@ defmodule HWeb.Transcript do
 
         head =
           cond do
-            MapSet.size(reducer.entry_ids) == 0 -> head
-            same_group?(wrapper.head_activity, wrapper.tail_activity) -> head
-            true -> wrapper.head_activity
+            MapSet.size(reducer.entry_ids) == 0 ->
+              head
+
+            same_group?(wrapper.head_activity, wrapper.tail_activity) ->
+              head
+
+            is_nil(wrapper.head_activity) and not Enum.any?(rows, &(not subagent_result?(&1))) ->
+              head
+
+            true ->
+              wrapper.head_activity
           end
 
         {:ok, rows,
@@ -90,7 +98,10 @@ defmodule HWeb.Transcript do
           {rows, head, tail}
 
         is_nil(tail) ->
-          {rows, if(rows == [], do: wrapper.head_activity, else: head), wrapper.tail_activity}
+          non_subagent_rows? = Enum.any?(rows, &(not subagent_result?(&1)))
+
+          {rows, if(not non_subagent_rows?, do: wrapper.head_activity, else: head),
+           wrapper.tail_activity}
 
         is_nil(wrapper.head_activity) ->
           {rows ++ [activity_row(tail)], head, wrapper.tail_activity}
@@ -116,17 +127,29 @@ defmodule HWeb.Transcript do
       Enum.reduce(entries, {[], tail, nil}, fn raw, {rows, pending, head} ->
         entry = normalize_entry(raw)
 
-        if ConversationComponents.message?(entry) do
-          head = if rows == [], do: pending, else: head
-          rows = if pending, do: [activity_row(pending) | rows], else: rows
-          {[entry | rows], Activity.after_message(entry), head}
-        else
-          {rows, Activity.merge(pending, Activity.from_entry(entry)), head}
+        cond do
+          subagent_result?(entry) ->
+            {[entry | rows], pending, head}
+
+          ConversationComponents.message?(entry) ->
+            head = if rows == [], do: pending, else: head
+            rows = if pending, do: [activity_row(pending) | rows], else: rows
+            {[entry | rows], Activity.after_message(entry), head}
+
+          true ->
+            {rows, Activity.merge(pending, Activity.from_entry(entry)), head}
         end
       end)
 
-    {Enum.reverse(rows), if(rows == [], do: tail, else: head), tail}
+    {Enum.reverse(rows), if(Enum.any?(rows, &(not subagent_result?(&1))), do: head, else: tail),
+     tail}
   end
+
+  defp subagent_result?(%{"kind" => "tool_result", "data" => data}) when is_map(data) do
+    (data["tool_name"] || data["name"]) == "subagent"
+  end
+
+  defp subagent_result?(_), do: false
 
   defp activity_row(activity),
     do: %{"id" => "activity-#{activity.id}", "activity" => Activity.summary(activity)}

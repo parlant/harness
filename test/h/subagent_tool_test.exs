@@ -523,7 +523,7 @@ defmodule H.SubagentToolTest do
                finish_reason: "tool_calls"
              }}
 
-          # Parent Turn 3: after steer returns, call await (without explicit request_id -> tracks start request!)
+          # Parent Turn 3: after steer returns, call await (without explicit request_id -> tracks latest steered request!)
           prompt == "Coordinate child" and length(tools) == 2 ->
             child_sid = Agent.get(child_sid_agent, & &1)
             send(test_pid, :parent_steered)
@@ -622,6 +622,288 @@ defmodule H.SubagentToolTest do
 
       assert List.last(items).data["content"] == [
                %{"type" => "text", "text" => "Full lifecycle complete"}
+             ]
+    end
+
+    test "await without explicit request_id tracks a queued follow_up after the initial child submission already settled, and ignores failed idle steer" do
+      test_pid = self()
+      turn1_gate = make_ref()
+      turn2_gate = make_ref()
+      child_sid_agent = start_supervised!({Agent, fn -> nil end})
+
+      handler = fn req, _emit ->
+        prompt = first_user_text(req)
+        tools = tool_messages(req)
+
+        user_texts =
+          req.messages
+          |> Enum.filter(&(&1.role == "user"))
+          |> Enum.map(fn m -> hd(m.content).text end)
+
+        cond do
+          # Parent Turn 1: start child wave 1
+          prompt == "Two waves" and tools == [] ->
+            {:ok,
+             %{
+               content: [],
+               tool_calls: [
+                 %{
+                   id: "c_w1_start",
+                   name: "subagent",
+                   arguments: %{"mode" => "start", "prompt" => "Wave 1 prompt"}
+                 }
+               ],
+               finish_reason: "tool_calls"
+             }}
+
+          # Child Wave 1: blocks until parent queues Wave 2 follow-up!
+          prompt == "Wave 1 prompt" and user_texts == ["Wave 1 prompt"] ->
+            send(test_pid, {:wave1_running, self()})
+
+            receive do
+              {:finish_wave1, ^turn1_gate} -> :ok
+            end
+
+            {:ok, %{content: [%{type: "text", text: "Wave 1 answer"}]}}
+
+          # Parent Turn 2: queue a follow-up via mode: "start" on the busy child
+          prompt == "Two waves" and length(tools) == 1 ->
+            [start1_res] = tools
+            [_, child_sid] = Regex.run(~r/Started subagent (\S+)/, hd(start1_res.content).text)
+            Agent.update(child_sid_agent, fn _ -> child_sid end)
+
+            {:ok,
+             %{
+               content: [],
+               tool_calls: [
+                 %{
+                   id: "c_w2_start",
+                   name: "subagent",
+                   arguments: %{
+                     "mode" => "start",
+                     "session_id" => child_sid,
+                     "prompt" => "Wave 2 follow-up"
+                   }
+                 }
+               ],
+               finish_reason: "tool_calls"
+             }}
+
+          # Child Wave 2: runs after Wave 1 finishes and drains inbox!
+          prompt == "Wave 1 prompt" and "Wave 2 follow-up" in user_texts ->
+            send(test_pid, {:wave2_running, self()})
+
+            receive do
+              {:finish_wave2, ^turn2_gate} -> :ok
+            end
+
+            {:ok, %{content: [%{type: "text", text: "Wave 2 final answer"}]}}
+
+          # Parent Turn 3: Wave 2 start returned status: queued; wait for Wave 1 to settle,
+          # then call await WITHOUT request_id — it MUST wait for Wave 2, NOT return Wave 1!
+          prompt == "Two waves" and length(tools) == 2 ->
+            start2_res = List.last(tools)
+            assert hd(start2_res.content).text =~ "status: queued"
+            child_sid = Agent.get(child_sid_agent, & &1)
+            send(test_pid, {:parent_queued_wave2, self()})
+
+            receive do
+              :now_await_wave2 -> :ok
+            end
+
+            {:ok,
+             %{
+               content: [],
+               tool_calls: [
+                 %{
+                   id: "c_w2_await",
+                   name: "subagent",
+                   arguments: %{"mode" => "await", "session_id" => child_sid}
+                 }
+               ],
+               finish_reason: "tool_calls"
+             }}
+
+          # Parent Turn 4: receives Wave 2 final answer! Then tries a steer on the now-idle child (fails),
+          # followed by another await without request_id (ignores failed steer and still resolves Wave 2).
+          prompt == "Two waves" and length(tools) == 3 ->
+            await_res = List.last(tools)
+            assert await_res.is_error == false
+            assert hd(await_res.content).text == "Wave 2 final answer"
+            child_sid = Agent.get(child_sid_agent, & &1)
+
+            {:ok,
+             %{
+               content: [],
+               tool_calls: [
+                 %{
+                   id: "c_failed_steer",
+                   name: "subagent",
+                   arguments: %{
+                     "mode" => "steer",
+                     "session_id" => child_sid,
+                     "prompt" => "Too late steer"
+                   }
+                 }
+               ],
+               finish_reason: "tool_calls"
+             }}
+
+          prompt == "Two waves" and length(tools) == 4 ->
+            steer_res = List.last(tools)
+            assert steer_res.is_error == true
+            child_sid = Agent.get(child_sid_agent, & &1)
+
+            {:ok,
+             %{
+               content: [],
+               tool_calls: [
+                 %{
+                   id: "c_reawait",
+                   name: "subagent",
+                   arguments: %{"mode" => "await", "session_id" => child_sid}
+                 }
+               ],
+               finish_reason: "tool_calls"
+             }}
+
+          prompt == "Two waves" and length(tools) == 5 ->
+            reawait_res = List.last(tools)
+            assert reawait_res.is_error == false
+            assert hd(reawait_res.content).text == "Wave 2 final answer"
+            {:ok, %{content: [%{type: "text", text: "Both waves verified"}]}}
+        end
+      end
+
+      env = start_env(handler)
+      parent_sid = "parent-waves-#{System.unique_integer([:positive])}"
+      {:ok, _} = Daemon.create_session(%{"session_id" => parent_sid, "cwd" => env.cwd}, env.opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          parent_sid,
+          cmd("req-w1", "submit", "1", %{"type" => "input", "content" => "Two waves"}),
+          env.opts
+        )
+
+      assert_receive {:wave1_running, child_w1_pid}, 2_000
+      assert_receive {:parent_queued_wave2, parent_gen_pid}, 2_000
+
+      # Finish Wave 1 so Wave 1's submission settles to "done" while Wave 2 starts running!
+      send(child_w1_pid, {:finish_wave1, turn1_gate})
+      assert_receive {:wave2_running, child_w2_pid}, 2_000
+
+      # Now parent calls await(session_id: child_sid) WITHOUT request_id while Wave 1 is already "done"
+      # and Wave 2 is actively running!
+      send(parent_gen_pid, :now_await_wave2)
+
+      # Parent must park waiting on Wave 2 rather than prematurely settling on Wave 1!
+      wait_until(fn ->
+        {:ok, detail} = Daemon.get_session_detail(parent_sid, env.opts)
+        Enum.any?(detail.tasks, &(&1.kind == "tool_call" and &1.status == "waiting"))
+      end)
+
+      send(child_w2_pid, {:finish_wave2, turn2_gate})
+
+      items =
+        wait_until(fn ->
+          {:ok, %{items: items}} =
+            Daemon.scan_entries(parent_sid, "1", %{"order" => "asc"}, env.opts)
+
+          if length(items) == 12, do: items, else: nil
+        end)
+
+      await_entry = Enum.at(items, 6)
+      assert await_entry.kind == "tool_result"
+      assert await_entry.data["details"]["mode"] == "await"
+      assert await_entry.data["content"] == [%{"type" => "text", "text" => "Wave 2 final answer"}]
+
+      assert List.last(items).data["content"] == [
+               %{"type" => "text", "text" => "Both waves verified"}
+             ]
+    end
+  end
+
+  describe "mixed subagent and local tool calls in one assistant turn" do
+    test "executes local tools without blocking on parked subagent and finishes round once all settle" do
+      test_pid = self()
+      child_gate = make_ref()
+
+      handler = fn req, _emit ->
+        prompt = first_user_text(req)
+        tools = tool_messages(req)
+
+        cond do
+          prompt == "Mixed turn" and tools == [] ->
+            {:ok,
+             %{
+               content: [],
+               tool_calls: [
+                 %{
+                   id: "c_mix_sub",
+                   name: "subagent",
+                   arguments: %{"prompt" => "Child slow work", "read_only" => true}
+                 },
+                 %{
+                   id: "c_mix_read",
+                   name: "read",
+                   arguments: %{"path" => "local.txt"}
+                 }
+               ],
+               finish_reason: "tool_calls"
+             }}
+
+          prompt == "Child slow work" ->
+            send(test_pid, {:mixed_child_running, self()})
+
+            receive do
+              {:release_mixed_child, ^child_gate} -> :ok
+            end
+
+            {:ok, %{content: [%{type: "text", text: "Child finished after local read"}]}}
+
+          prompt == "Mixed turn" and length(tools) == 2 ->
+            texts = Enum.map(tools, fn m -> hd(m.content).text end)
+            assert Enum.any?(texts, &(&1 =~ "local file content"))
+            assert "Child finished after local read" in texts
+            {:ok, %{content: [%{type: "text", text: "Mixed turn joined cleanly"}]}}
+        end
+      end
+
+      env = start_env(handler)
+      File.write!(Path.join(env.cwd, "local.txt"), "local file content\n")
+      parent_sid = "parent-mixed-#{System.unique_integer([:positive])}"
+      {:ok, _} = Daemon.create_session(%{"session_id" => parent_sid, "cwd" => env.cwd}, env.opts)
+
+      {:ok, _} =
+        Daemon.execute_command(
+          parent_sid,
+          cmd("req-mix", "submit", "1", %{"type" => "input", "content" => "Mixed turn"}),
+          env.opts
+        )
+
+      assert_receive {:mixed_child_running, child_worker}, 2_000
+
+      # Local read tool MUST complete even while the earlier subagent call is still parked waiting!
+      wait_until(fn ->
+        {:ok, %{items: items}} =
+          Daemon.scan_entries(parent_sid, "1", %{"order" => "asc"}, env.opts)
+
+        Enum.any?(items, &(&1.kind == "tool_result" and &1.data["name"] == "read"))
+      end)
+
+      send(child_worker, {:release_mixed_child, child_gate})
+
+      items =
+        wait_until(fn ->
+          {:ok, %{items: items}} =
+            Daemon.scan_entries(parent_sid, "1", %{"order" => "asc"}, env.opts)
+
+          if length(items) == 5, do: items, else: nil
+        end)
+
+      assert List.last(items).data["content"] == [
+               %{"type" => "text", "text" => "Mixed turn joined cleanly"}
              ]
     end
   end

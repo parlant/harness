@@ -1045,11 +1045,19 @@ defmodule H.Session.Server.Generation do
       true ->
         failure = inference_failure(err, gen_task, state)
 
+        reason = Map.get(err, :code) || "model_error"
+
         done_task =
-          Task.complete(gen_task, %{"status" => "unanswered", "reason" => "model_error"}, now)
+          Task.complete(
+            gen_task,
+            %{"status" => "unanswered", "reason" => to_string(reason)},
+            now
+          )
 
         sub_ids = gen_task.checkpoint["submission_ids"] || []
-        {sub_writes, state} = Submissions.settle(sub_ids, :unanswered, "model_error", state, now)
+
+        {sub_writes, state} =
+          Submissions.settle(sub_ids, :unanswered, "model_error", state, now)
 
         next_live = %{
           "run_failure" => Map.put(failure, "reason", "model_error")

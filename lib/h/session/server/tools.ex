@@ -14,7 +14,8 @@ defmodule H.Session.Server.Tools do
 
   Regular worker tools execute sequentially one at a time, whereas
   pending `"subagent"` tool calls dispatch and park concurrently without holding
-  `Task.Supervisor` workers.
+  `Task.Supervisor` workers. While parked `"subagent"` calls remain `"waiting"`,
+  any subsequent non-subagent tool calls in the same assistant turn can still advance.
   """
   def next_tool_spawn_effects(cid, child_ids, state) when is_list(child_ids) do
     children =
@@ -30,18 +31,14 @@ defmodule H.Session.Server.Tools do
     if non_subagent_running? do
       []
     else
-      case Enum.find(children, &(&1.status == "pending")) do
-        nil ->
-          []
+      pending_subagents =
+        Enum.filter(children, &(&1.status == "pending" and &1.checkpoint["name"] == "subagent"))
 
-        %{checkpoint: %{"name" => "subagent"}} ->
-          children
-          |> Enum.filter(&(&1.status == "pending" and &1.checkpoint["name"] == "subagent"))
-          |> Enum.map(&{:spawn_tool, cid, &1.id})
+      first_pending_other =
+        Enum.find(children, &(&1.status == "pending" and &1.checkpoint["name"] != "subagent"))
 
-        first_pending ->
-          [{:spawn_tool, cid, first_pending.id}]
-      end
+      Enum.map(pending_subagents, &{:spawn_tool, cid, &1.id}) ++
+        if(first_pending_other, do: [{:spawn_tool, cid, first_pending_other.id}], else: [])
     end
   end
 

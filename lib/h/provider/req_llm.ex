@@ -597,12 +597,21 @@ defmodule H.Provider.ReqLLM do
     {:halt, %{acc | terminal: :cancelled}}
   end
 
-  defp handle_event(%StreamEvent{type: :error, data: error}, acc, _emit) do
+  defp handle_event(%StreamEvent{type: :error, data: error, metadata: meta}, acc, _emit) do
+    enriched_error =
+      case error do
+        %{finish_reason: _} = map when is_map(meta) and map_size(meta) > 0 ->
+          Map.put_new(map, :provider_meta, Map.merge(acc.provider_meta, safe_event_meta(meta)))
+
+        other ->
+          other
+      end
+
     error =
       case acc do
-        %{managed_codex: true, observed?: false} -> CodexPool.rejection(error)
+        %{managed_codex: true, observed?: false} -> CodexPool.rejection(enriched_error)
         %{managed_codex: true} -> :codex_request_failed
-        _ -> normalize_error(error)
+        _ -> normalize_error(enriched_error)
       end
 
     {:halt, %{acc | terminal: {:error, error}}}
@@ -622,13 +631,107 @@ defmodule H.Provider.ReqLLM do
         {:cancelled, %{partial_content: content, usage: acc.usage}}
 
       _ ->
-        {:ok,
+        case empty_response_error(content, tool_calls, acc.finish_reason, acc.provider_meta) do
+          {:error, _} = err ->
+            err
+
+          :ok ->
+            {:ok,
+             %{
+               content: content,
+               tool_calls: tool_calls,
+               finish_reason: acc.finish_reason,
+               usage: acc.usage,
+               provider_meta: acc.provider_meta
+             }}
+        end
+    end
+  end
+
+  defp empty_response_error(content, tool_calls, finish_reason, provider_meta) do
+    has_output? =
+      tool_calls != [] or
+        Enum.any?(content, fn
+          %{type: "text", text: text} when is_binary(text) -> String.trim(text) != ""
+          %{type: "thinking"} -> false
+          _ -> true
+        end)
+
+    cond do
+      has_output? ->
+        :ok
+
+      finish_reason == "content_filter" ->
+        raw_reason =
+          Map.get(provider_meta, :finish_reason_raw) ||
+            Map.get(provider_meta, "finish_reason_raw")
+
+        finish_msg =
+          Map.get(provider_meta, :finish_message) ||
+            Map.get(provider_meta, "finish_message")
+
+        message =
+          cond do
+            is_binary(finish_msg) and String.trim(finish_msg) != "" and is_binary(raw_reason) ->
+              "#{raw_reason}: #{String.trim(finish_msg)}"
+
+            is_binary(finish_msg) and String.trim(finish_msg) != "" ->
+              String.trim(finish_msg)
+
+            is_binary(raw_reason) and raw_reason != "" ->
+              "Model output blocked by provider content filter (#{raw_reason})."
+
+            true ->
+              "Model output blocked by provider content filter."
+          end
+
+        {:error,
          %{
-           content: content,
-           tool_calls: tool_calls,
-           finish_reason: acc.finish_reason,
-           usage: acc.usage,
-           provider_meta: acc.provider_meta
+           code: "content_filter",
+           message: Credentials.sanitize(message),
+           retryable: false
+         }}
+
+      finish_reason in ["length", "max_tokens"] ->
+        {:error,
+         %{
+           code: "empty_response",
+           message: "Provider hit the output token limit without emitting a response.",
+           retryable: false
+         }}
+
+      true ->
+        raw_reason =
+          Map.get(provider_meta, :finish_reason_raw) ||
+            Map.get(provider_meta, "finish_reason_raw")
+
+        finish_msg =
+          Map.get(provider_meta, :finish_message) ||
+            Map.get(provider_meta, "finish_message")
+
+        detail =
+          cond do
+            is_binary(finish_msg) and String.trim(finish_msg) != "" ->
+              " (#{String.trim(finish_msg)})"
+
+            is_binary(raw_reason) and raw_reason != "" ->
+              " (finish_reason: #{raw_reason})"
+
+            finish_reason not in ["stop", nil, ""] ->
+              " (finish_reason: #{finish_reason})"
+
+            true ->
+              ""
+          end
+
+        {:error,
+         %{
+           code: "empty_response",
+           message:
+             Credentials.sanitize(
+               "Provider returned an empty response with no text or tool calls#{detail}"
+             ),
+           retryable: true
          }}
     end
   end
@@ -776,10 +879,28 @@ defmodule H.Provider.ReqLLM do
     }
   end
 
-  defp normalize_error(%{finish_reason: reason}) do
+  defp normalize_error(%{finish_reason: reason} = err) do
+    meta = Map.get(err, :provider_meta) || Map.get(err, "provider_meta") || err
+
+    raw =
+      Map.get(meta, :finish_reason_raw) ||
+        Map.get(meta, "finish_reason_raw") ||
+        to_string(reason)
+
+    finish_msg =
+      Map.get(meta, :finish_message) ||
+        Map.get(meta, "finish_message")
+
+    message =
+      if is_binary(finish_msg) and String.trim(finish_msg) != "" do
+        "Stream ended with #{raw}: #{String.trim(finish_msg)}"
+      else
+        "Stream ended with #{raw}"
+      end
+
     %{
       code: to_string(reason),
-      message: "Stream ended with #{reason}",
+      message: Credentials.sanitize(message),
       retryable: false
     }
   end
@@ -877,7 +998,22 @@ defmodule H.Provider.ReqLLM do
   defp safe_event_meta(_), do: %{}
 
   defp compact_provider_meta(meta) when is_map(meta) do
-    meta
+    nested =
+      case Map.get(meta, :provider_meta) || Map.get(meta, "provider_meta") do
+        %{} = inner ->
+          Map.take(inner, [
+            :finish_reason_raw,
+            "finish_reason_raw",
+            :finish_message,
+            "finish_message"
+          ])
+
+        _ ->
+          %{}
+      end
+
+    nested
+    |> Map.merge(meta)
     |> Map.drop([
       :provider_meta,
       "provider_meta",
