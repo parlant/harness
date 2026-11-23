@@ -251,6 +251,8 @@ enum ScreenBackend {
 }
 
 impl Backend for ScreenBackend {
+    type Error = io::Error;
+
     fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
@@ -258,7 +260,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.draw(content),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.draw(content),
+            ScreenBackend::Test(b) => b.draw(content).map_err(|never| match never {}),
         }
     }
 
@@ -266,7 +268,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.hide_cursor(),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.hide_cursor(),
+            ScreenBackend::Test(b) => b.hide_cursor().map_err(|never| match never {}),
         }
     }
 
@@ -274,7 +276,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.show_cursor(),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.show_cursor(),
+            ScreenBackend::Test(b) => b.show_cursor().map_err(|never| match never {}),
         }
     }
 
@@ -282,7 +284,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.get_cursor_position(),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.get_cursor_position(),
+            ScreenBackend::Test(b) => b.get_cursor_position().map_err(|never| match never {}),
         }
     }
 
@@ -290,7 +292,9 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.set_cursor_position(position),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.set_cursor_position(position),
+            ScreenBackend::Test(b) => b
+                .set_cursor_position(position)
+                .map_err(|never| match never {}),
         }
     }
 
@@ -298,7 +302,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.clear(),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.clear(),
+            ScreenBackend::Test(b) => b.clear().map_err(|never| match never {}),
         }
     }
 
@@ -306,7 +310,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.clear_region(clear_type),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.clear_region(clear_type),
+            ScreenBackend::Test(b) => b.clear_region(clear_type).map_err(|never| match never {}),
         }
     }
 
@@ -314,7 +318,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.size(),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.size(),
+            ScreenBackend::Test(b) => b.size().map_err(|never| match never {}),
         }
     }
 
@@ -322,7 +326,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => b.window_size(),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.window_size(),
+            ScreenBackend::Test(b) => b.window_size().map_err(|never| match never {}),
         }
     }
 
@@ -330,7 +334,7 @@ impl Backend for ScreenBackend {
         match self {
             ScreenBackend::Crossterm(b) => Backend::flush(b),
             #[cfg(test)]
-            ScreenBackend::Test(b) => b.flush(),
+            ScreenBackend::Test(b) => b.flush().map_err(|never| match never {}),
         }
     }
 }

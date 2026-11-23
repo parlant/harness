@@ -1,9 +1,11 @@
 import { build } from 'esbuild';
-import { copyFile, readFile } from 'node:fs/promises';
+import { copyFile, readFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const outdir = fileURLToPath(new URL('../priv/static/monaco', import.meta.url));
 const vs = fileURLToPath(new URL('./node_modules/monaco-editor/esm/vs/', import.meta.url));
+// esbuild doesn't remove old hashed chunks; don't serve or ship previous builds.
+await rm(outdir, {recursive: true, force: true});
 await build({
   absWorkingDir: fileURLToPath(new URL('.', import.meta.url)),
   entryPoints: {
