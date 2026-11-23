@@ -38,6 +38,26 @@
         >{@other_attention_count}</span>
       </.link>
       <button
+        id="session-tree-button"
+        type="button"
+        class="bar-button"
+        aria-haspopup="dialog"
+        aria-controls="session-tree-panel"
+        phx-click="open_session_tree"
+        aria-label="Session turn tree (/tree)"
+        title="Session turn tree (/tree)"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="6" cy="6" r="2.2" /><circle cx="18" cy="10" r="2.2" /><circle
+            cx="6"
+            cy="18"
+            r="2.2"
+          />
+          <path d="M6 8.2v7.6M8.2 6h4.8a3 3 0 0 1 3 3v.8" />
+        </svg>
+        <span class="session-tree-btn-label">Tree</span>
+      </button>
+      <button
         id="session-details-button"
         type="button"
         class="bar-button"
@@ -168,7 +188,18 @@
     </div>
 
     <div class="sidebar-section">
-      <div class="section-title">Conversations</div>
+      <div class="sidebar-section-head">
+        <span class="section-title">Conversations</span>
+        <button
+          id="details-open-tree-btn"
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-close-panel
+          phx-click="open_session_tree"
+        >
+          Browse tree (/tree)
+        </button>
+      </div>
       <ul id="branches-list" class="branch-list">
         <li :for={conv <- @conversations}>
           <.link
@@ -376,14 +407,29 @@
                 ↑ Up
               </button>
               <form id="picker-go-form" phx-submit="picker_go" class="path-form">
-                <input
-                  id="picker-path-input"
-                  type="text"
-                  name="path"
-                  value={@picker_path}
-                  aria-label="Target directory path"
-                  class="input mono"
-                />
+                <div
+                  id="archive-picker-dir-complete"
+                  class="dir-complete-wrap"
+                  phx-hook="DirectoryComplete"
+                  data-event="complete_path"
+                  data-kind="picker_directory"
+                  data-target-id="picker-path-input"
+                >
+                  <div class="dir-ghost" aria-hidden="true">
+                    <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
+                  </div>
+                  <input
+                    id="picker-path-input"
+                    type="text"
+                    name="path"
+                    value={@picker_path}
+                    aria-label="Target directory path"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="input mono dir-complete-input"
+                  />
+                  <div class="completion-popup dir-completions" role="listbox" hidden></div>
+                </div>
                 <button type="submit" class="btn btn-sm">Go</button>
               </form>
             </div>
@@ -447,14 +493,29 @@
                 ↑ Up
               </button>
               <form id="picker-go-form" phx-submit="picker_go" class="path-form">
-                <input
-                  id="picker-path-input"
-                  type="text"
-                  name="path"
-                  value={@picker_path}
-                  aria-label="Target directory path"
-                  class="input mono"
-                />
+                <div
+                  id="missing-picker-dir-complete"
+                  class="dir-complete-wrap"
+                  phx-hook="DirectoryComplete"
+                  data-event="complete_path"
+                  data-kind="picker_directory"
+                  data-target-id="picker-path-input"
+                >
+                  <div class="dir-ghost" aria-hidden="true">
+                    <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
+                  </div>
+                  <input
+                    id="picker-path-input"
+                    type="text"
+                    name="path"
+                    value={@picker_path}
+                    aria-label="Target directory path"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="input mono dir-complete-input"
+                  />
+                  <div class="completion-popup dir-completions" role="listbox" hidden></div>
+                </div>
                 <button type="submit" class="btn btn-sm">Go</button>
               </form>
             </div>
@@ -514,6 +575,40 @@
           Dismiss
         </button>
       </div>
+      <div
+        :if={@info_banner}
+        id="session-info-banner"
+        role="status"
+        class="flash-banner flash-info"
+      >
+        <span>{@info_banner}</span>
+        <button type="button" class="btn btn-sm btn-ghost" phx-click="dismiss_info">
+          Dismiss
+        </button>
+      </div>
+      <div
+        :if={@fork_edit}
+        id="fork-edit-banner"
+        role="status"
+        class="flash-banner fork-edit-banner"
+      >
+        <span>
+          Editing prompt <span class="mono">#{@fork_edit.entry_id}</span>
+          <%= if @fork_edit.predecessor_id do %>
+            (will branch at <span class="mono">#{@fork_edit.predecessor_id}</span>)
+          <% else %>
+            (will start a new session in this workspace)
+          <% end %>
+        </span>
+        <button
+          id="cancel-fork-edit-btn"
+          type="button"
+          class="btn btn-sm btn-ghost"
+          phx-click="cancel_fork_edit"
+        >
+          Cancel
+        </button>
+      </div>
       <button
         type="button"
         id="jump-latest"
@@ -546,22 +641,38 @@
           class="composer"
         >
           <input type="hidden" name="destination" value={composer_destination(assigns)} />
-          <textarea
-            id="prompt-input"
-            name="content"
-            rows="1"
-            aria-label="Message"
-            placeholder={
-              if Map.get(@session, :archived, false),
-                do: "Session is archived (unloaded) — send a message to resume…",
-                else: "Message the agent…"
-            }
-            phx-hook="ComposerDraft"
-            phx-mounted={JS.ignore_attributes("style")}
-            data-session-id={@session_id}
-            data-conversation-id={@conversation_id}
-            class="composer-input"
-          >{@composer_text}</textarea>
+          <div class="composer-completion-anchor">
+            <div
+              id="composer-completions"
+              class="completion-popup composer-completions"
+              role="listbox"
+              aria-label="Command and path completions"
+              hidden
+            >
+            </div>
+            <div class="composer-editor-wrap">
+              <div id="composer-ghost" class="composer-ghost" aria-hidden="true">
+                <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
+              </div>
+              <textarea
+                id="prompt-input"
+                name="content"
+                rows="1"
+                aria-label="Message"
+                placeholder={
+                  if Map.get(@session, :archived, false),
+                    do: "Session is archived (unloaded) — send a message to resume…",
+                    else: "Message the agent… (type / for commands, @ for files)"
+                }
+                phx-hook="ComposerDraft"
+                phx-mounted={JS.ignore_attributes("style")}
+                data-session-id={@session_id}
+                data-conversation-id={@conversation_id}
+                data-completion-meta={completion_metadata_json(@model_groups)}
+                class="composer-input"
+              >{@composer_text}</textarea>
+            </div>
+          </div>
 
           <div
             :if={Enum.any?(@uploads.attachment.entries, &(not &1.cancelled?))}
@@ -723,5 +834,185 @@
       <.link id="provider-settings-link" navigate={~p"/settings/providers"}>Manage providers</.link>
       <button type="button" class="btn" data-close-panel>Done</button>
     </div>
+  </Layouts.panel>
+
+  <Layouts.panel id="session-tree-panel" title="Session tree" wide>
+    <div class="tree-controls">
+      <div class="tree-filter-pills" role="tablist" aria-label="Tree filter mode">
+        <button
+          :for={
+            {mode, label} <- [
+              {"default", "Default"},
+              {"no-tools", "No tools"},
+              {"user-only", "User only"},
+              {"all", "All"}
+            ]
+          }
+          id={"tree-filter-#{mode}"}
+          type="button"
+          class={["inbox-pill inbox-pill-xs", @tree_filter == mode && "is-active"]}
+          aria-pressed={to_string(@tree_filter == mode)}
+          phx-click="tree_filter"
+          phx-value-filter={mode}
+        >
+          {label}
+        </button>
+      </div>
+      <div class="tree-search-row">
+        <form
+          id="tree-search-form"
+          phx-change="tree_search"
+          phx-submit="tree_search"
+          class="tree-search-form"
+        >
+          <input
+            id="tree-search-input"
+            type="search"
+            name="query"
+            value={@tree_query}
+            placeholder="Search steps…"
+            aria-label="Search tree steps"
+            autocomplete="off"
+            class="input"
+          />
+        </form>
+        <button
+          id="tree-refresh-btn"
+          type="button"
+          class="btn btn-sm"
+          phx-click="tree_refresh"
+          title="Refresh session tree"
+        >
+          Refresh
+        </button>
+      </div>
+    </div>
+
+    <div :if={@tree_error} id="tree-error-banner" role="alert" class="flash-banner flash-error">
+      <span>{@tree_error}</span>
+    </div>
+
+    <div class="tree-meta muted">
+      <span>
+        Showing {@tree_view.visible_count} of {@tree_view.total_nodes} steps · {length(
+          @tree_view.conversations
+        )} conversation(s)
+      </span>
+      <span :if={@tree_view.truncated?} class="badge badge-warn">truncated</span>
+    </div>
+
+    <div id="session-tree-list" class="tree-list" role="tree" aria-label="Session turn steps">
+      <p :if={@tree_view.rows == []} class="muted tree-empty">
+        No matching turn steps in this session.
+      </p>
+      <div
+        :for={row <- @tree_view.rows}
+        id={"tree-node-#{row.id}"}
+        class={[
+          "tree-row",
+          row.active_path? && "is-active-path",
+          row.current_leaf? && "is-current-leaf"
+        ]}
+        role="treeitem"
+      >
+        <div class="tree-row-main">
+          <span :if={row.prefix != ""} class="tree-prefix mono" aria-hidden="true">{row.prefix}</span>
+          <button
+            :if={row.foldable?}
+            type="button"
+            class="tree-fold-btn mono"
+            phx-click="tree_toggle_fold"
+            phx-value-entry_id={row.id}
+            aria-label={
+              if row.folded?, do: "Expand branch ##{row.id}", else: "Collapse branch ##{row.id}"
+            }
+            title={
+              if row.folded?,
+                do: "Expand (#{row.hidden_descendants} hidden)",
+                else: "Collapse branch"
+            }
+          >
+            {if row.folded?, do: "⊞", else: "⊟"}
+          </button>
+          <span
+            class={["tree-active-dot", row.active_path? && "is-on"]}
+            aria-hidden="true"
+            title={if row.active_path?, do: "On current conversation path", else: nil}
+          >
+            {if row.active_path?, do: "•", else: " "}
+          </span>
+          <span class="tree-id mono muted">#{row.id}</span>
+          <span class={[
+            "tree-kind-badge",
+            "tree-kind-#{row.kind}",
+            row.is_error && "is-error",
+            row.aborted && "is-aborted"
+          ]}>
+            {tree_kind_label(row.kind)}
+          </span>
+          <span class="tree-preview" title={row.preview}>{row.preview}</span>
+          <span
+            :if={row.folded? and row.hidden_descendants > 0}
+            class="badge mono tree-folded-count"
+          >
+            +{row.hidden_descendants}
+          </span>
+          <span
+            :for={tip <- row.conversation_tips}
+            class={["badge mono tree-conv-tip", tip.current? && "badge-active"]}
+          >
+            conv #{tip.id}{if tip.current?, do: " (current)", else: ""}
+          </span>
+        </div>
+        <div class="tree-row-actions">
+          <.link
+            :for={tip <- row.conversation_tips}
+            :if={!tip.current?}
+            data-panel-navigate
+            patch={InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, tip.id)}
+            class="btn btn-sm"
+          >
+            Switch to #{tip.id}
+          </.link>
+          <button
+            :if={@session && @session.status != "archived"}
+            type="button"
+            class="btn btn-sm btn-ghost"
+            phx-click="tree_branch_at"
+            phx-value-entry_id={row.id}
+            phx-value-source_cid={row.conversation_id}
+          >
+            Branch here
+          </button>
+          <button
+            :if={@session && @session.status != "archived" && row.kind == "user"}
+            type="button"
+            class="btn btn-sm btn-ghost"
+            phx-click="tree_edit_user_step"
+            phx-value-entry_id={row.id}
+            phx-value-source_cid={row.conversation_id}
+          >
+            Edit &amp; fork
+          </button>
+        </div>
+      </div>
+    </div>
+  </Layouts.panel>
+
+  <Layouts.panel id="slash-commands-help" title="Slash commands" wide>
+    <p class="muted slash-help-intro">
+      Type <span class="mono">/</span>
+      in the composer for auto-completion and ghost hints, <span class="mono">@</span>
+      for workspace files, <span class="mono">/cwd &lt;dir&gt;</span>
+      for directory completion, or <span class="mono">!cmd</span>
+      / <span class="mono">!!cmd</span>
+      for shell commands.
+    </p>
+    <ul id="slash-commands-help-list" class="slash-help-list">
+      <li :for={cmd <- SlashCommands.all()} class="slash-help-item">
+        <span class="mono slash-help-usage">{cmd.usage}</span>
+        <span class="muted">{cmd.description}</span>
+      </li>
+    </ul>
   </Layouts.panel>
 </div>

@@ -1,6 +1,7 @@
 import {PaneSplitter, FollowTranscript, InboxBrowser} from "./workbench.js";
 import {ReviewEditor} from "./review.js";
 import {Inspector} from "./inspector.js";
+import {ComposerCompleter, DirectoryComplete} from "./completion.js";
 
 (() => {
   const csrfMeta = document.querySelector("meta[name='csrf-token']");
@@ -54,6 +55,25 @@ import {Inspector} from "./inspector.js";
     });
   });
 
+  // Global LiveView panel open/close events (works even when the composer is hidden, e.g. archived sessions).
+  window.addEventListener("phx:open_panel", event => {
+    const id = event.detail?.id;
+    if (!id) return;
+    const panel = document.getElementById(id);
+    if (panel && typeof panel.showModal === "function" && !panel.open) {
+      panel.showModal();
+    }
+  });
+
+  window.addEventListener("phx:close_panel", event => {
+    const id = event.detail?.id;
+    if (!id) return;
+    const panel = document.getElementById(id);
+    if (panel && typeof panel.close === "function" && panel.open) {
+      panel.close();
+    }
+  });
+
   // Native popovers and modal dialogs keep chrome out of the page's scroll flow.
   document.addEventListener("click", event => {
     if (event.defaultPrevented || !(event.target instanceof Element)) return;
@@ -99,12 +119,16 @@ import {Inspector} from "./inspector.js";
   }
 
   const Hooks = {
-    PaneSplitter, FollowTranscript, InboxBrowser, Inspector, ReviewEditor,
+    PaneSplitter, FollowTranscript, InboxBrowser, Inspector, ReviewEditor, DirectoryComplete,
     ComposerDraft: {
       mounted() {
         const reply = this.el.closest("details");
         this.reply = reply;
-        this.onToggle = () => { if (reply.open) this.scheduleAutogrow?.(); };
+        this.completer = new ComposerCompleter(this, this.el);
+        this.onToggle = () => {
+          if (reply.open) this.scheduleAutogrow?.();
+          else this.completer?.dismiss();
+        };
         reply.addEventListener("toggle", this.onToggle);
         const key = this.key = draftKey(this.el);
         if (key && this.el.value === "") {
@@ -151,6 +175,7 @@ import {Inspector} from "./inspector.js";
 
         this.onInput = () => {
           this.scheduleAutogrow?.();
+          this.completer?.update(false);
           const k = draftKey(this.el);
           if (!k) return;
           try {
@@ -161,15 +186,21 @@ import {Inspector} from "./inspector.js";
         };
 
         this.onKeydown = (event) => {
-          if (event.key === "Enter" && event.shiftKey && !event.isComposing) {
+          if (this.completer?.handleKeydown(event)) {
+            return;
+          }
+          if (event.key === "Enter" && (event.shiftKey || event.metaKey || event.ctrlKey) && !event.isComposing) {
             event.preventDefault();
+            this.completer?.dismiss();
             if (this.el.form) {
               this.el.form.requestSubmit(document.getElementById("send-btn"));
             }
           } else if (event.key === "Escape" && !event.isComposing) {
             event.preventDefault();
+            const cancelFork = document.getElementById("cancel-fork-edit-btn");
             const stop = document.getElementById("stop-btn");
-            if (stop) stop.click();
+            if (cancelFork) cancelFork.click();
+            else if (stop) stop.click();
             else {
               reply.open = false;
               reply.querySelector("summary")?.focus({preventScroll: true});
@@ -192,7 +223,48 @@ import {Inspector} from "./inspector.js";
             }
           }
           this.el.value = "";
+          this.completer?.dismiss();
           this.scheduleAutogrow?.();
+        });
+
+        this.handleEvent("set_draft", ({ session_id, conversation_id, text, open_reply }) => {
+          const nextText = typeof text === "string" ? text : "";
+          if (open_reply && reply && !reply.open) {
+            reply.open = true;
+          }
+          this.el.value = nextText;
+          if (session_id && conversation_id) {
+            try {
+              window.localStorage.setItem(
+                `hweb:draft:${session_id}:${conversation_id}`,
+                nextText
+              );
+            } catch (_err) {
+              // Ignore storage errors.
+            }
+          }
+          this.completer?.dismiss();
+          this.scheduleAutogrow?.();
+          if (open_reply) {
+            this.el.focus({ preventScroll: true });
+            this.el.setSelectionRange(nextText.length, nextText.length);
+          }
+        });
+
+        this.handleEvent("open_panel", ({ id }) => {
+          if (!id) return;
+          const panel = document.getElementById(id);
+          if (panel && typeof panel.showModal === "function" && !panel.open) {
+            panel.showModal();
+          }
+        });
+
+        this.handleEvent("close_panel", ({ id }) => {
+          if (!id) return;
+          const panel = document.getElementById(id);
+          if (panel && typeof panel.close === "function" && panel.open) {
+            panel.close();
+          }
         });
       },
 
@@ -206,11 +278,14 @@ import {Inspector} from "./inspector.js";
           } catch (_err) {
             // Ignore localStorage access errors.
           }
+          this.completer?.dismiss();
         }
+        this.completer?.refreshMeta();
         this.scheduleAutogrow?.();
       },
 
       destroyed() {
+        this.completer?.destroy();
         this.reply.removeEventListener("toggle", this.onToggle);
         this.resizeObserver?.disconnect();
         if (this.growFrame != null) window.cancelAnimationFrame(this.growFrame);

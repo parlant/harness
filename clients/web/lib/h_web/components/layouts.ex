@@ -54,13 +54,14 @@ defmodule HWeb.Layouts do
   attr :id, :string, required: true
   attr :title, :string, required: true
   attr :side, :boolean, default: false
+  attr :wide, :boolean, default: false
   slot :inner_block, required: true
 
   def panel(assigns) do
     ~H"""
     <dialog
       id={@id}
-      class={["app-panel", @side && "app-panel-side"]}
+      class={["app-panel", @side && "app-panel-side", @wide && "app-panel-wide"]}
       aria-labelledby={@id <> "-title"}
       phx-mounted={JS.ignore_attributes("open")}
     >

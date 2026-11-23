@@ -4,7 +4,7 @@ defmodule HWeb.WorkspaceLive do
   """
   use HWeb, :live_view
 
-  alias HWeb.{Backend, CatalogState, InboxComponents, Layouts}
+  alias HWeb.{Backend, CatalogState, InboxComponents, Layouts, SlashCommands}
 
   @impl true
   def mount(params, _session, socket) do
@@ -98,6 +98,33 @@ defmodule HWeb.WorkspaceLive do
 
   def handle_event("select_dir", %{"path" => path}, socket) do
     {:noreply, assign(socket, :selected_dir, path)}
+  end
+
+  def handle_event("complete_directory", params, socket) do
+    lookup_id = params["lookup_id"]
+    prefix = if is_binary(params["prefix"]), do: params["prefix"], else: ""
+    target_id = params["target_id"] || "workspace-path-input"
+    env_id = socket.assigns.env_id || "host"
+
+    fallback_cwd =
+      if is_binary(socket.assigns.path) and String.starts_with?(socket.assigns.path, "/"),
+        do: socket.assigns.path,
+        else: "/"
+
+    items =
+      case SlashCommands.complete_directories(env_id, fallback_cwd, prefix) do
+        {:ok, list} -> list
+        _ -> []
+      end
+
+    {:noreply,
+     push_event(socket, "completion_results", %{
+       lookup_id: lookup_id,
+       target_id: target_id,
+       kind: "directory",
+       prefix: prefix,
+       items: items
+     })}
   end
 
   def handle_event("refresh_sessions", _params, socket) do

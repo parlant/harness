@@ -72,13 +72,29 @@
         </button>
 
         <form phx-submit="browse_path" class="path-form">
-          <input
-            type="text"
-            name="path"
-            value={@path}
-            aria-label="Workspace path"
-            class="input mono"
-          />
+          <div
+            id="workspace-path-dir-complete"
+            class="dir-complete-wrap"
+            phx-hook="DirectoryComplete"
+            data-event="complete_directory"
+            data-kind="directory"
+            data-target-id="workspace-path-input"
+          >
+            <div class="dir-ghost" aria-hidden="true">
+              <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
+            </div>
+            <input
+              id="workspace-path-input"
+              type="text"
+              name="path"
+              value={@path}
+              aria-label="Workspace path"
+              autocomplete="off"
+              spellcheck="false"
+              class="input mono dir-complete-input"
+            />
+            <div class="completion-popup dir-completions" role="listbox" hidden></div>
+          </div>
           <button type="submit" class="btn btn-sm">Go</button>
         </form>
 
@@ -103,14 +119,29 @@
         <div class="new-session-fields">
           <label class="field-group">
             <span class="field-label">Selected directory</span>
-            <input
-              id="selected-cwd-input"
-              type="text"
-              name="cwd"
-              value={@selected_dir}
-              class="input mono"
-              required
-            />
+            <div
+              id="selected-cwd-dir-complete"
+              class="dir-complete-wrap"
+              phx-hook="DirectoryComplete"
+              data-event="complete_directory"
+              data-kind="directory"
+              data-target-id="selected-cwd-input"
+            >
+              <div class="dir-ghost" aria-hidden="true">
+                <span class="ghost-mirror"></span><span class="ghost-suffix"></span>
+              </div>
+              <input
+                id="selected-cwd-input"
+                type="text"
+                name="cwd"
+                value={@selected_dir}
+                autocomplete="off"
+                spellcheck="false"
+                class="input mono dir-complete-input"
+                required
+              />
+              <div class="completion-popup dir-completions" role="listbox" hidden></div>
+            </div>
           </label>
 
           <label class="field-group">
