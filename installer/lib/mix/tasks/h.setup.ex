@@ -13,7 +13,7 @@ defmodule Mix.Tasks.H.Setup do
     * `--version VERSION` - release version to install (default: `latest`)
     * `--release-url URL` - override release download base URL (env: `H_RELEASE_URL`)
     * `--prefix DIR` - install prefix (default: `~/.local/opt/harness`, env: `H_PREFIX`)
-    * `--bin-dir DIR` - symlink directory for `hi`/`hi-import` (default: `~/.bin`, env: `H_BIN_DIR`)
+    * `--bin-dir DIR` - symlink directory for `hi`/`hi-import` (default: cascade writable `PATH` locations, falling back to `~/.bin` last; env: `H_BIN_DIR`)
     * `--data-dir DIR` - daemon data directory for `--service` (default: `~/.local/share/h`, env: `H_DATA_DIR`)
     * `--service` - register and start a per-user service (macOS LaunchAgent or Linux `systemd --user`)
     * `--signer-pubkey KEY` - override trusted `ssh-ed25519` public key (env: `H_SIGNER_PUBKEY`)
@@ -62,7 +62,11 @@ defmodule Mix.Tasks.H.Setup do
       release_url: parsed[:release_url] || System.get_env("H_RELEASE_URL"),
       prefix:
         parsed[:prefix] || System.get_env("H_PREFIX") || Path.join(home, ".local/opt/harness"),
-      bin_dir: parsed[:bin_dir] || System.get_env("H_BIN_DIR") || Path.join(home, ".bin"),
+      bin_dir:
+        Installer.select_bin_dir(
+          explicit: parsed[:bin_dir] || System.get_env("H_BIN_DIR"),
+          home: home
+        ),
       data_dir:
         parsed[:data_dir] || System.get_env("H_DATA_DIR") || Path.join(home, ".local/share/h"),
       service: Keyword.get(parsed, :service, false),

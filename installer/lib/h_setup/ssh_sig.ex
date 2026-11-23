@@ -6,7 +6,7 @@ defmodule HSetup.SshSig do
   external `ssh-keygen` binary.
   """
 
-  @default_signer_pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO2BgQNsHzpCX3VCsqN3rRqUsFvaFHsRItCqevnIcEEs"
+  @default_signer_pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsOhoxQkZ8pxWeObg2Q10fJ/Gcg0uL4pt1Oy/3vgLuN"
   @begin_marker "-----BEGIN SSH SIGNATURE-----"
   @end_marker "-----END SSH SIGNATURE-----"
 

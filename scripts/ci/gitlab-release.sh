@@ -101,7 +101,7 @@ desc = (
     "Verify downloads with OpenSSH using `packaging/keys/release-signers`:\n\n"
     "```sh\n"
     "ssh-keygen -Y verify -f packaging/keys/release-signers \\\n"
-    "  -I l.rieder@gmail.com -n file -s SHA256SUMS.sig < SHA256SUMS\n"
+    "  -I bingboombam@parlant.xyz -n file -s SHA256SUMS.sig < SHA256SUMS\n"
     "sha256sum -c SHA256SUMS\n"
     "```\n"
 )

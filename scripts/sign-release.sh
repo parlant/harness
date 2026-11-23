@@ -7,7 +7,8 @@
 # Key resolution (first match wins):
 #   1. H_SIGNING_KEY_PEM  (raw private key material, e.g. GitLab CI masked/file var)
 #   2. H_SIGNING_KEY      (path to private key file)
-#   3. $HOME/.ssh/id_ed25519
+#   3. $HOME/.ssh/harness/release_signing_ed25519
+#   4. $HOME/.ssh/id_ed25519
 #
 # Optional:
 #   H_ALLOW_UNSIGNED=1    generate SHA256SUMS + release-manifest.json without signing
@@ -172,6 +173,8 @@ if [ -n "${H_SIGNING_KEY_PEM:-}" ]; then
   key_file="$tmp_key"
 elif [ -n "${H_SIGNING_KEY:-}" ]; then
   key_file="$H_SIGNING_KEY"
+elif [ -f "${HOME:-}/.ssh/harness/release_signing_ed25519" ]; then
+  key_file="${HOME}/.ssh/harness/release_signing_ed25519"
 elif [ -f "${HOME:-}/.ssh/id_ed25519" ]; then
   key_file="${HOME}/.ssh/id_ed25519"
 fi

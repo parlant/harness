@@ -18,7 +18,10 @@ defmodule H.DaemonDrainTest do
     def parameters_schema do
       %{
         "type" => "object",
-        "properties" => %{"tag" => %{"type" => "string"}},
+        "properties" => %{
+          "tag" => %{"type" => "string"},
+          "timeout_ms" => %{"type" => "integer", "minimum" => 100, "maximum" => 600_000}
+        },
         "required" => ["tag"]
       }
     end
@@ -132,7 +135,9 @@ defmodule H.DaemonDrainTest do
     # Idempotent repeat returns draining without sending duplicate signals
     assert {:ok, %{state: "draining"}} = Maintenance.drain_and_stop(opts)
 
-    assert {:ok, %{"state" => "draining", "active_workers" => 1}} = Maintenance.status(opts)
+    assert {:ok, %{"state" => "draining", "active_workers" => 1, "shutdown_timeout_ms" => _}} =
+             Maintenance.status(opts)
+
     # Admission gate is closed immediately
     assert {:error, :daemon_draining} =
              Daemon.execute_command("drain-gen", submit("req-2", "Blocked"), opts)
@@ -696,10 +701,15 @@ defmodule H.DaemonDrainTest do
     token = Auth.owner_token(opts[:auth_table])
     headers = [{"authorization", "Bearer #{token}"}, {"host", "127.0.0.1:#{port}"}]
 
-    # Status endpoint reports running with 0 active workers
+    # Status endpoint reports running with 0 active workers and default 300s shutdown timeout
     status_resp = Req.get!("#{base_url}/api/v1/daemon/status", headers: headers, retry: false)
     assert status_resp.status == 200
-    assert status_resp.body == %{"state" => "running", "active_workers" => 0}
+
+    assert status_resp.body == %{
+             "state" => "running",
+             "active_workers" => 0,
+             "shutdown_timeout_ms" => 300_000
+           }
 
     # Invalid shutdown mode returns 422
     bad_resp =
@@ -748,7 +758,7 @@ defmodule H.DaemonDrainTest do
       )
 
     assert drain_resp.status == 202
-    assert drain_resp.body == %{"state" => "stopping"}
+    assert drain_resp.body == %{"state" => "stopping", "shutdown_timeout_ms" => 300_000}
     assert_receive :shutdown_drained, 1_000
 
     # Stopping the entire Instance (including Bandit listeners with active SSE streams)
@@ -759,6 +769,83 @@ defmodule H.DaemonDrainTest do
 
     assert elapsed_ms < 1_000,
            "expected Instance shutdown with open SSE streams in < 1000ms, took #{elapsed_ms}ms"
+  end
+
+  @tag :tmp_dir
+  test "computes dynamic shutdown_timeout_ms exceeding 300s floor for long-timeout running tools",
+       %{tmp_dir: dir} do
+    data = Path.join(dir, "store")
+    cwd = Path.join(dir, "work")
+    File.mkdir!(cwd)
+    on_exit(fn -> File.rm(StoreLock.socket_path(data)) end)
+
+    tool_gate = make_ref()
+    Application.put_env(:harness, SlowTool, %{owner: self(), gate: tool_gate})
+
+    fake =
+      start_supervised!(
+        {Fake,
+         script: [
+           {:reply, [],
+            %{
+              content: [%{type: "text", text: "Running long tool"}],
+              tool_calls: [
+                %{
+                  id: "call_long_1",
+                  name: "slow_tool",
+                  arguments: %{"tag" => "long", "timeout_ms" => 540_000}
+                }
+              ],
+              finish_reason: "tool_calls"
+            }}
+         ]},
+        id: :fake_dynamic_timeout
+      )
+
+    start_supervised!(
+      {Instance,
+       data_dir: data,
+       provider: Fake,
+       provider_config: %{server: fake},
+       default_model: "fake:coder",
+       tools: [SlowTool],
+       shutdown_owner: self()}
+    )
+
+    opts = Daemon.instance_options()
+
+    # Idle status uses the 300_000ms default floor
+    assert {:ok,
+            %{
+              "state" => "running",
+              "active_workers" => 0,
+              "shutdown_timeout_ms" => 300_000
+            }} = Maintenance.status(opts)
+
+    assert {:ok, _} = Daemon.create_session(%{"session_id" => "long-tool", "cwd" => cwd}, opts)
+    assert {:ok, _} = Daemon.execute_command("long-tool", submit("req-long", "Go"), opts)
+    assert_receive {:tool_entered, "long", ^tool_gate, tool_pid}, 2_000
+
+    # Status must scale beyond 540_000ms to include remaining tool deadline + 30_000ms commit grace
+    assert {:ok,
+            %{
+              "state" => "running",
+              "active_workers" => 1,
+              "shutdown_timeout_ms" => status_timeout_ms
+            }} = Maintenance.status(opts)
+
+    assert status_timeout_ms > 540_000
+    assert status_timeout_ms <= 570_000
+
+    # Beginning drain also reports the dynamic shutdown_timeout_ms
+    assert {:ok, %{state: "draining", shutdown_timeout_ms: drain_timeout_ms}} =
+             Maintenance.drain_and_stop(opts)
+
+    assert drain_timeout_ms > 540_000
+    assert drain_timeout_ms <= 570_000
+
+    send(tool_pid, {:release_tool, tool_gate})
+    assert_receive :shutdown_drained, 2_000
   end
 
   test "SignalHandler intercepts :sigterm and delivers {:os_signal, :sigterm} to owner without halting VM" do

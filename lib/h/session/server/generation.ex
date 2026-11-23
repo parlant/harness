@@ -171,7 +171,9 @@ defmodule H.Session.Server.Generation do
                   kind: :compaction,
                   pid: worker_pid,
                   monitor_ref: ref,
-                  started_at: now
+                  started_at: now,
+                  deadline_mono_ms:
+                    System.monotonic_time(:millisecond) + stream_timeout_ms(config)
                 }
 
                 %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
@@ -681,6 +683,22 @@ defmodule H.Session.Server.Generation do
 
   defp inference_config(state), do: state.provider_config
 
+  defp stream_timeout_ms(config) when is_map(config) do
+    case Map.get(config, :receive_timeout) || Map.get(config, "receive_timeout") do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> 300_000
+    end
+  end
+
+  defp stream_timeout_ms(config) when is_list(config) do
+    case Keyword.get(config, :receive_timeout) do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> 300_000
+    end
+  end
+
+  defp stream_timeout_ms(_), do: 300_000
+
   defp dispatch_policy(H.Provider.ReqLLM, config, model) do
     case H.Provider.ReqLLM.dispatch_limit(config, model || config[:model]) do
       nil ->
@@ -747,7 +765,8 @@ defmodule H.Session.Server.Generation do
           kind: :generation,
           pid: worker_pid,
           monitor_ref: ref,
-          started_at: now
+          started_at: now,
+          deadline_mono_ms: System.monotonic_time(:millisecond) + stream_timeout_ms(config)
         }
 
         %{state | workers: Map.put(state.workers, attempt_id, worker_info)}

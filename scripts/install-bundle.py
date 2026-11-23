@@ -131,12 +131,114 @@ def wait_until_serving(hi, env):
     raise RuntimeError(f"LaunchAgent has not become ready. Check h-daemon.log and `hi daemon status`: {last_error}")
 
 
+PREFERRED_BIN_DIRS = ("/usr/local/bin", "/opt/local/bin", "/opt/homebrew/bin")
+
+
+def _norm_dir(raw: str) -> Path:
+    return Path(os.path.normpath(os.path.expanduser(raw)))
+
+
+def _is_writable_dir(path: Path) -> bool:
+    return path.is_dir() and os.access(path, os.W_OK | os.X_OK)
+
+
+def _local_bin_usable(local_bin: Path, home: Path) -> bool:
+    if _is_writable_dir(local_bin):
+        return True
+    if os.path.lexists(local_bin):
+        return False
+    local_dir = home / ".local"
+    if _is_writable_dir(local_dir):
+        return True
+    return not os.path.lexists(local_dir) and _is_writable_dir(home)
+
+
+def _is_excluded_path_dir(raw: str, norm: Path, home_bin: Path) -> bool:
+    if not raw or not os.path.isabs(raw):
+        return True
+    s = str(norm)
+    if s in ("/", "/bin", "/usr/bin", "/sbin", "/usr/sbin"):
+        return True
+    if s.startswith(("/System/", "/Library/", "/var/run/")):
+        return True
+    if norm == home_bin:
+        return True
+    parts = norm.parts
+    if s.endswith("/.cargo/bin") or s.endswith("/node_modules/.bin"):
+        return True
+    if "Cellar" in parts or "shims" in parts:
+        return True
+    if any(part.startswith("erts-") for part in parts):
+        return True
+    return False
+
+
+def select_bin_dir(
+    explicit: str | None = None,
+    *,
+    home: Path | None = None,
+    path_env: str | None = None,
+    preferred: tuple[str, ...] | None = None,
+) -> Path:
+    if explicit:
+        return Path(explicit).expanduser().absolute()
+    env_bin_dir = os.environ.get("H_BIN_DIR")
+    if env_bin_dir:
+        return Path(env_bin_dir).expanduser().absolute()
+
+    home_dir = (home if home is not None else Path.home()).resolve()
+    raw_path = os.environ.get("PATH", "") if path_env is None else path_env
+    path_entries = [entry for entry in raw_path.split(os.pathsep) if entry]
+    norm_path_entries = [_norm_dir(entry) for entry in path_entries]
+    path_set = set(norm_path_entries)
+
+    pref_dirs = (
+        preferred
+        if preferred is not None
+        else tuple(
+            os.environ["H_PREFERRED_BIN_DIRS"].split(os.pathsep)
+            if os.environ.get("H_PREFERRED_BIN_DIRS")
+            else PREFERRED_BIN_DIRS
+        )
+    )
+    pref_paths = [_norm_dir(p) for p in pref_dirs if p]
+
+    # 1. Preferred standard locations on PATH and writable.
+    for pref in pref_paths:
+        if pref in path_set and _is_writable_dir(pref):
+            return pref
+
+    local_bin = _norm_dir(str(home_dir / ".local/bin"))
+    if local_bin in path_set and _local_bin_usable(local_bin, home_dir):
+        return local_bin
+
+    # 2. Any other user-writable directory on PATH (excluding OS, shims, and ~/.bin).
+    home_bin = _norm_dir(str(home_dir / ".bin"))
+    for raw, norm in zip(path_entries, norm_path_entries):
+        if _is_excluded_path_dir(raw, norm, home_bin):
+            continue
+        if _is_writable_dir(norm):
+            return norm
+
+    # 3. ~/.bin if it is on PATH and writable.
+    if home_bin in path_set and _is_writable_dir(home_bin):
+        return home_bin
+
+    # 4. Off-PATH fallback: preferred writable standard dirs, then existing writable ~/.local/bin, then ~/.bin last.
+    for pref in pref_paths:
+        if _is_writable_dir(pref):
+            return pref
+    if _is_writable_dir(local_bin):
+        return local_bin
+    return home_bin
+
+
 def install(args):
     home = Path.home().resolve()
     prefix = (home / ".local/opt/harness").resolve()
     releases = prefix / "releases"
     current = prefix / "current"
-    bin_dir = Path(args.bin_dir).expanduser().absolute()
+    bin_dir = select_bin_dir(args.bin_dir, home=home)
     hi_link = bin_dir / "hi"
     import_link = bin_dir / "hi-import"
     import_bin = current / "bin/hi-import"
@@ -204,7 +306,7 @@ def install(args):
             checked([release / "bin/hi", "daemon", "check-service"], env)
             # Use the new release's hi so cooperative drain mode is sent even when
             # upgrading from an older release whose hi only supported idle shutdown.
-            checked([release / "bin/hi", "daemon", "stop"], env, timeout=320)
+            checked([release / "bin/hi", "daemon", "stop"], env, timeout=660)
             # The API and store lock can disappear before the VM exits. A kickstart
             # while launchd still tracks that process may not start a replacement.
             print("Waiting for launchd to finish stopping the old release...")
@@ -246,7 +348,11 @@ def main():
     parser.add_argument("path", nargs="?", help="prebuilt bundle directory (default: dist/harness), or installed release ID with --activate")
     parser.add_argument("--activate", action="store_true", help="activate an existing release instead of copying")
     parser.add_argument("--service", action="store_true", help="register and start a macOS per-user LaunchAgent on first install")
-    parser.add_argument("--bin-dir", default="~/.bin", help="directory for the hi symlink (default: ~/.bin)")
+    parser.add_argument(
+        "--bin-dir",
+        default=None,
+        help="directory for the hi symlink (default: cascade writable PATH dirs, falling back to ~/.bin last)",
+    )
     parser.add_argument("--data-dir", default=os.environ.get("H_DATA_DIR") or "~/.local/share/h")
     args = parser.parse_args()
     if args.activate and args.path is None:

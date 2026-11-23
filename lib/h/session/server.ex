@@ -150,6 +150,22 @@ defmodule H.Session.Server do
   def handle_call(:active_worker_count, _from, state),
     do: {:reply, map_size(state.workers), state}
 
+  def handle_call(:max_worker_remaining_ms, _from, state) do
+    now_mono = System.monotonic_time(:millisecond)
+
+    remaining =
+      state.workers
+      |> Map.values()
+      |> Enum.reduce(0, fn worker, acc ->
+        case Map.get(worker, :deadline_mono_ms) do
+          deadline when is_integer(deadline) -> max(acc, max(0, deadline - now_mono))
+          _ -> acc
+        end
+      end)
+
+    {:reply, remaining, state}
+  end
+
   def handle_call(:get_seq, _from, state) do
     {:reply, {:ok, state.seq}, state}
   end

@@ -9,6 +9,10 @@ defmodule H.Tools.Bash do
   @min_timeout_ms 100
   @max_timeout_ms 600_000
 
+  @doc "Default bash execution timeout in milliseconds."
+  @spec default_timeout_ms() :: pos_integer()
+  def default_timeout_ms, do: @default_timeout_ms
+
   @impl true
   def name, do: "bash"
 

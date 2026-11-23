@@ -69,9 +69,9 @@ pub(crate) enum Daemon {
         /// Refuse shutdown immediately if any session or account operation is active
         #[arg(long)]
         idle_only: bool,
-        /// Maximum seconds to wait for drain and store lock release
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
+        /// Maximum seconds to wait for drain and store lock release (default: 300s, auto-expanded to active tool deadlines)
+        #[arg(long)]
+        timeout: Option<u64>,
     },
     /// Restart a standalone daemon in the foreground (drains active work by default)
     Restart {
@@ -84,9 +84,9 @@ pub(crate) enum Daemon {
         /// Refuse restart immediately if any session or account operation is active
         #[arg(long)]
         idle_only: bool,
-        /// Maximum seconds to wait for drain and store lock release
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
+        /// Maximum seconds to wait for drain and store lock release (default: 300s, auto-expanded to active tool deadlines)
+        #[arg(long)]
+        timeout: Option<u64>,
     },
     /// Start the registered per-user macOS service if stopped
     StartService,
@@ -97,18 +97,18 @@ pub(crate) enum Daemon {
         /// Refuse restart immediately if any session or account operation is active
         #[arg(long)]
         idle_only: bool,
-        /// Maximum seconds to wait for drain and store lock release
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
+        /// Maximum seconds to wait for drain and store lock release (default: 300s, auto-expanded to active tool deadlines)
+        #[arg(long)]
+        timeout: Option<u64>,
     },
     /// Unload and remove the hi-managed macOS service
     UninstallService {
         /// Refuse uninstall immediately if any session or account operation is active
         #[arg(long)]
         idle_only: bool,
-        /// Maximum seconds to wait for drain and store lock release
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
+        /// Maximum seconds to wait for drain and store lock release (default: 300s, auto-expanded to active tool deadlines)
+        #[arg(long)]
+        timeout: Option<u64>,
     },
     /// Run a packaged daemon in the foreground (Ctrl+C to stop)
     Start {
@@ -160,7 +160,7 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
             stop_daemon(
                 &data_dir(args.data_dir)?,
                 if idle_only { "idle" } else { "drain" },
-                Duration::from_secs(timeout),
+                timeout.map(Duration::from_secs),
             )?;
             println!("Daemon stopped.");
             return Ok(());
@@ -185,7 +185,7 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
             stop_daemon(
                 &dir,
                 if idle_only { "idle" } else { "drain" },
-                Duration::from_secs(timeout),
+                timeout.map(Duration::from_secs),
             )?;
             return start(dir, Some(launcher), port, no_extensions);
         }
@@ -212,7 +212,7 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
                 "restart",
                 &dir,
                 if idle_only { "idle" } else { "drain" },
-                Duration::from_secs(timeout),
+                timeout.map(Duration::from_secs),
             );
         }
         Command::Daemon {
@@ -224,7 +224,7 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
                 "uninstall",
                 &dir,
                 if idle_only { "idle" } else { "drain" },
-                Duration::from_secs(timeout),
+                timeout.map(Duration::from_secs),
             );
         }
         _ => {}
@@ -435,10 +435,12 @@ fn login(client: &DaemonClient, provider: &str, source: Option<String>) -> Resul
     }
 }
 
+const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(300);
+
 pub(crate) fn stop_daemon(
     dir: &std::path::Path,
     mode: &str,
-    timeout: Duration,
+    explicit_timeout: Option<Duration>,
 ) -> Result<(), String> {
     let cfg = match crate::config::resolve_config(Some(dir), None) {
         Ok(cfg) => cfg,
@@ -447,14 +449,23 @@ pub(crate) fn stop_daemon(
     };
     let client = DaemonClient::new(cfg.target, cfg.token);
     let started = Instant::now();
-    let deadline = started + timeout.max(Duration::from_secs(12));
+    let initial_timeout = explicit_timeout.unwrap_or(DEFAULT_STOP_TIMEOUT);
+    let mut deadline = started + initial_timeout.max(Duration::from_secs(12));
     let mut announced_drain = false;
     let draining_state;
 
     loop {
         match client.shutdown(mode) {
-            Ok(state) => {
+            Ok((state, server_timeout_ms)) => {
                 draining_state = state == "draining";
+                if explicit_timeout.is_none() {
+                    if let Some(ms) = server_timeout_ms {
+                        let server_deadline = Instant::now() + Duration::from_millis(ms);
+                        if server_deadline > deadline {
+                            deadline = server_deadline;
+                        }
+                    }
+                }
                 break;
             }
             Err(ClientError::ConnectionFailed { error, .. })

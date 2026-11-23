@@ -306,7 +306,7 @@ impl DaemonClient {
         self.connect(Some(Duration::from_secs(2))).map(drop)
     }
 
-    pub(crate) fn shutdown(&self, mode: &str) -> Result<String, ClientError> {
+    pub(crate) fn shutdown(&self, mode: &str) -> Result<(String, Option<u64>), ClientError> {
         let body = if mode == "idle" {
             serde_json::json!({})
         } else {
@@ -314,7 +314,10 @@ impl DaemonClient {
         };
         let reply: serde_json::Value = self.post_json("/api/v1/daemon/shutdown", &body)?;
         match reply["state"].as_str() {
-            Some(state @ ("stopping" | "draining")) => Ok(state.to_string()),
+            Some(state @ ("stopping" | "draining")) => {
+                let server_timeout_ms = reply["shutdown_timeout_ms"].as_u64();
+                Ok((state.to_string(), server_timeout_ms))
+            }
             _ => Err(ClientError::InvalidResponse(
                 "shutdown was not acknowledged".into(),
             )),

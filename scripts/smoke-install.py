@@ -18,7 +18,13 @@ def smoke(bundle):
     with tempfile.TemporaryDirectory(prefix="h-install-smoke-", dir="/private/tmp" if sys.platform == "darwin" else "/tmp") as tmp:
         home = Path(tmp)
         data = home / ".local/share/h"
-        env = {"HOME": tmp, "PATH": f"{home}/.bin:/usr/bin:/bin", "ERL_FLAGS": "+S 2:2", "H_WEB_PORT": "0"}
+        env = {
+            "HOME": tmp,
+            "PATH": f"{home}/.bin:/usr/bin:/bin",
+            "H_PREFERRED_BIN_DIRS": f"{home}/.nonexistent-pref",
+            "ERL_FLAGS": "+S 2:2",
+            "H_WEB_PORT": "0",
+        }
         hi = home / ".bin/hi"
         backing_bin = home / "bin backing"
         backing_bin.mkdir()
@@ -188,6 +194,44 @@ def smoke(bundle):
             states = iter([stopped])
             module.wait_until_stopped(home / "fake.plist", env)
             assert commands == ["print"]
+
+        # Exercise PATH bin_dir cascade (preferred writable dirs win over ~/.bin; ~/.bin only last)
+        pref_a = home / "pref-a"
+        pref_b = home / "pref-b"
+        pref_a.mkdir()
+        pref_b.mkdir()
+        custom_path_bin = home / "user-bin"
+        custom_path_bin.mkdir()
+        try:
+            assert module.select_bin_dir(
+                None,
+                home=home,
+                path_env=f"{home}/.bin:{pref_b}:{pref_a}:/usr/bin:/bin",
+                preferred=(str(pref_a), str(pref_b)),
+            ) == pref_a
+            os.chmod(pref_a, 0o555)
+            assert module.select_bin_dir(
+                None,
+                home=home,
+                path_env=f"{pref_a}:{pref_b}:{home}/.bin:/usr/bin:/bin",
+                preferred=(str(pref_a), str(pref_b)),
+            ) == pref_b
+            os.chmod(pref_b, 0o555)
+            assert module.select_bin_dir(
+                None,
+                home=home,
+                path_env=f"{pref_a}:{home}/.bin:{custom_path_bin}:/usr/bin:/bin",
+                preferred=(str(pref_a), str(pref_b)),
+            ) == custom_path_bin
+            assert module.select_bin_dir(
+                None,
+                home=home,
+                path_env="/usr/bin:/bin",
+                preferred=(str(pref_a), str(pref_b)),
+            ) == (home / ".bin")
+        finally:
+            os.chmod(pref_a, 0o755)
+            os.chmod(pref_b, 0o755)
 
         # No installer runs launchctl unless service registration was explicit.
         assert not (home / "Library/LaunchAgents").exists()

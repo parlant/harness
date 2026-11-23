@@ -3,10 +3,10 @@
 # Overrides: H_VERSION, H_RELEASE_URL, H_PREFIX, H_BIN_DIR, H_DATA_DIR, H_SIGNER_PUBKEY
 set -eu
 
-SIGNER_KEY="${H_SIGNER_PUBKEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO2BgQNsHzpCX3VCsqN3rRqUsFvaFHsRItCqevnIcEEs}"
+SIGNER_KEY="${H_SIGNER_PUBKEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsOhoxQkZ8pxWeObg2Q10fJ/Gcg0uL4pt1Oy/3vgLuN}"
 VERSION="${H_VERSION:-latest}"
 PREFIX="${H_PREFIX:-$HOME/.local/opt/harness}"
-BIN_DIR="${H_BIN_DIR:-$HOME/.bin}"
+BIN_DIR="${H_BIN_DIR:-}"
 DATA_DIR="${H_DATA_DIR:-$HOME/.local/share/h}"
 INSTALL_SERVICE=0
 
@@ -24,6 +24,68 @@ while [ "$#" -gt 0 ]; do
     *) die "unknown option: $1" ;;
   esac
 done
+
+norm_dir() {
+  d="$1"
+  while [ "$d" != "/" ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done
+  printf '%s' "$d"
+}
+path_has() {
+  target="$(norm_dir "$1")"
+  old_ifs="$IFS"; IFS=:
+  for p in ${PATH:-}; do
+    [ -n "$p" ] && [ "$(norm_dir "$p")" = "$target" ] && { IFS="$old_ifs"; return 0; }
+  done
+  IFS="$old_ifs"; return 1
+}
+dir_writable() { [ -d "$1" ] && [ -w "$1" ]; }
+local_bin_usable() {
+  dir_writable "$1" && return 0
+  [ ! -e "$1" ] && { dir_writable "$HOME/.local" || { [ ! -e "$HOME/.local" ] && dir_writable "$HOME"; }; }
+}
+excluded_path_dir() {
+  case "$1" in
+    /*) ;; *) return 0 ;;
+  esac
+  case "$1" in
+    /|/bin|/usr/bin|/sbin|/usr/sbin|/System/*|/Library/*|/var/run/*|*/.cargo/bin|*/Cellar/*|*/shims|*/shims/*|*/erts-*|*/node_modules/.bin) return 0 ;;
+  esac
+  [ "$1" = "$(norm_dir "$HOME/.bin")" ] && return 0
+  return 1
+}
+select_bin_dir() {
+  [ -n "$BIN_DIR" ] && { printf '%s' "$BIN_DIR"; return; }
+  pref_list="${H_PREFERRED_BIN_DIRS:-/usr/local/bin:/opt/local/bin:/opt/homebrew/bin}"
+  old_ifs="$IFS"; IFS=:
+  for pref in $pref_list; do
+    [ -n "$pref" ] || continue
+    pref="$(norm_dir "$pref")"
+    path_has "$pref" && dir_writable "$pref" && { IFS="$old_ifs"; printf '%s' "$pref"; return; }
+  done
+  IFS="$old_ifs"
+  local_bin="$(norm_dir "$HOME/.local/bin")"
+  path_has "$local_bin" && local_bin_usable "$local_bin" && { printf '%s' "$local_bin"; return; }
+  old_ifs="$IFS"; IFS=:
+  for raw in ${PATH:-}; do
+    [ -n "$raw" ] || continue
+    d="$(norm_dir "$raw")"
+    excluded_path_dir "$d" && continue
+    dir_writable "$d" && { IFS="$old_ifs"; printf '%s' "$d"; return; }
+  done
+  IFS="$old_ifs"
+  home_bin="$(norm_dir "$HOME/.bin")"
+  path_has "$home_bin" && dir_writable "$home_bin" && { printf '%s' "$home_bin"; return; }
+  old_ifs="$IFS"; IFS=:
+  for pref in $pref_list; do
+    [ -n "$pref" ] || continue
+    pref="$(norm_dir "$pref")"
+    dir_writable "$pref" && { IFS="$old_ifs"; printf '%s' "$pref"; return; }
+  done
+  IFS="$old_ifs"
+  dir_writable "$local_bin" && { printf '%s' "$local_bin"; return; }
+  printf '%s' "$home_bin"
+}
+BIN_DIR="$(select_bin_dir)"
 
 case "${H_OS:-$(uname -s)}" in
   Darwin|darwin) OS=darwin ;;
@@ -60,8 +122,8 @@ trap 'rm -rf -- "$TMP"' EXIT HUP INT TERM
 printf 'Fetching release manifest from %s\n' "$BASE_URL"
 fetch "$BASE_URL/SHA256SUMS" "$TMP/SHA256SUMS" || die "failed to download SHA256SUMS"
 fetch "$BASE_URL/SHA256SUMS.sig" "$TMP/SHA256SUMS.sig" || die "failed to download SHA256SUMS.sig"
-printf 'harness-release %s\n' "$SIGNER_KEY" > "$TMP/allowed_signers"
-ssh-keygen -Y verify -f "$TMP/allowed_signers" -I harness-release -n file \
+printf 'bingboombam@parlant.xyz %s\n' "$SIGNER_KEY" > "$TMP/allowed_signers"
+ssh-keygen -Y verify -f "$TMP/allowed_signers" -I bingboombam@parlant.xyz -n file \
   -s "$TMP/SHA256SUMS.sig" < "$TMP/SHA256SUMS" >/dev/null 2>&1 || die "SSH signature verification failed"
 
 MATCH="$(awk -v s="-${OS}-${ARCH}.tar.gz" 'NF >= 2 { f=$2; sub(/^\*/, "", f); if (length(f) > length(s) && substr(f, length(f)-length(s)+1) == s) { print $1 " " f; exit } }' "$TMP/SHA256SUMS")"
@@ -98,7 +160,7 @@ mv -Tf "$STAGE_LINK" "$CURRENT" 2>/dev/null || { rm -f "$STAGE_LINK"; ln -sfn "r
 ln -sfn "$CURRENT/bin/hi" "$BIN_DIR/hi"
 [ -x "$DEST/bin/hi-import" ] && ln -sfn "$CURRENT/bin/hi-import" "$BIN_DIR/hi-import"
 
-printf 'Installed %s -> %s\n' "$RELEASE_ID" "$CURRENT"
+printf 'Installed %s -> %s (linked in %s)\n' "$RELEASE_ID" "$CURRENT" "$BIN_DIR"
 if [ "$INSTALL_SERVICE" = 1 ]; then
   mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR"
   if [ "$OS" = "darwin" ]; then
@@ -110,10 +172,10 @@ if [ "$INSTALL_SERVICE" = 1 ]; then
   else
     UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
     mkdir -p "$UNIT_DIR"
-    printf '[Unit]\nDescription=Harness (H) Daemon\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart="%s" --data-dir "%s"\nWorkingDirectory=%s\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=300\n\n[Install]\nWantedBy=default.target\n' \
+    printf '[Unit]\nDescription=Harness (H) Daemon\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart="%s" --data-dir "%s"\nWorkingDirectory=%s\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=660\n\n[Install]\nWantedBy=default.target\n' \
       "$CURRENT/bin/h-daemon" "$DATA_DIR" "$DATA_DIR" > "$UNIT_DIR/harness-daemon.service"
     chmod 600 "$UNIT_DIR/harness-daemon.service"
     systemctl --user daemon-reload && systemctl --user enable harness-daemon.service && systemctl --user restart harness-daemon.service
   fi
 fi
-case ":${PATH:-}:" in *":$BIN_DIR:"*) ;; *) printf 'Add %s to PATH in your shell profile, then run: hi\n' "$BIN_DIR" ;; esac
+path_has "$BIN_DIR" || printf 'Add %s to PATH in your shell profile, then run: hi\n' "$BIN_DIR"

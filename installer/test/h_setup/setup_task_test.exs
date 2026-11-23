@@ -263,13 +263,99 @@ defmodule HSetup.SetupTaskTest do
              ~s(ExecStart="#{Path.join(prefix, "current/bin/h-daemon")}" --data-dir "#{data_dir}")
 
     assert unit_text =~ "Restart=on-failure"
-    assert unit_text =~ "TimeoutStopSec=300"
+    assert unit_text =~ "TimeoutStopSec=660"
 
     assert File.read!(log_file) |> String.split("\n", trim: true) == [
              "--user daemon-reload",
              "--user enable harness-daemon.service",
              "--user restart harness-daemon.service"
            ]
+  end
+
+  test "cascades writable PATH bin directories and falls back to ~/.bin last", %{tmp_dir: tmp_dir} do
+    home = Path.join(tmp_dir, "home")
+    pref1 = Path.join(tmp_dir, "usr_local_bin")
+    pref2 = Path.join(tmp_dir, "opt_local_bin")
+    pref3 = Path.join(tmp_dir, "opt_homebrew_bin")
+    custom_path_bin = Path.join(tmp_dir, "user_bin")
+    shim_bin = Path.join(tmp_dir, "asdf/shims")
+    cargo_bin = Path.join(home, ".cargo/bin")
+    local_bin = Path.join(home, ".local/bin")
+    home_bin = Path.join(home, ".bin")
+
+    for dir <- [home, pref1, pref2, pref3, custom_path_bin, shim_bin, cargo_bin, home_bin] do
+      File.mkdir_p!(dir)
+    end
+
+    on_exit(fn ->
+      File.chmod(pref1, 0o755)
+      File.chmod(pref2, 0o755)
+      File.chmod(pref3, 0o755)
+    end)
+
+    preferred = [pref1, pref2, pref3]
+
+    # 1. Explicit bin_dir always wins
+    assert Path.join(tmp_dir, "explicit") ==
+             Installer.select_bin_dir(
+               explicit: Path.join(tmp_dir, "explicit"),
+               home: home,
+               path: "#{pref1}:#{home_bin}",
+               preferred: preferred
+             )
+
+    # 2. Writable preferred dir on PATH wins over ~/.bin even if ~/.bin appears earlier in PATH
+    assert pref1 ==
+             Installer.select_bin_dir(
+               home: home,
+               path: "#{home_bin}:#{pref2}:#{pref1}",
+               preferred: preferred
+             )
+
+    # 3. Non-writable first preferred dir is skipped in favor of next writable preferred dir
+    File.chmod!(pref1, 0o555)
+
+    assert pref2 ==
+             Installer.select_bin_dir(
+               home: home,
+               path: "#{pref1}:#{pref2}:#{home_bin}",
+               preferred: preferred
+             )
+
+    # 4. ~/.local/bin on PATH (creatable under writable home) wins over arbitrary PATH dirs and ~/.bin
+    File.chmod!(pref2, 0o555)
+    File.chmod!(pref3, 0o555)
+
+    assert local_bin ==
+             Installer.select_bin_dir(
+               home: home,
+               path: "#{pref1}:#{pref2}:#{custom_path_bin}:#{local_bin}:#{home_bin}",
+               preferred: preferred
+             )
+
+    # 5. Shims / .cargo/bin / relative dirs are skipped; other writable PATH dir beats ~/.bin
+    assert custom_path_bin ==
+             Installer.select_bin_dir(
+               home: home,
+               path: ".:#{shim_bin}:#{cargo_bin}:#{home_bin}:#{custom_path_bin}",
+               preferred: preferred
+             )
+
+    # 6. ~/.bin is selected when it is the only writable non-excluded dir on PATH
+    assert home_bin ==
+             Installer.select_bin_dir(
+               home: home,
+               path: "#{pref1}:#{shim_bin}:#{cargo_bin}:#{home_bin}",
+               preferred: preferred
+             )
+
+    # 7. When nothing writable is on PATH and no preferred/local_bin is writable, falls back to ~/.bin last
+    assert home_bin ==
+             Installer.select_bin_dir(
+               home: home,
+               path: "/usr/bin:/bin",
+               preferred: preferred
+             )
   end
 
   test "refuses non-HTTPS remote URLs" do

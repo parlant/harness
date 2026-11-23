@@ -84,7 +84,7 @@ def main() -> int:
     # Syntax & conciseness check
     subprocess.run(["/bin/sh", "-n", str(script)], check=True)
     line_count = len(script.read_text().splitlines())
-    assert line_count <= 120, f"Expected install.sh <= 120 lines, got {line_count}"
+    assert line_count <= 200, f"Expected install.sh <= 200 lines, got {line_count}"
 
     tmp_root = "/private/tmp" if sys.platform == "darwin" else "/tmp"
     with tempfile.TemporaryDirectory(prefix="h-test-install-sh-", dir=tmp_root) as td:
@@ -269,13 +269,86 @@ def main() -> int:
             unit_text = unit_file.read_text()
             assert f'ExecStart="{linux_prefix}/current/bin/h-daemon" --data-dir "{linux_data}"' in unit_text
             assert "Restart=on-failure" in unit_text
-            assert "TimeoutStopSec=300" in unit_text
+            assert "TimeoutStopSec=660" in unit_text
             sc_calls = systemctl_log.read_text().splitlines()
             assert sc_calls == [
                 "--user daemon-reload",
                 "--user enable harness-daemon.service",
                 "--user restart harness-daemon.service",
             ]
+
+            # 8. Cascading writable PATH bin directory selection (resort to ~/.bin only last)
+            cascade_home = td_path / "cascade-home"
+            pref_usr = td_path / "pref-usr-local-bin"
+            pref_opt = td_path / "pref-opt-local-bin"
+            pref_brew = td_path / "pref-opt-homebrew-bin"
+            custom_bin = td_path / "custom-user-bin"
+            shims_bin = td_path / "asdf/shims"
+            cargo_bin = cascade_home / ".cargo/bin"
+            home_bin = cascade_home / ".bin"
+            for d in (cascade_home, pref_usr, pref_opt, pref_brew, custom_bin, shims_bin, cargo_bin, home_bin):
+                d.mkdir(parents=True)
+
+            try:
+                pref_list = f"{pref_usr}:{pref_opt}:{pref_brew}"
+                sys_path = "/usr/bin:/bin"
+
+                # 8a. Writable preferred dir on PATH wins over ~/.bin even when ~/.bin is first in PATH
+                p_8a = td_path / "prefix-cascade-8a"
+                env_8a = {
+                    **base_env,
+                    "HOME": str(cascade_home),
+                    "PATH": f"{home_bin}:{pref_opt}:{pref_usr}:{sys_path}",
+                    "H_PREFERRED_BIN_DIRS": pref_list,
+                    "H_RELEASE_URL": f"{base}/v2",
+                    "H_OS": "Darwin",
+                    "H_ARCH": "arm64",
+                }
+                res = run_install(script, env_8a, "--prefix", str(p_8a))
+                assert res.returncode == 0, f"cascade 8a failed: {res.stderr}"
+                assert (pref_usr / "hi").is_symlink()
+                assert not (home_bin / "hi").exists()
+                assert "Add " not in res.stdout
+
+                # 8b. Non-writable first preferred dir is skipped in favor of next writable preferred dir
+                os.chmod(pref_usr, 0o555)
+                p_8b = td_path / "prefix-cascade-8b"
+                env_8b = {
+                    **env_8a,
+                    "PATH": f"{pref_usr}:{pref_opt}:{home_bin}:{sys_path}",
+                }
+                res = run_install(script, env_8b, "--prefix", str(p_8b))
+                assert res.returncode == 0, f"cascade 8b failed: {res.stderr}"
+                assert (pref_opt / "hi").is_symlink()
+                assert not (home_bin / "hi").exists()
+
+                # 8c. When preferred dirs are non-writable and shims/.cargo/bin are present,
+                #     other writable PATH dir wins over ~/.bin
+                os.chmod(pref_opt, 0o555)
+                os.chmod(pref_brew, 0o555)
+                p_8c = td_path / "prefix-cascade-8c"
+                env_8c = {
+                    **env_8a,
+                    "PATH": f".:{shims_bin}:{cargo_bin}:{home_bin}:{custom_bin}:{sys_path}",
+                }
+                res = run_install(script, env_8c, "--prefix", str(p_8c))
+                assert res.returncode == 0, f"cascade 8c failed: {res.stderr}"
+                assert (custom_bin / "hi").is_symlink()
+                assert not (home_bin / "hi").exists()
+
+                # 8d. ~/.bin used strictly as last resort when nothing else writable is available
+                p_8d = td_path / "prefix-cascade-8d"
+                env_8d = {
+                    **env_8a,
+                    "PATH": f"{pref_usr}:{shims_bin}:{cargo_bin}:{sys_path}",
+                }
+                res = run_install(script, env_8d, "--prefix", str(p_8d))
+                assert res.returncode == 0, f"cascade 8d failed: {res.stderr}"
+                assert (home_bin / "hi").is_symlink()
+                assert f"Add {home_bin} to PATH" in res.stdout
+            finally:
+                for d in (pref_usr, pref_opt, pref_brew):
+                    os.chmod(d, 0o755)
         finally:
             server.shutdown()
             server.server_close()

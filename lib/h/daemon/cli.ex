@@ -59,11 +59,17 @@ defmodule H.Daemon.CLI do
           {:ok, %{state: "stopping"}} ->
             await_shutdown(ref, true, timeout_ms)
 
-          {:ok, %{state: "draining"}} ->
-            timer = Process.send_after(self(), :drain_timeout, timeout_ms)
+          {:ok, %{state: "draining"} = reply} ->
+            effective_timeout_ms =
+              case Map.get(reply, :shutdown_timeout_ms) do
+                ms when is_integer(ms) and ms > 0 -> max(timeout_ms, ms)
+                _ -> timeout_ms
+              end
+
+            timer = Process.send_after(self(), :drain_timeout, effective_timeout_ms)
 
             try do
-              await_shutdown(ref, true, timeout_ms)
+              await_shutdown(ref, true, effective_timeout_ms)
             after
               Process.cancel_timer(timer)
             end

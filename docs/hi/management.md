@@ -14,7 +14,7 @@ first word, e.g. `hi account list --data-dir /path/to/store`.
 | `hi account use <alias>` | `/account <alias>`, or **Use in stock mode**. |
 | `hi daemon status` | Authenticated liveness check; no session created. Exits nonzero and reports “not running” if the endpoint is missing or refuses the connection. |
 | `hi daemon start [--launcher PATH] [--no-extensions]` | Starts in the foreground. |
-| `hi daemon stop [--idle-only] [--timeout SECS]` / `hi daemon restart [...]` | Standalone only; cooperatively drains in-flight tools and open responses before stopping (pass `--idle-only` to refuse when busy). |
+| `hi daemon stop [--idle-only] [--timeout SECS]` / `hi daemon restart [...]` | Standalone only; cooperatively drains in-flight tools and open responses before stopping (pass `--idle-only` to refuse when busy; default 300s timeout automatically extends to cover longer running tool deadlines plus 30s commit grace unless `--timeout` is explicitly passed). |
 | `hi -s ID --conversation CID` | `/restart-ui [path/to/hi]` reexecs into the same session and branch. |
 
 For API-key profiles in the LaunchAgent, use `/key set <provider> <alias>`
@@ -32,7 +32,7 @@ explains how to keep using manual credentials or enable MultiCodex.
 
 Keep the checkout, installed releases and data separate:
 
-- `~/.bin/hi` → `~/.local/opt/harness/current/bin/hi`.
+- `<bin_dir>/hi` → `~/.local/opt/harness/current/bin/hi` (`<bin_dir>` cascades writable `PATH` locations: `/usr/local/bin`, `/opt/local/bin`, `/opt/homebrew/bin`, `~/.local/bin`, other user-writable `PATH` dirs, falling back to `~/.bin` last).
 - `~/.local/opt/harness/releases/<id>` contains a complete built bundle.
   `current` selects one release for the client and daemon together.
 - `~/.local/share/h` continues to hold sessions, credentials, configuration,
@@ -48,8 +48,9 @@ hi daemon status
 
 `mix h.install` uses the tested bundle at `dist/harness` by default. It does
 not build the checkout. Pass a bundle directory explicitly to install from
-another path. Make sure `~/.bin` is already on `PATH`, or pass `--bin-dir`
-to use a different directory on `PATH`. `--service` installs a macOS per-user
+another path. By default it cascades writable `PATH` locations (preferring
+`/usr/local/bin`, `/opt/local/bin`, `/opt/homebrew/bin`, and `~/.local/bin`,
+resorting to `~/.bin` only last), or pass `--bin-dir` to pin a specific directory. `--service` installs a macOS per-user
 LaunchAgent that starts at login and restarts on abnormal exit. An explicit
 idle `hi daemon stop` exits successfully and stays stopped until the next
 login or `hi daemon start-service`. No `sudo` or auto-build on attach. Run
@@ -126,8 +127,13 @@ On restart the candidate validates startup configuration before the old daemon
 is asked to stop. By default, the old daemon closes command admission and
 cooperatively drains in-flight workers (running tools, open provider streams,
 and active token refreshes) without spawning subsequent tools or turns; pass
-`--idle-only` to refuse immediately when busy. Once active workers finish, it
-exits through OTP shutdown (normal `SIGTERM` follows the same cooperative drain).
+`--idle-only` to refuse immediately when busy. The drain timeout defaults to
+300s (`H_SHUTDOWN_TIMEOUT_MS` floor) and automatically scales to
+`max(default_timeout_ms, max_remaining_worker_ms + 30_000)` when a running tool
+has a longer remaining deadline (for example, a 10-minute `bash` call), with
+LaunchAgent `ExitTimeOut` and systemd `TimeoutStopSec` set to `660` seconds.
+Once active workers finish, it exits through OTP shutdown (normal `SIGTERM`
+follows the same cooperative drain).
 The client waits for its listener to close and its store lock to be released
 before launching the replacement with the **same** store, where active sessions
 resume automatically; it never kills a PID from a manifest. The preflight is not
@@ -204,10 +210,13 @@ For a source checkout without the bundle, use `hi daemon start --launcher
 Prebuilt signed releases target `darwin-arm64`, `linux-arm64`, and `linux-x86_64`:
 
 - **Shell installer (`scripts/install.sh`, hosted at `/install.sh`)**: verifies
-  `SHA256SUMS.sig` with `ssh-keygen -Y verify` against `packaging/keys/release-signers`,
+  `SHA256SUMS.sig` with `ssh-keygen -Y verify -f packaging/keys/release-signers -I bingboombam@parlant.xyz -n file`,
   verifies the archive SHA-256, extracts to `~/.local/opt/harness/releases/<id>`,
-  switches `current` atomically, and links `hi` and `hi-import` into `~/.bin`
-  (with optional `--service` for macOS LaunchAgent or Linux `systemd --user`).
+  switches `current` atomically, and links `hi` and `hi-import` into the first
+  writable `PATH` bin directory (`/usr/local/bin`, `/opt/local/bin`,
+  `/opt/homebrew/bin`, `~/.local/bin`, or other writable `PATH` dirs, falling
+  back to `~/.bin` last; with optional `--service` for macOS LaunchAgent or
+  Linux `systemd --user`).
 - **Mix archive installer (`installer/`, `h_setup`)**: zero-dependency Mix
   archive (`mix archive.install hex h_setup` or `mix archive.install <url>/h_setup.ez`)
   providing `mix h.setup`, which verifies the same Ed25519 OpenSSH signature and

@@ -48,7 +48,12 @@ defmodule H.Daemon.Maintenance do
         GenServer.call(H.Daemon.Boot, :status, 5_000)
 
       _ ->
-        {:ok, %{"state" => "running", "active_workers" => 0}}
+        {:ok,
+         %{
+           "state" => "running",
+           "active_workers" => 0,
+           "shutdown_timeout_ms" => H.Daemon.Boot.compute_shutdown_timeout_ms(opts)
+         }}
     end
   catch
     :exit, _ -> {:error, :daemon_unavailable}

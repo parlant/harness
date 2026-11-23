@@ -16,7 +16,7 @@ pub(crate) fn control_with_stop(
     _action: &str,
     _dir: &Path,
     _mode: &str,
-    _timeout: Duration,
+    _timeout: Option<Duration>,
 ) -> Result<(), String> {
     Err("Per-user service management is available on macOS only".into())
 }
@@ -55,7 +55,7 @@ fn label(dir: &Path) -> String {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn control(action: &str, dir: &Path, launcher: Option<PathBuf>) -> Result<(), String> {
-    control_inner(action, dir, launcher, "drain", Duration::from_secs(300))
+    control_inner(action, dir, launcher, "drain", None)
 }
 
 #[cfg(target_os = "macos")]
@@ -63,7 +63,7 @@ pub(crate) fn control_with_stop(
     action: &str,
     dir: &Path,
     mode: &str,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<(), String> {
     control_inner(action, dir, None, mode, timeout)
 }
@@ -74,7 +74,7 @@ fn control_inner(
     dir: &Path,
     launcher: Option<PathBuf>,
     stop_mode: &str,
-    stop_timeout: Duration,
+    stop_timeout: Option<Duration>,
 ) -> Result<(), String> {
     use std::{
         fs,
@@ -327,7 +327,7 @@ fn plist_text(
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ThrottleInterval</key><integer>10</integer>
-<key>ExitTimeOut</key><integer>300</integer>
+<key>ExitTimeOut</key><integer>660</integer>
 <key>StandardOutPath</key><string>{log}</string>
 <key>StandardErrorPath</key><string>{log}</string>
 </dict></plist>
@@ -351,7 +351,7 @@ mod tests {
         assert!(body.contains("<string>/data dir/&lt;x&gt;</string>"));
         assert!(!body.contains("/bin/sh"));
         assert!(body.contains("<key>SuccessfulExit</key><false/>"));
-        assert!(body.contains("<key>ExitTimeOut</key><integer>300</integer>"));
+        assert!(body.contains("<key>ExitTimeOut</key><integer>660</integer>"));
         assert!(plist_text(
             "test",
             Path::new("/opt/h/current/bin/h-daemon"),

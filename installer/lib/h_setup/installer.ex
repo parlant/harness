@@ -8,6 +8,7 @@ defmodule HSetup.Installer do
   @default_latest_url "https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads"
   @default_tag_template "https://gitlab.com/parlant-co/harness/-/releases/v%{version}/downloads"
   @max_redirects 5
+  @default_preferred_bin_dirs ["/usr/local/bin", "/opt/local/bin", "/opt/homebrew/bin"]
 
   @type options :: %{
           version: String.t(),
@@ -41,6 +42,128 @@ defmodule HSetup.Installer do
          :ok <- verify_sha256(tarball_bin, expected_sha, tarball),
          {:ok, result} <- install_tarball(tarball_bin, tarball, os, opts, log) do
       {:ok, result}
+    end
+  end
+
+  @doc """
+  Selects the symlink bin directory by cascading writable `PATH` locations:
+
+  1. Preferred standard locations on `PATH` and writable: `/usr/local/bin`, `/opt/local/bin`,
+     `/opt/homebrew/bin`, then `~/.local/bin` (writable or creatable under writable `~/.local` / `~`).
+  2. Any other existing user-writable directory on `PATH` (excluding OS system directories,
+     toolchain shims/cellars/ERTS dirs, relative paths, and `~/.bin`).
+  3. `~/.bin` if on `PATH` and writable.
+  4. Off-`PATH` fallback: writable preferred standard locations, then existing writable
+     `~/.local/bin`, and `~/.bin` strictly as the last resort.
+  """
+  @spec select_bin_dir(keyword()) :: String.t()
+  def select_bin_dir(opts \\ []) do
+    explicit = Keyword.get(opts, :explicit) || System.get_env("H_BIN_DIR")
+
+    if is_binary(explicit) and explicit != "" do
+      Path.expand(explicit)
+    else
+      home = Keyword.get(opts, :home) || System.user_home!()
+      home_norm = normalize_dir(home)
+      raw_path = Keyword.get(opts, :path, System.get_env("PATH") || "")
+      path_entries = String.split(raw_path, ":", trim: true)
+      norm_entries = Enum.map(path_entries, &normalize_dir/1)
+      path_set = MapSet.new(norm_entries)
+
+      preferred =
+        Keyword.get_lazy(opts, :preferred, fn ->
+          case System.get_env("H_PREFERRED_BIN_DIRS") do
+            nil -> @default_preferred_bin_dirs
+            "" -> @default_preferred_bin_dirs
+            raw -> String.split(raw, ":", trim: true)
+          end
+        end)
+        |> Enum.map(&normalize_dir/1)
+
+      local_bin = normalize_dir(Path.join(home_norm, ".local/bin"))
+      home_bin = normalize_dir(Path.join(home_norm, ".bin"))
+
+      find_preferred_on_path(preferred, path_set) ||
+        if(MapSet.member?(path_set, local_bin) and local_bin_usable?(local_bin, home_norm),
+          do: local_bin
+        ) ||
+        find_other_writable_on_path(path_entries, norm_entries, home_bin) ||
+        if(MapSet.member?(path_set, home_bin) and writable_dir?(home_bin), do: home_bin) ||
+        Enum.find(preferred, &writable_dir?/1) ||
+        if(writable_dir?(local_bin), do: local_bin) ||
+        home_bin
+    end
+  end
+
+  defp find_preferred_on_path(preferred, path_set) do
+    Enum.find(preferred, fn dir ->
+      MapSet.member?(path_set, dir) and writable_dir?(dir)
+    end)
+  end
+
+  defp find_other_writable_on_path(raw_entries, norm_entries, home_bin) do
+    Enum.zip(raw_entries, norm_entries)
+    |> Enum.find_value(fn {raw, norm} ->
+      if not excluded_path_dir?(raw, norm, home_bin) and writable_dir?(norm) do
+        norm
+      end
+    end)
+  end
+
+  defp normalize_dir(dir) do
+    expanded = Path.expand(dir)
+
+    case String.trim_trailing(expanded, "/") do
+      "" -> "/"
+      trimmed -> trimmed
+    end
+  end
+
+  defp writable_dir?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :directory, access: access}} when access in [:read_write, :write] ->
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  defp local_bin_usable?(local_bin, home_norm) do
+    cond do
+      writable_dir?(local_bin) ->
+        true
+
+      match?({:ok, _}, File.lstat(local_bin)) ->
+        false
+
+      true ->
+        local_dir = Path.join(home_norm, ".local")
+
+        writable_dir?(local_dir) or
+          (match?({:error, :enoent}, File.lstat(local_dir)) and writable_dir?(home_norm))
+    end
+  end
+
+  defp excluded_path_dir?(raw, norm, home_bin) do
+    cond do
+      raw == "" or not String.starts_with?(raw, "/") ->
+        true
+
+      norm in ["/", "/bin", "/usr/bin", "/sbin", "/usr/sbin", home_bin] ->
+        true
+
+      String.starts_with?(norm, ["/System/", "/Library/", "/var/run/"]) ->
+        true
+
+      String.ends_with?(norm, ["/.cargo/bin", "/node_modules/.bin"]) ->
+        true
+
+      true ->
+        parts = Path.split(norm)
+
+        "Cellar" in parts or "shims" in parts or
+          Enum.any?(parts, &String.starts_with?(&1, "erts-"))
     end
   end
 
@@ -593,7 +716,7 @@ defmodule HSetup.Installer do
     WorkingDirectory=#{data_dir}
     Restart=on-failure
     RestartSec=5
-    TimeoutStopSec=300
+    TimeoutStopSec=660
 
     [Install]
     WantedBy=default.target

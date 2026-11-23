@@ -275,7 +275,8 @@ defmodule H.Session.UserShell do
                       pid: worker_pid,
                       monitor_ref: ref,
                       abort_ref: abort_ref,
-                      started_at: now
+                      started_at: now,
+                      deadline_mono_ms: System.monotonic_time(:millisecond) + timeout_ms
                     }
 
                     %{state | workers: Map.put(state.workers, attempt_id, worker_info)}

@@ -200,6 +200,7 @@ defmodule H.Session.Server.Tools do
           end)
 
         ref = Process.monitor(worker_pid)
+        tool_timeout_ms = resolve_tool_timeout_ms(tool_mod, validated_args)
 
         worker_info = %{
           abort_ref: abort_ref,
@@ -208,7 +209,8 @@ defmodule H.Session.Server.Tools do
           kind: :tool_call,
           pid: worker_pid,
           monitor_ref: ref,
-          started_at: now
+          started_at: now,
+          deadline_mono_ms: System.monotonic_time(:millisecond) + tool_timeout_ms
         }
 
         %{state | workers: Map.put(state.workers, attempt_id, worker_info)}
@@ -557,6 +559,23 @@ defmodule H.Session.Server.Tools do
     do: task.kind == "tool_call" and task.checkpoint["replay"] != "safe"
 
   # Internal helpers
+
+  defp resolve_tool_timeout_ms(tool_mod, validated_args) do
+    case validated_args["timeout_ms"] || validated_args[:timeout_ms] do
+      ms when is_integer(ms) and ms > 0 ->
+        ms
+
+      _ ->
+        if Code.ensure_loaded?(tool_mod) and function_exported?(tool_mod, :default_timeout_ms, 0) do
+          case tool_mod.default_timeout_ms() do
+            ms when is_integer(ms) and ms > 0 -> ms
+            _ -> 120_000
+          end
+        else
+          120_000
+        end
+    end
+  end
 
   defp put_result_cwd(details, task) do
     case task.checkpoint["exec_cwd"] do

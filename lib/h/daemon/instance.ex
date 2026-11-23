@@ -170,6 +170,9 @@ defmodule H.Daemon.Boot do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   @drain_poll_ms 100
+  @default_shutdown_timeout_ms 300_000
+  @shutdown_commit_grace_ms 30_000
+  @account_refresh_timeout_ms 14_000
 
   @impl true
   def init(opts) do
@@ -198,10 +201,12 @@ defmodule H.Daemon.Boot do
 
   def handle_call(:status, _from, state) do
     workers = count_active_workers(state.opts)
+    timeout_ms = compute_shutdown_timeout_ms(state.opts)
 
     payload = %{
       "state" => phase_string(state.phase),
-      "active_workers" => workers
+      "active_workers" => workers,
+      "shutdown_timeout_ms" => timeout_ms
     }
 
     {:reply, {:ok, payload}, state}
@@ -248,14 +253,20 @@ defmodule H.Daemon.Boot do
         {:reply, {:error, :shutdown_not_supported}, state}
 
       state.phase in [:draining, :stopping] ->
-        {:reply, {:ok, %{state: phase_string(state.phase)}}, state}
+        timeout_ms = compute_shutdown_timeout_ms(opts)
+
+        {:reply, {:ok, %{state: phase_string(state.phase), shutdown_timeout_ms: timeout_ms}},
+         state}
 
       true ->
         :ets.insert(table, [{:open, false}, {:draining, true}])
         notify_sessions_enter_drain(opts)
         state = %{state | phase: :draining}
         state = maybe_finish_drain(state)
-        {:reply, {:ok, %{state: phase_string(state.phase)}}, state}
+        timeout_ms = compute_shutdown_timeout_ms(opts)
+
+        {:reply, {:ok, %{state: phase_string(state.phase), shutdown_timeout_ms: timeout_ms}},
+         state}
     end
   end
 
@@ -415,6 +426,63 @@ defmodule H.Daemon.Boot do
       end
 
     session_workers + account_refreshes
+  end
+
+  @doc false
+  def compute_shutdown_timeout_ms(opts) do
+    base_floor_ms = env_or_opt_shutdown_timeout_ms(opts)
+
+    session_remaining_ms =
+      Enum.reduce(live_session_pids(opts), 0, fn pid, acc ->
+        try do
+          max(acc, GenServer.call(pid, :max_worker_remaining_ms, 2_000))
+        catch
+          :exit, _ -> acc
+        end
+      end)
+
+    account_remaining_ms =
+      case opts[:accounts] do
+        nil ->
+          0
+
+        accounts ->
+          try do
+            if GenServer.call(accounts, :active_refresh_count, 2_000) > 0 do
+              @account_refresh_timeout_ms
+            else
+              0
+            end
+          catch
+            :exit, _ -> 0
+          end
+      end
+
+    max_remaining_ms = max(session_remaining_ms, account_remaining_ms)
+
+    dynamic_required_ms =
+      if max_remaining_ms > 0, do: max_remaining_ms + @shutdown_commit_grace_ms, else: 0
+
+    max(base_floor_ms, dynamic_required_ms)
+  end
+
+  defp env_or_opt_shutdown_timeout_ms(opts) do
+    case Keyword.get(opts, :shutdown_timeout_ms) do
+      ms when is_integer(ms) and ms > 0 ->
+        ms
+
+      _ ->
+        case System.get_env("H_SHUTDOWN_TIMEOUT_MS") do
+          nil ->
+            @default_shutdown_timeout_ms
+
+          raw ->
+            case Integer.parse(String.trim(raw)) do
+              {ms, ""} when ms > 0 -> ms
+              _ -> @default_shutdown_timeout_ms
+            end
+        end
+    end
   end
 
   defp phase_string(:running), do: "running"

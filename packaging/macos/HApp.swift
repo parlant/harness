@@ -267,9 +267,96 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
         pb.setString(token, forType: .string)
     }
 
+    private func normalizedPath(_ raw: String) -> String {
+        let expanded = (raw as NSString).expandingTildeInPath
+        let standardized = (expanded as NSString).standardizingPath
+        return standardized == "/" ? "/" : standardized.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty ? "/" : standardized
+    }
+
+    private func isWritableDirectory(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+            return false
+        }
+        return access(path, W_OK | X_OK) == 0
+    }
+
+    private func isLocalBinUsable(_ localBin: String, home: String) -> Bool {
+        if isWritableDirectory(localBin) { return true }
+        if FileManager.default.fileExists(atPath: localBin) { return false }
+        let localDir = (home as NSString).appendingPathComponent(".local")
+        if isWritableDirectory(localDir) { return true }
+        return !FileManager.default.fileExists(atPath: localDir) && isWritableDirectory(home)
+    }
+
+    private func isExcludedPathDir(_ raw: String, normalized: String, homeBin: String) -> Bool {
+        if raw.isEmpty || !raw.hasPrefix("/") { return true }
+        let blockedExact: Set<String> = ["/", "/bin", "/usr/bin", "/sbin", "/usr/sbin", homeBin]
+        if blockedExact.contains(normalized) { return true }
+        if normalized.hasPrefix("/System/") || normalized.hasPrefix("/Library/") || normalized.hasPrefix("/var/run/") {
+            return true
+        }
+        if normalized.hasSuffix("/.cargo/bin") || normalized.hasSuffix("/node_modules/.bin") {
+            return true
+        }
+        let components = (normalized as NSString).pathComponents
+        if components.contains("Cellar") || components.contains("shims") { return true }
+        if components.contains(where: { $0.hasPrefix("erts-") }) { return true }
+        return false
+    }
+
+    private func selectBinDir() -> (url: URL, onPath: Bool) {
+        let env = daemonEnvironment()
+        let home = normalizedPath(FileManager.default.homeDirectoryForCurrentUser.path)
+        let rawPath = env["PATH"] ?? ""
+        let rawEntries = rawPath.split(separator: ":").map(String.init).filter { !$0.isEmpty }
+        let normEntries = rawEntries.map { normalizedPath($0) }
+        let pathSet = Set(normEntries)
+
+        if let explicit = env["H_BIN_DIR"], !explicit.isEmpty {
+            let norm = normalizedPath(explicit)
+            return (URL(fileURLWithPath: norm, isDirectory: true), pathSet.contains(norm))
+        }
+
+        let preferred = ["/usr/local/bin", "/opt/local/bin", "/opt/homebrew/bin"]
+        for pref in preferred {
+            if pathSet.contains(pref) && isWritableDirectory(pref) {
+                return (URL(fileURLWithPath: pref, isDirectory: true), true)
+            }
+        }
+
+        let localBin = normalizedPath((home as NSString).appendingPathComponent(".local/bin"))
+        if pathSet.contains(localBin) && isLocalBinUsable(localBin, home: home) {
+            return (URL(fileURLWithPath: localBin, isDirectory: true), true)
+        }
+
+        let homeBin = normalizedPath((home as NSString).appendingPathComponent(".bin"))
+        for (raw, norm) in zip(rawEntries, normEntries) {
+            if !isExcludedPathDir(raw, normalized: norm, homeBin: homeBin) && isWritableDirectory(norm) {
+                return (URL(fileURLWithPath: norm, isDirectory: true), true)
+            }
+        }
+
+        if pathSet.contains(homeBin) && isWritableDirectory(homeBin) {
+            return (URL(fileURLWithPath: homeBin, isDirectory: true), true)
+        }
+
+        for pref in preferred {
+            if isWritableDirectory(pref) {
+                return (URL(fileURLWithPath: pref, isDirectory: true), pathSet.contains(pref))
+            }
+        }
+
+        if isWritableDirectory(localBin) {
+            return (URL(fileURLWithPath: localBin, isDirectory: true), pathSet.contains(localBin))
+        }
+
+        return (URL(fileURLWithPath: homeBin, isDirectory: true), pathSet.contains(homeBin))
+    }
+
     @objc private func installCommandLineTools() {
-        let binDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".bin", isDirectory: true)
+        let selection = selectBinDir()
+        let binDir = selection.url
         do {
             try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
             for (name, target) in [("hi", hiPath), ("hi-import", hiImportPath)] {
@@ -287,9 +374,12 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
                 }
                 try FileManager.default.createSymbolicLink(atPath: linkURL.path, withDestinationPath: target)
             }
+            let pathHint = selection.onPath
+                ? "Run `hi` in any terminal."
+                : "Ensure \(binDir.path) is on your shell PATH, then run `hi` in any terminal."
             presentAlert(
                 title: "Installed `hi` and `hi-import`",
-                message: "Symlinks created in \(binDir.path).\n\nEnsure \(binDir.path) is on your shell PATH, then run `hi` in any terminal."
+                message: "Symlinks created in \(binDir.path).\n\n\(pathHint)"
             )
         } catch {
             presentAlert(title: "Failed to install CLI tools", message: error.localizedDescription)

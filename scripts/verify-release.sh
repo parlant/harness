@@ -7,7 +7,7 @@
 # Optional environment variables:
 #   H_ALLOWED_SIGNERS   path to allowed_signers file
 #                       (defaults to packaging/keys/release-signers)
-#   H_SIGNER_IDENTITY   signer principal (defaults to l.rieder@gmail.com)
+#   H_SIGNER_IDENTITY   signer principal (defaults to bingboombam@parlant.xyz)
 #   H_ALLOW_UNSIGNED=1  allow missing .sig files (still verifies SHA256SUMS and
 #                       embedded BUILD_MANIFEST.json provenance)
 set -eu
@@ -20,7 +20,7 @@ fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 rel_dir=$(CDPATH= cd -- "$1" && pwd -P)
 signers="${H_ALLOWED_SIGNERS:-$root/packaging/keys/release-signers}"
-identity="${H_SIGNER_IDENTITY:-l.rieder@gmail.com}"
+identity="${H_SIGNER_IDENTITY:-bingboombam@parlant.xyz}"
 
 sums="$rel_dir/SHA256SUMS"
 manifest="$rel_dir/release-manifest.json"

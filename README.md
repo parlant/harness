@@ -14,7 +14,7 @@ Review [`scripts/install.sh`](scripts/install.sh) (also served at `/install.sh` 
 curl -fsSL https://gitlab.com/parlant-co/harness/-/raw/main/scripts/install.sh | sh -s -- --service
 ```
 
-The script verifies `SHA256SUMS.sig` with `ssh-keygen -Y verify`, checks the archive SHA-256, installs the bundle under `~/.local/opt/harness/current`, symlinks `hi` and `hi-import` into `~/.bin` (override with `--bin-dir`), and optionally registers a per-user macOS LaunchAgent or Linux `systemd --user` service (`--service`).
+The script verifies `SHA256SUMS.sig` with `ssh-keygen -Y verify` (`bingboombam@parlant.xyz` in `packaging/keys/release-signers`), checks the archive SHA-256, installs the bundle under `~/.local/opt/harness/current`, cascades writable `PATH` locations (preferring `/usr/local/bin`, `/opt/local/bin`, `/opt/homebrew/bin`, `~/.local/bin`, or other writable `PATH` directories, falling back to `~/.bin` last; override with `--bin-dir`), and optionally registers a per-user macOS LaunchAgent or Linux `systemd --user` service (`--service`).
 
 ### Elixir / Hex archive (`mix h.setup`)
 
@@ -29,7 +29,7 @@ Once published on Hex.pm, `mix archive.install hex h_setup` installs the same ta
 
 ### macOS application bundle (`H.app`)
 
-On macOS (`arm64`), download `H-v<version>-darwin-arm64.dmg` from the [latest release](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest), drag **`H.app`** to `/Applications`, and open it. `H.app` starts its embedded daemon on `~/.local/share/h`, opens the web workbench at `http://127.0.0.1:4200/inbox`, and provides `[H]` menu-bar actions to copy your owner sign-in token, link `hi` into `~/.bin`, or cooperatively drain and restart the daemon.
+On macOS (`arm64`), download `H-v<version>-darwin-arm64.dmg` from the [latest release](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest), drag **`H.app`** to `/Applications`, and open it. `H.app` starts its embedded daemon on `~/.local/share/h`, opens the web workbench at `http://127.0.0.1:4200/inbox`, and provides `[H]` menu-bar actions to copy your owner sign-in token, link `hi` into the first writable standard `PATH` bin directory (falling back to `~/.bin` last), or cooperatively drain and restart the daemon.
 
 ## Build from source
 
@@ -91,12 +91,11 @@ service setup after stopping any manually started daemon. For later updates,
 run `mix h.local` to build, smoke-test, and install. If the bundle is already
 built, run `mix h.install` alone. `mix h.bundle` is equivalent to
 `mix h.build --release`.
-The installer puts `hi` in
-`~/.bin` by default; use `--bin-dir` to choose another directory on `PATH`.
+By default the installer cascades writable `PATH` directories (preferring `/usr/local/bin`, `/opt/local/bin`, `/opt/homebrew/bin`, `~/.local/bin`, and other user-writable `PATH` directories before falling back to `~/.bin` last); pass `--bin-dir` to pin a specific directory.
 This installs a versioned bundle and a per-user macOS service. `hi` resolves
 its sibling `h-daemon`; `H_DAEMON_BIN` or `--launcher` can override
 it. On macOS, `hi daemon install-service` registers a per-user LaunchAgent.
-Use `mix h.build` for a development build of all three applications. On shutdown (`hi daemon stop`, `restart`, `restart-service`, `mix h.install`, or `SIGTERM`), the daemon cooperatively drains open tools and provider streams without starting new tools or turns, then resumes active sessions on next boot. See
+Use `mix h.build` for a development build of all three applications. On shutdown (`hi daemon stop`, `restart`, `restart-service`, `mix h.install`, or `SIGTERM`), the daemon cooperatively drains open tools and provider streams without starting new tools or turns (automatically extending the 300s default drain timeout to cover active tool deadlines plus a 30s commit grace), then resumes active sessions on next boot. See
 [local daemon management](docs/hi/management.md) for cooperative restarts, `--idle-only` guards, and
 resuming the same conversation with `/restart-ui`.
 
