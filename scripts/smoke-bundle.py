@@ -27,7 +27,11 @@ def smoke(source):
         data.mkdir(mode=0o700)
         home = root / "home"
         home.mkdir(mode=0o700)
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "H_DATA_DIR": str(data), "ERL_FLAGS": "+S 2:2", "H_WEB_PORT": "0"}
+        erl_flags = "+S 2:2"
+        extra_erl_flags = os.environ.get("H_SMOKE_ERL_FLAGS", "").strip()
+        if extra_erl_flags:
+            erl_flags = f"{erl_flags} {extra_erl_flags}"
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "H_DATA_DIR": str(data), "ERL_FLAGS": erl_flags, "H_WEB_PORT": "0"}
         hi = bundle / "bin/hi"
         launcher = bundle / "bin/h-daemon"
         manifest = data / "daemon.json"

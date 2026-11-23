@@ -45,14 +45,25 @@ cargo build --locked --release --manifest-path clients/import/Cargo.toml
 install -m 755 "$CARGO_TARGET_DIR/release/hi-import" "$stage/otp/bin/hi-import"
 install -m 755 rel/h-daemon "$stage/otp/bin/h-daemon"
 cp rel/README.md "$stage/otp/README.md"
+if [ -f LICENSE ]; then
+  cp LICENSE "$stage/otp/LICENSE"
+fi
 # Ship the matching optional artifact without enabling it or copying any config.
 export H_SOURCE="$root"
 (cd extensions/multicodex; mix deps.get --only prod --check-locked; mix extension.build "$stage/otp/extensions/multicodex")
-if [ "$(uname -s)" = Darwin ]; then
-  python3 scripts/bundle-macos-libs.py "$stage/otp"
-fi
+case $(uname -s) in
+  Darwin) python3 scripts/bundle-macos-libs.py "$stage/otp" ;;
+  Linux)  python3 scripts/bundle-linux-libs.py "$stage/otp" ;;
+esac
+python3 scripts/write-build-manifest.py \
+  --source-root "$root" \
+  --bundle-root "$stage/otp" \
+  --version "${H_RELEASE_VERSION:-}" \
+  --git-commit "${H_GIT_COMMIT:-}" \
+  --git-tag "${H_GIT_TAG:-}" \
+  --target "${H_RELEASE_TARGET:-}"
 # Do not publish a launcher that needs the build toolchain on PATH.
-env -i PATH=/usr/bin:/bin HOME="$work" "$stage/otp/bin/h-daemon" --help
+env -i PATH=/usr/bin:/bin HOME="$work" ${ERL_FLAGS:+ERL_FLAGS="$ERL_FLAGS"} "$stage/otp/bin/h-daemon" --help
 if [ -e "$out" ] || [ -L "$out" ]; then
   echo "Bundle destination appeared during build: $out" >&2
   exit 1

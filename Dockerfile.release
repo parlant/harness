@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+# Multi-arch Linux release builder for H (:harness).
+#
+# Base glibc 2.35 (Ubuntu 22.04 Jammy) yields portable binaries that run across
+# Ubuntu 22.04+, Debian 12+, Fedora, RHEL/Rocky 9+, and Arch on both linux/amd64
+# and linux/arm64. Non-core native libraries (libcrypto.so.3, libtinfo.so.6) are
+# vendored into <bundle>/native/ with relative $ORIGIN RUNPATH (zero LD_LIBRARY_PATH).
+#
+# Build and export a release tarball for a target platform:
+#   docker buildx build \
+#     --platform linux/arm64 \
+#     --file Dockerfile.release \
+#     --target export \
+#     --build-arg H_GIT_COMMIT="$(git rev-parse HEAD)" \
+#     --output type=local,dest=./dist/release \
+#     .
+
+ARG ELIXIR_IMAGE=hexpm/elixir:1.20.5-erlang-29.1.2-ubuntu-jammy-20261110
+ARG NODE_MAJOR=22
+ARG RUST_VERSION=stable
+
+FROM ${ELIXIR_IMAGE} AS builder
+
+ARG NODE_MAJOR
+ARG RUST_VERSION
+ARG H_RELEASE_VERSION=""
+ARG H_GIT_COMMIT=""
+ARG H_GIT_TAG=""
+# Optional extra BEAM flags during container build (e.g. "+JMsingle true" when
+# building linux/amd64 under QEMU/Rosetta emulation on Apple Silicon). Never
+# baked into the finished release bundle.
+ARG H_BUILD_ERL_FLAGS=""
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH="/usr/local/cargo/bin:${PATH}" \
+    ERL_FLAGS="${H_BUILD_ERL_FLAGS}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      curl \
+      git \
+      gnupg \
+      patchelf \
+      pkg-config \
+      python3 \
+      xz-utils \
+    && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+    && rustc --version && cargo --version && node --version && npm --version && patchelf --version \
+    && mix local.hex --force \
+    && mix local.rebar --force \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+
+ENV H_RELEASE_VERSION="${H_RELEASE_VERSION}" \
+    H_GIT_COMMIT="${H_GIT_COMMIT}" \
+    H_GIT_TAG="${H_GIT_TAG}" \
+    H_SMOKE_ERL_FLAGS="${H_BUILD_ERL_FLAGS}"
+
+RUN mkdir -p /out/release \
+    && scripts/build-bundle.sh /out/bundle \
+    && python3 -B scripts/smoke-bundle.py /out/bundle \
+    && scripts/package-release.sh /out/bundle /out/release
+
+# Minimal export stage for `docker buildx build --target export --output type=local,dest=...`
+FROM scratch AS export
+COPY --from=builder /out/release/ /

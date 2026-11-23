@@ -1,16 +1,235 @@
-# Opt in on a native shell runner with Elixir 1.20 / OTP 29, Rust, Hex, Node/npm, and
-# Python 3 (plus Xcode command-line tools for macOS native library packaging).
-# Select the runner's OS/arch with its tags, not with cross-compilation here.
-bundle:
-  stage: build
-  tags: [h-native]
+# H (:harness) CI & Multi-Platform Release Pipeline
+#
+# Targets GitLab SaaS shared runners:
+#   - Linux x86_64 : saas-linux-medium-amd64
+#   - Linux arm64  : saas-linux-medium-arm64
+#   - macOS arm64  : saas-macos-large-m2pro
+#
+# Release builds run automatically on version tags (`v*`) and can be triggered
+# manually on `main` or feature branches for pre-release verification.
+
+stages:
+  - test
+  - build
+  - release
+  - pages
+
+variables:
+  ELIXIR_IMAGE: "hexpm/elixir:1.20.5-erlang-29.1.2-ubuntu-jammy-20261110"
+  RUST_IMAGE: "rust:1-bookworm"
+  RUST_VERSION: "stable"
+  NODE_MAJOR: "22"
+  MIX_ENV: "test"
+  CARGO_TERM_COLOR: "always"
+
+workflow:
   rules:
-    - when: manual
-  allow_failure: true
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# ---------------------------------------------------------------------------
+# Stage 1: Test
+# ---------------------------------------------------------------------------
+
+test:elixir:
+  stage: test
+  tags: [saas-linux-medium-amd64]
+  image: ${ELIXIR_IMAGE}
+  before_script:
+    - mix local.hex --force
+    - mix local.rebar --force
   script:
-    - mix h.bundle "dist/harness-${CI_JOB_ID}"
+    - mix deps.get --check-locked
+    - mix format --check-formatted
+    - mix compile --warnings-as-errors
+    - mix test
+    - |
+      cd clients/web
+      mix deps.get --check-locked
+      mix compile --warnings-as-errors
+      mix test
+
+test:rust:
+  stage: test
+  tags: [saas-linux-medium-amd64]
+  image: ${RUST_IMAGE}
+  script:
+    - cargo test --locked --manifest-path clients/tui/Cargo.toml
+    - cargo test --locked --manifest-path clients/import/Cargo.toml
+
+test:website:
+  stage: test
+  tags: [saas-linux-medium-amd64]
+  image: ruby:3.3-bookworm
+  rules:
+    - exists:
+        - website/scripts/verify_site.rb
+      when: on_success
+    - when: never
+  script:
+    - cd website && ruby scripts/verify_site.rb
+
+# ---------------------------------------------------------------------------
+# Stage 2: Native Multi-Platform Bundles
+# ---------------------------------------------------------------------------
+
+.bundle_rules:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - when: manual
+      allow_failure: true
+
+.linux_bundle_template:
+  stage: build
+  image: ${ELIXIR_IMAGE}
+  extends: .bundle_rules
+  variables:
+    MIX_ENV: "prod"
+    DEBIAN_FRONTEND: "noninteractive"
+  before_script:
+    - |
+      apt-get update -qq
+      apt-get install -y -qq --no-install-recommends \
+        build-essential ca-certificates curl git gnupg patchelf pkg-config python3 xz-utils
+      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+      apt-get install -y -qq --no-install-recommends nodejs
+      curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+      export PATH="$HOME/.cargo/bin:$PATH"
+      mix local.hex --force
+      mix local.rebar --force
+  script:
+    - export PATH="$HOME/.cargo/bin:$PATH"
+    - export H_GIT_COMMIT="${CI_COMMIT_SHA}"
+    - export H_GIT_TAG="${CI_COMMIT_TAG:-}"
+    - mkdir -p dist/release
+    - scripts/build-bundle.sh "dist/bundle-${H_RELEASE_TARGET}"
+    - python3 -B scripts/smoke-bundle.py "dist/bundle-${H_RELEASE_TARGET}"
+    - scripts/package-release.sh "dist/bundle-${H_RELEASE_TARGET}" dist/release
   artifacts:
-    name: "harness-${CI_COMMIT_SHORT_SHA}-${CI_RUNNER_ID}"
+    name: "harness-${H_RELEASE_TARGET}-${CI_COMMIT_SHORT_SHA}"
     paths:
-      - dist/harness-${CI_JOB_ID}/
-    expire_in: 7 days
+      - dist/release/harness-*.tar.gz
+    expire_in: 14 days
+
+bundle:linux-x86_64:
+  extends: .linux_bundle_template
+  tags: [saas-linux-medium-amd64]
+  variables:
+    H_RELEASE_TARGET: "linux-x86_64"
+
+bundle:linux-arm64:
+  extends: .linux_bundle_template
+  tags: [saas-linux-medium-arm64]
+  variables:
+    H_RELEASE_TARGET: "linux-arm64"
+
+bundle:darwin-arm64:
+  stage: build
+  tags: [saas-macos-large-m2pro]
+  extends: .bundle_rules
+  variables:
+    MIX_ENV: "prod"
+    HOMEBREW_NO_AUTO_UPDATE: "1"
+    H_RELEASE_TARGET: "darwin-arm64"
+  before_script:
+    - |
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+      brew install erlang elixir node python3 || true
+      if ! command -v cargo >/dev/null 2>&1; then
+        curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+      fi
+      export PATH="$HOME/.cargo/bin:$PATH"
+      elixir --version
+      cargo --version
+      node --version
+      swiftc --version
+      mix local.hex --force
+      mix local.rebar --force
+  script:
+    - eval "$(/opt/homebrew/bin/brew shellenv)"
+    - export PATH="$HOME/.cargo/bin:$PATH"
+    - export H_GIT_COMMIT="${CI_COMMIT_SHA}"
+    - export H_GIT_TAG="${CI_COMMIT_TAG:-}"
+    - mkdir -p dist/release
+    - scripts/build-bundle.sh "dist/bundle-darwin-arm64"
+    - python3 -B scripts/smoke-bundle.py "dist/bundle-darwin-arm64"
+    - scripts/package-release.sh "dist/bundle-darwin-arm64" dist/release
+    - scripts/build-macos-app.sh "dist/bundle-darwin-arm64" dist/release
+  artifacts:
+    name: "harness-darwin-arm64-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - dist/release/harness-*.tar.gz
+      - dist/release/H-*.dmg
+      - dist/release/H-*.app.zip
+    expire_in: 14 days
+
+# ---------------------------------------------------------------------------
+# Stage 3: Sign, Verify & Publish Release (tags `v*`)
+# ---------------------------------------------------------------------------
+
+release:publish:
+  stage: release
+  tags: [saas-linux-medium-amd64]
+  image: debian:bookworm-slim
+  needs:
+    - job: bundle:linux-x86_64
+      artifacts: true
+    - job: bundle:linux-arm64
+      artifacts: true
+    - job: bundle:darwin-arm64
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+  before_script:
+    - |
+      apt-get update -qq
+      apt-get install -y -qq --no-install-recommends ca-certificates curl git openssh-client python3
+  script:
+    - export H_GIT_COMMIT="${CI_COMMIT_SHA}"
+    - export H_GIT_TAG="${CI_COMMIT_TAG}"
+    - |
+      if [ -n "${H_RELEASE_SIGNING_KEY:-}" ]; then
+        if [ -f "${H_RELEASE_SIGNING_KEY}" ]; then
+          export H_SIGNING_KEY="${H_RELEASE_SIGNING_KEY}"
+        else
+          export H_SIGNING_KEY_PEM="${H_RELEASE_SIGNING_KEY}"
+        fi
+        scripts/sign-release.sh dist/release
+        scripts/verify-release.sh dist/release
+      else
+        export H_ALLOW_UNSIGNED=1
+        scripts/sign-release.sh dist/release
+        scripts/verify-release.sh dist/release
+      fi
+    - scripts/ci/gitlab-release.sh dist/release
+  artifacts:
+    name: "harness-release-${CI_COMMIT_TAG}"
+    paths:
+      - dist/release/SHA256SUMS
+      - dist/release/SHA256SUMS.sig
+      - dist/release/release-manifest.json
+      - dist/release/release-manifest.json.sig
+    expire_in: 90 days
+
+# ---------------------------------------------------------------------------
+# Stage 4: Pages (optional static site publish when website/ exists)
+# ---------------------------------------------------------------------------
+
+pages:
+  stage: pages
+  tags: [saas-linux-medium-amd64]
+  image: ruby:3.3-bookworm
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - website/scripts/verify_site.rb
+      when: on_success
+    - when: never
+  script:
+    - cd website && ruby scripts/verify_site.rb
+    - mkdir -p ../public
+    - cp -a _site/. ../public/ 2>/dev/null || cp -a public/. ../public/ 2>/dev/null || cp -a . ../public/
+  artifacts:
+    paths:
+      - public

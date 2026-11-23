@@ -1,0 +1,5 @@
+# OpenSSH allowed_signers for H (:harness) official release artifacts.
+# Verify with:
+#   ssh-keygen -Y verify -f packaging/keys/release-signers \
+#     -I l.rieder@gmail.com -n file -s SHA256SUMS.sig < SHA256SUMS
+l.rieder@gmail.com namespaces="file" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO2BgQNsHzpCX3VCsqN3rRqUsFvaFHsRItCqevnIcEEs Lukas Rieder
