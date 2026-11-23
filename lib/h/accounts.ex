@@ -245,6 +245,12 @@ defmodule H.Accounts do
   def handle_call(:idle, _from, state),
     do: {:reply, is_nil(state.login) and map_size(state.refreshes) == 0, state}
 
+  def handle_call(:drained, _from, state),
+    do: {:reply, map_size(state.refreshes) == 0, state}
+
+  def handle_call(:active_refresh_count, _from, state),
+    do: {:reply, map_size(state.refreshes), state}
+
   def handle_call(:key_providers, _from, state), do: {:reply, Map.keys(state.keys), state}
 
   def handle_call({:codex_status, pool}, _from, state) do

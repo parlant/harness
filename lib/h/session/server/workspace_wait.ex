@@ -48,7 +48,8 @@ defmodule H.Session.Server.WorkspaceWait do
 
         task = state.tasks[wait.task_id]
 
-        if (not state.storage_failed and task) && task.status == "pending" do
+        if (not state.storage_failed and not State.draining?(state) and task) &&
+             task.status == "pending" do
           effect = if task.kind == "user_shell", do: :spawn_user_shell, else: :spawn_tool
           {[{effect, cid, task.id}], state}
         else

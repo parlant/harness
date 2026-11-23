@@ -1,12 +1,19 @@
 defmodule Mix.Tasks.H.Restart do
   use Mix.Task
 
-  @shortdoc "Starts a built candidate after guarded idle-only daemon shutdown"
+  @shortdoc "Starts a built candidate after cooperative daemon shutdown"
 
   @impl true
   def run(args) do
     case OptionParser.parse(args,
-           strict: [bundle: :string, data_dir: :string, port: :integer, no_extensions: :boolean]
+           strict: [
+             bundle: :string,
+             data_dir: :string,
+             port: :integer,
+             no_extensions: :boolean,
+             idle_only: :boolean,
+             timeout: :integer
+           ]
          ) do
       {opts, [], []} ->
         bundle = Path.expand(opts[:bundle] || "dist/harness")
@@ -19,7 +26,9 @@ defmodule Mix.Tasks.H.Restart do
           ["daemon", "restart"] ++
             if(opts[:data_dir], do: ["--data-dir", opts[:data_dir]], else: []) ++
             if(opts[:port], do: ["--port", to_string(opts[:port])], else: []) ++
-            if opts[:no_extensions], do: ["--no-extensions"], else: []
+            if(opts[:no_extensions], do: ["--no-extensions"], else: []) ++
+            if(opts[:idle_only], do: ["--idle-only"], else: []) ++
+            if opts[:timeout], do: ["--timeout", to_string(opts[:timeout])], else: []
 
         # A foreground process in the caller's terminal; no daemon PID or live
         # store is ever read by the task itself. Keep SIGINT/stdio with the port.
@@ -33,7 +42,7 @@ defmodule Mix.Tasks.H.Restart do
 
       _ ->
         Mix.raise(
-          "usage: mix h.restart [--bundle DIR] [--data-dir DIR] [--port PORT] [--no-extensions]"
+          "usage: mix h.restart [--bundle DIR] [--data-dir DIR] [--port PORT] [--no-extensions] [--idle-only] [--timeout SECS]"
         )
     end
   end

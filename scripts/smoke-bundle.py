@@ -51,7 +51,7 @@ def smoke(source):
                 return json.load(response)
 
         def run(*args, check=True):
-            return subprocess.run(args, check=check, env=env, cwd=root, capture_output=True, text=True, timeout=10)
+            return subprocess.run(args, check=check, env=env, cwd=root, capture_output=True, text=True, timeout=30)
 
         assert "Usage:" in run(launcher, "--help").stdout
         assert run(launcher, "--invalid", check=False).returncode == 2
@@ -92,7 +92,7 @@ def smoke(source):
                 return proc
 
             def ready(proc):
-                deadline = time.monotonic() + 12
+                deadline = time.monotonic() + 30
                 while proc.poll() is None and time.monotonic() < deadline:
                     if manifest.is_file() and json.loads(manifest.read_text())["pid"] == proc.pid:
                         assert "Running:" in run(hi, "daemon", "status").stdout

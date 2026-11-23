@@ -548,9 +548,16 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    type ModeT = u16;
+    #[cfg(unix)]
+    #[cfg(not(target_os = "macos"))]
+    type ModeT = u32;
+
+    #[cfg(unix)]
     extern "C" {
         #[link_name = "mkfifo"]
-        fn libc_mkfifo(pathname: *const std::ffi::c_char, mode: u16) -> i32;
+        fn libc_mkfifo(pathname: *const std::ffi::c_char, mode: ModeT) -> i32;
     }
 
     fn minimal_png(extra_payload: &[u8]) -> Vec<u8> {

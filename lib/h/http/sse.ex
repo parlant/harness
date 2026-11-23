@@ -169,6 +169,13 @@ defmodule H.HTTP.SSE do
 
         {:close_sse, _reason} ->
           conn
+
+        {:EXIT, from, reason}
+        when reason == :shutdown or (is_tuple(reason) and elem(reason, 0) == :shutdown) ->
+          # Re-send EXIT with the original supervisor pid so ThousandIsland's
+          # GenServer loop handles the shutdown signal as soon as conn returns.
+          send(self(), {:EXIT, from, reason})
+          conn
       after
         state.keepalive_ms ->
           case chunk(conn, ": keepalive\n\n") do
@@ -251,6 +258,11 @@ defmodule H.HTTP.SSE do
           end
 
         {:close_sse, _reason} ->
+          conn
+
+        {:EXIT, from, reason}
+        when reason == :shutdown or (is_tuple(reason) and elem(reason, 0) == :shutdown) ->
+          send(self(), {:EXIT, from, reason})
           conn
       after
         state.keepalive_ms ->

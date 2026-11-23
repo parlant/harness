@@ -145,6 +145,11 @@ defmodule H.Session.Server do
 
   def handle_call(:idle, _from, state), do: {:reply, not State.session_active?(state), state}
 
+  def handle_call(:drained, _from, state), do: {:reply, map_size(state.workers) == 0, state}
+
+  def handle_call(:active_worker_count, _from, state),
+    do: {:reply, map_size(state.workers), state}
+
   def handle_call(:get_seq, _from, state) do
     {:reply, {:ok, state.seq}, state}
   end
@@ -306,6 +311,11 @@ defmodule H.Session.Server do
           process_with_drain({:worker_crashed, worker.task_id, attempt_id, reason}, state)
         end
     end
+  end
+
+  def handle_info(:enter_drain, state) do
+    Enum.each(state.wake_timers, fn {_tid, ref} -> Process.cancel_timer(ref) end)
+    {:noreply, %{state | wake_timers: %{}}}
   end
 
   def handle_info({:stop_storage_failed, io_err}, state) do
@@ -551,11 +561,19 @@ defmodule H.Session.Server do
   end
 
   defp stage_single_item({:wake_task, tid}, state, _staged_rev) do
-    Generation.stage_wake(tid, state)
+    if State.draining?(state) do
+      {:skip, state}
+    else
+      Generation.stage_wake(tid, state)
+    end
   end
 
   defp stage_single_item({:wait_signal, topic}, state, _staged_rev) do
-    Generation.stage_wait_signal(topic, state)
+    if State.draining?(state) do
+      {:skip, state}
+    else
+      Generation.stage_wait_signal(topic, state)
+    end
   end
 
   defp stage_single_item({:submission_settled, outcome}, state, _staged_rev) do
@@ -576,25 +594,41 @@ defmodule H.Session.Server do
   end
 
   defp apply_effect({:spawn_generation, cid, tid}, state) do
-    Generation.spawn_generation_worker(cid, tid, state)
+    if State.draining?(state),
+      do: state,
+      else: Generation.spawn_generation_worker(cid, tid, state)
   end
 
   defp apply_effect({:spawn_tool, cid, tid}, state) do
-    Tools.spawn_worker(cid, tid, state, &apply_effects_list/2)
+    if State.draining?(state),
+      do: state,
+      else: Tools.spawn_worker(cid, tid, state, &apply_effects_list/2)
   end
 
   defp apply_effect({:spawn_user_shell, cid, tid}, state) do
-    UserShell.spawn_worker(cid, tid, state)
+    case Map.get(state.tasks, tid) do
+      %{checkpoint: %{"phase" => "workspace_wait"}} ->
+        if State.draining?(state), do: state, else: UserShell.spawn_worker(cid, tid, state)
+
+      _ ->
+        UserShell.spawn_worker(cid, tid, state)
+    end
   end
 
   defp apply_effect({:spawn_compaction, cid, tid}, state) do
-    Generation.spawn_compaction_worker(cid, tid, state)
+    if State.draining?(state),
+      do: state,
+      else: Generation.spawn_compaction_worker(cid, tid, state)
   end
 
   defp apply_effect({:arm_wake_timer, tid, delay_ms}, state) do
-    state = cancel_wake_timer(tid, state)
-    ref = Process.send_after(self(), {:wake_task, tid}, delay_ms)
-    %{state | wake_timers: Map.put(state.wake_timers, tid, ref)}
+    if State.draining?(state) do
+      cancel_wake_timer(tid, state)
+    else
+      state = cancel_wake_timer(tid, state)
+      ref = Process.send_after(self(), {:wake_task, tid}, delay_ms)
+      %{state | wake_timers: Map.put(state.wake_timers, tid, ref)}
+    end
   end
 
   defp apply_effect({:cancel_wake_timer, tid}, state) do

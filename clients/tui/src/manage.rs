@@ -64,9 +64,16 @@ pub(crate) enum Daemon {
         #[arg(long)]
         launcher: Option<PathBuf>,
     },
-    /// Stop a standalone daemon only if no session has unfinished work
-    Stop,
-    /// Restart an idle standalone daemon in the foreground
+    /// Stop a standalone daemon cooperatively (drains in-flight tools/responses by default)
+    Stop {
+        /// Refuse shutdown immediately if any session or account operation is active
+        #[arg(long)]
+        idle_only: bool,
+        /// Maximum seconds to wait for drain and store lock release
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
+    /// Restart a standalone daemon in the foreground (drains active work by default)
     Restart {
         #[arg(long)]
         launcher: Option<PathBuf>,
@@ -74,15 +81,35 @@ pub(crate) enum Daemon {
         port: Option<u16>,
         #[arg(long)]
         no_extensions: bool,
+        /// Refuse restart immediately if any session or account operation is active
+        #[arg(long)]
+        idle_only: bool,
+        /// Maximum seconds to wait for drain and store lock release
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
     },
     /// Start the registered per-user macOS service if stopped
     StartService,
     /// Check launchd registration without starting or stopping the service
     CheckService,
-    /// Restart an idle hi-managed macOS service
-    RestartService,
+    /// Restart a hi-managed macOS service (drains active work by default)
+    RestartService {
+        /// Refuse restart immediately if any session or account operation is active
+        #[arg(long)]
+        idle_only: bool,
+        /// Maximum seconds to wait for drain and store lock release
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
     /// Unload and remove the hi-managed macOS service
-    UninstallService,
+    UninstallService {
+        /// Refuse uninstall immediately if any session or account operation is active
+        #[arg(long)]
+        idle_only: bool,
+        /// Maximum seconds to wait for drain and store lock release
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
     /// Run a packaged daemon in the foreground (Ctrl+C to stop)
     Start {
         /// Path to a prebuilt daemon launcher; default: sibling h-daemon or H_DAEMON_BIN
@@ -127,10 +154,14 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
             return crate::service::control("install", &dir, launcher);
         }
         Command::Daemon {
-            action: Daemon::Stop,
+            action: Daemon::Stop { idle_only, timeout },
         } => {
             reject_remote(args.daemon_url.as_deref())?;
-            stop_if_idle(&data_dir(args.data_dir)?)?;
+            stop_daemon(
+                &data_dir(args.data_dir)?,
+                if idle_only { "idle" } else { "drain" },
+                Duration::from_secs(timeout),
+            )?;
             println!("Daemon stopped.");
             return Ok(());
         }
@@ -140,6 +171,8 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
                     launcher,
                     port,
                     no_extensions,
+                    idle_only,
+                    timeout,
                 },
         } => {
             reject_remote(args.daemon_url.as_deref())?;
@@ -149,31 +182,50 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
                 return Err("This store has a hi-managed LaunchAgent. Use `hi daemon restart-service`, not foreground restart.".into());
             }
             preflight(&launcher, &dir, no_extensions)?;
-            stop_if_idle(&dir)?;
+            stop_daemon(
+                &dir,
+                if idle_only { "idle" } else { "drain" },
+                Duration::from_secs(timeout),
+            )?;
             return start(dir, Some(launcher), port, no_extensions);
         }
         Command::Daemon {
-            action:
-                Daemon::StartService
-                | Daemon::CheckService
-                | Daemon::RestartService
-                | Daemon::UninstallService,
+            action: Daemon::StartService,
         } => {
             reject_remote(args.daemon_url.as_deref())?;
             let dir = data_dir(args.data_dir)?;
-            let action = match args.command {
-                Command::Daemon {
-                    action: Daemon::StartService,
-                } => "start",
-                Command::Daemon {
-                    action: Daemon::CheckService,
-                } => "check",
-                Command::Daemon {
-                    action: Daemon::RestartService,
-                } => "restart",
-                _ => "uninstall",
-            };
-            return crate::service::control(action, &dir, None);
+            return crate::service::control("start", &dir, None);
+        }
+        Command::Daemon {
+            action: Daemon::CheckService,
+        } => {
+            reject_remote(args.daemon_url.as_deref())?;
+            let dir = data_dir(args.data_dir)?;
+            return crate::service::control("check", &dir, None);
+        }
+        Command::Daemon {
+            action: Daemon::RestartService { idle_only, timeout },
+        } => {
+            reject_remote(args.daemon_url.as_deref())?;
+            let dir = data_dir(args.data_dir)?;
+            return crate::service::control_with_stop(
+                "restart",
+                &dir,
+                if idle_only { "idle" } else { "drain" },
+                Duration::from_secs(timeout),
+            );
+        }
+        Command::Daemon {
+            action: Daemon::UninstallService { idle_only, timeout },
+        } => {
+            reject_remote(args.daemon_url.as_deref())?;
+            let dir = data_dir(args.data_dir)?;
+            return crate::service::control_with_stop(
+                "uninstall",
+                &dir,
+                if idle_only { "idle" } else { "drain" },
+                Duration::from_secs(timeout),
+            );
         }
         _ => {}
     }
@@ -258,12 +310,12 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
             action:
                 Daemon::Start { .. }
                 | Daemon::InstallService { .. }
-                | Daemon::Stop
+                | Daemon::Stop { .. }
                 | Daemon::Restart { .. }
                 | Daemon::StartService
                 | Daemon::CheckService
-                | Daemon::RestartService
-                | Daemon::UninstallService,
+                | Daemon::RestartService { .. }
+                | Daemon::UninstallService { .. },
         } => unreachable!(),
     };
     result.map_err(|err| match err {
@@ -383,23 +435,82 @@ fn login(client: &DaemonClient, provider: &str, source: Option<String>) -> Resul
     }
 }
 
-pub(crate) fn stop_if_idle(dir: &std::path::Path) -> Result<(), String> {
+pub(crate) fn stop_daemon(
+    dir: &std::path::Path,
+    mode: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     let cfg = match crate::config::resolve_config(Some(dir), None) {
         Ok(cfg) => cfg,
         Err(ConfigError::DaemonNotFound { .. }) => return Ok(()),
         Err(err) => return Err(err.to_string()),
     };
     let client = DaemonClient::new(cfg.target, cfg.token);
-    match client.shutdown_if_idle() {
-        Ok(()) => (),
-        Err(ClientError::ConnectionFailed { error, .. }) if matches!(error.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound) => return Ok(()),
-        Err(ClientError::HttpStatus { status: 409, message }) if message == "daemon_busy" => return Err("Daemon is busy; finish session work and account operations before restarting. Nothing was stopped.".into()),
-        Err(ClientError::HttpStatus { status: 404 | 409, .. }) => return Err("This daemon does not support guarded shutdown. Stop it manually once before using the new launcher.".into()),
-        Err(err) => return Err(format!("Could not confirm daemon shutdown: {err}")),
+    let started = Instant::now();
+    let deadline = started + timeout.max(Duration::from_secs(12));
+    let mut announced_drain = false;
+    let draining_state;
+
+    loop {
+        match client.shutdown(mode) {
+            Ok(state) => {
+                draining_state = state == "draining";
+                break;
+            }
+            Err(ClientError::ConnectionFailed { error, .. })
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(ClientError::HttpStatus {
+                status: 409,
+                message,
+            }) if message == "daemon_busy" && mode == "drain" => {
+                // Backward compatibility with older daemons that ignore the "mode"
+                // field and only accept idle shutdown. Wait until idle up to timeout.
+                if !announced_drain {
+                    eprintln!("Waiting for active session work to finish draining...");
+                    announced_drain = true;
+                }
+                if Instant::now() >= deadline {
+                    return Err(
+                        "Timed out waiting for active session work to finish before shutdown."
+                            .into(),
+                    );
+                }
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            Err(ClientError::HttpStatus {
+                status: 409,
+                message,
+            }) if message == "daemon_busy" => {
+                return Err(
+                    "Daemon is busy; finish session work and account operations before restarting. Nothing was stopped."
+                        .into(),
+                );
+            }
+            Err(ClientError::HttpStatus {
+                status: 404 | 409, ..
+            }) => {
+                return Err(
+                    "This daemon does not support guarded shutdown. Stop it manually once before using the new launcher."
+                        .into(),
+                );
+            }
+            Err(err) => return Err(format!("Could not confirm daemon shutdown: {err}")),
+        }
     }
-    let deadline = Instant::now() + Duration::from_secs(12);
+
     let lock = dir.join("lock.json");
     loop {
+        if draining_state && !announced_drain && started.elapsed() >= Duration::from_millis(500) {
+            eprintln!("Draining active session work before shutdown...");
+            announced_drain = true;
+        }
         match client.probe_connection() {
             Err(ClientError::ConnectionFailed { error, .. })
                 if matches!(
@@ -412,6 +523,21 @@ pub(crate) fn stop_if_idle(dir: &std::path::Path) -> Result<(), String> {
                     Err(err) => return Err(format!("Could not check store lock release: {err}")),
                     Ok(_) => (),
                 }
+            }
+            Err(ClientError::ConnectionFailed { error, .. })
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                // Transient disconnect while the socket is tearing down; keep polling.
+            }
+            Err(ClientError::Io(_)) => {
+                // Transient I/O error while listener closes; keep polling until refused + lock gone.
             }
             Err(err) => return Err(err.to_string()),
             Ok(()) => (),

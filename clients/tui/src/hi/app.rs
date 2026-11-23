@@ -2628,7 +2628,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let sock_path = PathBuf::from(format!("/private/tmp/hi-app-{tag}-{nanos}.sock"));
+            let sock_path = std::env::temp_dir().join(format!("hi-app-{tag}-{nanos}.sock"));
             let _ = std::fs::remove_file(&sock_path);
             let listener = UnixListener::bind(&sock_path).unwrap();
             let client = DaemonClient::new(
@@ -2732,7 +2732,7 @@ mod tests {
             pending_cwd_fork: None,
             config: UserConfig::default(),
             status_metadata: StatusMetadata::default(),
-            data_dir: PathBuf::from("/private/tmp/hi-app-nonexistent-config"),
+            data_dir: std::env::temp_dir().join("hi-app-nonexistent-config"),
             job: None,
             note: "Ready".into(),
             tools: false,

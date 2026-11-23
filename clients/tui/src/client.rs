@@ -306,15 +306,18 @@ impl DaemonClient {
         self.connect(Some(Duration::from_secs(2))).map(drop)
     }
 
-    pub(crate) fn shutdown_if_idle(&self) -> Result<(), ClientError> {
-        let reply: serde_json::Value =
-            self.post_json("/api/v1/daemon/shutdown", &serde_json::json!({}))?;
-        if reply["state"] == "stopping" {
-            Ok(())
+    pub(crate) fn shutdown(&self, mode: &str) -> Result<String, ClientError> {
+        let body = if mode == "idle" {
+            serde_json::json!({})
         } else {
-            Err(ClientError::InvalidResponse(
+            serde_json::json!({ "mode": mode })
+        };
+        let reply: serde_json::Value = self.post_json("/api/v1/daemon/shutdown", &body)?;
+        match reply["state"].as_str() {
+            Some(state @ ("stopping" | "draining")) => Ok(state.to_string()),
+            _ => Err(ClientError::InvalidResponse(
                 "shutdown was not acknowledged".into(),
-            ))
+            )),
         }
     }
 
@@ -1312,7 +1315,6 @@ mod tests {
     use crate::protocol::ServerFrame;
     use std::net::TcpListener;
     use std::os::unix::net::UnixListener;
-    use std::path::PathBuf;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1358,7 +1360,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let sock_path = PathBuf::from(format!("/private/tmp/h-cli-test-{nanos}.sock"));
+        let sock_path = std::env::temp_dir().join(format!("h-cli-test-{nanos}.sock"));
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
 
@@ -1521,7 +1523,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let sock_path = PathBuf::from(format!("/private/tmp/h-cancel-test-{nanos}.sock"));
+        let sock_path = std::env::temp_dir().join(format!("h-cancel-test-{nanos}.sock"));
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
 
@@ -1667,7 +1669,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let sock_path = PathBuf::from(format!("/private/tmp/h-ws-client-{nanos}.sock"));
+        let sock_path = std::env::temp_dir().join(format!("h-ws-client-{nanos}.sock"));
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
 

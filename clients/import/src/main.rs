@@ -164,6 +164,7 @@ fn import(client: &Client, path: &Path, known: &mut HashMap<String, Revision>) -
     }
     send_row(&mut socket, &format!("{{\"end\":{count}}}"))?;
     socket.write_all(b"0\r\n\r\n")?;
+    socket.flush()?;
     let receipt = response(socket)?;
     let index = match receipt["status"].as_str() {
         Some("created") => 0,
@@ -220,6 +221,7 @@ impl Client {
             "{method} {ARCHIVES} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {}\r\n{extra}\r\n",
             self.token
         )?;
+        socket.flush()?;
         Ok(socket)
     }
 }

@@ -23,22 +23,53 @@ defmodule H.HTTP.Router do
   plug(:match)
   plug(:dispatch)
 
-  post "/api/v1/daemon/shutdown" do
+  get "/api/v1/daemon/status" do
     {_daemon, opts} = daemon_config(conn)
 
-    case H.Daemon.Maintenance.stop_if_idle(opts) do
+    case H.Daemon.Maintenance.status(opts) do
       {:ok, payload} ->
-        try do
-          send_json(conn, 202, payload)
-        after
-          send(opts[:shutdown_owner], :shutdown_when_idle)
-        end
-
-      {:error, reason} when reason in [:daemon_busy, :shutdown_not_supported] ->
-        send_json(conn, 409, %{"error" => Atom.to_string(reason)})
+        send_json(conn, 200, payload)
 
       {:error, _} ->
         send_json(conn, 503, %{"error" => "daemon unavailable"})
+    end
+  end
+
+  post "/api/v1/daemon/shutdown" do
+    {_daemon, opts} = daemon_config(conn)
+    body = if is_map(conn.body_params), do: conn.body_params, else: %{}
+
+    case Map.get(body, "mode") do
+      mode when mode in [nil, "idle"] ->
+        case H.Daemon.Maintenance.stop_if_idle(opts) do
+          {:ok, payload} ->
+            try do
+              send_json(conn, 202, payload)
+            after
+              send(opts[:shutdown_owner], :shutdown_when_idle)
+            end
+
+          {:error, reason} when reason in [:daemon_busy, :shutdown_not_supported] ->
+            send_json(conn, 409, %{"error" => Atom.to_string(reason)})
+
+          {:error, _} ->
+            send_json(conn, 503, %{"error" => "daemon unavailable"})
+        end
+
+      "drain" ->
+        case H.Daemon.Maintenance.drain_and_stop(opts) do
+          {:ok, payload} ->
+            send_json(conn, 202, payload)
+
+          {:error, :shutdown_not_supported} ->
+            send_json(conn, 409, %{"error" => "shutdown_not_supported"})
+
+          {:error, _} ->
+            send_json(conn, 503, %{"error" => "daemon unavailable"})
+        end
+
+      _other ->
+        send_json(conn, 422, %{"error" => "invalid_shutdown_mode"})
     end
   end
 

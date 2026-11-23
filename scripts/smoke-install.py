@@ -145,7 +145,7 @@ def smoke(bundle):
             commands.clear()
             busy = False
             with (
-                patch.object(module.time, "monotonic", side_effect=[0, 0, 31]),
+                patch.object(module.time, "monotonic", side_effect=[0, 0, 61]),
                 patch.object(module.time, "sleep"),
                 patch("sys.stderr") as stderr,
             ):

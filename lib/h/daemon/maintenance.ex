@@ -30,4 +30,27 @@ defmodule H.Daemon.Maintenance do
   catch
     :exit, _ -> {:error, :daemon_unavailable}
   end
+
+  def drain_and_stop(opts) do
+    with table when is_reference(table) <- opts[:maintenance_table],
+         true <- :ets.lookup_element(table, :managed, 2, false) do
+      GenServer.call(H.Daemon.Boot, :begin_drain, 15_000)
+    else
+      _ -> {:error, :shutdown_not_supported}
+    end
+  catch
+    :exit, _ -> {:error, :daemon_unavailable}
+  end
+
+  def status(opts) do
+    case opts[:maintenance_table] do
+      table when is_reference(table) ->
+        GenServer.call(H.Daemon.Boot, :status, 5_000)
+
+      _ ->
+        {:ok, %{"state" => "running", "active_workers" => 0}}
+    end
+  catch
+    :exit, _ -> {:error, :daemon_unavailable}
+  end
 end

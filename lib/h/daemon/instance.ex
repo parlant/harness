@@ -63,7 +63,13 @@ defmodule H.Daemon.Runtime do
   @impl true
   def init({opts, service_children}) do
     table = :ets.new(:h_daemon_admission, [:set, :public, read_concurrency: true])
-    :ets.insert(table, [{:open, true}, {:managed, is_pid(opts[:shutdown_owner])}])
+
+    :ets.insert(table, [
+      {:open, true},
+      {:draining, false},
+      {:managed, is_pid(opts[:shutdown_owner])}
+    ])
+
     opts = Keyword.put(opts, :maintenance_table, table)
 
     router = [
@@ -85,7 +91,10 @@ defmodule H.Daemon.Runtime do
              plug: {H.HTTP.Router, Keyword.put(router, :bind_address, ip)},
              ip: ip,
              port: port,
-             thousand_island_options: [supervisor_options: [name: name]]},
+             thousand_island_options: [
+               shutdown_timeout: 2_000,
+               supervisor_options: [name: name]
+             ]},
             id: name
           )
         end
@@ -160,14 +169,43 @@ defmodule H.Daemon.Boot do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
+  @drain_poll_ms 100
+
   @impl true
   def init(opts) do
-    :ok = H.Daemon.recover_active_sessions(opts)
-    {:ok, %{opts: opts, reservations: %{}}}
+    {:ok,
+     %{
+       opts: opts,
+       reservations: %{},
+       phase: :running,
+       drain_timer: nil,
+       recovery_ref: nil
+     }, {:continue, :recover_sessions}}
+  end
+
+  @impl true
+  def handle_continue(:recover_sessions, state) do
+    # Run boot recovery outside Boot's GenServer mailbox so recovered sessions
+    # (such as a parent subagent re-attaching/submitting to its child via
+    # H.Daemon.Maintenance.admit/2) cannot deadlock calling back into Boot.
+    opts = state.opts
+    {_pid, ref} = spawn_monitor(fn -> H.Daemon.recover_active_sessions(opts) end)
+    {:noreply, %{state | recovery_ref: ref}}
   end
 
   @impl true
   def handle_call(:options, _from, state), do: {:reply, state.opts, state}
+
+  def handle_call(:status, _from, state) do
+    workers = count_active_workers(state.opts)
+
+    payload = %{
+      "state" => phase_string(state.phase),
+      "active_workers" => workers
+    }
+
+    {:reply, {:ok, payload}, state}
+  end
 
   def handle_call({:admit, table}, {pid, _}, state) do
     if table == state.opts[:maintenance_table] and :ets.lookup_element(table, :open, 2, false) do
@@ -185,14 +223,16 @@ defmodule H.Daemon.Boot do
       not is_pid(opts[:shutdown_owner]) or not Process.alive?(opts[:shutdown_owner]) ->
         {:reply, {:error, :shutdown_not_supported}, state}
 
-      map_size(reservations) != 0 or not :ets.lookup_element(table, :open, 2, false) ->
+      state.phase != :running or not is_nil(state.recovery_ref) or map_size(reservations) != 0 or
+          not :ets.lookup_element(table, :open, 2, false) ->
         {:reply, {:error, :daemon_busy}, state}
 
       true ->
         :ets.insert(table, {:open, false})
 
         if idle?(opts) do
-          {:reply, {:ok, %{state: "stopping"}}, state}
+          close_all_sse_subscribers(opts)
+          {:reply, {:ok, %{state: "stopping"}}, %{state | phase: :stopping}}
         else
           :ets.insert(table, {:open, true})
           {:reply, {:error, :daemon_busy}, state}
@@ -200,28 +240,192 @@ defmodule H.Daemon.Boot do
     end
   end
 
+  def handle_call(:begin_drain, _from, %{opts: opts} = state) do
+    table = opts[:maintenance_table]
+
+    cond do
+      not is_pid(opts[:shutdown_owner]) or not Process.alive?(opts[:shutdown_owner]) ->
+        {:reply, {:error, :shutdown_not_supported}, state}
+
+      state.phase in [:draining, :stopping] ->
+        {:reply, {:ok, %{state: phase_string(state.phase)}}, state}
+
+      true ->
+        :ets.insert(table, [{:open, false}, {:draining, true}])
+        notify_sessions_enter_drain(opts)
+        state = %{state | phase: :draining}
+        state = maybe_finish_drain(state)
+        {:reply, {:ok, %{state: phase_string(state.phase)}}, state}
+    end
+  end
+
   @impl true
   def handle_cast({:release, pid}, state) do
     {ref, reservations} = Map.pop(state.reservations, pid)
     if ref, do: Process.demonitor(ref, [:flush])
-    {:noreply, %{state | reservations: reservations}}
+    state = %{state | reservations: reservations}
+
+    state =
+      if state.phase == :draining and map_size(reservations) == 0 do
+        maybe_finish_drain(state)
+      else
+        state
+      end
+
+    {:noreply, state}
   end
 
   @impl true
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{recovery_ref: ref} = state) do
+    state = %{state | recovery_ref: nil}
+
+    state =
+      if state.phase == :draining and map_size(state.reservations) == 0 do
+        maybe_finish_drain(state)
+      else
+        state
+      end
+
+    {:noreply, state}
+  end
+
   def handle_info({:DOWN, ref, :process, pid, _}, state) do
     reservations =
       if state.reservations[pid] == ref,
         do: Map.delete(state.reservations, pid),
         else: state.reservations
 
-    {:noreply, %{state | reservations: reservations}}
+    state = %{state | reservations: reservations}
+
+    state =
+      if state.phase == :draining and map_size(reservations) == 0 do
+        maybe_finish_drain(state)
+      else
+        state
+      end
+
+    {:noreply, state}
   end
+
+  def handle_info(:check_drain, %{phase: :draining} = state) do
+    state = %{state | drain_timer: nil}
+    {:noreply, maybe_finish_drain(state)}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp maybe_finish_drain(
+         %{phase: :draining, opts: opts, reservations: reservations, recovery_ref: recovery_ref} =
+           state
+       ) do
+    if is_nil(recovery_ref) and map_size(reservations) == 0 and drained?(opts) do
+      if state.drain_timer, do: Process.cancel_timer(state.drain_timer)
+      close_all_sse_subscribers(opts)
+      send(opts[:shutdown_owner], :shutdown_drained)
+      %{state | phase: :stopping, drain_timer: nil}
+    else
+      arm_drain_poll(state)
+    end
+  end
+
+  defp close_all_sse_subscribers(opts) do
+    pubsub = opts[:pubsub]
+
+    if not is_nil(pubsub) and Process.whereis(pubsub) != nil do
+      for pid <-
+            Registry.select(pubsub, [
+              {{:catalog, :"$1", :_}, [], [:"$1"]},
+              {{{:conversation, :_, :_}, :"$1", :_}, [], [:"$1"]}
+            ]) do
+        send(pid, {:close_sse, :shutdown})
+      end
+    end
+
+    :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp arm_drain_poll(%{drain_timer: nil} = state) do
+    %{state | drain_timer: Process.send_after(self(), :check_drain, @drain_poll_ms)}
+  end
+
+  defp arm_drain_poll(state), do: state
+
+  defp notify_sessions_enter_drain(opts) do
+    for pid <- live_session_pids(opts) do
+      send(pid, :enter_drain)
+    end
+
+    :ok
+  end
+
+  defp live_session_pids(opts) do
+    Registry.select(opts[:registry], [{{{:session, :_}, :"$1", :_}, [], [:"$1"]}])
+  catch
+    :exit, _ -> []
+  end
+
+  defp drained?(opts) do
+    sessions_drained? =
+      Enum.all?(live_session_pids(opts), fn pid ->
+        try do
+          GenServer.call(pid, :drained, 5_000) == true
+        catch
+          :exit, {:noproc, _} -> true
+          :exit, _ -> false
+        end
+      end)
+
+    sessions_drained? and accounts_drained?(opts[:accounts])
+  end
+
+  defp accounts_drained?(nil), do: true
+
+  defp accounts_drained?(accounts) do
+    try do
+      GenServer.call(accounts, :drained, 5_000) == true
+    catch
+      :exit, {:noproc, _} -> true
+      :exit, _ -> false
+    end
+  end
+
+  defp count_active_workers(opts) do
+    session_workers =
+      Enum.reduce(live_session_pids(opts), 0, fn pid, acc ->
+        try do
+          acc + GenServer.call(pid, :active_worker_count, 2_000)
+        catch
+          :exit, _ -> acc
+        end
+      end)
+
+    account_refreshes =
+      case opts[:accounts] do
+        nil ->
+          0
+
+        accounts ->
+          try do
+            GenServer.call(accounts, :active_refresh_count, 2_000)
+          catch
+            :exit, _ -> 0
+          end
+      end
+
+    session_workers + account_refreshes
+  end
+
+  defp phase_string(:running), do: "running"
+  defp phase_string(:draining), do: "draining"
+  defp phase_string(:stopping), do: "stopping"
 
   defp idle?(opts) do
     # A canceled caller may already be past the gate in a coordinator.
     # Synchronize once with each live session before trusting the catalog.
     deadline = System.monotonic_time(:millisecond) + 1500
-    servers = Registry.select(opts[:registry], [{{{:session, :_}, :"$1", :_}, [], [:"$1"]}])
+    servers = live_session_pids(opts)
 
     Enum.all?(servers, fn pid ->
       remaining = max(1, deadline - System.monotonic_time(:millisecond))

@@ -95,7 +95,7 @@ def service_file(home, data, launcher):
 
 def wait_until_stopped(service, env):
     target = f"gui/{os.getuid()}/{service.stem}"
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 60
     last = "no launchd status received"
     while (remaining := deadline - time.monotonic()) > 0:
         try:
@@ -119,7 +119,7 @@ def wait_until_stopped(service, env):
 
 
 def wait_until_serving(hi, env):
-    deadline = time.monotonic() + 12
+    deadline = time.monotonic() + 30
     last_error = "No readiness response"
     while time.monotonic() < deadline:
         last = run([hi, "daemon", "status"], env, timeout=5)
@@ -202,7 +202,9 @@ def install(args):
             # A successful idle shutdown exits 0, so KeepAlive does not restart
             # the old release while the link is being switched.
             checked([release / "bin/hi", "daemon", "check-service"], env)
-            checked([hi, "daemon", "stop"], env, timeout=50)
+            # Use the new release's hi so cooperative drain mode is sent even when
+            # upgrading from an older release whose hi only supported idle shutdown.
+            checked([release / "bin/hi", "daemon", "stop"], env, timeout=320)
             # The API and store lock can disappear before the VM exits. A kickstart
             # while launchd still tracks that process may not start a replacement.
             print("Waiting for launchd to finish stopping the old release...")

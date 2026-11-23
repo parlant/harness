@@ -13,7 +13,8 @@ defmodule H.HTTP.UnixListener do
            Bandit.start_link(
              plug: {H.HTTP.Router, Keyword.put(router_opts, :unix_socket, true)},
              ip: {:local, path},
-             port: 0
+             port: 0,
+             thousand_island_options: [shutdown_timeout: 2_000]
            ) do
       case File.chmod(path, 0o600) do
         :ok ->

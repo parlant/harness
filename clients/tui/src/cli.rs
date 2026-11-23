@@ -1042,7 +1042,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let sock_path = PathBuf::from(format!("/private/tmp/h-e2e-test-{nanos}.sock"));
+        let sock_path = std::env::temp_dir().join(format!("h-e2e-test-{nanos}.sock"));
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
 
@@ -1222,7 +1222,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let sock_path = PathBuf::from(format!("/private/tmp/h-cli-create-{nanos}.sock"));
+        let sock_path = std::env::temp_dir().join(format!("h-cli-create-{nanos}.sock"));
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
 

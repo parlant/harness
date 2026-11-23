@@ -52,7 +52,12 @@ defmodule HWeb.Standalone do
     for {ip, port} <-
           Application.get_env(:harness_web, HWeb.Endpoint, [])[:standalone_listeners] || [] do
       Supervisor.child_spec(
-        {Bandit, plug: {__MODULE__, ip}, display_plug: HWeb.Endpoint, ip: ip, port: port},
+        {Bandit,
+         plug: {__MODULE__, ip},
+         display_plug: HWeb.Endpoint,
+         ip: ip,
+         port: port,
+         thousand_island_options: [shutdown_timeout: 2_000]},
         id: {__MODULE__, ip}
       )
     end

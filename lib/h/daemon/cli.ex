@@ -25,22 +25,14 @@ defmodule H.Daemon.CLI do
 
       {:ok, opts} ->
         dir = Path.expand(opts[:data_dir] || System.get_env("H_DATA_DIR") || "~/.local/share/h")
+        _ = H.Daemon.SignalHandler.install(self())
 
         with {:ok, addresses} <- H.Daemon.Network.load(dir),
              :ok <- web(:start, addresses),
              {:ok, _} <-
                H.serve(opts ++ [data_dir: dir, bind_addresses: addresses, shutdown_owner: self()]) do
           ref = Process.monitor(H.Daemon.Instance)
-
-          receive do
-            :shutdown_when_idle ->
-              Application.stop(:harness_web)
-              :ok = Supervisor.terminate_child(H.Supervisor, H.Daemon.Instance)
-              System.stop(0)
-
-            {:DOWN, ^ref, :process, _, _} ->
-              System.stop(1)
-          end
+          await_shutdown(ref, false, shutdown_timeout_ms())
         else
           {:error, reason} ->
             IO.puts(
@@ -54,6 +46,75 @@ defmodule H.Daemon.CLI do
       {:error, :usage} ->
         IO.puts(:stderr, @usage)
         System.halt(2)
+    end
+  end
+
+  defp await_shutdown(ref, draining?, timeout_ms) do
+    receive do
+      msg when msg in [:shutdown_when_idle, :shutdown_drained] ->
+        stop_cleanly()
+
+      {:os_signal, :sigterm} when not draining? ->
+        case initiate_drain() do
+          {:ok, %{state: "stopping"}} ->
+            await_shutdown(ref, true, timeout_ms)
+
+          {:ok, %{state: "draining"}} ->
+            timer = Process.send_after(self(), :drain_timeout, timeout_ms)
+
+            try do
+              await_shutdown(ref, true, timeout_ms)
+            after
+              Process.cancel_timer(timer)
+            end
+
+          _ ->
+            stop_cleanly()
+        end
+
+      {:os_signal, :sigterm} ->
+        stop_cleanly()
+
+      :drain_timeout ->
+        IO.puts(:stderr, "H daemon drain timed out; stopping now.")
+        stop_cleanly()
+
+      {:DOWN, ^ref, :process, _, _} ->
+        System.stop(1)
+    end
+  end
+
+  defp initiate_drain do
+    case H.Daemon.instance_options() do
+      opts when is_list(opts) -> H.Daemon.Maintenance.drain_and_stop(opts)
+      _ -> {:error, :daemon_unavailable}
+    end
+  catch
+    :exit, _ -> {:error, :daemon_unavailable}
+  end
+
+  defp stop_cleanly do
+    Application.stop(:harness_web)
+
+    case Supervisor.terminate_child(H.Supervisor, H.Daemon.Instance) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+      {:error, :not_running} -> :ok
+    end
+
+    System.stop(0)
+  end
+
+  defp shutdown_timeout_ms do
+    case System.get_env("H_SHUTDOWN_TIMEOUT_MS") do
+      nil ->
+        300_000
+
+      raw ->
+        case Integer.parse(String.trim(raw)) do
+          {ms, ""} when ms > 0 -> ms
+          _ -> 300_000
+        end
     end
   end
 

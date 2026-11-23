@@ -55,6 +55,17 @@ defmodule H.Session.Server.State do
     Enum.any?(state.tasks, fn {_id, t} -> t.status != "terminal" end)
   end
 
+  def draining?(state) do
+    table = Map.get(state, :maintenance_table)
+
+    is_reference(table) and
+      try do
+        :ets.lookup_element(table, :draining, 2, false) == true
+      rescue
+        ArgumentError -> false
+      end
+  end
+
   def conversation_busy?(state, cid) when is_map(state) and is_integer(cid) do
     live = get_in(state, [:docs, cid, "live"]) || %{}
 
