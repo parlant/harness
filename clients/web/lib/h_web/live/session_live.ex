@@ -64,6 +64,7 @@ defmodule HWeb.SessionLive do
         inbox: [],
         agent: %{},
         usage: %{},
+        turn_metrics: [],
         before_entry_id: nil,
         has_more: false,
         run_active?: false,
@@ -2303,6 +2304,110 @@ defmodule HWeb.SessionLive do
   end
 
   defp usage_summary(_), do: nil
+
+  defp build_metrics_chart(metrics) when is_list(metrics) do
+    points = Enum.take(metrics, -24)
+
+    if points == [] do
+      nil
+    else
+      count = length(points)
+      left = 32.0
+      right = 224.0
+      top = 8.0
+      bottom = 66.0
+      plot_w = right - left
+      plot_h = bottom - top
+
+      max_tokens =
+        points
+        |> Enum.map(& &1.total_tokens)
+        |> Enum.max(fn -> 1 end)
+        |> max(1)
+
+      tps_values =
+        points
+        |> Enum.map(& &1.tps)
+        |> Enum.filter(&is_number/1)
+
+      max_tps =
+        case tps_values do
+          [] -> 1.0
+          vals -> max(Enum.max(vals), 1.0)
+        end
+
+      slot_w = plot_w / count
+      bar_w = min(max(slot_w * 0.56, 3.0), 14.0)
+
+      indexed =
+        points
+        |> Enum.with_index()
+        |> Enum.map(fn {m, idx} ->
+          cx = left + (idx + 0.5) * slot_w
+          in_h = m.input_tokens / max_tokens * plot_h
+          out_h = m.output_tokens / max_tokens * plot_h
+          tot_h = min(in_h + out_h, plot_h)
+          out_y = bottom - tot_h
+          in_y = bottom - in_h
+
+          tps_y =
+            if is_number(m.tps) do
+              bottom - min(m.tps / max_tps, 1.0) * plot_h
+            end
+
+          %{
+            entry_id: m.entry_id,
+            x: Float.round(cx - bar_w / 2, 2),
+            cx: Float.round(cx, 2),
+            bar_w: Float.round(bar_w, 2),
+            in_y: Float.round(in_y, 2),
+            in_h: Float.round(in_h, 2),
+            out_y: Float.round(out_y, 2),
+            out_h: Float.round(max(tot_h - in_h, 0.0), 2),
+            tps: m.tps,
+            tps_y: if(tps_y, do: Float.round(tps_y, 2)),
+            input_tokens: m.input_tokens,
+            output_tokens: m.output_tokens,
+            total_tokens: m.total_tokens,
+            duration_ms: m.duration_ms
+          }
+        end)
+
+      line_points =
+        indexed
+        |> Enum.filter(&is_number(&1.tps_y))
+        |> Enum.map_join(" ", fn p -> "#{p.cx},#{p.tps_y}" end)
+
+      %{
+        points: indexed,
+        line_points: line_points,
+        has_tps?: tps_values != [],
+        max_tps_label: format_tps(max_tps),
+        max_tokens_label: format_compact_tokens(max_tokens),
+        latest_tps_label:
+          case List.last(tps_values) do
+            nil -> "—"
+            val -> "#{format_tps(val)} tok/s"
+          end,
+        turns: count
+      }
+    end
+  end
+
+  defp build_metrics_chart(_), do: nil
+
+  defp format_tps(val) when is_number(val) and val >= 100, do: "#{round(val)}"
+  defp format_tps(val) when is_number(val), do: :erlang.float_to_binary(val * 1.0, decimals: 1)
+
+  defp format_compact_tokens(n) when is_integer(n) and n >= 1_000_000 do
+    "#{Float.round(n / 1_000_000, 1)}M"
+  end
+
+  defp format_compact_tokens(n) when is_integer(n) and n >= 1_000 do
+    "#{Float.round(n / 1_000, 1)}k"
+  end
+
+  defp format_compact_tokens(n) when is_integer(n), do: Integer.to_string(n)
 
   defp non_empty(val) when is_binary(val) do
     trimmed = String.trim(val)

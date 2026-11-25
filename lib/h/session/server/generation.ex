@@ -200,10 +200,11 @@ defmodule H.Session.Server.Generation do
       gen_task ->
         now = System.system_time(:millisecond)
         cid = gen_task.checkpoint["conversation_id"]
+        duration_ms = if is_integer(worker.started_at), do: max(now - worker.started_at, 0)
         state = Stream.clear_ephemeral_for_conv(state, cid)
 
         case gen_result do
-          {:ok, resp} -> stage_generation_success(gen_task, cid, resp, state, now)
+          {:ok, resp} -> stage_generation_success(gen_task, cid, resp, state, now, duration_ms)
           {:cancelled, partial} -> stage_generation_cancelled(gen_task, cid, partial, state, now)
           {:error, err} -> stage_generation_error(gen_task, cid, err, state, now)
         end
@@ -807,7 +808,7 @@ defmodule H.Session.Server.Generation do
     end
   end
 
-  defp stage_generation_success(gen_task, cid, resp, state, now) do
+  defp stage_generation_success(gen_task, cid, resp, state, now, duration_ms) do
     {:ok, entry_id, store} = Storage.mint_id(state.store)
     state = %{state | store: store}
 
@@ -821,6 +822,11 @@ defmodule H.Session.Server.Generation do
       "usage" => usage_map,
       "provider_meta" => State.stringify_json(Map.get(resp, :provider_meta, %{}))
     }
+
+    entry_data =
+      if is_integer(duration_ms) and duration_ms >= 0,
+        do: Map.put(entry_data, "duration_ms", duration_ms),
+        else: entry_data
 
     entry_data =
       case Map.get(resp, :reasoning_details) do

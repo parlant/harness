@@ -376,11 +376,11 @@ body {
 .app-menu :is(a, button):hover, .app-menu [aria-current="page"] { background: var(--surface-2); }
 .session-actions-menu {
   inset-inline: auto max(8px, env(safe-area-inset-right));
-  width: min(13rem, calc(100vw - 16px));
+  width: min(14.5rem, calc(100vw - 16px));
 }
-.session-actions-menu button { justify-content: space-between; }
+.session-actions-menu :is(a, button) { justify-content: space-between; gap: 10px; }
 .session-actions-menu button:disabled { opacity: .5; cursor: default; }
-.session-actions-menu kbd { font: 11px var(--mono); color: var(--muted); }
+.session-actions-menu kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
 .app-menu-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
 
 .app-panel {
@@ -688,7 +688,107 @@ body {
 }
 
 .session-detail-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.session-meta-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.45;
+}
 .session-id-label { font-size: 12px; color: var(--muted); }
+
+.session-metrics-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.session-metrics-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.session-metrics-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.session-metrics-swatch {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+
+.session-metrics-swatch.is-tps {
+  height: 2px;
+  width: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.session-metrics-swatch.is-in {
+  background: color-mix(in srgb, var(--muted) 42%, transparent);
+}
+
+.session-metrics-swatch.is-out {
+  background: color-mix(in srgb, var(--accent) 55%, var(--surface));
+}
+
+.session-metrics-svg {
+  display: block;
+  width: 100%;
+  height: 78px;
+}
+
+.metrics-grid {
+  stroke: color-mix(in srgb, var(--border) 70%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+}
+
+.metrics-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.metrics-label {
+  fill: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.metrics-label.is-tps {
+  fill: var(--accent);
+}
+
+.metrics-bar-in {
+  fill: color-mix(in srgb, var(--muted) 38%, transparent);
+}
+
+.metrics-bar-out {
+  fill: color-mix(in srgb, var(--accent) 52%, transparent);
+}
+
+.metrics-tps-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.metrics-tps-dot {
+  fill: var(--accent);
+}
 
 .branch-link {
   display: flex;
@@ -1830,8 +1930,9 @@ html.inspect-picking * { cursor: crosshair !important; }
 }
 
 .inbox-row-main {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 .inbox-row-top {
@@ -1847,7 +1948,7 @@ html.inspect-picking * { cursor: crosshair !important; }
   font-weight: 600;
   font-size: 13px;
   min-width: 0;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1868,6 +1969,11 @@ html.inspect-picking * { cursor: crosshair !important; }
   white-space: nowrap;
 }
 
+.inbox-row.is-compact .inbox-row-sid,
+.inbox-row.is-compact .inbox-session-tag {
+  display: none;
+}
+
 .inbox-row.is-archived :is(.inbox-row-sid, .inbox-row-name) {
   max-width: 100%;
   overflow: hidden;
@@ -1878,8 +1984,20 @@ html.inspect-picking * { cursor: crosshair !important; }
 .inbox-row-tail {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+}
+
+.inbox-row.is-compact .inbox-row-tail {
+  max-width: 42%;
+}
+
+.inbox-row.is-compact .inbox-step-badge,
+.inbox-row.is-compact .inbox-worktree-badge {
+  display: none;
 }
 
 .inbox-status {
@@ -2023,17 +2141,18 @@ html.inspect-picking * { cursor: crosshair !important; }
 }
 
 .inbox-row.is-subsession {
-  min-height: 36px;
-  padding: 6px 10px;
+  height: 36px;
+  padding: 0 10px;
   font-size: 13px;
 }
 
 .inbox-row.is-subsession.is-compact {
-  min-height: 32px;
-  padding: 5px 8px;
+  height: 32px;
+  padding: 0 8px;
 }
 
 .inbox-lineage-prefix {
+  flex: none;
   font-size: 12px;
   line-height: 1;
 }

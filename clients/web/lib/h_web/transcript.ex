@@ -10,14 +10,33 @@ defmodule HWeb.Transcript do
 
   alias HWeb.{Activity, ConversationComponents, SubagentCards}
 
-  defstruct [:reducer, :head_activity, :tail_activity, subagent_events: [], subagent_rows: %{}]
+  defstruct [
+    :reducer,
+    :head_activity,
+    :tail_activity,
+    subagent_events: [],
+    subagent_rows: %{},
+    turn_metrics: [],
+    last_entry_at: nil
+  ]
+
+  @type turn_metric :: %{
+          entry_id: String.t(),
+          input_tokens: non_neg_integer(),
+          output_tokens: non_neg_integer(),
+          total_tokens: non_neg_integer(),
+          duration_ms: non_neg_integer() | nil,
+          tps: float() | nil
+        }
 
   @type t :: %__MODULE__{
           reducer: H.Transcript.t(),
           head_activity: Activity.t() | nil,
           tail_activity: Activity.t() | nil,
           subagent_events: [map()],
-          subagent_rows: map()
+          subagent_rows: map(),
+          turn_metrics: [turn_metric()],
+          last_entry_at: integer() | nil
         }
 
   @doc "Creates a new empty `HWeb.Transcript`."
@@ -32,11 +51,14 @@ defmodule HWeb.Transcript do
     case H.Transcript.apply_snapshot(reducer, payload) do
       {:ok, next} ->
         {rows, head, tail} = project(next.entries, nil)
+        {metrics, last_at} = extract_turn_metrics(next.entries, nil)
 
         wrapper = %__MODULE__{
           reducer: %{next | entries: []},
           head_activity: head,
-          tail_activity: tail
+          tail_activity: tail,
+          turn_metrics: metrics,
+          last_entry_at: last_at
         }
 
         {rows, wrapper} = with_subagent_rows(wrapper, rows, nil, :append)
@@ -71,12 +93,15 @@ defmodule HWeb.Transcript do
           end
 
         previous_live = reducer.docs["live"]
+        {new_metrics, last_at} = extract_turn_metrics(appended, wrapper.last_entry_at)
 
         wrapper = %{
           wrapper
           | reducer: %{next | entries: []},
             head_activity: head,
-            tail_activity: tail
+            tail_activity: tail,
+            turn_metrics: merge_turn_metrics(wrapper.turn_metrics, new_metrics, :append),
+            last_entry_at: last_at || wrapper.last_entry_at
         }
 
         {rows, wrapper} = with_subagent_rows(wrapper, rows, previous_live, :append)
@@ -147,11 +172,14 @@ defmodule HWeb.Transcript do
           end
       end
 
+    {older_metrics, _} = extract_turn_metrics(next.entries, nil)
+
     wrapper = %{
       wrapper
       | reducer: %{next | entries: []},
         head_activity: head,
-        tail_activity: tail
+        tail_activity: tail,
+        turn_metrics: merge_turn_metrics(wrapper.turn_metrics, older_metrics, :prepend)
     }
 
     with_subagent_rows(wrapper, rows, nil, :prepend)
@@ -239,7 +267,7 @@ defmodule HWeb.Transcript do
 
   @doc "Extracts compact Phoenix assigns from the underlying `H.Transcript`."
   @spec compact_assigns(t()) :: map()
-  def compact_assigns(%__MODULE__{reducer: r, tail_activity: tail}) do
+  def compact_assigns(%__MODULE__{reducer: r, tail_activity: tail, turn_metrics: turn_metrics}) do
     docs = r.docs || %{}
     committed = r.committed_docs || %{}
     live = Map.get(docs, "live") || %{}
@@ -252,6 +280,7 @@ defmodule HWeb.Transcript do
       inbox: Map.get(docs, "inbox") || [],
       agent: Map.get(committed, "agent") || %{},
       usage: Map.get(committed, "usage") || %{},
+      turn_metrics: turn_metrics,
       before_entry_id: r.before_entry_id,
       has_more: r.has_more,
       run_active?: run_active?(live)
@@ -301,4 +330,84 @@ defmodule HWeb.Transcript do
   defp stringify_nested(list) when is_list(list), do: Enum.map(list, &stringify_nested/1)
   defp stringify_nested(map) when is_map(map), do: stringify_top_keys(map)
   defp stringify_nested(other), do: other
+
+  defp extract_turn_metrics(entries, prev_at) do
+    {rev_metrics, last_at} =
+      Enum.reduce(entries, {[], prev_at}, fn raw, {acc, prev} ->
+        entry = normalize_entry(raw)
+        created_at = parse_timestamp(entry["created_at"])
+
+        acc =
+          if entry["kind"] == "assistant" do
+            case build_turn_metric(entry, prev, created_at) do
+              nil -> acc
+              metric -> [metric | acc]
+            end
+          else
+            acc
+          end
+
+        {acc, created_at || prev}
+      end)
+
+    {Enum.reverse(rev_metrics), last_at}
+  end
+
+  defp merge_turn_metrics(existing, [], _direction), do: existing
+
+  defp merge_turn_metrics(existing, incoming, direction) do
+    combined =
+      case direction do
+        :append -> existing ++ incoming
+        :prepend -> incoming ++ existing
+      end
+
+    combined
+    |> Enum.uniq_by(& &1.entry_id)
+    |> Enum.take(-40)
+  end
+
+  defp build_turn_metric(entry, prev_at, created_at) do
+    data = entry["data"] || %{}
+    usage = if is_map(data["usage"]), do: data["usage"], else: %{}
+    input = non_neg_int(usage["input_tokens"] || usage["input"])
+    output = non_neg_int(usage["output_tokens"] || usage["output"])
+    total = max(non_neg_int(usage["total_tokens"]), input + output)
+
+    if total == 0 do
+      nil
+    else
+      explicit_ms = positive_int(data["duration_ms"])
+
+      fallback_ms =
+        if is_integer(created_at) and is_integer(prev_at) and created_at > prev_at do
+          created_at - prev_at
+        end
+
+      duration_ms = explicit_ms || fallback_ms
+
+      tps =
+        if is_integer(duration_ms) and duration_ms > 0 and output > 0 do
+          Float.round(output * 1000.0 / duration_ms, 1)
+        end
+
+      %{
+        entry_id: entry["id"],
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+        duration_ms: duration_ms,
+        tps: tps
+      }
+    end
+  end
+
+  defp non_neg_int(n) when is_integer(n) and n >= 0, do: n
+  defp non_neg_int(_), do: 0
+
+  defp positive_int(n) when is_integer(n) and n > 0, do: n
+  defp positive_int(_), do: nil
+
+  defp parse_timestamp(n) when is_integer(n) and n > 0, do: n
+  defp parse_timestamp(_), do: nil
 end

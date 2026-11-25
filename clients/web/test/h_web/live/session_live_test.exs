@@ -398,7 +398,7 @@ defmodule HWeb.SessionLiveTest do
     assert patch_path =~ ~r"^/sessions/#{Regex.escape(sid)}/conversations/\d+$"
     forked_cid = patch_path |> String.split("/") |> List.last()
     assert forked_cid != "1"
-    assert render(view) =~ "conv ##{forked_cid}"
+    assert has_element?(view, "#hdr-conv", "conv: ##{forked_cid}")
   end
 
   test "renders parent session breadcrumb on subsessions and toggles hierarchical subsessions in sidebar",
@@ -807,8 +807,8 @@ defmodule HWeb.SessionLiveTest do
       |> render_click()
       |> follow_redirect(conn, holder_path)
 
-    assert has_element?(holder_view, "#session-details .session-id-label", holder_sid)
-    assert has_element?(holder_view, "#session-details .badge", "conv ##{holder_cid}")
+    assert has_element?(holder_view, "#session-details .session-id-label", "id: #{holder_sid}")
+    assert has_element?(holder_view, "#session-details #hdr-conv", "conv: ##{holder_cid}")
     assert has_element?(holder_view, ~s(#app-menu a[href="/inbox"]))
 
     {:ok, view, _} = live(conn, waiter_path)

@@ -11,7 +11,6 @@ defmodule HWeb.CoreComponents do
   def tag_input(assigns) do
     ~H"""
     <form id={@id <> "-form"} class="tag-editor" phx-submit="add_session_tags" phx-hook="SessionTags">
-      <label class="field-label" for={@id <> "-input"}>Session tags</label>
       <div class="tag-editor-field">
         <span :for={tag <- @tags} class="tag-chip">
           <span>{tag}</span>
@@ -27,13 +26,12 @@ defmodule HWeb.CoreComponents do
           id={@id <> "-input"}
           name="tags"
           class="input"
+          aria-label="Session tags"
           placeholder="Add a tag…"
-          aria-describedby={@id <> "-hint"}
           autocomplete="off"
         />
         <button type="submit" class="bar-button tag-add" aria-label="Add tag" title="Add tag">+</button>
       </div>
-      <small id={@id <> "-hint"} class="muted">Enter or comma adds a tag. Changes save automatically.</small>
       <small :if={@error} role="alert" class="tag-error">{@error}</small>
     </form>
     """

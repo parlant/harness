@@ -67,7 +67,7 @@
       phx-click="new_session"
       disabled={!@session || @cwd_missing?}
       data-dismiss-menu
-    >New</button>
+    ><span>New</span><kbd>/new</kbd></button>
     <button
       id="session-tree-button"
       type="button"
@@ -75,14 +75,14 @@
       aria-controls="session-tree-panel"
       phx-click="open_session_tree"
       data-dismiss-menu
-    >Tree <kbd>/tree</kbd></button>
+    ><span>Tree</span><kbd>/tree</kbd></button>
     <.link
       :if={@session && !@cwd_missing? && @session.status != "archived"}
       id="session-review-link"
       navigate={
         InboxFilter.review_path(@session_id, @inbox_filter, @from_inbox?, @conversation_id)
       }
-    >Review files</.link>
+    ><span>Review files</span><kbd>/review</kbd></.link>
     <button
       :if={@session && @session.status != "archived" && !Map.get(@session, :archived, false)}
       id="session-attention-toggle"
@@ -90,7 +90,9 @@
       phx-click="toggle_session_attention"
       disabled={@run_active?}
       data-dismiss-menu
-    >{if Map.get(@session, :needs_attention, true), do: "Mark as read", else: "Mark for attention"}</button>
+    ><span>{if Map.get(@session, :needs_attention, true),
+      do: "Mark as read",
+      else: "Mark for attention"}</span><kbd>/attention</kbd></button>
     <button
       :if={@session && @session.status != "archived" && !Map.get(@session, :archived, false)}
       id="archive-session-btn"
@@ -98,14 +100,14 @@
       phx-click="archive_current_session"
       title="Archive and unload this session"
       data-dismiss-menu
-    >Archive</button>
+    ><span>Archive</span><kbd>/archive</kbd></button>
     <button
       :if={@session && @session.status != "archived" && Map.get(@session, :archived, false)}
       id="unarchive-session-btn"
       type="button"
       phx-click="unarchive_current_session"
       data-dismiss-menu
-    >Unarchive</button>
+    ><span>Unarchive</span><kbd>/archive off</kbd></button>
   </div>
 
   <main id="session-main" aria-label="Conversation" class="session-main">
@@ -638,19 +640,20 @@
       {@error_banner}
     </p>
     <div class="sidebar-section">
-      <div class="session-detail-badges">
-        <span
-          :if={@session && Map.get(@session, :archived, false)}
-          id="hdr-archived-badge"
-          class="badge badge-warn"
-        >archived</span>
-        <span class="badge mono">conv #{@conversation_id}</span>
-        <span :if={!is_nil(@cursor_seq)} id="hdr-seq" class="badge mono">seq {@cursor_seq}</span>
-        <span :if={usage_summary(@usage)} id="hdr-usage" class="badge mono">{usage_summary(@usage)}</span>
+      <div
+        :if={@session && Map.get(@session, :archived, false)}
+        class="session-detail-badges"
+      >
+        <span id="hdr-archived-badge" class="badge badge-warn">archived</span>
       </div>
-      <div class="mono session-id-label">{@session_id}</div>
-      <div :if={@session} class="muted mono session-cwd">
-        {@session.env_id}: {@session.cwd}
+      <div class="session-meta-lines mono muted">
+        <div class="session-id-label">id: {@session_id}</div>
+        <div :if={@session} class="session-cwd">{@session.env_id}: {@session.cwd}</div>
+        <div :if={usage_summary(@usage)} id="hdr-usage">{usage_summary(@usage)}</div>
+        <div>
+          <span id="hdr-conv">conv: #{@conversation_id}</span>
+          <span :if={!is_nil(@cursor_seq)} id="hdr-seq"> · seq: {@cursor_seq}</span>
+        </div>
       </div>
       <div
         :if={@session_parent}
@@ -675,6 +678,80 @@
         tags={session_tags(assigns)}
         error={@tag_error}
       />
+      <% chart = build_metrics_chart(@turn_metrics) %>
+      <div :if={chart} id="session-metrics-chart" class="session-metrics-chart">
+        <div class="session-metrics-head mono muted">
+          <span class="session-metrics-legend">
+            <span class="session-metrics-swatch is-tps"></span>tok/s <span class="session-metrics-swatch is-in"></span>in <span class="session-metrics-swatch is-out"></span>out
+          </span>
+          <span>{chart.latest_tps_label}</span>
+        </div>
+        <svg
+          class="session-metrics-svg"
+          viewBox="0 0 256 78"
+          role="img"
+          aria-label="Response speed in tokens per second and tokens in and out per turn"
+        >
+          <line x1="32" y1="8" x2="224" y2="8" class="metrics-grid" />
+          <line x1="32" y1="37" x2="224" y2="37" class="metrics-grid" />
+          <line x1="32" y1="66" x2="224" y2="66" class="metrics-axis" />
+          <text x="29" y="11" text-anchor="end" class="metrics-label is-tps">
+            {chart.max_tps_label}
+          </text>
+          <text x="29" y="68" text-anchor="end" class="metrics-label is-tps">0</text>
+          <text x="227" y="11" text-anchor="start" class="metrics-label">
+            {chart.max_tokens_label}
+          </text>
+          <text x="227" y="68" text-anchor="start" class="metrics-label">0</text>
+          <g :for={p <- chart.points}>
+            <rect
+              :if={p.in_h > 0}
+              x={p.x}
+              y={p.in_y}
+              width={p.bar_w}
+              height={p.in_h}
+              rx="1"
+              class="metrics-bar-in"
+            >
+              <title>
+                Entry #{p.entry_id}: {p.input_tokens} in / {p.output_tokens} out{if p.tps,
+                  do: " · #{p.tps} tok/s",
+                  else: ""}
+              </title>
+            </rect>
+            <rect
+              :if={p.out_h > 0}
+              x={p.x}
+              y={p.out_y}
+              width={p.bar_w}
+              height={p.out_h}
+              rx="1"
+              class="metrics-bar-out"
+            >
+              <title>
+                Entry #{p.entry_id}: {p.input_tokens} in / {p.output_tokens} out{if p.tps,
+                  do: " · #{p.tps} tok/s",
+                  else: ""}
+              </title>
+            </rect>
+          </g>
+          <polyline
+            :if={chart.has_tps? && chart.line_points != ""}
+            points={chart.line_points}
+            class="metrics-tps-line"
+          />
+          <circle
+            :for={p <- chart.points}
+            :if={is_number(p.tps_y)}
+            cx={p.cx}
+            cy={p.tps_y}
+            r="2"
+            class="metrics-tps-dot"
+          >
+            <title>Entry #{p.entry_id}: {p.tps} tok/s ({p.output_tokens} out)</title>
+          </circle>
+        </svg>
+      </div>
     </div>
 
     <div class="sidebar-section sidebar-divider">

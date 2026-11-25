@@ -132,6 +132,67 @@ defmodule HWeb.TranscriptTest do
       assert Transcript.compact_assigns(t2).run_active? == false
       assert Transcript.compact_assigns(t2).cursor_seq == 2
     end
+
+    test "collects per-turn token and tok/s metrics from snapshots and commits" do
+      {:ok, _rows, t1} =
+        Transcript.apply_snapshot(Transcript.new(session_id: "s1", conversation_id: "1"), %{
+          "seq" => 2,
+          "entries" => [
+            %{"id" => "1", "kind" => "user", "created_at" => 1_000, "data" => %{}},
+            %{
+              "id" => "2",
+              "kind" => "assistant",
+              "created_at" => 3_000,
+              "data" => %{
+                "content" => [%{"type" => "text", "text" => "hi"}],
+                "usage" => %{"input_tokens" => 100, "output_tokens" => 50},
+                "duration_ms" => 1_000
+              }
+            }
+          ],
+          "docs" => %{"live" => %{}, "inbox" => [], "agent" => %{}, "usage" => %{}}
+        })
+
+      assert [
+               %{
+                 entry_id: "2",
+                 input_tokens: 100,
+                 output_tokens: 50,
+                 total_tokens: 150,
+                 tps: 50.0
+               }
+             ] =
+               Transcript.compact_assigns(t1).turn_metrics
+
+      assert {:ok, _rows, t2} =
+               Transcript.apply_commit(t1, %{
+                 "seq" => 3,
+                 "appended_entries" => [
+                   %{
+                     "id" => "3",
+                     "kind" => "assistant",
+                     "created_at" => 5_000,
+                     "data" => %{
+                       "content" => [%{"type" => "text", "text" => "next"}],
+                       "usage" => %{"input_tokens" => 200, "output_tokens" => 40}
+                     }
+                   }
+                 ],
+                 "doc_ops" => %{}
+               })
+
+      assert [
+               %{entry_id: "2", tps: 50.0},
+               %{
+                 entry_id: "3",
+                 input_tokens: 200,
+                 output_tokens: 40,
+                 total_tokens: 240,
+                 duration_ms: 2_000,
+                 tps: 20.0
+               }
+             ] = Transcript.compact_assigns(t2).turn_metrics
+    end
   end
 
   describe "subagent tool_call and tool_result projection" do
