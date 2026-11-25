@@ -984,7 +984,7 @@ defmodule H.Daemon do
   end
 
   defp build_fork_agent_overrides(source_agent) when is_map(source_agent) do
-    ["model", "thinking", "system_prompt", "tools"]
+    ["model", "thinking", "system_prompt", "tools", "budget", "approval_policy"]
     |> Enum.reduce(%{}, fn key, acc ->
       case Map.fetch(source_agent, key) do
         {:ok, val} -> Map.put(acc, key, val)
@@ -1407,6 +1407,37 @@ defmodule H.Daemon do
 
   def execute_command(_session_id, _raw_envelope, _opts) do
     {:error, {:bad_request, "command envelope must be a map"}}
+  end
+
+  @doc "Validates and delivers an external wake signal to `H.Session.Server`."
+  @spec deliver_signal(String.t(), map(), keyword()) ::
+          {:ok, map()}
+          | {:error, :not_found | {:bad_request, String.t()} | {:conflict, String.t()} | term()}
+  def deliver_signal(session_id, params, opts \\ [])
+
+  def deliver_signal(session_id, params, opts)
+      when is_binary(session_id) and is_map(params) and is_list(opts) do
+    H.Daemon.Maintenance.admit(opts, fn -> do_deliver_signal(session_id, params, opts) end)
+  end
+
+  def deliver_signal(_session_id, _params, _opts) do
+    {:error, {:bad_request, "expected a map"}}
+  end
+
+  defp do_deliver_signal(session_id, params, opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- Validation.ensure_not_quarantined(entry),
+         :ok <-
+           if(entry.status == "archived",
+             do: {:error, {:conflict, "session is archived"}},
+             else: :ok
+           ),
+         {:ok, validated} <- Validation.validate_signal_params(params) do
+      call_session(entry, opts, &Server.deliver_signal(&1, validated))
+    end
   end
 
   defp dispatch_command(session_id, raw_envelope, opts) do

@@ -58,7 +58,9 @@ defmodule H.Document do
       "thinking" => "medium",
       "system_prompt" => nil,
       "instructions" => nil,
-      "tools" => @default_tools
+      "tools" => @default_tools,
+      "budget" => Keyword.get(opts, :default_budget),
+      "approval_policy" => Keyword.get(opts, :default_approval_policy, "never")
     }
   end
 
@@ -147,27 +149,61 @@ defmodule H.Document do
   """
   @spec configure_agent(map(), map()) :: {map(), [op()]}
   def configure_agent(agent, updates) when is_map(agent) and is_map(updates) do
-    allowed = [:model, :thinking, :system_prompt, :instructions, :tools]
+    allowed = [
+      :model,
+      :thinking,
+      :system_prompt,
+      :instructions,
+      :tools,
+      :budget,
+      :approval_policy
+    ]
 
     Enum.reduce(allowed, {agent, []}, fn atom_key, {acc_doc, acc_ops} ->
       key = Atom.to_string(atom_key)
 
-      cond do
-        Map.has_key?(updates, key) ->
-          val = Map.fetch!(updates, key)
+      raw_val =
+        cond do
+          Map.has_key?(updates, key) -> {:ok, Map.fetch!(updates, key)}
+          Map.has_key?(updates, atom_key) -> {:ok, Map.fetch!(updates, atom_key)}
+          true -> :error
+        end
+
+      case raw_val do
+        {:ok, val} ->
+          val = normalize_agent_field(atom_key, val)
           {next_doc, ops} = set(acc_doc, [key], val)
           {next_doc, acc_ops ++ ops}
 
-        Map.has_key?(updates, atom_key) ->
-          val = Map.fetch!(updates, atom_key)
-          {next_doc, ops} = set(acc_doc, [key], val)
-          {next_doc, acc_ops ++ ops}
-
-        true ->
+        :error ->
           {acc_doc, acc_ops}
       end
     end)
   end
+
+  defp normalize_agent_field(:budget, nil), do: nil
+
+  defp normalize_agent_field(:budget, val) when is_map(val) do
+    normalized =
+      Enum.reduce(val, %{}, fn
+        {k, v}, acc when k in [:max_turns, "max_turns"] and not is_nil(v) ->
+          Map.put(acc, "max_turns", v)
+
+        {k, v}, acc when k in [:max_cost_usd, "max_cost_usd"] and not is_nil(v) ->
+          Map.put(acc, "max_cost_usd", v * 1.0)
+
+        {k, v}, acc when k in [:max_elapsed_ms, "max_elapsed_ms"] and not is_nil(v) ->
+          Map.put(acc, "max_elapsed_ms", v)
+
+        _, acc ->
+          acc
+      end)
+
+    if map_size(normalized) == 0, do: nil, else: normalized
+  end
+
+  defp normalize_agent_field(:budget, other), do: other
+  defp normalize_agent_field(_key, val), do: val
 
   @doc """
   Accumulates turn usage metrics into the `"usage"` document and returns

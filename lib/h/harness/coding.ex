@@ -10,9 +10,9 @@ defmodule H.Harness.Coding do
   @behaviour H.Harness
 
   alias H.ExecutionEnv
-  alias H.Tools.{Bash, Edit, Read, SearchHistory, Subagent, Write}
+  alias H.Tools.{Bash, Edit, Read, SearchHistory, Subagent, WaitSignal, Write}
 
-  @base_tools [Read, Write, Edit, Bash, SearchHistory]
+  @base_tools [Read, Write, Edit, Bash, SearchHistory, WaitSignal]
   @default_max_subagent_depth 1
   @max_parent_hops 25
   @max_agents_bytes 65_536

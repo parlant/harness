@@ -7,7 +7,7 @@ defmodule H.Session.Server.Commands do
 
   alias H.{Document, Storage, Submission, Task}
   alias H.Session.{Compaction, UserShell}
-  alias H.Session.Server.{Generation, State, Submissions}
+  alias H.Session.Server.{Generation, State, Submissions, Tools}
 
   def stage(from, cmd, state, staged_rev) do
     req_id = cmd.request_id
@@ -89,6 +89,10 @@ defmodule H.Session.Server.Commands do
 
   defp dispatch(from, "abort", cid, req_id, fp, args, state, _staged_rev) do
     stage_abort(from, cid, req_id, fp, args, state)
+  end
+
+  defp dispatch(from, "approve_tool", cid, req_id, fp, args, state, _staged_rev) do
+    stage_approve_tool(from, cid, req_id, fp, args, state)
   end
 
   defp dispatch(from, "workspace_wait", cid, req_id, fp, args, state, _staged_rev) do
@@ -813,40 +817,313 @@ defmodule H.Session.Server.Commands do
   defp stage_abort(from, cid, req_id, fp, args, state, command \\ "abort") do
     now = System.system_time(:millisecond)
     reason = Map.get(args, :reason) || "aborted"
-    {:ok, sub_id, store} = Storage.mint_id(state.store)
-    state = %{state | store: store}
+    task_id = Map.get(args, :task_id)
 
-    {all_abort_writes, ev, all_kill_effects, _aborted?, state} =
-      abort_conversation_tasks(cid, reason, state, now)
+    if is_integer(task_id) and command == "abort" do
+      stage_task_abort(from, cid, req_id, fp, args, task_id, reason, state, now)
+    else
+      {:ok, sub_id, store} = Storage.mint_id(state.store)
+      state = %{state | store: store}
 
-    sub =
-      Submission.new(%{
-        id: sub_id,
-        request_id: req_id,
-        fingerprint: fp,
-        kind: command,
-        status: "done",
-        conversation_id: cid,
-        reason: reason,
-        created_at: now
-      })
+      {all_abort_writes, ev, all_kill_effects, _aborted?, state} =
+        abort_conversation_tasks(cid, reason, state, now)
 
-    writes =
-      [{:check, {:unique_request_id, req_id, fp}}, {:put_submission, sub}] ++ all_abort_writes
+      sub =
+        Submission.new(%{
+          id: sub_id,
+          request_id: req_id,
+          fingerprint: fp,
+          kind: command,
+          status: "done",
+          conversation_id: cid,
+          reason: reason,
+          created_at: now
+        })
 
-    staged = %{
-      raw_item:
-        {:command, from,
-         %{command: command, conversation_id: cid, request_id: req_id, args: args}},
-      writes: writes,
-      conv_events: %{cid => ev},
-      submissions: [sub],
-      effects: all_kill_effects,
-      reply_from: from,
-      receipt: Submission.to_receipt(sub, state.seq)
-    }
+      writes =
+        [{:check, {:unique_request_id, req_id, fp}}, {:put_submission, sub}] ++ all_abort_writes
 
-    {:batch, staged, state}
+      staged = %{
+        raw_item:
+          {:command, from,
+           %{command: command, conversation_id: cid, request_id: req_id, args: args}},
+        writes: writes,
+        conv_events: %{cid => ev},
+        submissions: [sub],
+        effects: all_kill_effects,
+        reply_from: from,
+        receipt: Submission.to_receipt(sub, state.seq)
+      }
+
+      {:batch, staged, state}
+    end
+  end
+
+  defp stage_task_abort(from, cid, req_id, fp, args, task_id, reason, state, now) do
+    case Map.get(state.tasks, task_id) do
+      nil ->
+        {:immediate, from, {:error, :not_found}, [], state}
+
+      task ->
+        if task_belongs_to_conv?(task, cid, state) do
+          if task.status == "terminal" do
+            {:immediate, from, {:error, {:conflict, "task_not_active"}}, [], state}
+          else
+            {:ok, sub_id, store} = Storage.mint_id(state.store)
+            state = %{state | store: store}
+
+            {abort_writes, ev, kill_effects, state} =
+              case task.kind do
+                "tool_call" ->
+                  Tools.stage_abort_single_tool(task, cid, reason, state, now)
+
+                "generation" ->
+                  {w, st, eff} = Generation.abort_generation_run(task, cid, reason, state, now)
+                  {w, build_conv_event(w, st.docs[cid]["live"]), eff, st}
+
+                "compaction" ->
+                  {w, st, eff} = Generation.abort_compaction_run(task, cid, reason, state, now)
+                  {w, build_conv_event(w, st.docs[cid]["live"]), eff, st}
+
+                "user_shell" ->
+                  {w, st, eff} = UserShell.stage_abort(task, cid, reason, state, now)
+                  {w, build_conv_event(w, st.docs[cid]["live"]), eff, st}
+
+                _ ->
+                  aborted = Task.abort(task, reason, now)
+                  st = State.put_task(state, aborted)
+                  {[{:put_task, aborted}], %{entries: [], doc_ops: %{}}, [], st}
+              end
+
+            sub =
+              Submission.new(%{
+                id: sub_id,
+                request_id: req_id,
+                fingerprint: fp,
+                kind: "abort",
+                status: "done",
+                conversation_id: cid,
+                reason: reason,
+                created_at: now
+              })
+
+            writes =
+              [{:check, {:unique_request_id, req_id, fp}}, {:put_submission, sub}] ++
+                abort_writes
+
+            staged = %{
+              raw_item:
+                {:command, from,
+                 %{command: "abort", conversation_id: cid, request_id: req_id, args: args}},
+              writes: writes,
+              conv_events: %{cid => ev},
+              submissions: [sub],
+              effects: kill_effects,
+              reply_from: from,
+              receipt: Submission.to_receipt(sub, state.seq)
+            }
+
+            {:batch, staged, state}
+          end
+        else
+          {:immediate, from, {:error, :not_found}, [], state}
+        end
+    end
+  end
+
+  defp task_belongs_to_conv?(task, cid, state) do
+    case task.checkpoint["conversation_id"] do
+      ^cid ->
+        true
+
+      nil ->
+        case task.owner do
+          {:conversation, ^cid} ->
+            true
+
+          {:task, parent_id} ->
+            get_in(state.tasks, [parent_id, Access.key(:owner)]) == {:conversation, cid}
+
+          _ ->
+            false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp build_conv_event(writes, live) do
+    appended =
+      Enum.flat_map(writes, fn
+        {:append_entry, e} -> [e]
+        _ -> []
+      end)
+
+    %{entries: appended, doc_ops: %{"live" => [["replace", live]]}}
+  end
+
+  defp stage_approve_tool(from, cid, req_id, fp, args, state) do
+    task_id = args.task_id
+    decision = args.decision
+    reason = Map.get(args, :reason)
+
+    case Map.get(state.tasks, task_id) do
+      nil ->
+        {:immediate, from, {:error, :not_found}, [], state}
+
+      task ->
+        if not task_belongs_to_conv?(task, cid, state) do
+          {:immediate, from, {:error, :not_found}, [], state}
+        else
+          if task.kind != "tool_call" or task.status != "waiting" or
+               get_in(task.wake, ["on"]) != "approval" do
+            {:immediate, from, {:error, {:conflict, "task_not_awaiting_approval"}}, [], state}
+          else
+            now = System.system_time(:millisecond)
+            {:ok, sub_id, store} = Storage.mint_id(state.store)
+            state = %{state | store: store}
+            call_id = task.checkpoint["call_id"]
+            name = task.checkpoint["name"]
+
+            sub =
+              Submission.new(%{
+                id: sub_id,
+                request_id: req_id,
+                fingerprint: fp,
+                kind: "approve_tool",
+                status: "done",
+                conversation_id: cid,
+                reason: reason,
+                created_at: now
+              })
+
+            if decision == "allow" do
+              memos =
+                (task.memos || %{})
+                |> Map.put("approval_decision", "allow")
+                |> Map.put("approved_at", now)
+                |> then(fn m ->
+                  if is_binary(reason) and reason != "",
+                    do: Map.put(m, "approval_reason", reason),
+                    else: m
+                end)
+
+              pending_task = %{
+                task
+                | status: "pending",
+                  wake: nil,
+                  memos: memos,
+                  checkpoint: Map.put(task.checkpoint, "phase", "approved"),
+                  updated_at: now
+              }
+
+              live =
+                (state.docs[cid]["live"] || %{})
+                |> State.put_tool_status(call_id, "pending")
+                |> Tools.clear_approval_entry(task.id)
+
+              state = state |> State.put_task(pending_task) |> State.put_doc(cid, "live", live)
+
+              writes = [
+                {:check, {:unique_request_id, req_id, fp}},
+                {:put_submission, sub},
+                {:put_task, pending_task},
+                {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}
+              ]
+
+              staged = %{
+                raw_item:
+                  {:command, from,
+                   %{
+                     command: "approve_tool",
+                     conversation_id: cid,
+                     request_id: req_id,
+                     args: args
+                   }},
+                writes: writes,
+                conv_events: %{cid => %{entries: [], doc_ops: %{"live" => [["replace", live]]}}},
+                submissions: [sub],
+                effects: [{:spawn_tool, cid, pending_task.id}],
+                reply_from: from,
+                receipt: Submission.to_receipt(sub, state.seq)
+              }
+
+              {:batch, staged, state}
+            else
+              {:ok, entry_id, store} = Storage.mint_id(state.store)
+              state = %{state | store: store}
+
+              deny_msg =
+                if is_binary(reason) and String.trim(reason) != "" do
+                  "Tool '#{name}' execution denied by operator: #{reason}"
+                else
+                  "Tool '#{name}' execution denied by operator."
+                end
+
+              entry_data = %{
+                "tool_call_id" => call_id,
+                "name" => name,
+                "content" => [%{"type" => "text", "text" => deny_msg}],
+                "details" =>
+                  %{
+                    "denied" => true,
+                    "diagnostic" => "tool_denied"
+                  }
+                  |> then(fn d ->
+                    if is_binary(reason) and reason != "",
+                      do: Map.put(d, "reason", reason),
+                      else: d
+                  end),
+                "is_error" => true,
+                "diagnostic" => "tool_denied"
+              }
+
+              entry = State.build_entry(entry_id, cid, "tool_result", entry_data, now)
+              state = State.record_entry(state, cid, entry_id)
+
+              done_task =
+                Task.complete(
+                  task,
+                  %{"entry_id" => entry_id, "is_error" => true, "diagnostic" => "tool_denied"},
+                  now
+                )
+
+              live =
+                (state.docs[cid]["live"] || %{})
+                |> State.put_tool_status(call_id, "done")
+                |> Tools.clear_approval_entry(task.id)
+
+              state = state |> State.put_task(done_task) |> State.put_doc(cid, "live", live)
+
+              {:batch, tool_staged, state} =
+                Tools.stage_after_tool_settled(cid, done_task, entry, live, state, now, [])
+
+              writes =
+                [{:check, {:unique_request_id, req_id, fp}}, {:put_submission, sub}] ++
+                  tool_staged.writes
+
+              staged = %{
+                tool_staged
+                | raw_item:
+                    {:command, from,
+                     %{
+                       command: "approve_tool",
+                       conversation_id: cid,
+                       request_id: req_id,
+                       args: args
+                     }},
+                  writes: writes,
+                  submissions: [sub],
+                  reply_from: from,
+                  receipt: Submission.to_receipt(sub, state.seq)
+              }
+
+              {:batch, staged, state}
+            end
+          end
+        end
+    end
   end
 
   defp stage_withdraw(from, cid, req_id, fp, args, state, staged_rev) do

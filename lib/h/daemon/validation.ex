@@ -117,17 +117,29 @@ defmodule H.Daemon.Validation do
     end
   end
 
+  @signal_topic_regex ~r/\A[a-zA-Z0-9:._-]{1,80}\z/
+  @max_signal_payload_bytes 16_384
+
   def validate_optional_agent(nil), do: {:ok, nil}
 
   def validate_optional_agent(agent) when is_map(agent) do
-    Schema.validate_map(agent, [
-      {:model, :string, required: false, nullable: true},
-      {:thinking, :string, required: false, nullable: true},
-      {:system_prompt, :string, required: false, nullable: true},
-      {:instructions, :string, required: false, nullable: true},
-      {:tools, {:list, :string}, required: false}
-    ])
+    with {:ok, base} <-
+           Schema.validate_map(agent, [
+             {:model, :string, required: false, nullable: true},
+             {:thinking, :string, required: false, nullable: true},
+             {:system_prompt, :string, required: false, nullable: true},
+             {:instructions, :string, required: false, nullable: true},
+             {:tools, {:list, :string}, required: false},
+             {:budget, :map, required: false, nullable: true},
+             {:approval_policy, :any, required: false}
+           ]),
+         {:ok, base} <- validate_agent_budget_field(base),
+         {:ok, base} <- validate_agent_approval_policy_field(base) do
+      {:ok, base}
+    end
   end
+
+  def validate_optional_agent(_), do: {:error, "agent: must be a map"}
 
   def validate_envelope(raw) do
     with {:ok, env} <-
@@ -142,6 +154,7 @@ defmodule H.Daemon.Validation do
                  "fork_and_submit",
                  "configure",
                  "abort",
+                 "approve_tool",
                  "workspace_wait",
                  "withdraw",
                  "rename",
@@ -273,6 +286,29 @@ defmodule H.Daemon.Validation do
     parse_strict_bool(val, default, field)
   end
 
+  def validate_signal_params(params) when is_map(params) do
+    with {:ok, validated} <-
+           Schema.validate_map(params, [
+             {:request_id, :non_empty_string, required: true},
+             {:topic, :non_empty_string, required: true},
+             {:payload, :any, required: false}
+           ]),
+         :ok <- validate_signal_request_id(validated.request_id),
+         :ok <- validate_signal_topic(validated.topic),
+         {:ok, payload} <- validate_signal_payload(Map.get(validated, :payload)) do
+      {:ok,
+       %{
+         request_id: validated.request_id,
+         topic: validated.topic,
+         payload: payload
+       }}
+    else
+      {:error, reason} when is_binary(reason) -> {:error, {:bad_request, reason}}
+    end
+  end
+
+  def validate_signal_params(_), do: {:error, {:bad_request, "expected a map"}}
+
   # Internal command & query validators
 
   defp parse_order(nil), do: {:ok, :desc}
@@ -355,13 +391,28 @@ defmodule H.Daemon.Validation do
   end
 
   defp validate_command_args("configure", raw_args) do
+    with {:ok, args} <-
+           Schema.validate_map(raw_args, [
+             {:model, :string, required: false, nullable: true},
+             {:thinking, :string, required: false, nullable: true},
+             {:system_prompt, :string, required: false, nullable: true},
+             {:instructions, :string, required: false, nullable: true},
+             {:tools, {:list, :string}, required: false},
+             {:budget, :map, required: false, nullable: true},
+             {:approval_policy, :any, required: false},
+             {:expected_seq, {:int, min: 0}, required: false, nullable: true}
+           ]),
+         {:ok, args} <- validate_agent_budget_field(args),
+         {:ok, args} <- validate_agent_approval_policy_field(args) do
+      {:ok, args}
+    end
+  end
+
+  defp validate_command_args("approve_tool", raw_args) do
     Schema.validate_map(raw_args, [
-      {:model, :string, required: false, nullable: true},
-      {:thinking, :string, required: false, nullable: true},
-      {:system_prompt, :string, required: false, nullable: true},
-      {:instructions, :string, required: false, nullable: true},
-      {:tools, {:list, :string}, required: false},
-      {:expected_seq, {:int, min: 0}, required: false, nullable: true}
+      {:task_id, :pos_int, required: true},
+      {:decision, {:enum, ["allow", "deny"]}, required: true},
+      {:reason, :string, required: false, nullable: true}
     ])
   end
 
@@ -560,5 +611,94 @@ defmodule H.Daemon.Validation do
       {:ok, _} -> {:error, {:bad_request, "#{field} must be between #{min} and #{max}"}}
       {:error, reason} -> {:error, {:bad_request, "#{field}: #{reason}"}}
     end
+  end
+
+  defp validate_agent_budget_field(%{budget: nil} = map), do: {:ok, map}
+
+  defp validate_agent_budget_field(%{budget: budget} = map) when is_map(budget) do
+    with {:ok, parsed} <-
+           Schema.validate_map(budget, [
+             {:max_turns, :pos_int, required: false, nullable: true},
+             {:max_cost_usd, :any, required: false, nullable: true},
+             {:max_elapsed_ms, :pos_int, required: false, nullable: true}
+           ]),
+         :ok <- validate_optional_pos_float(Map.get(parsed, :max_cost_usd), "budget.max_cost_usd") do
+      clean =
+        parsed
+        |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+        |> Enum.into(%{}, fn
+          {:max_cost_usd, v} -> {"max_cost_usd", v * 1.0}
+          {:max_turns, v} -> {"max_turns", v}
+          {:max_elapsed_ms, v} -> {"max_elapsed_ms", v}
+        end)
+
+      {:ok, %{map | budget: if(map_size(clean) == 0, do: nil, else: clean)}}
+    end
+  end
+
+  defp validate_agent_budget_field(map), do: {:ok, map}
+
+  defp validate_optional_pos_float(nil, _field), do: :ok
+  defp validate_optional_pos_float(v, _field) when is_number(v) and v > 0, do: :ok
+  defp validate_optional_pos_float(_v, field), do: {:error, "#{field}: must be > 0"}
+
+  defp validate_agent_approval_policy_field(%{approval_policy: policy} = map) do
+    case policy do
+      p when p in ["never", "mutating"] ->
+        {:ok, map}
+
+      tools when is_list(tools) ->
+        if Enum.all?(tools, &(is_binary(&1) and String.trim(&1) != "")) do
+          {:ok, %{map | approval_policy: Enum.uniq(tools)}}
+        else
+          {:error,
+           "approval_policy: must be \"never\", \"mutating\", or a list of tool name strings"}
+        end
+
+      _ ->
+        {:error,
+         "approval_policy: must be \"never\", \"mutating\", or a list of tool name strings"}
+    end
+  end
+
+  defp validate_agent_approval_policy_field(map), do: {:ok, map}
+
+  defp validate_signal_request_id(req_id) when is_binary(req_id) do
+    if byte_size(req_id) in 1..128 and String.valid?(req_id) and
+         not String.contains?(req_id, <<0>>) do
+      :ok
+    else
+      {:error, "request_id: must be 1..128 UTF-8 bytes"}
+    end
+  end
+
+  defp validate_signal_topic(topic) when is_binary(topic) do
+    if Regex.match?(@signal_topic_regex, topic) do
+      :ok
+    else
+      {:error, "topic: must match [a-zA-Z0-9:._-]{1,80}"}
+    end
+  end
+
+  defp validate_signal_payload(nil), do: {:ok, nil}
+
+  defp validate_signal_payload(payload) do
+    if is_map(payload) or is_list(payload) or is_binary(payload) or is_number(payload) or
+         is_boolean(payload) do
+      encoded =
+        IO.iodata_to_binary(
+          JSON.encode_to_iodata!(H.Session.Server.State.stringify_json(payload))
+        )
+
+      if byte_size(encoded) <= @max_signal_payload_bytes do
+        {:ok, JSON.decode!(encoded)}
+      else
+        {:error, "payload: exceeds #{@max_signal_payload_bytes} bytes"}
+      end
+    else
+      {:error, "payload: must be valid JSON"}
+    end
+  rescue
+    _ -> {:error, "payload: must be valid JSON"}
   end
 end

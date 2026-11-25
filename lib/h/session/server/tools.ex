@@ -6,8 +6,8 @@ defmodule H.Session.Server.Tools do
   """
 
   alias H.{Document, ExecutionEnv, Storage, Task, Tool}
-  alias H.Session.{LiveOutput, Subagents}
-  alias H.Session.Server.{State, Stream, Submissions, WorkspaceWait}
+  alias H.Session.{LiveOutput, Signals, Subagents}
+  alias H.Session.Server.{Generation, State, Stream, Submissions, WorkspaceWait}
 
   @doc """
   Computes the next `{:spawn_tool, cid, tid}` effects for a generation's tool round.
@@ -23,12 +23,12 @@ defmodule H.Session.Server.Tools do
       |> Enum.map(&Map.get(state.tasks, &1))
       |> Enum.reject(&is_nil/1)
 
-    non_subagent_running? =
+    non_subagent_active? =
       Enum.any?(children, fn t ->
-        t.status == "running" and t.checkpoint["name"] != "subagent"
+        t.status in ["running", "waiting"] and t.checkpoint["name"] != "subagent"
       end)
 
-    if non_subagent_running? do
+    if non_subagent_active? do
       []
     else
       pending_subagents =
@@ -62,19 +62,27 @@ defmodule H.Session.Server.Tools do
     tool = if Tool.selected?(name, state.docs[cid]["agent"]["tools"]), do: state.tools[name]
 
     with {:ok, args} <- validate_tool(tool, name, args) do
-      if tool == H.Tools.Subagent do
-        Subagents.spawn_or_dispatch(cid, task, args, state, apply_effects_fn)
-      else
-        with {:ok, env, task} <- bind_tool_cwd(tool, args, task, state),
-             {:ok, state} <- maybe_acquire_tool_lease(tool, cid, task, env, state) do
-          start_worker(cid, task, tool, args, env, state)
-        else
-          {:waiting, state} ->
-            state
+      cond do
+        requires_approval?(tool, name, task, state.docs[cid]["agent"]) ->
+          park_for_approval(cid, task, tool, name, args, state, apply_effects_fn)
 
-          {:error, diagnostic, message} ->
-            commit_immediate_error(cid, task, message, diagnostic, state, apply_effects_fn)
-        end
+        tool == H.Tools.Subagent ->
+          Subagents.spawn_or_dispatch(cid, task, args, state, apply_effects_fn)
+
+        tool == H.Tools.WaitSignal ->
+          Signals.dispatch_wait_signal(cid, task, args, state, apply_effects_fn)
+
+        true ->
+          with {:ok, env, task} <- bind_tool_cwd(tool, args, task, state),
+               {:ok, state} <- maybe_acquire_tool_lease(tool, cid, task, env, state) do
+            start_worker(cid, task, tool, args, env, state)
+          else
+            {:waiting, state} ->
+              state
+
+            {:error, diagnostic, message} ->
+              commit_immediate_error(cid, task, message, diagnostic, state, apply_effects_fn)
+          end
       end
     else
       {:error, diagnostic, message} ->
@@ -326,7 +334,9 @@ defmodule H.Session.Server.Tools do
         {:batch, staged, state}
 
       true ->
-        {round_writes, state, round_effects} = finish_tool_round_stage(gen_task, state, now)
+        {round_writes, state, round_effects} =
+          finish_tool_round_stage(gen_task, state, now, entry: entry)
+
         next_live = state.docs[cid]["live"]
 
         appended =
@@ -365,58 +375,97 @@ defmodule H.Session.Server.Tools do
     end
   end
 
-  def finish_tool_round_stage(gen_task, state, now) do
+  def finish_tool_round_stage(gen_task, state, now, opts \\ []) do
     cid = gen_task.checkpoint["conversation_id"]
-    turns = gen_task.checkpoint["turns"] || 1
 
-    {steer_entries, steer_sub_writes, steer_sub_ids, inbox_ops, state} =
-      Submissions.drain_inbox(cid, state, now, "steer")
+    case Generation.check_run_budget(gen_task, cid, state, now) do
+      {:exceeded, failure} ->
+        done_gen =
+          Task.complete(
+            gen_task,
+            %{"status" => "unanswered", "reason" => "budget_exceeded"},
+            now
+          )
 
-    next_turns = turns + 1
-    existing_sub_ids = gen_task.checkpoint["submission_ids"] || []
+        sub_ids = gen_task.checkpoint["submission_ids"] || []
 
-    next_gen = %{
-      gen_task
-      | status: "pending",
-        restarts: 0,
-        checkpoint:
-          gen_task.checkpoint
-          |> Map.merge(%{
-            "turns" => next_turns,
-            "retry_count" => 0,
-            "phase" => "stream",
-            "submission_ids" => existing_sub_ids ++ steer_sub_ids
-          })
-          |> Map.delete("tool_task_ids")
-          |> Map.delete("dispatch_policy")
-          |> Map.delete("retry")
-          |> Map.delete("wait"),
-        updated_at: now
-    }
+        {sub_writes, state} =
+          Submissions.settle(sub_ids, :unanswered, "budget_exceeded", state, now)
 
-    next_live = Submissions.initial_generation_live(next_gen.id, next_turns)
+        next_live =
+          (state.docs[cid]["live"] || %{})
+          |> Map.delete("run")
+          |> Map.delete("generation")
+          |> Map.delete("tools")
+          |> Map.delete("approvals")
+          |> Map.delete("workspace_wait")
+          |> Map.put("run_failure", failure)
 
-    state =
-      state
-      |> State.put_task(next_gen)
-      |> State.put_doc(cid, "live", next_live)
+        state =
+          state
+          |> State.put_task(done_gen)
+          |> State.put_doc(cid, "live", next_live)
 
-    writes =
-      Enum.map(steer_entries, &{:append_entry, &1}) ++
-        steer_sub_writes ++
-        [
-          {:put_task, next_gen},
-          {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
-        ] ++
-        if(inbox_ops == [],
-          do: [],
-          else: [
-            {:put_doc, {:conversation, cid, "inbox"},
-             Document.wrap("inbox", state.docs[cid]["inbox"])}
-          ]
-        )
+        writes =
+          [{:put_task, done_gen}] ++
+            sub_writes ++
+            [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
 
-    {writes, state, [{:spawn_generation, cid, next_gen.id}]}
+        {writes, state, []}
+
+      :ok ->
+        turns = gen_task.checkpoint["turns"] || 1
+
+        {steer_entries, steer_sub_writes, steer_sub_ids, inbox_ops, state} =
+          Submissions.drain_inbox(cid, state, now, "steer")
+
+        next_turns = turns + 1
+        existing_sub_ids = gen_task.checkpoint["submission_ids"] || []
+
+        next_gen = %{
+          gen_task
+          | status: "pending",
+            restarts: 0,
+            checkpoint:
+              gen_task.checkpoint
+              |> Map.merge(%{
+                "turns" => next_turns,
+                "retry_count" => 0,
+                "phase" => "stream",
+                "submission_ids" => existing_sub_ids ++ steer_sub_ids
+              })
+              |> Map.delete("tool_task_ids")
+              |> Map.delete("dispatch_policy")
+              |> Map.delete("retry")
+              |> Map.delete("wait"),
+            updated_at: now
+        }
+
+        next_live = Submissions.initial_generation_live(next_gen.id, next_turns)
+
+        state =
+          state
+          |> State.put_task(next_gen)
+          |> State.put_doc(cid, "live", next_live)
+
+        writes =
+          Enum.map(steer_entries, &{:append_entry, &1}) ++
+            steer_sub_writes ++
+            [
+              {:put_task, next_gen},
+              {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+            ] ++
+            if(inbox_ops == [],
+              do: [],
+              else: [
+                {:put_doc, {:conversation, cid, "inbox"},
+                 Document.wrap("inbox", state.docs[cid]["inbox"])}
+              ]
+            )
+
+        _ = opts
+        {writes, state, [{:spawn_generation, cid, next_gen.id}]}
+    end
   end
 
   def recover_unclean_tool_call(tool_task, state, now) do
@@ -545,11 +594,113 @@ defmodule H.Session.Server.Tools do
             end
 
           kill_eff =
-            State.worker_kill_effects(acc_s, tid) ++ subagent_effects
+            State.worker_kill_effects(acc_s, tid) ++
+              subagent_effects ++
+              [{:cancel_wake_timer, tid}]
 
           {acc_w ++ [{:append_entry, entry}, {:put_task, aborted_tool}], acc_s, acc_k ++ kill_eff}
       end
     end)
+  end
+
+  @doc """
+  Aborts a single active `tool_call` task (including running workers, parked
+  approvals, workspace waits, wait_signal timers, or parked subagents) without
+  aborting sibling tools unless all sibling tools are now terminal.
+  """
+  def stage_abort_single_tool(tool_task, cid, reason, state, now) do
+    call_id = tool_task.checkpoint["call_id"]
+    name = tool_task.checkpoint["name"]
+    eph = Map.get(state.ephemeral, cid)
+    live = Stream.merge_ephemeral_into_live(state.docs[cid]["live"], eph)
+    state = Stream.clear_ephemeral_for_conv(state, cid)
+    partial_out = get_in(live, ["tools", call_id, "output"]) || ""
+
+    {:ok, entry_id, store} = Storage.mint_id(state.store)
+    state = %{state | store: store}
+
+    entry_data = %{
+      "tool_call_id" => call_id,
+      "name" => name,
+      "content" => [%{"type" => "text", "text" => aborted_tool_message(name, partial_out)}],
+      "details" =>
+        put_result_cwd(
+          %{"aborted" => true, "abort_reason" => reason, "partial_output" => partial_out},
+          tool_task
+        ),
+      "is_error" => true,
+      "diagnostic" => "aborted"
+    }
+
+    entry = State.build_entry(entry_id, cid, "tool_result", entry_data, now)
+    state = State.record_entry(state, cid, entry_id)
+    aborted_tool = Task.abort(tool_task, reason, now)
+    state = State.put_task(state, aborted_tool)
+
+    {state, subagent_effects} =
+      case tool_task.memos do
+        %{"child_session_id" => child_sid, "mode" => mode} = memos
+        when is_binary(child_sid) and mode in ["wait", "await"] ->
+          child_cid = memos["child_conversation_id"] || 1
+          child_req_id = memos["child_request_id"]
+
+          next_s =
+            if is_binary(child_req_id),
+              do: Subagents.remove_watch(state, child_sid, child_req_id, tool_task.id),
+              else: state
+
+          unwatch_eff =
+            if is_binary(child_req_id),
+              do: [{:unwatch_subagent, child_sid, child_req_id}],
+              else: []
+
+          {next_s, unwatch_eff ++ [{:abort_subagent, child_sid, child_cid, "parent_aborted"}]}
+
+        _ ->
+          {state, []}
+      end
+
+    was_waiting_workspace? = get_in(state.workspace_waits, [cid, :task_id]) == tool_task.id
+    had_held_lease? = Map.has_key?(state.held_leases, cid) and tool_task.status == "running"
+
+    live =
+      live
+      |> State.put_tool_status(call_id, "done")
+      |> clear_approval_entry(tool_task.id)
+      |> then(fn l -> if was_waiting_workspace?, do: Map.delete(l, "workspace_wait"), else: l end)
+
+    state = State.put_doc(state, cid, "live", live)
+
+    base_effects =
+      State.worker_kill_effects(state, tool_task.id) ++
+        subagent_effects ++
+        [{:cancel_wake_timer, tool_task.id}] ++
+        if(was_waiting_workspace? or had_held_lease?, do: [{:release_lease, cid}], else: [])
+
+    {:batch, staged, state} =
+      stage_after_tool_settled(cid, aborted_tool, entry, live, state, now, base_effects)
+
+    {staged.writes, staged.conv_events[cid], staged.effects, state}
+  end
+
+  def clear_approval_entry(live, task_id) when is_map(live) do
+    case Map.get(live, "approvals") do
+      approvals when is_map(approvals) ->
+        remaining = Map.delete(approvals, to_string(task_id))
+
+        if map_size(remaining) == 0,
+          do: Map.delete(live, "approvals"),
+          else: Map.put(live, "approvals", remaining)
+
+      _ ->
+        live
+    end
+  end
+
+  def clear_approval_entry(live, _task_id), do: live
+
+  def approval_required?(tool_mod, name, task, agent_doc) do
+    requires_approval?(tool_mod, name, task, agent_doc)
   end
 
   def unsafe_running_tool?(task),
@@ -652,5 +803,73 @@ defmodule H.Session.Server.Tools do
 
   defp aborted_tool_message(name, partial) do
     "Tool '#{name}' was aborted.\n\nPartial output:\n#{partial}"
+  end
+
+  defp requires_approval?(tool_mod, name, task, agent_doc) do
+    if get_in(task.memos, ["approval_decision"]) == "allow" do
+      false
+    else
+      case Map.get(agent_doc || %{}, "approval_policy", "never") do
+        "mutating" -> tool_mod.mutating?()
+        list when is_list(list) -> name in list
+        _ -> false
+      end
+    end
+  end
+
+  defp park_for_approval(cid, tool_task, _tool_mod, name, validated_args, state, apply_effects_fn) do
+    now = System.system_time(:millisecond)
+    call_id = tool_task.checkpoint["call_id"]
+
+    cwd =
+      Map.get(validated_args, "cwd") ||
+        tool_task.checkpoint["exec_cwd"] ||
+        State.workspace_cwd(state.execution_env, state)
+
+    waiting_task = %{
+      Task.start_waiting(tool_task, now, %{"phase" => "approval"})
+      | wake: %{"on" => "approval", "call_id" => call_id},
+        started_at: tool_task.started_at || now
+    }
+
+    approval_record = %{
+      "task_id" => to_string(waiting_task.id),
+      "call_id" => call_id,
+      "tool_name" => name,
+      "arguments" => State.stringify_json(validated_args),
+      "cwd" => cwd,
+      "requested_at" => now
+    }
+
+    live =
+      (state.docs[cid]["live"] || %{})
+      |> State.put_tool_status(call_id, "awaiting_approval")
+      |> update_in(["approvals"], fn existing ->
+        Map.put(existing || %{}, to_string(waiting_task.id), approval_record)
+      end)
+
+    state = state |> State.put_task(waiting_task) |> State.put_doc(cid, "live", live)
+
+    writes = [
+      {:put_task, waiting_task},
+      {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", live)}
+    ]
+
+    case Storage.commit(state.store, [writes]) do
+      {:ok, %{seqs: [batch_seq]}, committed_store} ->
+        state = %{state | store: committed_store, seq: batch_seq}
+
+        state =
+          Stream.broadcast_commit_frame(state, cid, batch_seq, [], %{
+            "live" => [["replace", live]]
+          })
+
+        State.report_catalog_active(state)
+        apply_effects_fn.([], state)
+
+      {:error, reason} ->
+        send(self(), {:stop_storage_failed, reason})
+        %{state | storage_failed: true}
+    end
   end
 end
