@@ -21,6 +21,20 @@ test("commands, directory arguments and inline paths have distinct contexts", ()
   assert.equal(atEnd("/steer !cat src/fil").shell, true);
 });
 
+test("fork-edit keeps slash text literal while allowing file completion", () => {
+  const prompt = "/tree";
+  assert.equal(composerContext(prompt, prompt.length, false, false), null);
+  const path = "/tree see @client";
+  assert.equal(composerContext(path, path.length, false, false).kind, "workspace_file");
+
+  const editor = Object.assign(Object.create(Completer.prototype), {
+    composer: true,
+    input: { value: prompt, dataset: { forkEdit: "true" } },
+    isCurrent: () => false
+  });
+  assert.equal(editor.handleKeydown({ key: "Enter" }), false);
+});
+
 test("completion replaces the whole active token but preserves surrounding text", () => {
   const arg = "/thinking higXX thanks";
   assert.deepEqual(completionEdit(arg, composerContext(arg, 13), { value: "high" }), {
@@ -43,7 +57,7 @@ test("selecting an @ folder preserves the trigger until a file is picked", () =>
 test("an async result cannot overwrite a new lookup, a command, or a dismissed editor", () => {
   // Exercise lookup transitions without a DOM layout (covered separately in a browser).
   const requests = [];
-  const input = { id: "prompt-input", value: "", selectionStart: 0, selectionEnd: 0 };
+  const input = { id: "prompt-input", value: "", selectionStart: 0, selectionEnd: 0, dataset: {} };
   const subject = Object.assign(Object.create(Completer.prototype), {
     input, composer: true, event: "complete_path", items: [],
     meta: { commands: [{ name: "/compact" }] },

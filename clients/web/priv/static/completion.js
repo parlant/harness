@@ -25,8 +25,8 @@ function slashLine(value) {
 
 const staticArgs = ["/thinking", "/model", "/attention", "/archive", "/fork"];
 
-export function composerContext(value, cursor, explicit = false) {
-  if (slashLine(value) && !value.slice(0, cursor).trimStart().includes("\n")) {
+export function composerContext(value, cursor, explicit = false, allowCommands = true) {
+  if (allowCommands && slashLine(value) && !value.slice(0, cursor).trimStart().includes("\n")) {
     const leading = value.length - value.trimStart().length;
     const name = value.trimStart().match(/^\S+/)[0];
     const end = leading + name.length;
@@ -316,7 +316,7 @@ export class Completer {
 
   contextFor({ value, start, end }, explicit) {
     if (start !== end) return null;
-    return this.composer ? composerContext(value, start, explicit) : {
+    return this.composer ? composerContext(value, start, explicit, this.input.dataset.forkEdit !== "true") : {
       mode: "path", kind: this.kind, prefix: value.slice(0, start), start: 0, end: value.length
     };
   }
@@ -443,7 +443,7 @@ export class Completer {
     }
     if (open && event.key === "ArrowRight" && !this.view.ghost.hidden) return this.accept();
 
-    if (this.composer && event.key === "Enter" && slashLine(this.input.value)) {
+    if (this.composer && this.input.dataset.forkEdit !== "true" && event.key === "Enter" && slashLine(this.input.value)) {
       const line = this.input.value.trim();
       const command = line.split(/\s/, 1)[0].toLowerCase();
       const exact = this.meta.commands.some(cmd => cmd.name === command);

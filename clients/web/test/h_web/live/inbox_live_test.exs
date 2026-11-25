@@ -233,99 +233,67 @@ defmodule HWeb.InboxLiveTest do
   end
 
   describe "navigation between /inbox and SessionLive switcher" do
-    test "navigates from /inbox to /sessions/:sid?from=inbox, shows live switcher & return link, and jumps to next attention session",
+    test "navigates in inbox order while the sidebar shows only other sessions in its folder",
          %{
            conn: conn,
-           projects_dir: projects_dir,
+           projects_dir: cwd,
            owner_token: owner_token,
-           daemon_opts: daemon_opts,
+           daemon_opts: opts,
            pubsub: pubsub
          } do
-      catalog = Keyword.fetch!(daemon_opts, :catalog)
+      catalog = Keyword.fetch!(opts, :catalog)
+      other_dir = Path.join(cwd, "other")
+      File.mkdir_p!(other_dir)
 
-      dir_a = Path.join(projects_dir, "proj-a") |> Path.expand()
-      dir_b = Path.join(projects_dir, "proj-b") |> Path.expand()
-      File.mkdir_p!(dir_a)
-      File.mkdir_p!(dir_b)
-
-      {:ok, %{session: s1}} =
-        Daemon.create_session(%{"cwd" => dir_a, "title" => "First"}, daemon_opts)
-
-      {:ok, %{session: s2}} =
-        Daemon.create_session(%{"cwd" => dir_b, "title" => "Second"}, daemon_opts)
+      for {sid, dir} <- [{"current", cwd}, {"peer", cwd}, {"elsewhere", other_dir}] do
+        assert {:ok, _} = Daemon.create_session(%{session_id: sid, cwd: dir}, opts)
+      end
 
       conn = log_in_owner(conn, owner_token)
-      {:ok, inbox_view, _html} = live(conn, "/inbox")
+      {:ok, inbox, _} = live(conn, "/inbox")
 
-      # Click session s1 from /inbox -> navigates to /sessions/:sid?from=inbox
-      {:ok, session_view, _html} =
-        inbox_view
-        |> element(~s(a[data-session-id="#{s1.session_id}"]))
+      {:ok, view, _} =
+        inbox
+        |> element(~s(a[data-session-id="current"]))
         |> render_click()
-        |> follow_redirect(conn, "/sessions/#{s1.session_id}?from=inbox")
+        |> follow_redirect(conn, "/sessions/current?from=inbox")
 
-      # SessionLive is subscribed to :catalog as well as its conversation
-      assert Enum.any?(Registry.lookup(pubsub, :catalog), fn {pid, _} ->
-               pid == session_view.pid
-             end)
+      assert Enum.any?(Registry.lookup(pubsub, :catalog), fn {pid, _} -> pid == view.pid end)
+      assert has_element?(view, ~s(#app-menu a[href="/inbox"]), "Inbox")
+      assert has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="peer"]))
+      refute has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="current"]))
+      refute has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="elsewhere"]))
 
-      # Header shows <- Inbox return navigation and Next -> attention pill
-      assert has_element?(session_view, "#header-inbox-link.btn-inbox-return", "← Inbox")
-      assert has_element?(session_view, ~s(#next-attention-btn [aria-label="1 need attention"]))
-      assert has_element?(session_view, "#next-attention-btn .next-attention-label", "Next")
-
-      # Sidebar/mobile drawer shows All Sessions (Inbox) tree with both sessions
-      assert has_element?(
-               session_view,
-               ~s(#session-sidebar-inbox-tree a[data-session-id="#{s1.session_id}"].is-current)
-             )
-
-      assert has_element?(
-               session_view,
-               ~s(#session-sidebar-inbox-tree a[data-session-id="#{s2.session_id}"])
-             )
-
-      # Live catalog update inside SessionLive when s2 enters error state
-      {:ok, _} =
-        Catalog.report_runtime(catalog, s2.session_id, %{
-          active: false,
-          attention: "error",
-          activity_label: "model_error"
-        })
+      assert {:ok, _} =
+               Catalog.report_runtime(catalog, "peer", %{
+                 active: false,
+                 attention: "error",
+                 activity_label: "model_error"
+               })
 
       wait_until(fn ->
-        has_element?(
-          session_view,
-          "#next-attention-btn.is-error .next-attention-label",
-          "Next error"
-        ) and
-          has_element?(
-            session_view,
-            ~s(#session-sidebar-inbox-tree a[data-session-id="#{s2.session_id}"].is-error)
-          )
+        has_element?(view, ~s(#inbox-previous-session[href="/sessions/peer?from=inbox"])) and
+          has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="peer"].is-error))
       end)
 
-      # Jumping to next attention session opens s2?from=inbox
-      {:ok, s2_view, _html} =
-        session_view
-        |> element("#next-attention-btn")
+      {:ok, peer, _} =
+        view
+        |> element("#inbox-previous-session")
         |> render_click()
-        |> follow_redirect(conn, "/sessions/#{s2.session_id}?from=inbox")
+        |> follow_redirect(conn, "/sessions/peer?from=inbox")
 
-      assert has_element?(s2_view, "#session-details .session-id-label", s2.session_id)
-      assert has_element?(s2_view, "#header-inbox-link.btn-inbox-return", "← Inbox")
+      assert has_element?(peer, ~s(#inbox-next-session[href="/sessions/current?from=inbox"]))
 
-      # Clicking <- Inbox returns cleanly to /inbox
-      {:ok, returned_inbox, _html} =
-        s2_view
-        |> element("#header-inbox-link")
+      {:ok, returned, _} =
+        peer
+        |> element(~s(#app-menu a[href="/inbox"]))
         |> render_click()
         |> follow_redirect(conn, "/inbox")
 
-      assert has_element?(returned_inbox, "#inbox-workspace-tree")
+      assert has_element?(returned, "#inbox-workspace-tree")
     end
 
-    test "carries exact directory, tag, and search filters through Next, branch links, and return to Inbox",
+    test "carries exact directory, tag, and search filters through the inbox carets, branch links, and main menu",
          %{conn: conn, projects_dir: cwd, owner_token: owner_token, daemon_opts: opts} do
       catalog = Keyword.fetch!(opts, :catalog)
       other_cwd = Path.join(cwd, "child")
@@ -390,41 +358,29 @@ defmodule HWeb.InboxLiveTest do
         |> render_click()
         |> follow_redirect(conn, ~p"/sessions/current?#{session_filters}")
 
-      assert has_element?(
-               view,
-               "#carousel-filter-search-form select[name=workspace] option[selected]",
-               cwd
-             )
-
-      assert has_element?(
-               view,
-               "#carousel-filter-search-form select[name=tag] option[selected]",
-               "topic & notes"
-             )
-
-      refute has_element?(view, ~s(a[data-session-id^="wrong-"]))
-      assert has_element?(view, ~s(#next-attention-btn [aria-label="1 need attention"]))
-      assert has_element?(view, "#next-attention-btn .next-attention-label", "Next")
+      refute has_element?(view, ~s(.app-bar a[title*="wrong-"]))
+      assert has_element?(view, ".app-bar a.inbox-caret[title$='Review second']")
+      assert has_element?(view, ".app-bar button.inbox-caret[disabled]")
 
       view |> element("#branches-list a") |> render_click()
       assert_patch(view, ~p"/sessions/current/conversations/1?#{session_filters}")
 
       {:ok, peer, _} =
         view
-        |> element("#next-attention-btn")
+        |> element(".app-bar a.inbox-caret")
         |> render_click()
         |> follow_redirect(conn, ~p"/sessions/peer?#{session_filters}")
 
       {:ok, returned, _} =
         peer
-        |> element("#header-inbox-link")
+        |> element("#app-menu a", "Inbox")
         |> render_click()
         |> follow_redirect(conn, ~p"/inbox?#{filters}")
 
       refute has_element?(returned, ~s(a[data-session-id^="wrong-"]))
     end
 
-    test "updates carousel candidates on tag edits and lets Session details change and clear filters",
+    test "updates filtered inbox neighbors on tag edits without hiding same-folder sessions",
          %{conn: conn, projects_dir: cwd, owner_token: owner_token, daemon_opts: opts} do
       for {sid, tags} <- [{"current", ["work"]}, {"peer", ["work"]}, {"other", ["personal"]}] do
         assert {:ok, _} = Daemon.create_session(%{session_id: sid, cwd: cwd, tags: tags}, opts)
@@ -434,50 +390,19 @@ defmodule HWeb.InboxLiveTest do
       {:ok, view, _} = live(conn, "/sessions/current?from=inbox&tag=work")
       {:ok, peer, _} = live(conn, "/sessions/peer")
 
-      assert has_element?(
-               view,
-               ~s(#next-attention-btn[title="Jump to peer"] [aria-label="1 need attention"])
-             )
+      assert has_element?(view, ~s(.app-bar a.inbox-caret[title$=": peer"]))
+      assert has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="other"]))
+      refute has_element?(peer, ".app-bar .inbox-caret")
 
-      peer |> form("#session-tags-form", %{tags: "personal, urgent"}) |> render_submit()
-      assert has_element?(peer, ~s(#session-tags-input[value="personal, urgent"]))
-      wait_until(fn -> not has_element?(view, "#next-attention-btn") end)
+      peer
+      |> element(~s(#session-tags-form button[aria-label="Remove tag work"]))
+      |> render_click()
 
-      assert has_element?(
-               view,
-               "#carousel-filter-search-form select[name=tag] option[selected]",
-               "work"
-             )
+      wait_until(fn -> not has_element?(view, ".app-bar a.inbox-caret") end)
+      assert has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="peer"]))
 
-      view |> form("#carousel-filter-search-form", %{tag: "urgent"}) |> render_change()
-      assert_patch(view, ~p"/sessions/current?#{%{tag: "urgent", from: "inbox"}}")
-
-      assert has_element?(
-               view,
-               ~s(#next-attention-btn[title="Jump to peer"] [aria-label="1 need attention"])
-             )
-
-      refute has_element?(view, ~s(a[data-session-id="other"]))
-
-      view |> element("#carousel-filter-search-form a", "Clear filters") |> render_click()
-      assert_patch(view, "/sessions/current?from=inbox")
-
-      assert has_element?(
-               view,
-               "#carousel-filter-search-form select[name=tag] option[selected]",
-               "All tags"
-             )
-
-      assert has_element?(view, ~s(#next-attention-btn [aria-label="2 need attention"]))
-      assert has_element?(view, ~s(a[data-session-id="other"]))
-
-      assert {:ok, _} = Daemon.archive_session("other", %{archived: true}, opts)
-
-      view |> form("#carousel-filter-search-form", %{filter: "archived"}) |> render_change()
-      assert_patch(view, ~p"/sessions/current?#{%{filter: "archived", from: "inbox"}}")
-      refute has_element?(view, "#next-attention-btn")
-      assert has_element?(view, ~s(a[data-session-id="other"][data-archived="true"]))
-      refute has_element?(view, ~s(a[data-session-id="peer"]))
+      peer |> form("#session-tags-form", %{tags: "work"}) |> render_submit()
+      wait_until(fn -> has_element?(view, ~s(.app-bar a.inbox-caret[title$=": peer"])) end)
     end
 
     test "creates a new session from a workspace group header + New button and opens with ?from=inbox",
@@ -522,7 +447,7 @@ defmodule HWeb.InboxLiveTest do
       conn = log_in_owner(conn, owner_token)
       {:ok, view, _html} = live(conn, "/sessions/#{sid}?from=inbox")
 
-      assert has_element?(view, "#header-inbox-link.btn-inbox-return")
+      assert has_element?(view, ~s(#app-menu a[href="/inbox"]))
 
       view
       |> form("#composer-form", %{content: "Start branch"})
@@ -531,12 +456,12 @@ defmodule HWeb.InboxLiveTest do
       wait_until(fn -> render(view) =~ "Hello" end)
 
       view
-      |> element("#entries-stream article:first-of-type button[phx-click=\"fork_entry\"]")
+      |> element("#entries-stream .entry-assistant button[phx-click=\"fork_entry\"]")
       |> render_click()
 
       patch_path = assert_patch(view)
       assert patch_path =~ ~r"^/sessions/#{Regex.escape(sid)}/conversations/\d+\?from=inbox$"
-      assert has_element?(view, "#header-inbox-link.btn-inbox-return")
+      assert has_element?(view, ~s(#app-menu a[href="/inbox"]))
     end
 
     test "unsubscribes from :catalog PubSub when InboxLive and SessionLive terminate", %{
@@ -650,9 +575,14 @@ defmodule HWeb.InboxLiveTest do
       {s2_pos, _} = :binary.match(html, ~s(data-session-id="#{s2.session_id}"))
       assert s1_pos < s2_pos
 
-      # Opening s1: #next-attention-btn is absent because s2 does not need attention
+      # Carets traverse the inbox, including sessions already marked read.
       {:ok, s1_view, _} = live(conn, "/sessions/#{s1.session_id}?from=inbox")
-      refute has_element?(s1_view, "#next-attention-btn")
+
+      assert has_element?(
+               s1_view,
+               ~s(#inbox-next-session[href="/sessions/#{s2.session_id}?from=inbox"])
+             )
+
       assert has_element?(s1_view, "#session-attention-toggle", "Mark as read")
 
       # Toggle attention right from SessionLive header

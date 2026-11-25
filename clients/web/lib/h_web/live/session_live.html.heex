@@ -1,71 +1,32 @@
 <% profile = profile(@session, @cwd_missing?, @model_groups, @provider_filter, @agent) %>
-<div id="session" class="screen session-shell">
-  <Layouts.app_bar title={session_title(@session, @session_id)} section={:session}>
-    <:leading>
-      <.link
-        id="header-inbox-link"
-        navigate={InboxFilter.inbox_path(@inbox_filter)}
-        class={["bar-button", @from_inbox? && "btn-inbox-return"]}
-        aria-label="Back to Inbox"
-        title="Back to Inbox"
-      >← Inbox</.link>
-    </:leading>
+<div id="session" class="screen session-shell" phx-hook="SessionSidebar">
+  <Layouts.app_bar
+    title={session_title(@session, @session_id)}
+    section={:session}
+    inbox_path={InboxFilter.inbox_path(@inbox_filter)}
+  >
+    <:before_title :if={@inbox_neighbors}>
+      <InboxComponents.inbox_caret
+        direction={:previous}
+        neighbor={@inbox_neighbors.previous}
+        filter={@inbox_filter}
+      />
+    </:before_title>
+    <:after_title :if={@inbox_neighbors}>
+      <InboxComponents.inbox_caret
+        direction={:next}
+        neighbor={@inbox_neighbors.next}
+        filter={@inbox_filter}
+      />
+    </:after_title>
     <:actions>
-      <span
-        :if={@session && Map.get(@session, :archived, false)}
-        id="hdr-archived-badge"
-        class="badge badge-warn"
-      >archived</span>
-      <% next_error? =
-        @next_attention_session && @next_attention_session.attention in ["error", "quarantined"] %>
-      <.link
-        :if={@next_attention_session}
-        id="next-attention-btn"
-        navigate={InboxFilter.session_path(@next_attention_session.session_id, @inbox_filter)}
-        class={[
-          "bar-button session-attention-pill",
-          if(next_error?, do: "is-error", else: "is-idle")
-        ]}
-        aria-label={if next_error?, do: "Next error", else: "Next session needing attention"}
-        title={"Jump to #{@next_attention_session.title || @next_attention_session.session_id}"}
-      >
-        <span class="next-attention-label">{if next_error?, do: "Next error", else: "Next"}</span>
-        <span aria-hidden="true">→</span>
-        <span
-          :if={@other_attention_count > 0}
-          class="attention-count mono"
-          aria-label={"#{@other_attention_count} need attention"}
-        >{@other_attention_count}</span>
-      </.link>
       <button
-        id="session-tree-button"
+        id="session-actions-button"
         type="button"
         class="bar-button"
-        aria-haspopup="dialog"
-        aria-controls="session-tree-panel"
-        phx-click="open_session_tree"
-        aria-label="Session turn tree (/tree)"
-        title="Session turn tree (/tree)"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="6" cy="6" r="2.2" /><circle cx="18" cy="10" r="2.2" /><circle
-            cx="6"
-            cy="18"
-            r="2.2"
-          />
-          <path d="M6 8.2v7.6M8.2 6h4.8a3 3 0 0 1 3 3v.8" />
-        </svg>
-        <span class="session-tree-btn-label">Tree</span>
-      </button>
-      <button
-        id="session-details-button"
-        type="button"
-        class="bar-button"
-        aria-haspopup="dialog"
-        aria-controls="session-details"
-        data-open-panel="session-details"
-        aria-label="Session details and actions"
-        title="Session details and actions"
+        popovertarget="session-actions"
+        aria-label="Session actions"
+        title="Session actions"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle
           cx="12"
@@ -73,202 +34,79 @@
           r="1"
         /><circle cx="19" cy="12" r="1" /></svg>
       </button>
+      <button
+        id="session-details-button"
+        type="button"
+        class="bar-button"
+        aria-controls="session-details"
+        aria-expanded="false"
+        data-session-sidebar-toggle
+        aria-label="Session sidebar"
+        title="Session sidebar"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect
+          x="3"
+          y="5"
+          width="18"
+          height="14"
+          rx="2"
+        /><path d="M15 5v14" /></svg>
+      </button>
     </:actions>
   </Layouts.app_bar>
 
-  <Layouts.panel id="session-details" title="Session details" side>
-    <div class="session-detail-actions">
-      <p :if={@error_banner} class="flash-banner flash-error" role="alert">{@error_banner}</p>
-      <.link
-        :if={@session_parent}
-        id="header-parent-session-link"
-        navigate={
-          ~p"/sessions/#{@session_parent.session_id}/conversations/#{@session_parent.conversation_id}"
-        }
-        class="btn btn-sm"
-      >← Parent session</.link>
-      <.link
-        :if={@session && !@cwd_missing? && @session.status != "archived"}
-        id="session-review-link"
-        navigate={
-          InboxFilter.review_path(@session_id, @inbox_filter, @from_inbox?, @conversation_id)
-        }
-        class="btn btn-sm"
-      >
-        Review files
-      </.link>
-      <button
-        :if={
-          @session && @session.status != "archived" && !Map.get(@session, :archived, false) &&
-            !@run_active?
-        }
-        id="session-attention-toggle"
-        type="button"
-        class={[
-          "btn btn-sm",
-          if(Map.get(@session, :needs_attention, true),
-            do: "btn-inbox-return",
-            else: "btn-ghost"
-          )
-        ]}
-        phx-click="toggle_session_attention"
-        title={
-          if Map.get(@session, :needs_attention, true),
-            do: "Mark as not needing attention",
-            else: "Mark as needing attention"
-        }
-      >
-        {if Map.get(@session, :needs_attention, true),
-          do: "Mark as read",
-          else: "Mark for attention"}
-      </button>
-      <button
-        :if={@session && @session.status != "archived" && !Map.get(@session, :archived, false)}
-        id="archive-session-btn"
-        type="button"
-        class="btn btn-sm btn-ghost"
-        phx-click="archive_current_session"
-        title="Archive and unload this session"
-      >
-        Archive
-      </button>
-      <button
-        :if={@session && @session.status != "archived" && Map.get(@session, :archived, false)}
-        id="unarchive-session-btn"
-        type="button"
-        class="btn btn-sm btn-primary"
-        phx-click="unarchive_current_session"
-        title="Restore session to Inbox"
-      >
-        Unarchive
-      </button>
-    </div>
-    <div class="sidebar-section">
-      <div class="section-title">Session</div>
-      <div class="session-detail-badges">
-        <span class="badge mono">conv #{@conversation_id}</span>
-        <span :if={!is_nil(@cursor_seq)} id="hdr-seq" class="badge mono">seq {@cursor_seq}</span>
-        <span :if={usage_summary(@usage)} id="hdr-usage" class="badge mono">{usage_summary(@usage)}</span>
-      </div>
-      <div class="mono session-id-label">{@session_id}</div>
-      <div :if={@session} class="muted mono session-cwd">
-        {@session.env_id}: {@session.cwd}
-      </div>
-      <div
-        :if={@session_parent}
-        id="sidebar-parent-lineage"
-        class="session-parent-meta muted mono"
-      >
-        <span>Spawned from</span>
-        <.link
-          navigate={
-            ~p"/sessions/#{@session_parent.session_id}/conversations/#{@session_parent.conversation_id}"
-          }
-          class="session-parent-link"
-        >
-          {@session_parent.session_id} conv #{@session_parent.conversation_id}
-          <span :if={@session_parent.at_entry_id}> @ entry #{@session_parent.at_entry_id}</span>
-        </.link>
-      </div>
-      <form
-        :if={@session}
-        id="session-tags-form"
-        phx-submit="save_session_tags"
-        class="inbox-scope-controls"
-      >
-        <label class="field-label" for="session-tags-input">Session tags (comma-separated)</label>
-        <input
-          id="session-tags-input"
-          name="tags"
-          class="input"
-          value={Enum.join(Map.get(@catalog.by_id[@session_id] || @session, :tags, []), ", ")}
-        />
-        <button type="submit" class="btn btn-sm">Save tags</button>
-      </form>
-    </div>
-
-    <div class="sidebar-section">
-      <div class="sidebar-section-head">
-        <span class="section-title">Conversations</span>
-        <button
-          id="details-open-tree-btn"
-          type="button"
-          class="btn btn-sm btn-ghost"
-          data-close-panel
-          phx-click="open_session_tree"
-        >
-          Browse tree (/tree)
-        </button>
-      </div>
-      <ul id="branches-list" class="branch-list">
-        <li :for={conv <- @conversations}>
-          <.link
-            data-panel-navigate
-            patch={InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, conv.id)}
-            class={[
-              "branch-link mono",
-              if(to_string(conv.id) == @conversation_id, do: "is-active")
-            ]}
-          >
-            <span>#{conv.id}</span>
-            <span :if={conv.parent} class="muted">
-              from #{conv.parent.conversation_id}@#{conv.parent.at}
-            </span>
-          </.link>
-        </li>
-      </ul>
-    </div>
-
-    <div id="session-inbox-switcher" class="sidebar-section sidebar-inbox-section">
-      <div class="sidebar-section-head">
-        <span class="section-title">Inbox sessions</span>
-        <div class="sidebar-header-actions">
-          <button
-            :if={@catalog_counts.subsessions > 0 or @show_subsessions?}
-            id="session-sidebar-subsessions-toggle"
-            type="button"
-            aria-pressed={to_string(@show_subsessions?)}
-            class={[
-              "inbox-pill inbox-pill-xs inbox-subsessions-pill",
-              if(@show_subsessions?, do: "is-active")
-            ]}
-            phx-click="toggle_subsessions"
-          >
-            <span>Subsessions</span>
-            <span class="inbox-pill-count mono">{@catalog_counts.subsessions}</span>
-          </button>
-          <span
-            :if={@catalog_counts.attention > 0}
-            class={[
-              "badge mono",
-              if(@catalog_counts.error > 0, do: "badge-danger", else: "badge-attention")
-            ]}
-          >
-            {@catalog_counts.attention}
-          </span>
-        </div>
-      </div>
-
-      <InboxComponents.scope_controls
-        id="carousel-filter"
-        filter={@inbox_filter}
-        options={@filter_options}
-        clear_path={
-          session_filter_path(@session_id, @conversation_id, @from_inbox?, %InboxFilter{})
-        }
-        show_mode={true}
-      />
-
-      <InboxComponents.workspace_tree
-        id="session-sidebar-inbox-tree"
-        groups={@catalog_groups}
-        current_session_id={@session_id}
-        inbox_filter={@inbox_filter}
-        compact={true}
-        empty_message="No sessions match the current filters."
-      />
-    </div>
-  </Layouts.panel>
+  <div
+    id="session-actions"
+    class="app-menu session-actions-menu"
+    popover
+    aria-label="Session actions"
+  >
+    <button
+      id="session-new-button"
+      type="button"
+      phx-click="new_session"
+      disabled={!@session || @cwd_missing?}
+      data-dismiss-menu
+    >New</button>
+    <button
+      id="session-tree-button"
+      type="button"
+      aria-haspopup="dialog"
+      aria-controls="session-tree-panel"
+      phx-click="open_session_tree"
+      data-dismiss-menu
+    >Tree <kbd>/tree</kbd></button>
+    <.link
+      :if={@session && !@cwd_missing? && @session.status != "archived"}
+      id="session-review-link"
+      navigate={
+        InboxFilter.review_path(@session_id, @inbox_filter, @from_inbox?, @conversation_id)
+      }
+    >Review files</.link>
+    <button
+      :if={@session && @session.status != "archived" && !Map.get(@session, :archived, false)}
+      id="session-attention-toggle"
+      type="button"
+      phx-click="toggle_session_attention"
+      disabled={@run_active?}
+      data-dismiss-menu
+    >{if Map.get(@session, :needs_attention, true), do: "Mark as read", else: "Mark for attention"}</button>
+    <button
+      :if={@session && @session.status != "archived" && !Map.get(@session, :archived, false)}
+      id="archive-session-btn"
+      type="button"
+      phx-click="archive_current_session"
+      title="Archive and unload this session"
+      data-dismiss-menu
+    >Archive</button>
+    <button
+      :if={@session && @session.status != "archived" && Map.get(@session, :archived, false)}
+      id="unarchive-session-btn"
+      type="button"
+      phx-click="unarchive_current_session"
+      data-dismiss-menu
+    >Unarchive</button>
+  </div>
 
   <main id="session-main" aria-label="Conversation" class="session-main">
     <div
@@ -277,6 +115,8 @@
       tabindex="0"
       aria-label="Transcript"
       role="region"
+      data-session-id={@session_id}
+      data-conversation-id={@conversation_id}
       phx-hook="FollowTranscript"
     >
       <div id="transcript-content" class="transcript-content">
@@ -293,19 +133,22 @@
 
         <div id="entries-stream" phx-update="stream" class="entries-list">
           <%= for {dom_id, entry} <- @streams.entries do %>
-            <%= if activity = entry["activity"] do %>
-              <ConversationComponents.activity_line
-                id={dom_id}
-                count={activity.count}
-                status={activity.status}
-              />
-            <% else %>
-              <ConversationComponents.entry_card
-                id={dom_id}
-                entry={entry}
-                catalog_by_id={@catalog.by_id}
-                can_fork?={@session != nil && @session.status != "archived"}
-              />
+            <%= cond do %>
+              <% activity = entry["activity"] -> %>
+                <ConversationComponents.activity_line id={dom_id} activity={activity} />
+              <% card = entry["subagent"] -> %>
+                <ConversationComponents.subagent_card
+                  id={dom_id}
+                  card={card}
+                  child={@catalog.by_id[card.child_id]}
+                  can_fork?={@session != nil && @session.status != "archived"}
+                />
+              <% true -> %>
+                <ConversationComponents.entry_card
+                  id={dom_id}
+                  entry={entry}
+                  can_fork?={@session != nil && @session.status != "archived"}
+                />
             <% end %>
           <% end %>
         </div>
@@ -364,7 +207,6 @@
           live={@ephemeral_live}
           inbox={@inbox}
           tail_activity={@tail_activity}
-          catalog_by_id={@catalog.by_id}
         />
         <div :if={@session && @session.status == "archived"} class="session-recovery">
           <div class="archive-readonly-bar">
@@ -601,6 +443,9 @@
           <% else %>
             (will start a new session in this workspace)
           <% end %>
+          <span :if={@fork_edit.images != []}>
+            · {length(@fork_edit.images)} original image(s) included
+          </span>
         </span>
         <button
           id="cancel-fork-edit-btn"
@@ -618,7 +463,13 @@
         phx-mounted={JS.ignore_attributes("hidden")}
         hidden
       >Latest ↓</button>
-      <details :if={profile} id="reply" class="reply" phx-mounted={JS.ignore_attributes("open")}>
+      <details
+        :if={profile}
+        id="reply"
+        class="reply"
+        open={@open_reply_by_default?}
+        phx-mounted={JS.ignore_attributes("open")}
+      >
         <summary id="reply-toggle" class="reply-toggle">
           <span class="reply-open-label">Reply</span>
           <span class="reply-close-label">Hide reply</span>
@@ -634,7 +485,9 @@
           phx-submit="submit"
           phx-change="composer_change"
           class="composer"
+          phx-drop-target={@uploads.attachment.ref}
         >
+          <div class="composer-drop-label" aria-hidden="true">Drop files to attach</div>
           <input type="hidden" name="destination" value={composer_destination(assigns)} />
           <div class="composer-editor-wrap">
             <textarea
@@ -653,6 +506,7 @@
               phx-mounted={JS.ignore_attributes(["style", "aria-activedescendant"])}
               data-session-id={@session_id}
               data-conversation-id={@conversation_id}
+              data-fork-edit={@fork_edit != nil && "true"}
               data-completion-meta={completion_metadata_json(@model_groups)}
               class="composer-input"
             >{@composer_text}</textarea>
@@ -738,10 +592,14 @@
                 id="send-btn"
                 type="submit"
                 class="btn btn-primary"
-                title={if @run_active?, do: "Queue (Shift+Enter)", else: "Send (Shift+Enter)"}
-              >{if @run_active?, do: "Queue", else: "Send"}</button>
+                title={
+                  if @run_active? && !@fork_edit,
+                    do: "Queue (Shift+Enter)",
+                    else: "Send (Shift+Enter)"
+                }
+              >{if @run_active? && !@fork_edit, do: "Queue", else: "Send"}</button>
               <button
-                :if={@run_active?}
+                :if={@run_active? && !@fork_edit}
                 id="steer-btn"
                 type="submit"
                 name="mode"
@@ -756,6 +614,119 @@
       <ConversationComponents.stop_button :if={@run_active?} id="stop-btn" compact />
     </footer>
   </main>
+  <aside
+    id="session-details"
+    class="session-sidebar"
+    aria-labelledby="session-details-title"
+    hidden
+  >
+    <header class="app-panel-header">
+      <h2 id="session-details-title">Session details</h2>
+      <button
+        type="button"
+        class="bar-button"
+        data-session-sidebar-toggle
+        aria-label="Close session sidebar"
+        title="Close"
+      >×</button>
+    </header>
+    <p :if={@error_banner} class="flash-banner flash-error session-sidebar-error" role="alert">
+      {@error_banner}
+    </p>
+    <div class="sidebar-section">
+      <div class="session-detail-badges">
+        <span
+          :if={@session && Map.get(@session, :archived, false)}
+          id="hdr-archived-badge"
+          class="badge badge-warn"
+        >archived</span>
+        <span class="badge mono">conv #{@conversation_id}</span>
+        <span :if={!is_nil(@cursor_seq)} id="hdr-seq" class="badge mono">seq {@cursor_seq}</span>
+        <span :if={usage_summary(@usage)} id="hdr-usage" class="badge mono">{usage_summary(@usage)}</span>
+      </div>
+      <div class="mono session-id-label">{@session_id}</div>
+      <div :if={@session} class="muted mono session-cwd">
+        {@session.env_id}: {@session.cwd}
+      </div>
+      <div
+        :if={@session_parent}
+        id="sidebar-parent-lineage"
+        class="session-parent-meta muted mono"
+      >
+        <span>Spawned from</span>
+        <.link
+          id="header-parent-session-link"
+          navigate={
+            ~p"/sessions/#{@session_parent.session_id}/conversations/#{@session_parent.conversation_id}"
+          }
+          class="session-parent-link"
+        >
+          {@session_parent.session_id} conv #{@session_parent.conversation_id}
+          <span :if={@session_parent.at_entry_id}> @ entry #{@session_parent.at_entry_id}</span>
+        </.link>
+      </div>
+      <.tag_input
+        :if={@session}
+        id="session-tags"
+        tags={session_tags(assigns)}
+        error={@tag_error}
+      />
+    </div>
+
+    <div class="sidebar-section sidebar-divider">
+      <h3 class="section-title">Conversations</h3>
+      <ul id="branches-list" class="branch-list">
+        <li :for={conv <- @conversations}>
+          <.link
+            patch={InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, conv.id)}
+            class={[
+              "branch-link mono",
+              if(to_string(conv.id) == @conversation_id, do: "is-active")
+            ]}
+          >
+            <span>#{conv.id}</span>
+            <span :if={conv.parent} class="muted">
+              from #{conv.parent.conversation_id}@#{conv.parent.at}
+            </span>
+          </.link>
+        </li>
+      </ul>
+    </div>
+
+    <div id="session-inbox-switcher" class="sidebar-section sidebar-divider">
+      <div class="sidebar-section-head">
+        <h3 class="section-title">Sessions in this folder</h3>
+        <button
+          :if={@folder_subsessions_count > 0}
+          id="session-sidebar-subsessions-toggle"
+          type="button"
+          aria-pressed={to_string(@show_folder_subsessions?)}
+          class={["inbox-pill inbox-pill-xs", @show_folder_subsessions? && "is-active"]}
+          phx-click="toggle_folder_subsessions"
+        >Subsessions <span class="inbox-pill-count mono">{@folder_subsessions_count}</span></button>
+      </div>
+      <InboxComponents.workspace_tree
+        id="session-sidebar-inbox-tree"
+        groups={@folder_groups}
+        inbox_filter={@folder_filter}
+        compact={true}
+        show_workspace_header={false}
+        empty_message="No other inbox sessions in this folder."
+      />
+    </div>
+  </aside>
+
+  <Layouts.panel
+    id="tool-inspection"
+    title={if @tool_inspection, do: @tool_inspection.name, else: "Tool call"}
+    wide
+  >
+    <ConversationComponents.tool_inspection
+      :if={@tool_inspection}
+      inspection={@tool_inspection}
+    />
+    <p :if={!@tool_inspection}>Tool call details are no longer available.</p>
+  </Layouts.panel>
 
   <Layouts.panel :if={profile} id="agent-options" title="Agent settings">
     <div class="agent-current">

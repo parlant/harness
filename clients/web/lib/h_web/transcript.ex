@@ -3,19 +3,21 @@ defmodule HWeb.Transcript do
   Thin Phoenix LiveView state wrapper around `H.Transcript`.
 
   Delegates frame reduction to `H.Transcript` and projects messages and activity
-  summaries for `Phoenix.LiveView.stream/4`. Only the boundary groups are kept
-  for merging commits and older pages; the trailing group is rendered separately
-  so its status can change with live docs without re-rendering committed messages.
+  summaries for `Phoenix.LiveView.stream/4`. Retains boundary activity groups
+  and compact subagent metadata (not result bodies) to merge pages and update
+  cards. The trailing activity group is rendered separately for live work.
   """
 
-  alias HWeb.{Activity, ConversationComponents}
+  alias HWeb.{Activity, ConversationComponents, SubagentCards}
 
-  defstruct [:reducer, :head_activity, :tail_activity]
+  defstruct [:reducer, :head_activity, :tail_activity, subagent_events: [], subagent_rows: %{}]
 
   @type t :: %__MODULE__{
           reducer: H.Transcript.t(),
           head_activity: Activity.t() | nil,
-          tail_activity: Activity.t() | nil
+          tail_activity: Activity.t() | nil,
+          subagent_events: [map()],
+          subagent_rows: map()
         }
 
   @doc "Creates a new empty `HWeb.Transcript`."
@@ -31,8 +33,14 @@ defmodule HWeb.Transcript do
       {:ok, next} ->
         {rows, head, tail} = project(next.entries, nil)
 
-        {:ok, rows,
-         %__MODULE__{reducer: %{next | entries: []}, head_activity: head, tail_activity: tail}}
+        wrapper = %__MODULE__{
+          reducer: %{next | entries: []},
+          head_activity: head,
+          tail_activity: tail
+        }
+
+        {rows, wrapper} = with_subagent_rows(wrapper, rows, nil, :append)
+        {:ok, rows, wrapper}
 
       {:error, _} = err ->
         err
@@ -55,15 +63,24 @@ defmodule HWeb.Transcript do
             same_group?(wrapper.head_activity, wrapper.tail_activity) ->
               head
 
-            is_nil(wrapper.head_activity) and not Enum.any?(rows, &(not subagent_result?(&1))) ->
+            is_nil(wrapper.head_activity) and not Enum.any?(rows, &ordinary_row?/1) ->
               head
 
             true ->
               wrapper.head_activity
           end
 
-        {:ok, rows,
-         %{wrapper | reducer: %{next | entries: []}, head_activity: head, tail_activity: tail}}
+        previous_live = reducer.docs["live"]
+
+        wrapper = %{
+          wrapper
+          | reducer: %{next | entries: []},
+            head_activity: head,
+            tail_activity: tail
+        }
+
+        {rows, wrapper} = with_subagent_rows(wrapper, rows, previous_live, :append)
+        {:ok, rows, wrapper}
 
       {:gap, _next} ->
         {:gap, wrapper}
@@ -80,9 +97,24 @@ defmodule HWeb.Transcript do
   @spec apply_ephemeral(t(), map() | binary()) :: {:ok, t()} | :ignored | {:error, term()}
   def apply_ephemeral(%__MODULE__{reducer: reducer} = wrapper, payload) do
     case H.Transcript.apply_ephemeral(reducer, payload) do
-      {:ok, next} -> {:ok, %{wrapper | reducer: next}}
-      :ignored -> :ignored
-      {:error, _} = err -> err
+      {:ok, next} ->
+        updated =
+          if SubagentCards.slots(reducer.docs["live"]) == SubagentCards.slots(next.docs["live"]) do
+            %{wrapper | reducer: next}
+          else
+            {[], updated} =
+              with_subagent_rows(%{wrapper | reducer: next}, [], reducer.docs["live"], :append)
+
+            updated
+          end
+
+        {:ok, updated}
+
+      :ignored ->
+        :ignored
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -98,9 +130,7 @@ defmodule HWeb.Transcript do
           {rows, head, tail}
 
         is_nil(tail) ->
-          non_subagent_rows? = Enum.any?(rows, &(not subagent_result?(&1)))
-
-          {rows, if(not non_subagent_rows?, do: wrapper.head_activity, else: head),
+          {rows, if(Enum.any?(rows, &ordinary_row?/1), do: head, else: wrapper.head_activity),
            wrapper.tail_activity}
 
         is_nil(wrapper.head_activity) ->
@@ -117,39 +147,89 @@ defmodule HWeb.Transcript do
           end
       end
 
-    {rows, %{wrapper | reducer: %{next | entries: []}, head_activity: head, tail_activity: tail}}
+    wrapper = %{
+      wrapper
+      | reducer: %{next | entries: []},
+        head_activity: head,
+        tail_activity: tail
+    }
+
+    with_subagent_rows(wrapper, rows, nil, :prepend)
   end
 
-  # Fold one page or commit into display rows. A visible message closes the
-  # preceding group and may start a new one if it also contains tool calls.
+  # Subagent rows do not close ordinary tool activity. When prose and calls share
+  # an entry, the prose is still its own message before the individual cards.
   defp project(entries, tail) do
     {rows, tail, head} =
       Enum.reduce(entries, {[], tail, nil}, fn raw, {rows, pending, head} ->
         entry = normalize_entry(raw)
+        calls = SubagentCards.calls(entry)
+
+        marks = for {call, index} <- calls, do: {:subagent_call, entry["id"], call, index}
 
         cond do
-          subagent_result?(entry) ->
-            {[entry | rows], pending, head}
+          SubagentCards.result?(entry) ->
+            {[{:subagent_result, entry} | rows], pending, head}
 
           ConversationComponents.message?(entry) ->
-            head = if rows == [], do: pending, else: head
+            head = if Enum.any?(rows, &ordinary_row?/1), do: head, else: pending
             rows = if pending, do: [activity_row(pending) | rows], else: rows
-            {[entry | rows], Activity.after_message(entry), head}
+            {Enum.reverse(marks, [entry | rows]), Activity.after_message(entry), head}
+
+          calls != [] ->
+            {Enum.reverse(marks, rows), Activity.merge(pending, Activity.after_message(entry)),
+             head}
 
           true ->
             {rows, Activity.merge(pending, Activity.from_entry(entry)), head}
         end
       end)
 
-    {Enum.reverse(rows), if(Enum.any?(rows, &(not subagent_result?(&1))), do: head, else: tail),
-     tail}
+    {Enum.reverse(rows), if(Enum.any?(rows, &ordinary_row?/1), do: head, else: tail), tail}
   end
 
-  defp subagent_result?(%{"kind" => "tool_result", "data" => data}) when is_map(data) do
-    (data["tool_name"] || data["name"]) == "subagent"
-  end
+  defp ordinary_row?(row), do: is_map(row)
 
-  defp subagent_result?(_), do: false
+  defp with_subagent_rows(wrapper, rows, previous_live, direction) do
+    previous_slots = SubagentCards.slots(previous_live)
+
+    {rows, new_events} =
+      Enum.map_reduce(rows, [], fn
+        {:subagent_call, id, call, index}, events ->
+          event = SubagentCards.call_event(id, call, index)
+          {event.id, [event | events]}
+
+        {:subagent_result, entry}, events ->
+          event = SubagentCards.result_event(entry, previous_slots)
+          {event.id, [event | events]}
+
+        row, events ->
+          {row, events}
+      end)
+
+    new_events = Enum.reverse(new_events)
+
+    events =
+      case direction do
+        :append ->
+          if new_events == [],
+            do: wrapper.subagent_events,
+            else: wrapper.subagent_events ++ new_events
+
+        :prepend ->
+          new_events ++ wrapper.subagent_events
+      end
+
+    slots = SubagentCards.slots(wrapper.reducer.docs["live"])
+
+    cards =
+      if new_events == [] and slots == previous_slots,
+        do: wrapper.subagent_rows,
+        else: SubagentCards.project(events, slots)
+
+    rows = Enum.map(rows, fn row -> if is_binary(row), do: cards[row], else: row end)
+    {Enum.reject(rows, &is_nil/1), %{wrapper | subagent_events: events, subagent_rows: cards}}
+  end
 
   defp activity_row(activity),
     do: %{"id" => "activity-#{activity.id}", "activity" => Activity.summary(activity)}
@@ -196,7 +276,8 @@ defmodule HWeb.Transcript do
 
   def run_active?(_), do: false
 
-  defp normalize_entry(entry) do
+  @doc false
+  def normalize_entry(entry) do
     %{
       "id" => to_string(Map.get(entry, "id") || Map.get(entry, :id)),
       "conversation_id" =>

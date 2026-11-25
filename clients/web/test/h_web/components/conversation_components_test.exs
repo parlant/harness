@@ -93,7 +93,7 @@ defmodule HWeb.ConversationComponentsTest do
   end
 
   describe "entry_card/1" do
-    test "renders user card with below-card toolbar, plain copy text, step id, and fork button" do
+    test "renders user card with below-card toolbar, plain copy text, step id, and Edit instead of Fork" do
       entry = %{
         "id" => 12,
         "kind" => "user",
@@ -121,13 +121,14 @@ defmodule HWeb.ConversationComponentsTest do
       assert LazyHTML.attribute(copy_btn, "data-copy-text") == ["Hello **plain** prompt\nline 2"]
       assert LazyHTML.attribute(copy_btn, "aria-label") == ["Copy message"]
 
-      fork_btn =
+      edit_btn =
         LazyHTML.query(
           doc,
-          ".entry-user footer.entry-toolbar button[phx-click='fork_entry'][phx-value-entry_id='12']"
+          ".entry-user footer.entry-toolbar button[phx-click='edit_entry'][phx-value-entry_id='12']"
         )
 
-      assert LazyHTML.to_tree(fork_btn) != []
+      assert LazyHTML.text(edit_btn) |> String.trim() == "Edit"
+      assert LazyHTML.query(doc, "button[phx-click='fork_entry']") |> LazyHTML.to_tree() == []
 
       assert LazyHTML.query(doc, ".entry-user footer.entry-toolbar .entry-step-id")
              |> LazyHTML.text() == "#12"
@@ -208,31 +209,43 @@ defmodule HWeb.ConversationComponentsTest do
       assert LazyHTML.query(doc, "img.feedback-image") |> LazyHTML.to_tree() != []
       assert LazyHTML.query(doc, "button[data-copy-btn]") |> LazyHTML.to_tree() == []
     end
+  end
 
-    test "renders copy button on subagent tool_result when text is present" do
-      entry = %{
-        "id" => 25,
-        "kind" => "tool_result",
-        "data" => %{
-          "name" => "subagent",
-          "content" => "Subagent summary text",
-          "details" => %{"status" => "done"}
-        }
-      }
+  describe "subagent_card/1" do
+    test "copies the full prompt even when the preview is truncated" do
+      prompt = "Review the notes.\n  " <> String.duplicate("Long prompt. ", 20)
 
       doc =
-        render_component(&ConversationComponents.entry_card/1,
-          id: "entries-25",
-          entry: entry,
+        render_component(&ConversationComponents.subagent_card/1,
+          id: "entry-subagent-call-15-0",
+          card: %{
+            title: "Check tests",
+            prompt: prompt,
+            status: "done",
+            child_id: nil,
+            entry_id: "25"
+          },
+          child: %{title: "Different title", attention: "running"},
           can_fork?: true
         )
         |> LazyHTML.from_fragment()
 
-      assert LazyHTML.query(doc, "article#entries-25.entry-card.entry-tool_result")
-             |> LazyHTML.to_tree() != []
+      assert LazyHTML.query(doc, ".subagent-card-title") |> LazyHTML.text() == "Check tests"
 
-      copy_btn = LazyHTML.query(doc, "footer.entry-toolbar button[data-copy-btn]")
-      assert LazyHTML.attribute(copy_btn, "data-copy-text") == ["Subagent summary text"]
+      assert LazyHTML.query(doc, ".subagent-card-head .badge") |> LazyHTML.text() ==
+               "subagentrunning"
+
+      preview = LazyHTML.query(doc, ".subagent-card-preview") |> LazyHTML.text()
+      assert String.length(preview) == 160
+      assert String.ends_with?(preview, "…")
+
+      assert LazyHTML.query(doc, "footer [data-copy-btn]") |> LazyHTML.attribute("data-copy-text") ==
+               [prompt]
+
+      assert LazyHTML.query(doc, "footer .fork-btn") |> LazyHTML.attribute("phx-value-entry_id") ==
+               ["25"]
+
+      assert LazyHTML.query(doc, ".subagent-card a, details") |> LazyHTML.to_tree() == []
     end
   end
 

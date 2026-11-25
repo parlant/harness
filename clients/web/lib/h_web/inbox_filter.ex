@@ -1,5 +1,5 @@
 defmodule HWeb.InboxFilter do
-  @moduledoc "URL-backed filters shared by the inbox and the session attention carousel."
+  @moduledoc "URL-backed filters shared by the Inbox and session navigation."
 
   use HWeb, :verified_routes
 

@@ -1,48 +1,39 @@
 defmodule HWeb.Activity do
-  @moduledoc "Compact transcript activity, with tool calls and their results counted once."
+  @moduledoc "Compact transcript activity with references for on-demand tool inspection."
 
-  defstruct [:id, calls: MapSet.new(), results: MapSet.new(), other: 0, outcome: :complete]
+  defstruct [:id, tools: %{}, other: 0]
 
-  @type t :: %__MODULE__{
-          id: String.t() | nil,
-          calls: MapSet.t(String.t()),
-          results: MapSet.t(String.t()),
-          other: non_neg_integer(),
-          outcome: :complete | :stopped | :interrupted | :failed
-        }
+  @type t :: %__MODULE__{id: String.t() | nil, tools: map(), other: non_neg_integer()}
 
-  @outcomes [:failed, :interrupted, :stopped, :complete]
   @active_slots ~w(pending running waiting retrying)
 
   def from_entry(%{"id" => id, "kind" => kind, "data" => data}) do
-    activity = %__MODULE__{id: id, outcome: outcome(data)}
+    activity = %__MODULE__{id: id}
 
-    case {kind, data} do
-      {"assistant", _} ->
-        case call_ids(data) do
-          [] -> %{activity | other: 1}
-          calls -> add_calls(activity, calls)
-        end
+    case kind do
+      "assistant" ->
+        after_message(%{"id" => id, "kind" => kind, "data" => data}) || %{activity | other: 1}
 
-      {"tool_result", %{"tool_call_id" => id}} when is_binary(id) ->
-        %{activity | results: MapSet.new([id])}
+      "tool_result" ->
+        tool = %{tool_ref(data) | result_entry: id, name: data["tool_name"] || data["name"]}
+        %{activity | tools: %{(data["tool_call_id"] || {:result, id}) => tool}}
 
       _ ->
         %{activity | other: 1}
     end
   end
 
-  @doc "Returns activity attached to an otherwise visible message, if any."
-  def after_message(%{"kind" => "assistant", "data" => data} = entry) do
-    non_subagent_calls =
-      for call <- List.wrap(data["tool_calls"]),
+  @doc "Returns tool activity attached to an otherwise visible message, if any."
+  def after_message(%{"kind" => "assistant", "id" => id, "data" => data}) do
+    tools =
+      for {call, index} <- Enum.with_index(List.wrap(data["tool_calls"])),
           is_map(call),
           call["name"] != "subagent",
-          do: call
+          into: %{} do
+        {call["id"] || {:call, id, index}, %{tool_ref(call) | call_entry: id, call_index: index}}
+      end
 
-    if non_subagent_calls != [] do
-      from_entry(put_in(entry["data"]["tool_calls"], non_subagent_calls))
-    end
+    if map_size(tools) > 0, do: %__MODULE__{id: id, tools: tools}
   end
 
   def after_message(_), do: nil
@@ -54,35 +45,54 @@ defmodule HWeb.Activity do
   def merge(activity, added) do
     %{
       activity
-      | calls: MapSet.union(activity.calls, added.calls),
-        results: MapSet.union(activity.results, added.results),
-        other: activity.other + added.other,
-        outcome: Enum.find(@outcomes, &(&1 in [activity.outcome, added.outcome]))
+      | tools: merge_tools(activity.tools, added.tools),
+        other: activity.other + added.other
     }
   end
 
-  defp count(activity) do
-    MapSet.size(MapSet.union(activity.calls, activity.results)) + activity.other
+  def summary(activity) do
+    tools =
+      activity.tools
+      |> Map.values()
+      |> Enum.sort_by(fn tool ->
+        id = tool.call_entry || tool.result_entry
+        {is_nil(id), id && String.to_integer(id), tool.call_index, tool.live_id}
+      end)
+
+    %{
+      id: activity.id,
+      count: if(tools == [], do: activity.other, else: length(tools)),
+      tools: tools
+    }
   end
 
-  defp status(activity) do
-    cond do
-      activity.outcome != :complete -> activity.outcome
-      MapSet.subset?(activity.calls, activity.results) -> :complete
-      true -> :incomplete
-    end
-  end
-
-  def summary(activity), do: %{count: count(activity), status: status(activity)}
-
-  @doc "Adds live work to the trailing activity without including output or arguments."
+  @doc "Adds streaming calls and active tool slots to the trailing activity."
   def live_summary(tail, live, message, streaming_text?) do
-    calls = call_ids(message) ++ active_tools(live["tools"])
+    slots = live_slots(live["tools"])
+    active_slots = Enum.filter(slots, fn {_id, slot} -> slot["status"] in @active_slots end)
+    waiting_subagents? = Enum.any?(active_slots, fn {_id, slot} -> slot["name"] == "subagent" end)
+
+    streaming =
+      for %{"id" => id} = call <- List.wrap(message["tool_calls"]),
+          is_binary(id),
+          call["name"] != "subagent",
+          do: {id, call}
+
+    active = Enum.reject(active_slots, fn {_id, slot} -> slot["name"] == "subagent" end)
+
+    live_tools =
+      for {id, call} <- streaming ++ active, into: %{}, do: {id, %{tool_ref(call) | live_id: id}}
+
     extra = Enum.count([live["compaction"], live["user_shell"]], &is_map/1)
-    activity = add_calls(tail || %__MODULE__{}, calls)
-    activity = %{activity | other: activity.other + extra}
-    count = count(activity)
-    waiting_subagents? = active_subagents?(live["tools"])
+    activity = tail || %__MODULE__{}
+
+    activity = %{
+      activity
+      | tools: merge_tools(activity.tools, live_tools),
+        other: activity.other + extra
+    }
+
+    summary = summary(activity)
 
     status =
       cond do
@@ -98,7 +108,7 @@ defmodule HWeb.Activity do
         get_in(live, ["generation", "retry"]) || get_in(live, ["compaction", "retry"]) ->
           :retrying
 
-        calls != [] or extra > 0 ->
+        map_size(live_tools) > 0 or extra > 0 ->
           :working
 
         waiting_subagents? ->
@@ -107,80 +117,74 @@ defmodule HWeb.Activity do
         !streaming_text? and (live["run"] || live["generation"]) ->
           :working
 
-        count > 0 ->
-          status(activity)
-
         true ->
           nil
       end
 
-    cond do
-      status == :waiting and waiting_subagents? and count == 0 -> nil
-      status in [:working, :retrying, :waiting] and count == 0 -> %{count: 1, status: status}
-      count > 0 -> %{count: count, status: status}
-      true -> nil
+    if summary.count > 0 or (status in [:working, :retrying, :waiting] and not waiting_subagents?) do
+      Map.put(summary, :status, status)
     end
   end
 
-  defp outcome(data) do
-    cond do
-      data["aborted"] || data["cancelled"] || data["diagnostic"] == "aborted" ->
-        :stopped
+  @doc "Resolves a tool from the selected conversation's entries and its live document."
+  def inspect_tool(params, live, fetch_entry) do
+    call =
+      with index when is_binary(index) <- params["call_index"],
+           {index, ""} when index >= 0 <- Integer.parse(index),
+           %{"kind" => "assistant", "data" => data} <- fetch_entry.(params["call_entry"]),
+           %{} = call <- Enum.at(List.wrap(data["tool_calls"]), index) do
+        call
+      else
+        _ -> nil
+      end
 
-      data["interrupted"] || data["diagnostic"] == "interrupted" ->
-        :interrupted
+    result =
+      case fetch_entry.(params["result_entry"]) do
+        %{"kind" => "tool_result", "data" => data} -> data
+        _ -> nil
+      end
 
-      data["is_error"] || data["error"] ||
-        data["status"] in ~w(error failed) ||
-          data["finish_reason"] in ~w(error content_filter) ->
-        :failed
+    live_id = params["live_id"]
+    generation = live["generation"] || %{}
+    message = generation["message"] || generation
 
-      is_integer(data["exit_code"]) and data["exit_code"] != 0 ->
-        :failed
+    streaming =
+      live_id && Enum.find(List.wrap(message["tool_calls"]), &match?(%{"id" => ^live_id}, &1))
 
-      true ->
-        :complete
+    slot = live_id && List.keyfind(live_slots(live["tools"]), live_id, 0)
+    slot = if slot, do: elem(slot, 1)
+    source = call || streaming || result || slot
+
+    ids = Enum.reject([call && call["id"], result && result["tool_call_id"], live_id], &is_nil/1)
+
+    if source && length(Enum.uniq(ids)) <= 1 do
+      %{
+        name: source["name"] || source["tool_name"] || "Tool call",
+        arguments: (call || streaming || %{})["arguments"],
+        result: result,
+        output: slot && slot["output"],
+        live?: not is_nil(streaming || slot)
+      }
     end
   end
 
-  defp call_ids(data) do
-    for call <- List.wrap(data["tool_calls"]), is_map(call), do: call["id"]
+  defp tool_ref(data) do
+    %{name: data["name"], call_entry: nil, call_index: nil, result_entry: nil, live_id: nil}
   end
 
-  defp add_calls(activity, calls) do
-    Enum.reduce(calls, activity, fn
-      id, acc when is_binary(id) -> %{acc | calls: MapSet.put(acc.calls, id)}
-      _, acc -> %{acc | other: acc.other + 1}
+  defp merge_tools(first, second) do
+    Map.merge(first, second, fn _, a, b ->
+      Map.merge(a, b, fn _, left, right -> left || right end)
     end)
   end
 
-  defp active_tools(tools) when is_map(tools) do
-    for {id, %{"status" => status} = slot} <- tools,
-        status in @active_slots,
-        slot["name"] != "subagent",
-        do: id
+  defp live_slots(tools) when is_map(tools) do
+    for {id, %{} = slot} <- tools, is_binary(id), do: {id, slot}
   end
 
-  defp active_tools(tools) when is_list(tools) do
-    for %{"status" => status} = slot <- tools,
-        status in @active_slots,
-        slot["name"] != "subagent",
-        do: slot["id"]
+  defp live_slots(tools) when is_list(tools) do
+    for %{"id" => id} = slot <- tools, is_binary(id), do: {id, slot}
   end
 
-  defp active_tools(_), do: []
-
-  defp active_subagents?(tools) when is_map(tools) do
-    Enum.any?(tools, fn {_id, slot} ->
-      is_map(slot) and slot["name"] == "subagent" and slot["status"] in @active_slots
-    end)
-  end
-
-  defp active_subagents?(tools) when is_list(tools) do
-    Enum.any?(tools, fn slot ->
-      is_map(slot) and slot["name"] == "subagent" and slot["status"] in @active_slots
-    end)
-  end
-
-  defp active_subagents?(_), do: false
+  defp live_slots(_), do: []
 end

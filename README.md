@@ -25,7 +25,9 @@ mix archive.install hex h_setup
 mix h.setup --service
 ```
 
-To embed the `:harness` OTP application in your own Elixir project, add `{:hiness, "~> 0.2.0"}` to `mix.exs` and consult [HexDocs (`hiness`)](https://hexdocs.pm/hiness) and [hiness.dev](https://hiness.dev).
+### Embed H in an Elixir project
+
+With Elixir 1.20 / OTP 29, add `{:harness, "~> 0.3.0", hex: :hiness}` to `mix.exs`. `hiness` is the Hex package; `:harness` is the OTP application and configuration key. See the [embedding guide](docs/hexdocs.md) and [HexDocs](https://hexdocs.pm/hiness).
 
 ### macOS application bundle (`H.app`)
 
@@ -111,6 +113,7 @@ Run `mix test` at the root and in `clients/web/`; both projects default to `--no
 
 ## Documentation
 
+- [Hex release checklist](docs/releasing.md) — build, verify, and publish `hiness` and the separate `h_setup` installer
 - [Architecture](docs/architecture.md) — ownership, commits, recovery and client boundaries
 - [Subagents and work delegation](docs/architecture/subagents.md) — multi-session orchestration reflection and proposed delegation primitives
 - [Local HTTP/JSON and SSE protocol](docs/protocol.md)

@@ -4,6 +4,41 @@ defmodule HWeb.CoreComponents do
   """
   use Phoenix.Component
 
+  attr :id, :string, required: true
+  attr :tags, :list, required: true
+  attr :error, :string, default: nil
+
+  def tag_input(assigns) do
+    ~H"""
+    <form id={@id <> "-form"} class="tag-editor" phx-submit="add_session_tags" phx-hook="SessionTags">
+      <label class="field-label" for={@id <> "-input"}>Session tags</label>
+      <div class="tag-editor-field">
+        <span :for={tag <- @tags} class="tag-chip">
+          <span>{tag}</span>
+          <button
+            type="button"
+            phx-click="remove_session_tag"
+            phx-value-tag={tag}
+            aria-label={"Remove tag #{tag}"}
+            title={"Remove #{tag}"}
+          >×</button>
+        </span>
+        <input
+          id={@id <> "-input"}
+          name="tags"
+          class="input"
+          placeholder="Add a tag…"
+          aria-describedby={@id <> "-hint"}
+          autocomplete="off"
+        />
+        <button type="submit" class="bar-button tag-add" aria-label="Add tag" title="Add tag">+</button>
+      </div>
+      <small id={@id <> "-hint"} class="muted">Enter or comma adds a tag. Changes save automatically.</small>
+      <small :if={@error} role="alert" class="tag-error">{@error}</small>
+    </form>
+    """
+  end
+
   attr(:id, :string, required: true)
 
   def completion_layer(assigns) do

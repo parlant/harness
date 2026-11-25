@@ -71,7 +71,12 @@ defmodule HWeb.TranscriptTest do
                  "appended_entries" => [%{id: 5, kind: "assistant", data: %{text: "Done"}}]
                })
 
-      assert activity == %{"id" => "activity-4", "activity" => %{count: 1, status: :complete}}
+      assert %{
+               "id" => "activity-4",
+               "activity" => %{count: 1, tools: [%{call_entry: "2", result_entry: "4"}]}
+             } = activity
+
+      refute inspect(activity) =~ "tool body"
       assert reply["id"] == "5"
       assert finished.tail_activity == nil
       assert finished.reducer.entries == []
@@ -130,7 +135,7 @@ defmodule HWeb.TranscriptTest do
   end
 
   describe "subagent tool_call and tool_result projection" do
-    test "does not leave stuck incomplete activity lines or liveWorking spinners for parallel subagent rounds" do
+    test "keeps parked subagents in their own cards without adding activity rows or a spinner" do
       {:ok, rows, t1} =
         Transcript.apply_snapshot(Transcript.new(session_id: "p1", conversation_id: "1"), %{
           "seq" => 10,
@@ -175,15 +180,19 @@ defmodule HWeb.TranscriptTest do
           }
         })
 
-      # Only visible entries (user, assistant subagent card, tool_result subagent card) — zero bogus activity rows!
-      assert Enum.map(rows, & &1["id"]) == ["1", "2", "3"]
+      assert [
+               %{"id" => "1"},
+               %{"id" => "subagent-call-2-0", "subagent" => %{status: "done", entry_id: "3"}},
+               %{"id" => "subagent-call-2-1", "subagent" => %{status: "waiting", entry_id: "2"}}
+             ] = rows
+
       assert t1.tail_activity == nil
 
       # Live summary does not show a spinning Working activity while only parked waiting on sub_2
       live1 = Transcript.compact_assigns(t1).ephemeral_live
       assert HWeb.Activity.live_summary(t1.tail_activity, live1, %{}, false) == nil
 
-      # When sub_2 settles and next turn starts with a bash tool call, no stale "incomplete" row appears!
+      # Settling the last subagent on the way to a reply does not create a separate activity row.
       {:ok, commit_rows, t2} =
         Transcript.apply_commit(t1, %{
           "seq" => 11,
@@ -206,9 +215,86 @@ defmodule HWeb.TranscriptTest do
           "doc_ops" => %{"live" => [["replace", %{}]]}
         })
 
-      assert Enum.map(commit_rows, & &1["id"]) == ["4", "5"]
-      refute Enum.any?(commit_rows, &Map.has_key?(&1, "activity"))
+      assert [%{"id" => "5"}] = commit_rows
+
+      assert %{"subagent" => %{status: "done", entry_id: "4"}} =
+               t2.subagent_rows["subagent-call-2-1"]
+
       assert t2.tail_activity == nil
+    end
+
+    test "loading the older call fills in the original prompt without duplicating the child" do
+      result = %{
+        id: 7,
+        kind: "tool_result",
+        data: %{
+          name: "subagent",
+          tool_call_id: "reused-id",
+          details: %{child_session_id: "worker"}
+        }
+      }
+
+      assert {:ok, [%{"id" => "subagent-result-7"}], snapshot} =
+               Transcript.apply_snapshot(Transcript.new(), %{
+                 "seq" => 9,
+                 "before_entry_id" => "7",
+                 "entries" => [result]
+               })
+
+      assert {[%{"id" => "5"}, %{"id" => "subagent-call-5-0"}], paged} =
+               Transcript.prepend_older_page(
+                 snapshot,
+                 [
+                   %{
+                     id: 5,
+                     kind: "assistant",
+                     data: %{
+                       text: "First delegation",
+                       tool_calls: [
+                         %{
+                           id: "reused-id",
+                           name: "subagent",
+                           arguments: %{title: "Worker", prompt: "Original prompt"}
+                         }
+                       ]
+                     }
+                   }
+                 ],
+                 nil
+               )
+
+      assert %{
+               "subagent-call-5-0" => %{
+                 "subagent" => %{child_id: "worker", title: "Worker", prompt: "Original prompt"}
+               }
+             } =
+               paged.subagent_rows
+
+      assert map_size(paged.subagent_rows) == 1
+
+      assert {:ok, [%{"id" => "10"}], follow_up} =
+               Transcript.apply_commit(paged, %{
+                 "seq" => 10,
+                 "appended_entries" => [
+                   %{
+                     id: 10,
+                     kind: "assistant",
+                     data: %{
+                       text: "Check again",
+                       tool_calls: [
+                         %{
+                           id: "reused-id",
+                           name: "subagent",
+                           arguments: %{session_id: "worker", prompt: "Follow-up"}
+                         }
+                       ]
+                     }
+                   },
+                   put_in(result.id, 11)
+                 ]
+               })
+
+      assert follow_up.subagent_rows == paged.subagent_rows
     end
 
     test "preserves surrounding non-subagent tool activity across a subagent tool_result" do
@@ -256,8 +342,8 @@ defmodule HWeb.TranscriptTest do
 
       assert [
                %{"id" => "1"},
-               %{"id" => "3"},
-               %{"id" => "activity-1", "activity" => %{count: 1, status: :complete}},
+               %{"id" => "subagent-call-1-0", "subagent" => %{prompt: "go", entry_id: "3"}},
+               %{"id" => "activity-1", "activity" => %{count: 1, tools: [%{name: "read"}]}},
                %{"id" => "4"}
              ] = rows
 

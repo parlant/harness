@@ -6,32 +6,35 @@ For binary installation (`hi`, `h-daemon`, `H.app`), interactive walkthroughs, a
 
 ## Embed `:harness` in an Elixir/OTP application
 
-Add `hiness` to your `mix.exs` dependencies:
+Use Elixir 1.20 and Erlang/OTP 29. Add this dependency to `mix.exs` and run `mix deps.get`. The dependency key is the OTP application (`:harness`); `hex: :hiness` selects the package on Hex.
 
 ```elixir
 def deps do
   [
-    {:hiness, "~> 0.2.0"}
+    {:harness, "~> 0.3.0", hex: :hiness}
   ]
 end
 ```
 
-Start the daemon under your application's supervision tree by configuring a dedicated private `:data_dir` for `:harness` (see `H.Application`), or launch a standalone listener with `H.serve/1`:
+To start an in-VM daemon with your application, configure a dedicated private store in `config/runtime.exs`:
+
+```elixir
+import Config
+
+config :harness, data_dir: "/path/to/private/store"
+```
+
+With this configuration, `H.Application` starts the daemon without TCP or Unix API listeners by default. Call `H.Daemon` in-VM to create sessions, submit commands, and read conversation or catalog streams. Give the instance its own `:data_dir`; `H.StoreLock` holds the store exclusively. Host tools execute with the OS user's file and shell permissions.
+
+For a standalone listener, leave the embedded configuration unset and call `H.serve/1` instead:
 
 ```elixir
 {:ok, info} = H.serve(data_dir: "/path/to/private/store", port: 4100)
 ```
 
-Call `H.Daemon` in-VM to create sessions, submit idempotent commands, and subscribe to live conversation or catalog streams. Give each embedded instance its own `:data_dir` so `H.StoreLock` owns the store exclusively. Host tools execute with the OS user's file and shell permissions.
-
 ## Install the standalone CLI and web workbench
 
-To run `hi` and `hiweb` as a standalone local tool without adding `:hiness` to a project's `mix.exs`, install a signed release bundle via `h_setup` on Hex or from [hiness.dev/#install](https://hiness.dev/#install):
-
-```sh
-mix archive.install hex h_setup
-mix h.setup --service
-```
+The Hex package contains the daemon and its Elixir API. To run `hi` and `hiweb`, follow the [signed bundle installation guide](https://hiness.dev/docs/setup/).
 
 ## Module map and canonical guides
 

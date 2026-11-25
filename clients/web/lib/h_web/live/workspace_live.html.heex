@@ -260,10 +260,12 @@
         <ul class="session-list">
           <li :for={s <- @folder_sessions} class="session-card">
             <div class="session-card-info">
-              <span class="mono session-id">{s.session_id}</span>
-              <span :if={s.title} class="session-title">{s.title}</span>
-              <span :if={s.active} class="badge badge-active">active</span>
-              <span :if={Map.get(s, :archived, false)} class="badge mono">archived</span>
+              <span :if={s.title} class="session-title" title={s.title}>{s.title}</span>
+              <span class="mono session-id" title={s.session_id}>{s.session_id}</span>
+              <div :if={s.active || Map.get(s, :archived, false)} class="session-card-badges">
+                <span :if={s.active} class="badge badge-active">active</span>
+                <span :if={Map.get(s, :archived, false)} class="badge">Archived</span>
+              </div>
             </div>
             <.link navigate={~p"/sessions/#{s.session_id}"} class="btn btn-sm">
               {if Map.get(s, :archived, false), do: "Open", else: "Resume"}

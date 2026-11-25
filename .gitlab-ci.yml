@@ -4,8 +4,8 @@
 # `saas-linux-medium-arm64`) and an opt-in macOS Apple Silicon runner
 # (`h-macos-arm64`, or `H_MACOS_RUNNER_TAG` override).
 #
-# Release builds run automatically on version tags (`v*`) and can be triggered
-# manually on `main` or feature branches for pre-release verification.
+# Native release builds run automatically on version tags (`v*`) and can be
+# triggered manually on branches. Hex publication is manual on protected tags.
 
 stages:
   - test
@@ -64,6 +64,16 @@ test:elixir:
         MIX_ENV=docs mix deps.get --check-locked
         MIX_ENV=docs mix docs --warnings-as-errors --output /tmp/h-setup-docs
       )
+
+test:hex:
+  stage: test
+  tags: [saas-linux-medium-amd64]
+  image: ${ELIXIR_TEST_IMAGE}
+  before_script:
+    - mix local.hex --force
+    - mix local.rebar --force
+  script:
+    - elixir scripts/ci/smoke-hex.exs
 
 test:rust:
   stage: test
@@ -274,30 +284,38 @@ release:publish:
       - dist/release/release-manifest.json.sig
     expire_in: 90 days
 
-release:hex:
+.hex_publish_template:
   stage: release
   tags: [saas-linux-medium-amd64]
   image: ${ELIXIR_TEST_IMAGE}
-  needs:
-    - job: release:publish
   rules:
-    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: '$CI_COMMIT_TAG =~ /^v/ && $CI_COMMIT_REF_PROTECTED == "true"'
+      when: manual
+      allow_failure: true
   before_script:
+    - ': "${HEX_API_KEY:?Set a protected HEX_API_KEY for the Hex publisher}"'
     - mix local.hex --force
     - mix local.rebar --force
+
+release:hex:
+  extends: .hex_publish_template
+  needs: ["test:elixir", "test:hex"]
+  variables:
+    MIX_ENV: "dev"
   script:
-    - |
-      if [ -n "${HEX_API_KEY:-}" ]; then
-        MIX_ENV=dev mix deps.get --check-locked
-        MIX_ENV=dev mix hex.publish --yes
-        (
-          cd installer
-          MIX_ENV=docs mix deps.get --check-locked
-          MIX_ENV=docs mix hex.publish --yes
-        )
-      else
-        echo "HEX_API_KEY not configured; skipping automated Hex publish"
-      fi
+    - mix deps.get --check-locked
+    - mix hex.publish --yes
+
+release:hex-installer:
+  extends: .hex_publish_template
+  needs: ["test:elixir", "test:hex", "release:publish"]
+  variables:
+    MIX_ENV: "docs"
+  script:
+    - 'test -s dist/release/SHA256SUMS.sig || { echo "h_setup requires signed release bundles" >&2; exit 1; }'
+    - cd installer
+    - mix deps.get --check-locked
+    - mix hex.publish --yes
 
 # ---------------------------------------------------------------------------
 # Stage 4: Websites (Cloudflare Pages deploy for hiness.dev & hiness.app)

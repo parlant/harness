@@ -64,21 +64,74 @@ export const PaneSplitter = {
 export const FollowTranscript = {
   mounted() {
     const scroller = this.el, button = document.getElementById("jump-latest");
-    let follow = true;
+    let follow = true, liveDisclosure = null, liveActivityKey = null;
+    const conversation = () => `${scroller.dataset.sessionId}:${scroller.dataset.conversationId}`;
+    let scope = conversation();
     const updateButton = () => { button.hidden = follow; };
+    const atEnd = () => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 32;
     const sync = () => { if (follow) scroller.scrollTop = scroller.scrollHeight; updateButton(); };
     button.onclick = () => { follow = true; sync(); };
     scroller.onscroll = () => {
-      follow = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 32;
+      follow = atEnd() && (follow || !scroller.querySelector(".activity-line > details[open]"));
       updateButton();
     };
+
+    // Opening a tool group is like reading earlier output: don't follow it offscreen.
+    this.onActivityClick = event => {
+      const details = event.target.closest(".activity-line > details > summary")?.parentElement;
+      if (!details || details.open || event.defaultPrevented) return;
+      follow = false;
+      if (details.parentElement.id === "live-activity") {
+        liveDisclosure = details;
+        liveActivityKey = details.parentElement.dataset.activityKey;
+      }
+      updateButton();
+    };
+    scroller.addEventListener("click", this.onActivityClick);
+
+    // Carry the live group's disclosure over when the row moves into the stream.
+    this.activityObserver = new MutationObserver(() => {
+      const nextScope = conversation();
+      if (scope !== nextScope) {
+        scope = nextScope;
+        liveDisclosure = null;
+        liveActivityKey = null;
+      } else if (liveDisclosure && scroller.contains(liveDisclosure)) {
+        liveActivityKey = liveDisclosure.parentElement.dataset.activityKey;
+      } else if (liveDisclosure) {
+        if (liveDisclosure.open && liveActivityKey) {
+          const replacement = document.getElementById(`entry-activity-${liveActivityKey}-details`);
+          if (replacement && scroller.contains(replacement)) {
+            replacement.open = true;
+            const row = replacement.getBoundingClientRect();
+            const viewport = scroller.getBoundingClientRect();
+            if (!follow && row.top >= viewport.top && row.top < viewport.bottom &&
+                row.bottom > viewport.bottom && row.height < viewport.height) {
+              scroller.scrollTop += Math.ceil(row.bottom - viewport.bottom);
+            }
+            liveDisclosure = null;
+          }
+        } else {
+          liveDisclosure = null;
+        }
+      }
+    });
+    this.activityObserver.observe(scroller, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["data-activity-key", "data-session-id", "data-conversation-id"]
+    });
+
     // Changes to the composer, viewport, transcript or images can move the end.
     this.observer = new ResizeObserver(sync);
     this.observer.observe(scroller);
     this.observer.observe(scroller.firstElementChild);
     sync();
   },
-  destroyed() { this.observer.disconnect(); }
+  destroyed() {
+    this.el.removeEventListener("click", this.onActivityClick);
+    this.activityObserver.disconnect();
+    this.observer.disconnect();
+  }
 };
 
 // Desktop keyboard navigation for /inbox: j/k/arrows move across rows,

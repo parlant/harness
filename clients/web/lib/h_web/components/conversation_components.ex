@@ -2,17 +2,13 @@ defmodule HWeb.ConversationComponents do
   @moduledoc "Stateless rendering for committed messages and in-flight conversation activity."
   use HWeb, :html
 
-  alias HWeb.{Activity, CatalogState, Markdown}
+  alias HWeb.{Activity, Markdown}
 
   def message?(%{"kind" => "user"}), do: true
 
   def message?(%{"kind" => "assistant", "data" => data}) do
-    String.trim(message_text(data)) != "" or images(data) != [] or subagent_tool_calls(data) != [] or
+    String.trim(message_text(data)) != "" or images(data) != [] or
       filtered_assistant_notice(data) != nil
-  end
-
-  def message?(%{"kind" => "tool_result", "data" => data}) do
-    (data["tool_name"] || data["name"]) == "subagent"
   end
 
   def message?(_), do: false
@@ -39,126 +35,140 @@ defmodule HWeb.ConversationComponents do
 
   attr(:id, :string, required: true)
   attr(:entry, :map, required: true)
-  attr(:catalog_by_id, :map, default: %{})
   attr(:can_fork?, :boolean, default: false)
 
   def entry_card(assigns) do
     data = assigns.entry["data"] || %{}
-    kind = assigns.entry["kind"]
-    tool_name = data["tool_name"] || data["name"]
     text = message_text(data)
-    status = entry_status(data)
 
     assigns =
       assign(assigns,
-        data: data,
-        kind: kind,
-        tool_name: tool_name,
-        text: text,
-        copy_text: copyable_text(kind, tool_name, text),
-        status: status
+        kind: assigns.entry["kind"],
+        copy_text: if(String.trim(text) != "", do: text),
+        status: entry_status(data)
       )
 
     ~H"""
     <article
       id={@id}
-      class={[
-        "entry-card",
-        "entry-#{@kind}",
-        @status && "has-status"
-      ]}
+      class={["entry-card", "entry-#{@kind}", @status && "has-status"]}
     >
       <div class="entry-body">
-        <.entry_body entry={@entry} catalog_by_id={@catalog_by_id} />
+        <.entry_body entry={@entry} />
       </div>
-
-      <footer class="entry-toolbar">
-        <span :if={@status == :aborted} class="entry-status is-warn">
-          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M6 18 18 6M6 6l12 12" />
-          </svg>
-          <span>Aborted</span>
-        </span>
-        <span :if={@status == :failed} class="entry-status is-danger">
-          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
-          </svg>
-          <span>Failed</span>
-        </span>
-
-        <button
-          :if={@copy_text}
-          type="button"
-          class="toolbar-btn copy-btn"
-          data-copy-btn
-          data-copy-text={@copy_text}
-          aria-label="Copy message"
-          title="Copy"
-        >
-          <svg class="toolbar-icon icon-copy" viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="8" y="8" width="12" height="12" rx="2" />
-            <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
-          </svg>
-          <svg class="toolbar-icon icon-check" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m5 13 4 4L19 7" />
-          </svg>
-          <span class="copy-feedback" aria-live="polite">Copied</span>
-        </button>
-
-        <button
-          :if={@can_fork?}
-          type="button"
-          class="toolbar-btn fork-btn"
-          phx-click="fork_entry"
-          phx-value-entry_id={@entry["id"]}
-          aria-label={"Fork from step ##{@entry["id"]}"}
-          title="Branch from here"
-        >
-          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="6" cy="6" r="2.5" />
-            <circle cx="18" cy="6" r="2.5" />
-            <circle cx="6" cy="18" r="2.5" />
-            <path d="M6 8.5v7M18 8.5a6 6 0 0 1-6 6H6" />
-          </svg>
-          <span>Fork</span>
-        </button>
-
-        <span :if={@entry["id"]} class="entry-step-id mono">#{@entry["id"]}</span>
-      </footer>
+      <.entry_toolbar
+        entry_id={@entry["id"]}
+        copy_text={@copy_text}
+        status={@status}
+        can_fork?={@can_fork?}
+        edit?={@kind == "user"}
+      />
     </article>
     """
   end
 
+  attr(:entry_id, :any, required: true)
+  attr(:copy_text, :string, default: nil)
+  attr(:status, :atom, default: nil)
+  attr(:can_fork?, :boolean, required: true)
+  attr(:edit?, :boolean, default: false)
+  attr(:child_sid, :string, default: nil)
+  attr(:copy_label, :string, default: "Copy message")
+
+  defp entry_toolbar(assigns) do
+    ~H"""
+    <footer class="entry-toolbar">
+      <span :if={@status == :aborted} class="entry-status is-warn">
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6 18 18 6M6 6l12 12" />
+        </svg>
+        <span>Aborted</span>
+      </span>
+      <span :if={@status == :failed} class="entry-status is-danger">
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+        </svg>
+        <span>Failed</span>
+      </span>
+
+      <button
+        :if={@copy_text}
+        type="button"
+        class="toolbar-btn copy-btn"
+        data-copy-btn
+        data-copy-text={@copy_text}
+        aria-label={@copy_label}
+        title="Copy"
+      >
+        <svg class="toolbar-icon icon-copy" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="8" y="8" width="12" height="12" rx="2" />
+          <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+        </svg>
+        <svg class="toolbar-icon icon-check" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m5 13 4 4L19 7" />
+        </svg>
+        <span class="copy-feedback" aria-live="polite">Copied</span>
+      </button>
+
+      <button
+        :if={@can_fork? && @edit?}
+        type="button"
+        class="toolbar-btn edit-btn"
+        phx-click="edit_entry"
+        phx-value-entry_id={@entry_id}
+        aria-label={"Edit prompt at step ##{@entry_id}"}
+        title="Edit on a new branch"
+      >
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m15 5 4 4M4 20l4.5-1 12-12a2.8 2.8 0 0 0-4-4l-12 12L4 20Z" />
+        </svg>
+        <span>Edit</span>
+      </button>
+      <button
+        :if={@can_fork? && !@edit?}
+        type="button"
+        class="toolbar-btn fork-btn"
+        phx-click="fork_entry"
+        phx-value-entry_id={@entry_id}
+        aria-label={"Fork from step ##{@entry_id}"}
+        title="Branch from here"
+      >
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="6" cy="6" r="2.5" />
+          <circle cx="18" cy="6" r="2.5" />
+          <circle cx="6" cy="18" r="2.5" />
+          <path d="M6 8.5v7M18 8.5a6 6 0 0 1-6 6H6" />
+        </svg>
+        <span>Fork</span>
+      </button>
+      <.link
+        :if={@child_sid}
+        navigate={~p"/sessions/#{@child_sid}"}
+        class="toolbar-btn subagent-open-link"
+      >
+        Open subsession
+      </.link>
+
+      <span :if={@entry_id} class="entry-step-id mono">#{@entry_id}</span>
+    </footer>
+    """
+  end
+
   attr(:entry, :map, required: true)
-  attr(:catalog_by_id, :map, default: %{})
 
   def entry_body(assigns) do
     data = assigns.entry["data"] || %{}
-    kind = assigns.entry["kind"]
-    tool_name = data["tool_name"] || data["name"]
 
     assigns =
       assign(assigns,
-        data: data,
-        kind: kind,
-        tool_name: tool_name,
+        kind: assigns.entry["kind"],
         text: message_text(data),
         filter_notice: filtered_assistant_notice(data),
-        images: images(data),
-        subagent_calls: subagent_tool_calls(data)
+        images: images(data)
       )
 
     ~H"""
-    <div :if={@kind == "tool_result" and @tool_name == "subagent"}>
-      <.subagent_card
-        source={:tool_result}
-        data={@data}
-        text={@text}
-        catalog_by_id={@catalog_by_id}
-      />
-    </div>
-
-    <div :if={@kind != "tool_result"}>
+    <div>
       <img
         :for={{media_type, encoded} <- @images}
         src={"data:" <> media_type <> ";base64," <> encoded}
@@ -171,15 +181,6 @@ defmodule HWeb.ConversationComponents do
         {@filter_notice}
       </p>
       <p :if={@kind == "user" and @text != ""} class="entry-text">{@text}</p>
-
-      <div :for={tc <- @subagent_calls}>
-        <.subagent_card
-          source={:tool_call}
-          data={tc}
-          text=""
-          catalog_by_id={@catalog_by_id}
-        />
-      </div>
     </div>
     """
   end
@@ -193,30 +194,126 @@ defmodule HWeb.ConversationComponents do
   end
 
   attr(:id, :string, required: true)
-  attr(:count, :integer, required: true)
-  attr(:status, :atom, required: true)
+  attr(:activity, :map, required: true)
 
   def activity_line(assigns) do
-    {label, spinning?} =
-      case assigns.status do
-        :working -> {"Working", true}
-        :retrying -> {"Retrying", true}
-        :waiting -> {"Waiting", false}
-        :paused -> {"Paused", false}
-        :failed -> {"Failed", false}
-        :stopped -> {"Stopped", false}
-        :interrupted -> {"Interrupted", false}
-        :incomplete -> {"Incomplete", false}
-        :complete -> {"Complete", false}
+    %{count: count, tools: tools} = assigns.activity
+    status = Map.get(assigns.activity, :status)
+
+    label =
+      case {count, tools, status} do
+        {1, [], _} -> "1 activity"
+        {count, [], _} when count > 0 -> "#{count} activities"
+        {1, _, _} -> "1 tool call"
+        {count, [_ | _], _} -> "#{count} tool calls"
+        {0, _, :retrying} -> "Retrying…"
+        {0, _, :waiting} -> "Waiting…"
+        {0, _, _} -> "Working…"
       end
 
-    assigns = assign(assigns, label: label, spinning?: spinning?)
+    assigns = assign(assigns, tools: tools, status: status, label: label)
 
     ~H"""
-    <div id={@id} class="activity-line" data-status={@status}>
-      <span :if={@spinning?} class="activity-spinner" aria-hidden="true"></span>
-      <span>{@count} {if @count == 1, do: "activity", else: "activities"}</span>
-      <span class="activity-status">· {@label}</span>
+    <div id={@id} class="activity-line" data-activity-key={@activity[:id]} data-status={@status}>
+      <details :if={@tools != []} id={@id <> "-details"} phx-mounted={JS.ignore_attributes("open")}>
+        <summary class="activity-caption">
+          <.activity_spinner status={@status} />
+          {@label}
+          <svg class="activity-chevron toolbar-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="m6 4 4 4-4 4" />
+          </svg>
+        </summary>
+        <ol class="activity-tools" aria-label="Tool calls">
+          <li :for={tool <- @tools}>
+            <button
+              type="button"
+              class="btn btn-sm mono"
+              phx-click="inspect_tool"
+              phx-value-call_entry={tool.call_entry}
+              phx-value-call_index={tool.call_index}
+              phx-value-result_entry={tool.result_entry}
+              phx-value-live_id={tool.live_id}
+            >
+              {tool.name || "Tool call"}
+            </button>
+          </li>
+        </ol>
+      </details>
+      <div :if={@tools == []} class="activity-caption">
+        <.activity_spinner status={@status} />
+        {@label}
+      </div>
+    </div>
+    """
+  end
+
+  attr(:status, :atom, required: true)
+
+  defp activity_spinner(assigns) do
+    ~H"""
+    <svg
+      :if={@status in [:working, :retrying]}
+      class="activity-spinner"
+      viewBox="0 0 16 16"
+      role="img"
+      aria-label={if @status == :retrying, do: "Retrying", else: "Working"}
+      fill="none"
+      stroke-width="2"
+    >
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 2a6 6 0 0 1 6 6" stroke-linecap="round" />
+    </svg>
+    """
+  end
+
+  attr(:inspection, :map, required: true)
+
+  def tool_inspection(assigns) do
+    inspection = assigns.inspection
+    result = inspection.result || %{}
+    output = message_text(result)
+
+    images =
+      for %{"type" => "image", "data" => encoded} = image <- List.wrap(result["content"]),
+          mime = image["media_type"] || image["mime_type"],
+          mime in ["image/jpeg", "image/png", "image/webp", "image/gif"],
+          is_binary(encoded),
+          do: {mime, encoded}
+
+    output =
+      cond do
+        is_nil(inspection.result) -> inspection.output
+        output != "" -> output
+        images != [] -> nil
+        value = result["output"] || result["error"] || result["diagnostic"] -> format_json(value)
+        true -> nil
+      end
+
+    arguments =
+      case inspection.arguments do
+        nil -> nil
+        args when is_binary(args) -> args
+        args -> Jason.encode!(args, pretty: true)
+      end
+
+    assigns = assign(assigns, output: output, images: images, arguments: arguments)
+
+    ~H"""
+    <div class="tool-inspection">
+      <h3>Arguments</h3>
+      <pre :if={@arguments not in [nil, ""]}>{@arguments}</pre>
+      <p :if={@arguments in [nil, ""]} class="muted">No arguments available in this view.</p>
+      <h3>Output</h3>
+      <pre :if={@output not in [nil, ""]}>{@output}</pre>
+      <img
+        :for={{mime, encoded} <- @images}
+        src={"data:" <> mime <> ";base64," <> encoded}
+        alt="Tool output image"
+      />
+      <p :if={@output in [nil, ""] and @images == []} class="muted">No output available.</p>
+      <p :if={@inspection.live? and is_nil(@inspection.result)} class="muted">
+        Live snapshot. Reopen this call to see newer output.
+      </p>
     </div>
     """
   end
@@ -224,7 +321,6 @@ defmodule HWeb.ConversationComponents do
   attr(:live, :map, required: true)
   attr(:inbox, :list, required: true)
   attr(:tail_activity, :any, default: nil)
-  attr(:catalog_by_id, :map, default: %{})
 
   def live_region(assigns) do
     live = assigns.live || %{}
@@ -233,7 +329,6 @@ defmodule HWeb.ConversationComponents do
     text = message_text(msg)
     streaming_text? = String.trim(text) != ""
     activity = Activity.live_summary(assigns.tail_activity, live, msg, streaming_text?)
-    subagent_slots = live_subagent_slots(live["tools"])
 
     {failure, failure_label} =
       case {live["run_failure"], live["compaction_failure"]} do
@@ -254,7 +349,6 @@ defmodule HWeb.ConversationComponents do
       assign(assigns,
         activity: activity,
         streaming_text?: streaming_text?,
-        subagent_slots: subagent_slots,
         text: text,
         failure: failure,
         failure_label: failure_label,
@@ -264,10 +358,7 @@ defmodule HWeb.ConversationComponents do
 
     ~H"""
     <section
-      :if={
-        @streaming_text? || @activity || @subagent_slots != [] || @inbox != [] || @failure ||
-          @retry || @wait
-      }
+      :if={@streaming_text? || @activity || @inbox != [] || @failure || @retry || @wait}
       id="live-region"
       class="live-region"
       aria-live="polite"
@@ -275,8 +366,7 @@ defmodule HWeb.ConversationComponents do
       <.activity_line
         :if={@activity}
         id="live-activity"
-        count={@activity.count}
-        status={@activity.status}
+        activity={@activity}
       />
       <div :if={@wait} id="wait-banner" class="retry-banner" role="status">
         <strong>{@wait["title"] || "Waiting to continue"}</strong>
@@ -324,17 +414,6 @@ defmodule HWeb.ConversationComponents do
         </footer>
       </article>
 
-      <div :if={@subagent_slots != []} id="live-subagents" class="live-tools">
-        <div :for={slot <- @subagent_slots}>
-          <.subagent_card
-            source={:live_slot}
-            data={slot}
-            text={tool_slot_output(slot)}
-            catalog_by_id={@catalog_by_id}
-          />
-        </div>
-      </div>
-
       <div :if={@inbox != []} id="live-inbox" class="live-inbox">
         <div class="role-label">Queued ({length(@inbox)})</div>
         <div :for={item <- @inbox} class="inbox-item">
@@ -364,137 +443,60 @@ defmodule HWeb.ConversationComponents do
     """
   end
 
-  attr(:source, :atom, required: true)
-  attr(:data, :map, required: true)
-  attr(:text, :string, default: "")
-  attr(:catalog_by_id, :map, default: %{})
+  attr(:id, :string, required: true)
+  attr(:card, :map, required: true)
+  attr(:child, :map, default: nil)
+  attr(:can_fork?, :boolean, default: false)
 
-  defp subagent_card(assigns) do
-    data = assigns.data || %{}
-    details = if is_map(data["details"]), do: data["details"], else: %{}
-    args = extract_tool_args(data)
-    catalog_by_id = if is_map(assigns.catalog_by_id), do: assigns.catalog_by_id, else: %{}
+  def subagent_card(assigns) do
+    %{card: card, child: child} = assigns
 
-    child_sid =
-      non_empty_string(details["child_session_id"]) ||
-        non_empty_string(data["child_session_id"]) ||
-        non_empty_string(args["session_id"])
-
-    child_session = if child_sid, do: Map.get(catalog_by_id, child_sid), else: nil
-
-    mode =
-      non_empty_string(args["mode"]) ||
-        non_empty_string(details["mode"]) ||
-        if(assigns.source == :tool_call, do: "wait", else: nil)
-
-    read_only? = args["read_only"] == true or details["read_only"] == true
-
-    title =
-      non_empty_string(args["title"]) ||
-        non_empty_string(details["title"]) ||
-        if(child_session, do: non_empty_string(child_session.title), else: nil)
-
-    prompt_preview = preview_text(args["prompt"] || data["prompt"])
-
-    live_status =
+    status =
       cond do
-        not is_nil(child_session) ->
-          format_child_status(child_session)
-
-        is_binary(details["status"]) and details["status"] != "" ->
-          details["status"]
-
-        is_binary(data["status"]) and data["status"] != "" ->
-          data["status"]
-
-        true ->
-          nil
+        card.status in ["failed", "aborted", "interrupted"] -> card.status
+        child -> child.attention
+        true -> card.status
       end
 
-    live_status_class =
+    status_class =
       cond do
-        child_session && child_session.attention in ["error", "quarantined"] ->
-          "badge-danger"
-
-        child_session && CatalogState.processing?(child_session) ->
-          "badge-active"
-
-        data["is_error"] == true or not is_nil(data["error"]) ->
-          "badge-danger"
-
-        true ->
-          nil
-      end
-
-    output =
-      case assigns.source do
-        :tool_result -> format_tool_output(data, assigns.text)
-        :live_slot -> assigns.text
-        _ -> ""
+        status in ["failed", "error", "quarantined"] -> "badge-danger"
+        status in ["running", "sleeping", "retrying", "waiting"] -> "badge-active"
+        true -> nil
       end
 
     assigns =
       assign(assigns,
-        child_sid: child_sid,
-        child_session: child_session,
-        mode: mode,
-        read_only?: read_only?,
-        title: title,
-        prompt_preview: prompt_preview,
-        live_status: live_status,
-        live_status_class: live_status_class,
-        output: output
+        title: card.title || (child && child.title),
+        prompt_preview: preview_text(card.prompt),
+        status: status,
+        status_class: status_class
       )
 
     ~H"""
-    <div
-      class="tool-call-card subagent-card"
-      data-subagent-card="true"
-      data-child-session-id={@child_sid}
+    <article
+      id={@id}
+      class="entry-card entry-subagent"
+      data-child-session-id={@card.child_id}
     >
-      <div class="subagent-card-head">
-        <div class="tool-call-head">
+      <div class="subagent-card">
+        <div class="subagent-card-head">
           <span class="badge mono">subagent</span>
-          <span :if={@mode} class="badge mono">{@mode}</span>
-          <span :if={@read_only?} class="badge mono">read-only</span>
-          <span :if={@live_status} class={["badge mono subagent-status-pill", @live_status_class]}>
-            {@live_status}
-          </span>
-          <span :if={@child_sid} class="muted mono">{@child_sid}</span>
+          <span class={["badge mono subagent-status-pill", @status_class]}>{@status}</span>
         </div>
-
-        <.link
-          :if={@child_sid}
-          navigate={~p"/sessions/#{@child_sid}"}
-          class="btn btn-sm btn-ghost subagent-open-link"
-        >
-          Open subsession →
-        </.link>
+        <div :if={@title} class="subagent-card-title">{@title}</div>
+        <p :if={@prompt_preview} class="subagent-card-preview muted">{@prompt_preview}</p>
       </div>
-
-      <div :if={@title} class="subagent-card-title">{@title}</div>
-      <p :if={@prompt_preview} class="subagent-card-preview muted">{@prompt_preview}</p>
-
-      <details :if={@source == :tool_result && @output != ""} class="collapsible">
-        <summary>Subagent Output</summary>
-        <pre class="code-pre">{@output}</pre>
-      </details>
-
-      <pre :if={@source == :live_slot && @output != ""} class="code-pre">{@output}</pre>
-    </div>
+      <.entry_toolbar
+        entry_id={@card.entry_id}
+        copy_text={@card.prompt}
+        copy_label="Copy prompt"
+        can_fork?={@can_fork?}
+        child_sid={@card.child_id}
+      />
+    </article>
     """
   end
-
-  defp copyable_text("user", _tool_name, text), do: non_empty_copy(text)
-  defp copyable_text("assistant", _tool_name, text), do: non_empty_copy(text)
-  defp copyable_text("tool_result", "subagent", text), do: non_empty_copy(text)
-  defp copyable_text(_, _, _), do: nil
-
-  defp non_empty_copy(text) when is_binary(text) do
-    if String.trim(text) == "", do: nil, else: text
-  end
-
-  defp non_empty_copy(_), do: nil
 
   defp entry_status(data) when is_map(data) do
     cond do
@@ -505,65 +507,6 @@ defmodule HWeb.ConversationComponents do
   end
 
   defp entry_status(_), do: nil
-
-  defp subagent_tool_calls(data) when is_map(data) do
-    for %{"name" => "subagent"} = tc <- List.wrap(data["tool_calls"]), do: tc
-  end
-
-  defp subagent_tool_calls(_), do: []
-
-  defp live_subagent_slots(tools) when is_map(tools) do
-    tools
-    |> Enum.sort_by(fn {id, _} -> to_string(id) end)
-    |> Enum.flat_map(fn {id, slot} ->
-      if is_map(slot) and slot["name"] == "subagent" and slot["status"] != "done" do
-        [Map.put_new(slot, "id", to_string(id))]
-      else
-        []
-      end
-    end)
-  end
-
-  defp live_subagent_slots(tools) when is_list(tools) do
-    for %{"name" => "subagent"} = slot <- tools, slot["status"] != "done", do: slot
-  end
-
-  defp live_subagent_slots(_), do: []
-
-  defp tool_slot_output(slot) when is_map(slot) do
-    out = slot["output"] || slot["text"] || ""
-    if is_binary(out), do: out, else: format_json(out)
-  end
-
-  defp format_tool_output(data, text) do
-    if text != "" do
-      text
-    else
-      case data["output"] || data["result"] do
-        out when is_binary(out) -> out
-        nil -> format_json(data)
-        other -> format_json(other)
-      end
-    end
-  end
-
-  defp extract_tool_args(data) when is_map(data) do
-    case data["arguments"] || data["args"] || data["input"] do
-      args when is_map(args) -> args
-      _ -> %{}
-    end
-  end
-
-  defp extract_tool_args(_), do: %{}
-
-  defp format_child_status(child_session) do
-    detail = CatalogState.status_detail(child_session)
-
-    case {child_session.attention, detail} do
-      {att, d} when is_binary(d) and d != "" and d != att -> "#{att} · #{d}"
-      {att, _} -> att
-    end
-  end
 
   defp preview_text(val) when is_binary(val) do
     cleaned =

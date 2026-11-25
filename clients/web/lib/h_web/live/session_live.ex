@@ -9,6 +9,7 @@ defmodule HWeb.SessionLive do
   use HWeb, :live_view
 
   alias HWeb.{
+    Activity,
     Backend,
     CatalogState,
     ComposerAttachment,
@@ -28,9 +29,6 @@ defmodule HWeb.SessionLive do
     cid = normalize_cid(params["conversation_id"])
     from_inbox? = params["from"] == "inbox"
 
-    socket =
-      socket
-
     inbox_filter = InboxFilter.from_params(params)
 
     socket =
@@ -40,15 +38,16 @@ defmodule HWeb.SessionLive do
         conversation_id: cid,
         from_inbox?: from_inbox?,
         inbox_filter: inbox_filter,
-        filter_options: %{workspaces: [], tags: []},
         subscribed_cid: nil,
         catalog: CatalogState.new(),
         catalog_subscribed?: false,
-        catalog_groups: [],
-        catalog_counts: CatalogState.counts([]),
-        show_subsessions?: inbox_filter.subsessions == true,
-        other_attention_count: 0,
-        next_attention_session: nil,
+        folder_groups: [],
+        folder_filter: %InboxFilter{},
+        folder_subsessions_count: 0,
+        show_folder_subsessions?: false,
+        inbox_neighbors: nil,
+        tag_error: nil,
+        open_reply_by_default?: false,
         session: nil,
         session_parent: nil,
         conversations: [],
@@ -61,6 +60,7 @@ defmodule HWeb.SessionLive do
         committed_docs: %{},
         ephemeral_live: %{},
         tail_activity: nil,
+        tool_inspection: nil,
         inbox: [],
         agent: %{},
         usage: %{},
@@ -103,8 +103,7 @@ defmodule HWeb.SessionLive do
     socket =
       assign(socket,
         from_inbox?: params["from"] == "inbox",
-        inbox_filter: inbox_filter,
-        show_subsessions?: socket.assigns.show_subsessions? or inbox_filter.subsessions == true
+        inbox_filter: inbox_filter
       )
 
     cond do
@@ -116,6 +115,8 @@ defmodule HWeb.SessionLive do
          |> assign(
            session_id: sid,
            conversation_id: cid,
+           show_folder_subsessions?: false,
+           tag_error: nil,
            provider_filter: nil,
            cwd_missing?: false,
            show_fork_picker?: false,
@@ -129,7 +130,6 @@ defmodule HWeb.SessionLive do
            tree_folded_ids: MapSet.new(),
            tree_error: nil
          )
-         |> recompute_catalog_assigns()
          |> load_initial(sid, cid)}
 
       cid != socket.assigns.conversation_id ->
@@ -169,7 +169,7 @@ defmodule HWeb.SessionLive do
       {:ok, next_catalog} ->
         socket =
           socket
-          |> assign(:catalog, next_catalog)
+          |> assign_catalog(next_catalog)
           |> sync_current_session_from_catalog()
           |> recompute_catalog_assigns()
 
@@ -188,7 +188,7 @@ defmodule HWeb.SessionLive do
       {:ok, rows, next_t} ->
         {:noreply,
          socket
-         |> stream(:entries, rows)
+         |> stream_transcript_rows(rows, next_t)
          |> apply_transcript(next_t)}
 
       {:stale, _t} ->
@@ -208,7 +208,9 @@ defmodule HWeb.SessionLive do
         live = Map.get(next_t.reducer.docs, "live") || %{}
 
         {:noreply,
-         assign(socket,
+         socket
+         |> stream_transcript_rows([], next_t)
+         |> assign(
            transcript: next_t,
            ephemeral_live: live,
            run_active?: Transcript.run_active?(live)
@@ -223,48 +225,38 @@ defmodule HWeb.SessionLive do
   end
 
   @impl true
-  def handle_event("toggle_subsessions", _params, socket) do
-    next = not socket.assigns.show_subsessions?
-    filter = %{socket.assigns.inbox_filter | subsessions: next}
-
+  def handle_event("toggle_folder_subsessions", _params, socket) do
     {:noreply,
      socket
-     |> assign(show_subsessions?: next, inbox_filter: filter)
+     |> assign(:show_folder_subsessions?, not socket.assigns.show_folder_subsessions?)
      |> recompute_catalog_assigns()}
   end
 
-  def handle_event("filter_inbox", params, socket) do
-    filter = InboxFilter.from_form(socket.assigns.inbox_filter, params)
+  def handle_event("new_session", _params, socket), do: new_session(socket, false)
 
-    {:noreply,
-     push_patch(socket,
-       to:
-         session_filter_path(
-           socket.assigns.session_id,
-           socket.assigns.conversation_id,
-           socket.assigns.from_inbox?,
-           filter
-         ),
-       replace: true
-     )}
+  def handle_event("add_session_tags", %{"tags" => raw_tags}, socket) when is_binary(raw_tags) do
+    new_tags =
+      raw_tags |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+    tags = Enum.uniq(session_tags(socket.assigns) ++ new_tags)
+
+    socket =
+      case save_session_tags(socket, tags) do
+        {:ok, socket} -> push_event(socket, "session_tags_added", %{value: raw_tags})
+        {:error, socket} -> socket
+      end
+
+    {:noreply, socket}
   end
 
-  def handle_event("save_session_tags", %{"tags" => raw_tags}, socket) when is_binary(raw_tags) do
-    tags = raw_tags |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
-
-    case Backend.triage_session(socket.assigns.session_id, %{"tags" => tags}) do
-      {:ok, %{session: updated}} ->
-        {:noreply,
-         socket
-         |> assign(error_banner: nil)
-         |> apply_session_to_catalog(updated)}
-
-      {:error, reason} ->
-        {:noreply, assign(socket, :error_banner, format_error(reason))}
-    end
+  def handle_event("remove_session_tag", %{"tag" => tag}, socket) when is_binary(tag) do
+    {_result, socket} = save_session_tags(socket, List.delete(session_tags(socket.assigns), tag))
+    {:noreply, socket}
   end
 
-  def handle_event("save_session_tags", _params, socket), do: {:noreply, socket}
+  def handle_event(event, _params, socket)
+      when event in ["add_session_tags", "remove_session_tag"],
+      do: {:noreply, socket}
 
   def handle_event("dismiss_error", _params, socket) do
     {:noreply, assign(socket, :error_banner, nil)}
@@ -582,30 +574,39 @@ defmodule HWeb.SessionLive do
     text = non_empty(raw_text) || ""
     steer? = params["mode"] == "steer"
 
-    if params["destination"] != composer_destination(socket.assigns) do
-      {:noreply, socket}
-    else
-      case SlashCommands.parse_input(raw_text) do
-        {:command, cmd, arg} when not steer? ->
-          execute_slash_command(socket, cmd, arg, params["request_id"])
+    cond do
+      params["destination"] != composer_destination(socket.assigns) ->
+        {:noreply, socket}
 
-        {:unknown_command, cmd} when not steer? ->
-          {:noreply,
-           assign(socket,
-             error_banner: "Unknown command #{cmd} · type / for commands",
-             info_banner: nil,
-             composer_text: raw_text
-           )}
+      fork_edit = socket.assigns.fork_edit ->
+        if String.trim(raw_text) == "/fork cancel" do
+          {:noreply, cancel_fork_edit(socket)}
+        else
+          submit_fork_edit(socket, fork_edit, text, params["request_id"])
+        end
 
-        {:user_shell, shell_cmd, include_in_context?} when not steer? ->
-          execute_user_shell(socket, shell_cmd, include_in_context?, params["request_id"])
+      true ->
+        case SlashCommands.parse_input(raw_text) do
+          {:command, cmd, arg} when not steer? ->
+            execute_slash_command(socket, cmd, arg, params["request_id"])
 
-        {:message, clean_text} ->
-          submit_message_or_fork_edit(socket, clean_text, steer?, params["request_id"])
+          {:unknown_command, cmd} when not steer? ->
+            {:noreply,
+             assign(socket,
+               error_banner: "Unknown command #{cmd} · type / for commands",
+               info_banner: nil,
+               composer_text: raw_text
+             )}
 
-        _ ->
-          submit_message_or_fork_edit(socket, text, steer?, params["request_id"])
-      end
+          {:user_shell, shell_cmd, include_in_context?} when not steer? ->
+            execute_user_shell(socket, shell_cmd, include_in_context?, params["request_id"])
+
+          {:message, clean_text} ->
+            submit_message(socket, clean_text, steer?, params["request_id"])
+
+          _ ->
+            submit_message(socket, text, steer?, params["request_id"])
+        end
     end
   end
 
@@ -682,6 +683,10 @@ defmodule HWeb.SessionLive do
     end
   end
 
+  def handle_event("edit_entry", %{"entry_id" => entry_id}, socket) when is_binary(entry_id) do
+    {:noreply, begin_fork_edit(socket, entry_id, socket.assigns.conversation_id)}
+  end
+
   def handle_event("fork_entry", %{"entry_id" => entry_id_str} = params, socket) do
     case Integer.parse(to_string(entry_id_str)) do
       {entry_id, ""} when entry_id > 0 ->
@@ -717,6 +722,16 @@ defmodule HWeb.SessionLive do
     end
   end
 
+  def handle_event("inspect_tool", params, socket) do
+    %{session_id: sid, conversation_id: cid, ephemeral_live: live} = socket.assigns
+    inspection = Activity.inspect_tool(params, live, &fetch_transcript_entry(sid, cid, &1))
+
+    {:noreply,
+     socket
+     |> assign(:tool_inspection, inspection)
+     |> push_event("open_panel", %{id: "tool-inspection"})}
+  end
+
   def handle_event("load_earlier", _params, socket) do
     cursor = socket.assigns.before_entry_id
 
@@ -733,11 +748,54 @@ defmodule HWeb.SessionLive do
 
           {:noreply,
            socket
-           |> stream(:entries, Enum.reverse(rows), at: 0)
+           |> stream_transcript_rows(Enum.reverse(rows), next_t, at: 0)
            |> apply_transcript(next_t)}
 
         {:error, reason} ->
           {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    end
+  end
+
+  defp new_session(socket, clear_draft?) do
+    if socket.assigns.session && !socket.assigns.cwd_missing? do
+      session = socket.assigns.session
+
+      case Backend.create_session(%{"env_id" => session.env_id, "cwd" => session.cwd}) do
+        {:ok, %{session: new_session}} ->
+          sid = new_session[:session_id] || new_session["session_id"]
+          socket = if clear_draft?, do: clear_composer_and_draft(socket), else: socket
+
+          {:noreply,
+           socket
+           |> unsubscribe_current()
+           |> push_navigate(
+             to:
+               InboxFilter.session_path(
+                 sid,
+                 socket.assigns.inbox_filter,
+                 socket.assigns.from_inbox?
+               )
+           )}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, :error_banner, format_error(reason))}
+      end
+    else
+      {:noreply, assign(socket, :error_banner, "Session workspace unavailable.")}
+    end
+  end
+
+  defp save_session_tags(socket, tags) do
+    if tags == session_tags(socket.assigns) do
+      {:ok, assign(socket, :tag_error, nil)}
+    else
+      case Backend.triage_session(socket.assigns.session_id, %{"tags" => tags}) do
+        {:ok, %{session: updated}} ->
+          {:ok, socket |> assign(tag_error: nil) |> apply_session_to_catalog(updated)}
+
+        {:error, reason} ->
+          {:error, assign(socket, :tag_error, format_error(reason))}
       end
     end
   end
@@ -749,7 +807,8 @@ defmodule HWeb.SessionLive do
           case CatalogState.apply_snapshot(CatalogState.new(), seq, json_bin) do
             {:ok, catalog} ->
               socket
-              |> assign(catalog: catalog, catalog_subscribed?: true)
+              |> assign_catalog(catalog)
+              |> assign(:catalog_subscribed?, true)
               |> recompute_catalog_assigns()
 
             {:error, _} ->
@@ -768,7 +827,7 @@ defmodule HWeb.SessionLive do
     case Backend.list_sessions(%{}) do
       {:ok, sessions} ->
         socket
-        |> assign(:catalog, CatalogState.from_list(sessions))
+        |> assign_catalog(CatalogState.from_list(sessions))
         |> recompute_catalog_assigns()
 
       _ ->
@@ -777,52 +836,94 @@ defmodule HWeb.SessionLive do
   end
 
   defp recompute_catalog_assigns(socket) do
-    all_sessions = socket.assigns.catalog.sessions
-    filter = socket.assigns.inbox_filter
+    %{catalog: catalog, inbox_filter: filter, session_id: sid} = socket.assigns
+    current = catalog.by_id[sid] || socket.assigns.session
+    workspace = if current, do: {current.env_id, current.cwd}
+    include_subsessions? = socket.assigns.show_folder_subsessions?
 
-    scoped = InboxFilter.scope(filter, all_sessions)
-    current_sid = socket.assigns.session_id
-    show_subsessions? = socket.assigns.show_subsessions?
-
-    sessions =
-      CatalogState.filter_sessions(scoped, filter.mode, "",
-        include_subsessions: show_subsessions?
-      )
-
-    counts = CatalogState.counts(scoped)
-
-    sidebar_sessions =
-      if filter.mode == "inbox" do
-        Enum.filter(scoped, fn s ->
-          if CatalogState.subsession?(s) do
-            show_subsessions? and not s.archived
-          else
-            s.session_id == current_sid or CatalogState.active_inbox?(s)
-          end
-        end)
-      else
-        sessions
-      end
-
-    groups =
-      CatalogState.group_by_workspace(sidebar_sessions, include_subsessions: show_subsessions?)
-
-    next_attention = CatalogState.next_attention_session(sessions, current_sid)
-
-    other_attention_count =
-      Enum.count(sessions, fn s ->
-        s.session_id != current_sid and CatalogState.needs_attention?(s)
+    folder_sessions =
+      Enum.filter(catalog.sessions, fn s ->
+        workspace == {s.env_id, s.cwd} and s.session_id != sid and not s.archived
       end)
 
+    folder_groups =
+      CatalogState.group_by_workspace(folder_sessions, include_subsessions: include_subsessions?)
+
+    neighbors =
+      if socket.assigns.from_inbox? do
+        opts = [include_subsessions: filter.subsessions]
+
+        catalog.sessions
+        |> then(&InboxFilter.scope(filter, &1))
+        |> CatalogState.filter_sessions(filter.mode, "", opts)
+        |> CatalogState.group_by_workspace(opts)
+        |> Enum.flat_map(&inbox_order(&1.sessions))
+        |> inbox_neighbors(sid)
+      end
+
     assign(socket,
-      catalog_counts: counts,
-      catalog_groups: groups,
-      filter_options: InboxFilter.options(filter, all_sessions),
-      next_attention_session: next_attention,
-      other_attention_count: other_attention_count,
-      session_parent:
-        resolve_session_parent(socket.assigns.session, socket.assigns.catalog, current_sid)
+      folder_groups: folder_groups,
+      folder_filter: %InboxFilter{workspace: workspace, subsessions: include_subsessions?},
+      folder_subsessions_count: CatalogState.subsession_count(folder_sessions),
+      inbox_neighbors: neighbors,
+      session_parent: resolve_session_parent(socket.assigns.session, catalog, sid)
     )
+  end
+
+  defp inbox_order(sessions), do: Enum.flat_map(sessions, &[&1 | inbox_order(&1.children)])
+
+  defp inbox_neighbors(sessions, sid) do
+    case Enum.split_while(sessions, &(&1.session_id != sid)) do
+      {before, [_current | after_current]} ->
+        %{previous: List.last(before), next: List.first(after_current)}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp session_tags(%{catalog: catalog, session: session, session_id: sid}) do
+    Map.get(catalog.by_id[sid] || session || %{}, :tags, [])
+  end
+
+  # Streams don't retain rendered rows. Reinsert only changed cards, and drop
+  # a provisional result-only card if its earlier call is loaded later.
+  defp stream_transcript_rows(socket, rows, transcript, opts \\ []) do
+    before = socket.assigns.transcript.subagent_rows
+    current = transcript.subagent_rows
+
+    case {before, current} do
+      {same, same} ->
+        stream(socket, :entries, rows, opts)
+
+      _ ->
+        before
+        |> Enum.reduce(socket, fn {id, previous}, acc ->
+          case Map.fetch(current, id) do
+            :error -> stream_delete(acc, :entries, previous)
+            {:ok, ^previous} -> acc
+            {:ok, row} -> stream_insert(acc, :entries, row, update_only: true)
+          end
+        end)
+        |> stream(:entries, rows, opts)
+    end
+  end
+
+  defp assign_catalog(socket, catalog) do
+    previous = socket.assigns.catalog.by_id
+    socket = assign(socket, :catalog, catalog)
+
+    Enum.reduce(socket.assigns.transcript.subagent_rows, socket, fn {_, row}, acc ->
+      child_id = row["subagent"].child_id
+      old = previous[child_id]
+      new = catalog.by_id[child_id]
+
+      if (old && {old.title, old.attention}) != (new && {new.title, new.attention}) do
+        stream_insert(acc, :entries, row, update_only: true)
+      else
+        acc
+      end
+    end)
   end
 
   defp apply_transcript(socket, transcript) do
@@ -899,10 +1000,6 @@ defmodule HWeb.SessionLive do
       end
   end
 
-  defp session_filter_path(sid, cid, from_inbox?, filter) do
-    InboxFilter.session_path(sid, filter, from_inbox?, if(cid != "1", do: cid))
-  end
-
   defp load_initial(socket, session_id, cid) do
     case Backend.get_session_detail(session_id) do
       {:ok, detail} ->
@@ -922,6 +1019,14 @@ defmodule HWeb.SessionLive do
             show_fork_picker?: false
           )
           |> load_conversation(session_id, cid)
+          |> recompute_catalog_assigns()
+
+        socket =
+          assign(
+            socket,
+            :open_reply_by_default?,
+            MapSet.size(socket.assigns.transcript.reducer.entry_ids) == 0
+          )
 
         if cwd_missing? do
           init_directory_picker(socket, session)
@@ -958,6 +1063,11 @@ defmodule HWeb.SessionLive do
   end
 
   defp load_conversation(socket, session_id, cid) do
+    socket =
+      socket
+      |> assign(:tool_inspection, nil)
+      |> push_event("close_panel", %{id: "tool-inspection"})
+
     if connected?(socket) do
       subscribe_and_apply(socket, session_id, cid)
     else
@@ -1064,6 +1174,9 @@ defmodule HWeb.SessionLive do
 
     CatalogState.normalize_parent(raw_parent)
   end
+
+  defp composer_destination(%{session_id: sid, conversation_id: cid, fork_edit: %{entry_id: id}}),
+    do: "#{sid}:#{cid}:edit:#{id}"
 
   defp composer_destination(%{session_id: sid, conversation_id: cid}), do: "#{sid}:#{cid}"
 
@@ -1271,7 +1384,7 @@ defmodule HWeb.SessionLive do
     }
 
     socket
-    |> assign(:catalog, next_catalog)
+    |> assign_catalog(next_catalog)
     |> recompute_catalog_assigns()
   end
 
@@ -1291,12 +1404,13 @@ defmodule HWeb.SessionLive do
     }
   end
 
-  defp clear_composer_and_draft(socket) do
+  defp clear_composer_and_draft(socket, opts \\ []) do
     socket
     |> reset_composer()
     |> push_event("clear_draft", %{
       session_id: socket.assigns.session_id,
-      conversation_id: socket.assigns.conversation_id
+      conversation_id: socket.assigns.conversation_id,
+      preserve_saved: Keyword.get(opts, :preserve_saved?, false)
     })
   end
 
@@ -1309,7 +1423,8 @@ defmodule HWeb.SessionLive do
       session_id: socket.assigns.session_id,
       conversation_id: socket.assigns.conversation_id,
       text: text,
-      open_reply: open_reply?
+      open_reply: open_reply?,
+      fork_edit: socket.assigns.fork_edit != nil
     })
   end
 
@@ -1337,33 +1452,35 @@ defmodule HWeb.SessionLive do
     assign(socket, :tree_view, view)
   end
 
-  defp submit_message_or_fork_edit(socket, text, steer?, request_id) do
-    case socket.assigns.fork_edit do
-      nil ->
-        with {:ok, content} <- composer_content(socket, text) do
-          if content == "" do
-            {:noreply, socket}
-          else
-            args = %{
-              "type" => "input",
-              "content" => content,
-              "when_busy" => if(steer?, do: "steer", else: "follow_up"),
-              "when_idle" => if(steer?, do: "reject", else: "start")
-            }
+  defp submit_message(socket, text, steer?, request_id) do
+    with {:ok, content} <- composer_content(socket, text) do
+      if content == "" do
+        {:noreply, socket}
+      else
+        args = %{
+          "type" => "input",
+          "content" => content,
+          "when_busy" => if(steer?, do: "steer", else: "follow_up"),
+          "when_idle" => if(steer?, do: "reject", else: "start")
+        }
 
-            send_submit(socket, args, request_id, clear_composer?: true)
-          end
-        else
-          {:error, message} -> {:noreply, assign(socket, :attachment_error, message)}
-        end
-
-      fork_edit ->
-        submit_fork_edit(socket, fork_edit, text, steer?, request_id)
+        send_submit(socket, args, request_id, clear_composer?: true)
+      end
+    else
+      {:error, message} -> {:noreply, assign(socket, :attachment_error, message)}
     end
   end
 
-  defp submit_fork_edit(socket, fork_edit, text, steer?, request_id) do
+  defp submit_fork_edit(socket, fork_edit, text, request_id) do
     with {:ok, content} <- composer_content(socket, text) do
+      content =
+        case fork_edit.images do
+          [] -> content
+          images when is_list(content) -> content ++ images
+          images when content == "" -> images
+          images -> [%{"type" => "text", "text" => content} | images]
+        end
+
       if content == "" do
         {:noreply, socket}
       else
@@ -1401,16 +1518,25 @@ defmodule HWeb.SessionLive do
                   request_id
                 )
 
-              _ = Backend.execute_command(new_sid, envelope)
+              case Backend.execute_command(new_sid, envelope) do
+                {:ok, _} ->
+                  {:noreply,
+                   socket
+                   |> assign(fork_edit: nil, error_banner: nil, info_banner: nil)
+                   |> clear_composer_and_draft(preserve_saved?: true)
+                   |> unsubscribe_current()
+                   |> push_navigate(
+                     to:
+                       InboxFilter.session_path(
+                         new_sid,
+                         socket.assigns.inbox_filter,
+                         socket.assigns.from_inbox?
+                       )
+                   )}
 
-              {:noreply,
-               socket
-               |> assign(fork_edit: nil, error_banner: nil, info_banner: nil)
-               |> clear_composer_and_draft()
-               |> unsubscribe_current()
-               |> push_navigate(
-                 to: InboxFilter.session_path(new_sid, socket.assigns.inbox_filter)
-               )}
+                {:error, reason} ->
+                  {:noreply, assign(socket, :error_banner, format_error(reason))}
+              end
 
             {:error, reason} ->
               {:noreply, assign(socket, :error_banner, format_error(reason))}
@@ -1418,12 +1544,7 @@ defmodule HWeb.SessionLive do
         else
           pred_int = String.to_integer(fork_edit.predecessor_id)
 
-          args = %{
-            "at_entry_id" => pred_int,
-            "content" => content,
-            "when_busy" => if(steer?, do: "steer", else: "follow_up"),
-            "when_idle" => if(steer?, do: "reject", else: "start")
-          }
+          args = %{"at_entry_id" => pred_int, "content" => content}
 
           envelope =
             build_envelope_for(fork_edit.source_cid, "fork_and_submit", args, request_id)
@@ -1435,7 +1556,7 @@ defmodule HWeb.SessionLive do
               socket =
                 socket
                 |> assign(fork_edit: nil, error_banner: nil, info_banner: nil)
-                |> clear_composer_and_draft()
+                |> clear_composer_and_draft(preserve_saved?: true)
                 |> refresh_detail()
 
               if new_cid != "" do
@@ -1466,48 +1587,47 @@ defmodule HWeb.SessionLive do
   defp begin_fork_edit(socket, entry_id_str, source_cid) do
     session = socket.assigns.session
 
-    cond do
-      is_nil(session) or session.status == "archived" ->
-        assign(socket, :error_banner, "Cannot fork-edit an archived session.")
+    with true <- session != nil and session.status != "archived",
+         {:ok, items} <- scan_through_entry(socket.assigns.session_id, source_cid, entry_id_str),
+         [%{"id" => ^entry_id_str, "kind" => "user", "data" => data} | predecessors] <- items do
+      full_text = extract_entry_plain_text(data) || ""
+      previous_edit = socket.assigns.fork_edit
 
-      true ->
-        with {:ok, tree} <- fetch_or_load_tree(socket),
-             node when is_map(node) <-
-               Enum.find(tree.nodes, &(to_string(&1.id) == to_string(entry_id_str))),
-             true <- to_string(node.kind) == "user" do
-          cid_for_scan =
-            to_string(node.conversation_id || source_cid || socket.assigns.conversation_id)
+      fork_edit = %{
+        entry_id: entry_id_str,
+        predecessor_id: List.first(predecessors, %{})["id"],
+        source_cid: source_cid,
+        saved_draft:
+          if(previous_edit, do: previous_edit.saved_draft, else: socket.assigns.composer_text),
+        images: Enum.filter(List.wrap(data["content"]), &match?(%{"type" => "image"}, &1))
+      }
 
-          full_text =
-            fetch_user_entry_text(socket.assigns.session_id, cid_for_scan, to_string(node.id)) ||
-              node.preview
+      socket
+      |> assign(fork_edit: fork_edit, error_banner: nil, info_banner: nil)
+      |> set_composer_draft(full_text, open_reply?: true)
+    else
+      false -> assign(socket, :error_banner, "Cannot fork-edit an archived session.")
+      {:error, reason} -> assign(socket, :error_banner, format_error(reason))
+      _ -> assign(socket, :error_banner, "User prompt ##{entry_id_str} not found.")
+    end
+  end
 
-          fork_edit = %{
-            entry_id: to_string(node.id),
-            predecessor_id: node.parent_id && to_string(node.parent_id),
-            source_cid: cid_for_scan,
-            saved_draft: socket.assigns.composer_text
-          }
-
-          socket
-          |> assign(
-            tree_raw: tree,
-            fork_edit: fork_edit,
-            error_banner: nil,
-            info_banner: nil
-          )
-          |> recompute_tree_view()
-          |> set_composer_draft(full_text, open_reply?: true)
-        else
-          {:error, reason} ->
-            assign(socket, :error_banner, format_error(reason))
-
-          nil ->
-            assign(socket, :error_banner, "Entry ##{entry_id_str} not found.")
-
-          false ->
-            assign(socket, :error_banner, "Entry ##{entry_id_str} is not a user prompt.")
+  # The visible predecessor determines the cut. Read both entries together
+  # rather than relying on a cached or truncated session-wide tree.
+  defp scan_through_entry(session_id, cid, entry_id) do
+    case Integer.parse(entry_id) do
+      {id, ""} when id > 0 ->
+        case Backend.scan_entries(session_id, cid, %{
+               "order" => "desc",
+               "cursor" => Integer.to_string(id + 1),
+               "limit" => 2
+             }) do
+          {:ok, %{items: items}} -> {:ok, Enum.map(items, &Transcript.normalize_entry/1)}
+          {:error, _} = error -> error
         end
+
+      _ ->
+        {:ok, []}
     end
   end
 
@@ -1523,36 +1643,22 @@ defmodule HWeb.SessionLive do
     end
   end
 
-  defp fetch_or_load_tree(socket) do
-    case socket.assigns.tree_raw do
-      %{} = tree -> {:ok, tree}
-      _ -> Backend.get_session_tree(socket.assigns.session_id)
+  defp fetch_transcript_entry(session_id, cid, entry_id_str) when is_binary(entry_id_str) do
+    with {id, ""} when id > 0 <- Integer.parse(entry_id_str),
+         {:ok, %{items: [entry]}} <-
+           Backend.scan_entries(session_id, cid, %{
+             "order" => "desc",
+             "cursor" => Integer.to_string(id + 1),
+             "limit" => 1
+           }),
+         %{"id" => ^entry_id_str} = normalized <- Transcript.normalize_entry(entry) do
+      normalized
+    else
+      _ -> nil
     end
   end
 
-  defp fetch_user_entry_text(session_id, cid, entry_id_str) do
-    case Integer.parse(entry_id_str) do
-      {target_id, ""} when target_id > 0 ->
-        case Backend.scan_entries(session_id, cid, %{
-               "order" => "desc",
-               "cursor" => Integer.to_string(target_id + 1),
-               "limit" => 1
-             }) do
-          {:ok, %{items: [entry | _]}} ->
-            if to_string(entry[:id] || entry["id"]) == entry_id_str do
-              extract_entry_plain_text(entry[:data] || entry["data"])
-            else
-              nil
-            end
-
-          _ ->
-            nil
-        end
-
-      _ ->
-        nil
-    end
-  end
+  defp fetch_transcript_entry(_session_id, _cid, _entry_id), do: nil
 
   defp extract_entry_plain_text(data) when is_map(data) do
     case data["content"] || data[:content] do
@@ -1781,29 +1887,7 @@ defmodule HWeb.SessionLive do
     end
   end
 
-  defp execute_slash_command(socket, "/new", _arg, _request_id) do
-    session = socket.assigns.session
-
-    if is_nil(session) do
-      {:noreply, assign(socket, :error_banner, "Session workspace unavailable.")}
-    else
-      params = %{"env_id" => session.env_id, "cwd" => session.cwd}
-
-      case Backend.create_session(params) do
-        {:ok, %{session: new_session}} ->
-          new_sid = new_session[:session_id] || new_session["session_id"]
-
-          {:noreply,
-           socket
-           |> clear_composer_and_draft()
-           |> unsubscribe_current()
-           |> push_navigate(to: InboxFilter.session_path(new_sid, socket.assigns.inbox_filter))}
-
-        {:error, reason} ->
-          {:noreply, assign(socket, :error_banner, format_error(reason))}
-      end
-    end
-  end
+  defp execute_slash_command(socket, "/new", _arg, _request_id), do: new_session(socket, true)
 
   defp execute_slash_command(socket, "/inbox", _arg, _request_id) do
     {:noreply,
@@ -2156,7 +2240,7 @@ defmodule HWeb.SessionLive do
     if arg == "" do
       {:noreply, assign(socket, :error_banner, "Usage: /steer <message>")}
     else
-      submit_message_or_fork_edit(socket, arg, true, request_id)
+      submit_message(socket, arg, true, request_id)
     end
   end
 
@@ -2164,7 +2248,7 @@ defmodule HWeb.SessionLive do
     if arg == "" do
       {:noreply, assign(socket, :error_banner, "Usage: /follow-up <message>")}
     else
-      submit_message_or_fork_edit(socket, arg, false, request_id)
+      submit_message(socket, arg, false, request_id)
     end
   end
 

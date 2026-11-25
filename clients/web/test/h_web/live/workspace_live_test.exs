@@ -46,8 +46,27 @@ defmodule HWeb.WorkspaceLiveTest do
     minted_sid = String.replace_prefix(to_path, "/sessions/", "")
     assert minted_sid != existing.session_id
 
-    {:ok, _session_view, session_html} = live(conn, to_path)
+    {:ok, session_view, session_html} = live(conn, to_path)
     assert session_html =~ minted_sid
+    assert has_element?(session_view, "#reply[open]")
+  end
+
+  test "keeps archived status separate from the Open action for long session IDs", ctx do
+    sid = "archive-" <> String.duplicate("a", 60)
+    catalog = Keyword.fetch!(ctx.daemon_opts, :catalog)
+
+    assert {:ok, _} =
+             Catalog.put_session(catalog, %{
+               session_id: sid,
+               cwd: ctx.projects_dir,
+               title: "An archived session with a long ID",
+               archived: true
+             })
+
+    {:ok, view, _} = live(log_in_owner(ctx.conn, ctx.owner_token), "/workspaces")
+    assert has_element?(view, ".session-card .session-id", sid)
+    assert has_element?(view, ".session-card-badges > .badge", "Archived")
+    assert has_element?(view, ~s(.session-card > a[href="/sessions/#{sid}"]), "Open")
   end
 
   test "keeps subsessions out of WorkspaceLive sidebar and attention counts", %{

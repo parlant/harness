@@ -14,6 +14,15 @@ defmodule HWeb.ComposerAttachmentTest do
   end
 
   test "previews a screenshot, then commits it once with the message on Send", ctx do
+    [ref] =
+      ctx.view
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query("#composer-form input[type=file]")
+      |> LazyHTML.attribute("id")
+
+    assert has_element?(ctx.view, ~s(#composer-form[phx-drop-target="#{ref}"]))
+
     assert has_element?(
              ctx.view,
              ~s(#composer-form input[type="file"][multiple][aria-label="Attach files"])
@@ -61,6 +70,33 @@ defmodule HWeb.ComposerAttachmentTest do
     assert has_element?(ctx.view, "#entries-stream img[alt='Attached screenshot']")
     refute has_element?(ctx.view, ".composer-attachment")
     send(worker, {:release, gate})
+  end
+
+  test "editing a message with a screenshot keeps it on the replacement prompt", ctx do
+    upload = attachment(ctx.view, "mobile.png", Base.decode64!(@png), "image/png")
+    render_upload(upload, "mobile.png")
+
+    for text <- ["Original answer", "Edited answer"] do
+      Fake.push_step(ctx.fake, {:reply, [], %{content: text}})
+    end
+
+    ctx.view |> form("#composer-form", %{content: "Original"}) |> render_submit()
+    assert has_element?(ctx.view, ".entry-user .edit-btn")
+    ctx.view |> element(".entry-user .edit-btn") |> render_click()
+    assert has_element?(ctx.view, "#fork-edit-banner", "1 original image(s) included")
+
+    assert {:error, {:live_redirect, %{to: path}}} =
+             ctx.view |> form("#composer-form", %{content: "Edited"}) |> render_submit()
+
+    new_sid = String.replace_prefix(URI.parse(path).path, "/sessions/", "")
+
+    for {sid, text} <- [{ctx.sid, "Original"}, {new_sid, "Edited"}] do
+      assert {:ok, %{items: [%{data: %{"content" => content}}]}} =
+               Backend.scan_entries(sid, 1, %{"order" => "asc", "limit" => 1})
+
+      assert [%{"type" => "text", "text" => ^text}, %{"type" => "image", "data" => @png}] =
+               content
+    end
   end
 
   test "rejects oversize uploads and unsupported bytes without sending the draft", ctx do

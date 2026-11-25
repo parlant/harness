@@ -20,7 +20,8 @@ server on loopback, not behind a public proxy. Neither is enabled in prod.
 
 ## Attach screenshots or files in chat
 
-Open **Reply**, then choose **Attach files** (paperclip icon) beside the model button.
+Drop files onto the message composer, or choose **Attach files** (the paperclip
+beside the model button). If the composer is tucked away, choose **Reply** first.
 Attach up to 6 files per message (up to 8 MiB total): PNG, JPEG or WebP images
 (up to 2 MiB each), or UTF-8 text files (up to 64 KiB each). You can pick
 multiple files at once or add more before sending. Review the filenames and
@@ -63,8 +64,9 @@ without enabling the development inspector below.
 Authenticated pages share `HWeb.Layouts.app_bar/1`: one row for navigation,
 page title and immediate actions. The main menu opens over the page. The central
 content takes the remaining viewport height and scrolls independently of the bar.
-In a session this is the transcript. **Reply** reveals the message field; **Hide
-reply** tucks it away without clearing text or the selected attachment. The model
+In a session this is the transcript. The composer opens by default on a new
+session. **Hide reply** tucks it away without clearing text or attachments;
+**Reply** reveals it again. The model
 button in the composer opens **Agent settings**. Browsing providers doesn't
 change the conversation; choosing a model or reasoning level applies it directly.
 The transcript follows output while you're at the end. Reading earlier messages
@@ -72,8 +74,13 @@ turns following off; **Latest** returns to the end. During a run, the open
 composer groups **Queue**, **Steer**, and the square **Stop** icon. With reply
 closed, **Stop** is a small round button on the right, below the transcript.
 
-Session details (**⋯**), workspace sessions and Inbox filters use native dialog
-panels rather than expanding the header. File review uses `HWeb.Workbench.split/1`
+In a session, the centered title is flanked by previous/next carets when browsing
+from Inbox. The **Session actions** menu groups **New**, **Tree**, **Review files**,
+**Mark as read**, and **Archive** (as applicable). The right-sidebar button toggles
+**Session details** below the app bar. Its open/closed preference is saved in the
+browser across sessions and reloads. On narrow screens the sidebar takes the place
+of the transcript until closed. Workspace sessions and Inbox filters still use
+native dialog panels. File review uses `HWeb.Workbench.split/1`
 with `:sidebar` and `:main` slots; the separator is draggable or keyboard adjustable
 (arrows, Home, End). Width is per view and browser tab. On narrow screens **Browse**
 switches between the tree and the editor rather than stacking two scroll areas.
@@ -83,13 +90,14 @@ unloaded while idle. Unloading doesn't move a session to **Archived**, which
 only lists archived sessions. **Attention** remains the view for sessions that
 need you to act.
 
-The Inbox filter panel and session details share working-directory, tag, and text filters.
-The filters travel in the URL: opening a row, jumping to the next session
-needing attention, switching branches, and returning to the Inbox preserve
-them. A directory filter matches the exact environment and directory; a tag
-filter matches the full tag. Use **Clear filters** to reset the view. Edit a
-session's tags in **Session details**. In the Inbox browser,
-`n`/`p` cycle through attention rows; Tab moves between controls.
+Working-directory, tag, and text filters are available from the Inbox filter panel.
+They travel in the URL: opening a row, using the session carets, switching branches,
+and returning through **Main menu → Inbox** preserve them. A directory filter
+matches the exact environment and directory; a tag filter matches the full tag.
+Use **Clear filters** to reset the view. The session sidebar lists other unarchived
+sessions in the same directory regardless of those filters. Add a session tag with
+Enter, comma, or **+**; remove it with **×**. Changes save automatically. In the
+Inbox browser, `n`/`p` cycle through attention rows; Tab moves between controls.
 
 - Put presentation in function components (`ConversationComponents`), and
   page markup in colocated `*.html.heex`. Keep URL params, subscriptions,
@@ -123,14 +131,22 @@ In the composer, type `/` at the start of a message for slash commands, or
 `Tab`; `→` also accepts a visible inline hint at the end of the draft. Picking an
 `@` folder keeps browsing inside that folder; picking a file inserts its plain
 path. `/cwd <dir>` and workspace path fields offer directory-only completion.
-`Enter` executes single-line slash commands, and `/tree` (or **Tree** in the
-session bar) browses the turn-step tree across conversations and branches.
+`Enter` executes single-line slash commands, and `/tree` (or **Tree** in
+**Session actions**) browses the turn-step tree across conversations and branches.
+Use **Edit** below a user message to load it into the composer. **Send** forks
+before the original prompt and submits its replacement without changing the
+original branch. Editing the first prompt starts a new session in the same
+workspace because there is no earlier step to fork from.
 
-Consecutive tool and system activity appears in one line between messages,
-including across **Load earlier** pages. A tool call and its result count once.
-The line shows a spinner while work is underway, or a status such as **Waiting**,
-**Complete**, **Paused**, or **Failed**. This is a web display change; the daemon
-and `hi` still have the original transcript and tool output.
+Consecutive tool calls appear in a single row between messages, including across
+**Load earlier** pages. A call and its result count once. Active work shows a
+spinner (a static indicator when reduced motion is enabled); settled groups show
+only the count, not an overall success or failure label. Tap or click the count
+to list the calls, then select one to inspect its arguments and output. Live
+output is a snapshot taken when you open the call. Subagents have one card per
+subsession that updates in place with its current status. **Copy** copies the full
+prompt; **Open subsession** opens the child's transcript. The daemon and `hi`
+transcript are unchanged.
 
 ## Check a change
 
@@ -150,7 +166,7 @@ requires a provider call.
   empty review session; after it has a transcript entry, the next open creates
   a fresh one. It does not reuse or alter unrelated sessions. Opening files
   does not start an agent run.
-- **Session → ⋯ → Review files** opens review in the displayed conversation,
+- **Session → Session actions → Review files** opens review in the displayed conversation,
   including a fork. **Inbox → Files** uses the row's session. Return to the
   session to see comments in its transcript.
 - In a git worktree, **Changes** shows staged, unstaged and untracked files

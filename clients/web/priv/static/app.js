@@ -91,7 +91,7 @@ import {Completer, DirectoryComplete} from "./completion.js";
     } else if (inspector) {
       document.getElementById("inspector-toggle")?.click();
     }
-    const menu = target.closest("#app-menu");
+    const menu = target.closest("[popover].app-menu");
     if (menu && target.closest("a, [data-dismiss-menu], [data-open-inspector]")) menu.hidePopover();
     target.closest("[data-panel-navigate]")?.closest("dialog")?.close();
   });
@@ -120,6 +120,58 @@ import {Completer, DirectoryComplete} from "./completion.js";
 
   const Hooks = {
     PaneSplitter, FollowTranscript, InboxBrowser, Inspector, ReviewEditor, DirectoryComplete,
+    SessionSidebar: {
+      mounted() {
+        const key = "hweb:session-sidebar";
+        this.sidebarEvents = new AbortController();
+        const {signal} = this.sidebarEvents;
+        let open = false;
+        try { open = localStorage.getItem(key) === "open"; } catch {}
+
+        const trigger = () => this.el.querySelector("#session-details-button");
+        this.renderSidebar = () => {
+          this.el.toggleAttribute("data-sidebar-open", open);
+          this.el.querySelector("#session-details").hidden = !open;
+          trigger().setAttribute("aria-expanded", String(open));
+        };
+        const setOpen = value => {
+          open = value;
+          this.renderSidebar();
+          try { localStorage.setItem(key, open ? "open" : "closed"); } catch {}
+          if (!open) trigger().focus({preventScroll: true});
+        };
+        this.el.addEventListener("click", event => {
+          if (event.target.closest("[data-session-sidebar-toggle]")) setOpen(!open);
+        }, {signal});
+        this.el.addEventListener("keydown", event => {
+          if (event.key === "Escape" && !event.defaultPrevented && open &&
+              event.target.closest("#session-details, #session-details-button") &&
+              !this.el.querySelector(".app-menu:popover-open")) {
+            event.preventDefault();
+            setOpen(false);
+          }
+        }, {signal});
+        this.renderSidebar();
+      },
+      updated() { this.renderSidebar(); },
+      destroyed() { this.sidebarEvents.abort(); }
+    },
+    SessionTags: {
+      mounted() {
+        const input = this.el.elements.tags;
+        this.onTagKeydown = event => {
+          if (event.key === "," && !event.isComposing && event.keyCode !== 229) {
+            event.preventDefault();
+            if (input.value.trim()) this.el.requestSubmit();
+          }
+        };
+        input.addEventListener("keydown", this.onTagKeydown);
+        this.handleEvent("session_tags_added", ({value}) => {
+          if (input.value === value) input.value = "";
+        });
+      },
+      destroyed() { this.el.elements.tags.removeEventListener("keydown", this.onTagKeydown); }
+    },
     ComposerDraft: {
       mounted() {
         const reply = this.el.closest("details");
@@ -176,7 +228,7 @@ import {Completer, DirectoryComplete} from "./completion.js";
         this.onInput = () => {
           this.scheduleAutogrow?.();
           const k = draftKey(this.el);
-          if (!k) return;
+          if (!k || this.el.dataset.forkEdit === "true") return;
           try {
             window.localStorage.setItem(k, this.el.value);
           } catch (_err) {
@@ -209,8 +261,8 @@ import {Completer, DirectoryComplete} from "./completion.js";
         this.el.addEventListener("keydown", this.onKeydown);
         this.scheduleAutogrow?.();
 
-        this.handleEvent("clear_draft", ({ session_id, conversation_id }) => {
-          if (session_id && conversation_id) {
+        this.handleEvent("clear_draft", ({ session_id, conversation_id, preserve_saved }) => {
+          if (session_id && conversation_id && !preserve_saved) {
             try {
               window.localStorage.removeItem(
                 `hweb:draft:${session_id}:${conversation_id}`
@@ -224,13 +276,13 @@ import {Completer, DirectoryComplete} from "./completion.js";
           this.scheduleAutogrow?.();
         });
 
-        this.handleEvent("set_draft", ({ session_id, conversation_id, text, open_reply }) => {
+        this.handleEvent("set_draft", ({ session_id, conversation_id, text, open_reply, fork_edit }) => {
           const nextText = typeof text === "string" ? text : "";
           if (open_reply && reply && !reply.open) {
             reply.open = true;
           }
           this.el.value = nextText;
-          if (session_id && conversation_id) {
+          if (session_id && conversation_id && !fork_edit) {
             try {
               window.localStorage.setItem(
                 `hweb:draft:${session_id}:${conversation_id}`,
