@@ -17,8 +17,9 @@ defmodule H.RemoteAgent do
   use GenServer
 
   alias H.ExecutionEnv
+  alias H.RemoteAgent.Client
 
-  @type server :: GenServer.server()
+  @type server :: GenServer.server() | Client.t()
   @type fence :: {term(), term(), term(), term()}
   @type descriptor :: %{id: String.t(), kind: String.t(), cwd: String.t()}
 
@@ -41,59 +42,113 @@ defmodule H.RemoteAgent do
 
   @doc "Returns the plain JSON-safe environment descriptor (`id`, `kind: \"remote\"`, `cwd`)."
   @spec descriptor(server()) :: descriptor()
+  def descriptor(%Client{} = client), do: Client.descriptor(client)
   def descriptor(agent), do: GenServer.call(agent, :descriptor)
 
   @doc "Returns the agent's canonical base working directory."
   @spec cwd(server()) :: String.t()
+  def cwd(%Client{} = client), do: Client.cwd(client)
   def cwd(agent), do: GenServer.call(agent, :cwd)
 
   @doc "Remotely resolves `path` and verifies that it exists as a directory."
   @spec bind_cwd(server(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
-  def bind_cwd(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+  def bind_cwd(agent, path, opts \\ [])
+
+  def bind_cwd(%Client{} = client, path, opts) when is_binary(path) and is_list(opts) do
+    Client.bind_cwd(client, path, opts)
+  end
+
+  def bind_cwd(agent, path, opts) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:bind_cwd, path, opts})
   end
 
   @doc "Remotely resolves `path` using target OS POSIX path semantics."
   @spec resolve_path(server(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
-  def resolve_path(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+  def resolve_path(agent, path, opts \\ [])
+
+  def resolve_path(%Client{} = client, path, opts) when is_binary(path) and is_list(opts) do
+    Client.resolve_path(client, path, opts)
+  end
+
+  def resolve_path(agent, path, opts) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:resolve_path, path, opts})
   end
 
   @doc "Remotely canonicalizes `path` by resolving symlinks on the target agent."
   @spec canonical_path(server(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
-  def canonical_path(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+  def canonical_path(agent, path, opts \\ [])
+
+  def canonical_path(%Client{} = client, path, opts)
+      when is_binary(path) and is_list(opts) do
+    Client.canonical_path(client, path, opts)
+  end
+
+  def canonical_path(agent, path, opts) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:canonical_path, path, opts})
   end
 
   @doc "Reads bounded UTF-8 lines from a remote file."
   @spec read_file_lines(server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def read_file_lines(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+  def read_file_lines(agent, path, opts \\ [])
+
+  def read_file_lines(%Client{} = client, path, opts)
+      when is_binary(path) and is_list(opts) do
+    Client.read_file_lines(client, path, opts)
+  end
+
+  def read_file_lines(agent, path, opts) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:read_file_lines, path, opts})
   end
 
   @doc "Reads bounded raw bytes from a remote file."
   @spec read_file_bytes(server(), String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
-  def read_file_bytes(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+  def read_file_bytes(agent, path, opts \\ [])
+
+  def read_file_bytes(%Client{} = client, path, opts)
+      when is_binary(path) and is_list(opts) do
+    Client.read_file_bytes(client, path, opts)
+  end
+
+  def read_file_bytes(agent, path, opts) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:read_file_bytes, path, opts})
   end
 
   @doc "Atomically writes `content` to a remote file, creating missing parent directories."
   @spec write_file(server(), String.t(), iodata(), keyword()) :: :ok | {:error, term()}
-  def write_file(agent, path, content, opts \\ []) when is_binary(path) and is_list(opts) do
+  def write_file(agent, path, content, opts \\ [])
+
+  def write_file(%Client{} = client, path, content, opts)
+      when is_binary(path) and is_list(opts) do
+    Client.write_file(client, path, content, opts)
+  end
+
+  def write_file(agent, path, content, opts) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:write_file, path, content, opts})
   end
 
   @doc "Lists a remote directory with sorting, pagination, hidden/dir filters, and markers."
   @spec list_dir(server(), String.t(), keyword()) ::
           {:ok, %{entries: [map()], next_cursor: nil | non_neg_integer()}} | {:error, term()}
-  def list_dir(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+  def list_dir(agent, path, opts \\ [])
+
+  def list_dir(%Client{} = client, path, opts) when is_binary(path) and is_list(opts) do
+    Client.list_dir(client, path, opts)
+  end
+
+  def list_dir(agent, path, opts) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:list_dir, path, opts})
   end
 
   @doc "Recursively discovers bounded files and directories on the remote agent."
   @spec list_files(server(), String.t(), keyword()) ::
           {:ok, %{entries: [map()], truncated: boolean()}} | {:error, term()}
-  def list_files(agent, path, opts \\ []) when is_binary(path) and is_list(opts) do
+  def list_files(agent, path, opts \\ [])
+
+  def list_files(%Client{} = client, path, opts) when is_binary(path) and is_list(opts) do
+    Client.list_files(client, path, opts)
+  end
+
+  def list_files(agent, path, opts) when is_binary(path) and is_list(opts) do
     call_agent(agent, {:list_files, path, opts})
   end
 
@@ -106,7 +161,13 @@ defmodule H.RemoteAgent do
   """
   @spec exec(server(), ExecutionEnv.command(), keyword()) ::
           {:ok, ExecutionEnv.exec_result()} | {:error, term()}
-  def exec(agent, command, opts \\ []) when is_list(opts) do
+  def exec(agent, command, opts \\ [])
+
+  def exec(%Client{} = client, command, opts) when is_list(opts) do
+    Client.exec(client, command, opts)
+  end
+
+  def exec(agent, command, opts) when is_list(opts) do
     abort_ref = Keyword.get(opts, :abort_ref)
     on_output = Keyword.get(opts, :on_output)
 
@@ -128,6 +189,14 @@ defmodule H.RemoteAgent do
   @doc "Renews the lease TTL (in milliseconds) for an active fenced execution."
   @spec renew_lease(server(), fence(), pos_integer()) ::
           :ok | {:error, :not_found | :invalid_lease_ms | {:agent_down, term()}}
+  def renew_lease(
+        %Client{} = client,
+        {_session_id, _inc, _task_id, _attempt_id} = fence,
+        lease_ms
+      ) do
+    Client.renew_lease(client, fence, lease_ms)
+  end
+
   def renew_lease(agent, {_session_id, _inc, _task_id, _attempt_id} = fence, lease_ms) do
     if is_integer(lease_ms) and lease_ms > 0 do
       call_agent(agent, {:renew_lease, fence, lease_ms})
@@ -138,12 +207,17 @@ defmodule H.RemoteAgent do
 
   @doc "Aborts an active fenced execution and waits for its process group to be reaped."
   @spec abort(server(), fence()) :: :ok | {:error, :not_found | {:agent_down, term()}}
+  def abort(%Client{} = client, {_session_id, _inc, _task_id, _attempt_id} = fence) do
+    Client.abort(client, fence)
+  end
+
   def abort(agent, {_session_id, _inc, _task_id, _attempt_id} = fence) do
     call_agent(agent, {:abort, fence}, :infinity)
   end
 
   @doc "Returns the list of currently active execution fences on this agent."
   @spec active_fences(server()) :: [fence()]
+  def active_fences(%Client{} = client), do: Client.active_fences(client)
   def active_fences(agent), do: GenServer.call(agent, :active_fences)
 
   # --- GenServer callbacks ---

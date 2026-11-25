@@ -25,6 +25,90 @@ defmodule H.ExecutionEnv.Remote do
 
   alias H.ExecutionEnv
   alias H.RemoteAgent
+  alias H.RemoteAgent.Client
+
+  @doc """
+  Connects to a remote `H.RemoteAgent.HTTP` endpoint (TCP HTTP or Unix domain socket)
+  and returns `{:ok, H.ExecutionEnv.t()}`.
+
+  `url_or_opts` may be a base URL string (e.g. `"http://127.0.0.1:4105"`) or a keyword
+  list passed to `H.RemoteAgent.Client.new/2` (e.g. `[unix_socket: "/path/agent.sock", token: "..."]`).
+
+  ## Options
+    * `:token` (required unless provided in `url_or_opts`) - bearer token string
+    * `:unix_socket` - Unix domain socket path
+    * `:host` - optional `Host` header override
+    * `:request_timeout_ms` - HTTP request timeout in ms (default `30_000`)
+    * `:lease_ms` - default lease TTL in ms (default `30_000`)
+    * `:heartbeat_ms` - active lease renewal interval in ms (default `5_000`)
+    * `:env_id` - optional non-empty string override for the environment ID
+    * `:default_exec_opts` - keyword list of default fence/lease/exec options
+  """
+  @spec connect_http(String.t() | keyword(), nil | String.t(), keyword()) ::
+          {:ok, ExecutionEnv.t()} | {:error, term()}
+  def connect_http(url_or_opts, cwd \\ nil, opts \\ [])
+      when (is_binary(url_or_opts) or is_list(url_or_opts)) and
+             (is_binary(cwd) or is_nil(cwd)) and is_list(opts) do
+    {remote_opts, client_opts} = Keyword.split(opts, [:env_id, :default_exec_opts])
+    client = Client.new(url_or_opts, client_opts)
+
+    with {:ok, descriptor} <- safe_descriptor(client),
+         {:ok, remote_cwd} <- resolve_initial_cwd(client, descriptor, cwd) do
+      env_id =
+        case Keyword.get(remote_opts, :env_id) do
+          nil ->
+            descriptor.id
+
+          id when is_binary(id) and id != "" ->
+            id
+
+          other ->
+            raise ArgumentError, "expected non-empty string :env_id, got: #{inspect(other)}"
+        end
+
+      default_exec_opts =
+        validate_default_exec_opts!(Keyword.get(remote_opts, :default_exec_opts, []))
+
+      {:ok,
+       ExecutionEnv.new(__MODULE__, %{
+         agent: client,
+         env_id: env_id,
+         cwd: remote_cwd,
+         default_exec_opts: default_exec_opts
+       })}
+    end
+  end
+
+  @doc """
+  Builds an `H.EnvRegistry` environment spec targeting an `H.RemoteAgent.HTTP`
+  endpoint (TCP HTTP or Unix domain socket) so a local daemon ("brains") can
+  coordinate tools across authenticated network/UDS remote agents ("hands").
+  """
+  @spec env_spec_for_http(String.t(), String.t() | keyword(), keyword()) :: map()
+  def env_spec_for_http(id, url_or_opts, opts \\ [])
+      when is_binary(id) and id != "" and (is_binary(url_or_opts) or is_list(url_or_opts)) and
+             is_list(opts) do
+    default_cwd = Keyword.get(opts, :default_cwd, "/")
+
+    default_label =
+      if is_binary(url_or_opts), do: "Remote HTTP #{url_or_opts}", else: "Remote HTTP #{id}"
+
+    label = Keyword.get(opts, :label, default_label)
+    connect_opts = opts |> Keyword.drop([:default_cwd, :label]) |> Keyword.put_new(:env_id, id)
+
+    %{
+      id: id,
+      kind: "remote",
+      label: label,
+      default_cwd: default_cwd,
+      build: fn cwd ->
+        case connect_http(url_or_opts, cwd, connect_opts) do
+          {:ok, env} -> env
+          {:error, _reason} -> nil
+        end
+      end
+    }
+  end
 
   @doc """
   Connects to a remote BEAM `node` hosting a registered `H.RemoteAgent` and
@@ -165,6 +249,13 @@ defmodule H.ExecutionEnv.Remote do
           true -> :ok
           _ -> {:error, :node_unreachable}
         end
+    end
+  end
+
+  defp safe_descriptor(%Client{} = client) do
+    case Client.fetch_descriptor(client) do
+      {:ok, desc} -> {:ok, desc}
+      {:error, _} = err -> err
     end
   end
 
