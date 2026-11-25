@@ -38,6 +38,16 @@ defmodule H.Accounts.Config do
     end
   end
 
+  def delete(dir) do
+    path = Path.join(dir, "accounts.json")
+
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, _} -> {:error, :account_config_unavailable}
+    end
+  end
+
   def parse(%{"sources" => sources} = settings)
       when is_list(sources) and length(sources) in 1..8 do
     active = Map.get(settings, "active", hd(sources))

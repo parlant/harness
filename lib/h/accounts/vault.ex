@@ -87,6 +87,27 @@ defmodule H.Accounts.Vault do
     end
   end
 
+  def delete({dir, uid}, source) do
+    with true <- Config.valid_source?(source),
+         {:ok, %File.Stat{type: :directory, uid: ^uid, mode: mode}} <- File.lstat(dir),
+         true <- (mode &&& 0o777) == 0o700,
+         path = Path.join(dir, "openai_codex-#{source}.json"),
+         allowed when allowed in [:ok, {:error, :enoent}] <- check_file(path, uid),
+         :ok <- remove_file(path) do
+      :ok
+    else
+      _ -> {:error, :credential_store_unavailable}
+    end
+  end
+
+  defp remove_file(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, _} -> {:error, :credential_store_unavailable}
+    end
+  end
+
   # A bounded, atomically replaced file keeps key material and each provider's
   # selection together. Unlike a Codex grant, API keys do not rotate on use.
   @key_limit 500_000
@@ -104,6 +125,19 @@ defmodule H.Accounts.Vault do
     else
       {:error, :enoent} -> {:ok, %{}}
       _ -> {:error, :unsafe_or_invalid_api_key_store}
+    end
+  end
+
+  def write_api_keys({dir, uid}, profiles) when map_size(profiles) == 0 do
+    path = Path.join(dir, "api-keys.json")
+
+    with {:ok, %File.Stat{type: :directory, uid: ^uid, mode: mode}} <- File.lstat(dir),
+         true <- (mode &&& 0o777) == 0o700,
+         allowed when allowed in [:ok, {:error, :enoent}] <- check_file(path, uid, @key_limit),
+         :ok <- remove_file(path) do
+      :ok
+    else
+      _ -> {:error, :credential_store_unavailable}
     end
   end
 

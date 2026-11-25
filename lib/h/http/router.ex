@@ -85,37 +85,10 @@ defmodule H.HTTP.Router do
     end
   end
 
-  post "/api/v1/extensions/reload" do
-    {_daemon, opts} = daemon_config(conn)
-
-    case H.Daemon.Maintenance.reload_extensions(opts) do
-      {:ok, payload} ->
-        send_json(conn, 200, payload)
-
-      {:error, :daemon_draining} ->
-        send_json(conn, 503, %{"error" => "daemon_draining"})
-
-      {:error, :daemon_unavailable} ->
-        send_json(conn, 503, %{"error" => "daemon unavailable"})
-
-      {:error, :reload_not_supported} ->
-        send_json(conn, 409, %{"error" => "reload_not_supported"})
-
-      {:error, {:extensions, :extensions_disabled}} ->
-        send_json(conn, 409, %{"error" => "extensions_disabled"})
-
-      {:error, {:extensions, {:modules_in_use, mods}}} ->
-        send_json(conn, 409, %{
-          "error" => "modules_in_use",
-          "modules" => Enum.map(mods, &Atom.to_string/1)
-        })
-
-      {:error, {:extensions, reason}} ->
-        send_json(conn, 422, %{"error" => "extension_reload_failed", "reason" => inspect(reason)})
-
-      {:error, reason} ->
-        send_json(conn, 422, %{"error" => inspect(reason)})
-    end
+  get "/api/v1/harnesses" do
+    {daemon, daemon_opts} = daemon_config(conn)
+    harnesses = apply(daemon, :list_harnesses, [daemon_opts])
+    send_json(conn, 200, %{"harnesses" => harnesses})
   end
 
   get "/api/v1/environments" do
@@ -187,6 +160,17 @@ defmodule H.HTTP.Router do
     send_login(conn, result)
   end
 
+  post "/api/v1/provider-keys/remove" do
+    {_daemon, opts} = daemon_config(conn)
+
+    result =
+      H.Daemon.Maintenance.admit(opts, fn ->
+        H.Accounts.remove_api_key(opts[:accounts], conn.body_params)
+      end)
+
+    send_login(conn, result)
+  end
+
   get "/api/v1/provider-logins" do
     {_daemon, opts} = daemon_config(conn)
     send_login(conn, H.Accounts.discover(opts[:accounts], opts[:codex_account_policy]))
@@ -228,6 +212,17 @@ defmodule H.HTTP.Router do
     result =
       H.Daemon.Maintenance.admit(opts, fn ->
         H.Accounts.activate(opts[:accounts], conn.body_params)
+      end)
+
+    send_login(conn, result)
+  end
+
+  post "/api/v1/provider-accounts/remove" do
+    {_daemon, opts} = daemon_config(conn)
+
+    result =
+      H.Daemon.Maintenance.admit(opts, fn ->
+        H.Accounts.remove(opts[:accounts], conn.body_params)
       end)
 
     send_login(conn, result)
@@ -386,6 +381,24 @@ defmodule H.HTTP.Router do
     case apply(daemon, :scan_entries, [sid, cid, conn.query_params, daemon_opts]) do
       {:ok, %{items: items, next_cursor: next_cursor}} ->
         send_json(conn, 200, %{"items" => items, "next_cursor" => next_cursor})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
+  get "/api/v1/sessions/:sid/conversations/:cid/extension-status" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :extension_status, [sid, cid, daemon_opts]) do
+      {:ok, payload} ->
+        send_json(conn, 200, payload)
 
       {:error, :not_found} ->
         send_json(conn, 404, %{"error" => "not found"})

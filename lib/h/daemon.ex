@@ -43,27 +43,17 @@ defmodule H.Daemon do
       if Process.whereis(H.Daemon.Instance), do: exit(:daemon_not_ready), else: nil
   end
 
-  @doc "Lists loaded extensions and current reload generation for the running daemon."
+  @doc "Lists startup-loaded extensions for the running daemon."
   @spec list_extensions(keyword()) :: {:ok, map()} | {:error, term()}
   def list_extensions(opts \\ []) when is_list(opts) do
     opts = if opts == [], do: instance_options() || [], else: opts
     H.Daemon.Maintenance.extensions_status(opts)
   end
 
-  @doc """
-  Hot-reloads configured extensions from `<data_dir>/extensions.json` in-place
-  without stopping the daemon or dropping live session state.
-
-  Validates all manifests, BEAM files, and `configure/2` contributions before
-  reconciling supervised extension children and refreshing live session
-  coordinators. Fails cleanly without mutating running extensions if any
-  module still has lingering old code (`{:extensions, {:modules_in_use, mods}}`)
-  or if configuration/child startup fails.
-  """
-  @spec reload_extensions(keyword()) :: {:ok, map()} | {:error, term()}
-  def reload_extensions(opts \\ []) when is_list(opts) do
-    opts = if opts == [], do: instance_options() || [], else: opts
-    H.Daemon.Maintenance.reload_extensions(opts)
+  @doc "Lists configured harness profile descriptors (`\"coding\"` first)."
+  @spec list_harnesses(keyword()) :: [map()]
+  def list_harnesses(opts \\ []) when is_list(opts) do
+    Harness.list_harnesses(opts)
   end
 
   @doc "Lists configured execution environments (`\"host\"` plus any custom/remote environments)."
@@ -1115,6 +1105,62 @@ defmodule H.Daemon do
     end
   end
 
+  @doc "Returns the read-only extension status projection for a conversation's configured model."
+  @spec extension_status(String.t(), term(), keyword()) ::
+          {:ok, map()}
+          | {:error,
+             :not_found | {:bad_request, String.t()} | {:quarantined, String.t()} | term()}
+  def extension_status(session_id, conversation_id, opts \\ [])
+      when is_binary(session_id) and is_list(opts) do
+    table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+    with {:ok, _sid} <- Validation.validate_sid_or_not_found(session_id),
+         {:ok, entry} <- Catalog.get_session(session_id, table),
+         :ok <- Validation.ensure_not_quarantined(entry),
+         {:ok, cid} <- Validation.parse_cid(conversation_id),
+         {:ok, model} <- resolve_conversation_model(entry, cid, opts) do
+      scope = %{
+        session_id: entry.session_id,
+        conversation_id: to_string(cid),
+        model: model
+      }
+
+      projections = Keyword.get(opts, :status_projections, [])
+      {:ok, H.Extensions.Status.project(scope, projections)}
+    end
+  end
+
+  defp resolve_conversation_model(entry, cid, opts) do
+    registry = Keyword.get(opts, :registry, @default_registry)
+
+    cond do
+      entry.status == "archived" ->
+        {:ok, nil}
+
+      Map.get(entry, :archived) == true and
+          lookup_live_server(registry, entry.session_id) == :not_running ->
+        table = Keyword.get(opts, :catalog_table, @default_catalog_table)
+
+        case ColdSession.snapshot(entry, cid, opts, cold_default_model(opts)) do
+          {:ok, {:snapshot, _seq, json_bin}} ->
+            model =
+              case JSON.decode(json_bin) do
+                {:ok, %{"docs" => %{"agent" => %{"model" => m}}}} -> m
+                _ -> nil
+              end
+
+            {:ok, model}
+
+          {:error, _} = err ->
+            _ = table
+            err
+        end
+
+      true ->
+        call_session(entry, opts, &Server.get_conversation_model(&1, cid), preserve_archive: true)
+    end
+  end
+
   @doc "Scans cursor-paged raw transcript entries for a conversation."
   @spec scan_entries(String.t(), term(), map(), keyword()) ::
           {:ok, %{items: [map()], next_cursor: nil | String.t()}}
@@ -1703,6 +1749,7 @@ defmodule H.Daemon do
         |> maybe_put_kw(:initial_agent, initial_agent)
         |> maybe_copy_kw(opts, :environments)
         |> maybe_copy_kw(opts, :harnesses)
+        |> maybe_copy_kw(opts, :observers_server)
         |> maybe_copy_kw(opts, :max_subagent_depth_hard)
         |> maybe_copy_kw(opts, :maintenance_table)
         |> maybe_copy_kw(opts, :provider)

@@ -116,6 +116,16 @@ defmodule H.Accounts do
 
   def use_api_key(_server, _params), do: {:error, :invalid_api_key_profile}
 
+  @doc "Removes a stored API key alias for `provider` (reassigning active or dropping provider)."
+  def remove_api_key(server, %{"provider" => provider, "source" => source} = params)
+      when map_size(params) == 2 do
+    if Config.valid_source?(provider) and Config.valid_source?(source),
+      do: call(server, {:remove_api_key, provider, source}),
+      else: {:error, :invalid_api_key_profile}
+  end
+
+  def remove_api_key(_server, _params), do: {:error, :invalid_api_key_profile}
+
   @doc false
   def resolve_api_key(server, provider) when is_atom(provider),
     do: resolve_api_key(server, Atom.to_string(provider))
@@ -166,6 +176,15 @@ defmodule H.Accounts do
   end
 
   def activate(_server, _params), do: {:error, :invalid_login_request}
+
+  @doc "Removes a Codex account source alias and its credential file from the vault."
+  def remove(server, %{"source" => source} = params) when map_size(params) == 1 do
+    if Config.valid_source?(source),
+      do: call(server, {:remove, source}),
+      else: {:error, :invalid_login_request}
+  end
+
+  def remove(_server, _params), do: {:error, :invalid_login_request}
 
   @doc "Resolves one named Codex credential (or the active stock account); never falls through."
   def resolve_codex(
@@ -341,6 +360,43 @@ defmodule H.Accounts do
     end
   end
 
+  def handle_call({:remove_api_key, provider, source}, _from, state) do
+    case provider in state.key_providers && state.keys[provider] do
+      false ->
+        {:reply, {:error, :unknown_account_source}, state}
+
+      %{keys: keys, active: active} = profile when is_map_key(keys, source) ->
+        remaining = Map.delete(keys, source)
+
+        {next_all, next_active} =
+          if map_size(remaining) == 0 do
+            {Map.delete(state.keys, provider), nil}
+          else
+            reassigned =
+              if active == source,
+                do: remaining |> Map.keys() |> Enum.sort() |> hd(),
+                else: active
+
+            {Map.put(state.keys, provider, %{profile | keys: remaining, active: reassigned}),
+             reassigned}
+          end
+
+        case Vault.write_api_keys(state.vault, next_all) do
+          :ok ->
+            if state.table, do: :ets.insert(state.table, {:key_providers, Map.keys(next_all)})
+
+            {:reply, {:ok, %{removed: source, provider: provider, active: next_active}},
+             %{state | keys: next_all}}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      _ ->
+        {:reply, {:error, :unknown_account_source}, state}
+    end
+  end
+
   def handle_call({:add, source}, _from, state) do
     case add_source(source, state) do
       {:ok, state} -> {:reply, {:ok, %{source: source}}, state}
@@ -380,6 +436,42 @@ defmodule H.Accounts do
       true ->
         case Config.write(state.dir, state.sources, source) do
           :ok -> {:reply, {:ok, %{active: source}}, %{state | active: source}}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
+  def handle_call({:remove, source}, _from, state) do
+    cond do
+      source not in state.sources ->
+        {:reply, {:error, :unknown_account_source}, state}
+
+      match?(%{source: ^source}, state.login) or Map.has_key?(state.refreshes, source) ->
+        {:reply, {:error, :login_busy}, state}
+
+      true ->
+        remaining_sources = List.delete(state.sources, source)
+
+        next_active =
+          cond do
+            remaining_sources == [] -> nil
+            state.active == source -> hd(remaining_sources)
+            true -> state.active
+          end
+
+        with :ok <- Vault.delete(state.vault, source),
+             :ok <- write_or_delete_config(state.dir, remaining_sources, next_active) do
+          if state.table, do: :ets.insert(state.table, {:configured, remaining_sources != []})
+
+          next_state = %{
+            state
+            | sources: remaining_sources,
+              active: next_active,
+              credentials: Map.delete(state.credentials, source)
+          }
+
+          {:reply, {:ok, %{removed: source, active: next_active}}, next_state}
+        else
           {:error, reason} -> {:reply, {:error, reason}, state}
         end
     end
@@ -508,6 +600,9 @@ defmodule H.Accounts do
         end
     end
   end
+
+  defp write_or_delete_config(dir, [], nil), do: Config.delete(dir)
+  defp write_or_delete_config(dir, sources, active), do: Config.write(dir, sources, active)
 
   defp persist_keys(state, provider, profile) do
     all = Map.put(state.keys, provider, profile)

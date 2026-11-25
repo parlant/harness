@@ -50,20 +50,8 @@ defmodule H.Daemon.Maintenance do
       _ ->
         {:ok,
          H.Extensions.summarize(
-           H.Extensions.empty_state(Keyword.get(opts, :no_extensions, false), 1)
+           H.Extensions.empty_state(Keyword.get(opts, :no_extensions, false))
          )}
-    end
-  catch
-    :exit, _ -> {:error, :daemon_unavailable}
-  end
-
-  def reload_extensions(opts) do
-    case opts[:maintenance_table] do
-      table when is_reference(table) ->
-        GenServer.call(H.Daemon.Boot, :reload_extensions, 30_000)
-
-      _ ->
-        {:error, :reload_not_supported}
     end
   catch
     :exit, _ -> {:error, :daemon_unavailable}

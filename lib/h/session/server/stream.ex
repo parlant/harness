@@ -277,6 +277,7 @@ defmodule H.Session.Server.Stream do
       end)
 
     state = broadcast_settled_submissions(state, staged.writes, batch_seq)
+    notify_observers(state, staged, batch_seq)
 
     apply_committed_batches(rest_s, rest_q, state)
   end
@@ -515,5 +516,44 @@ defmodule H.Session.Server.Stream do
     Registry.dispatch(pubsub, {:conversation, sid, cid}, fn entries ->
       for {pid, _val} <- entries, do: send(pid, msg)
     end)
+  end
+
+  defp notify_observers(state, staged, batch_seq) do
+    observers_server = Map.get(state, :observers_server)
+
+    if observers_server do
+      case Map.get(staged, :raw_item) do
+        {:command, _from, %{command: command, conversation_id: cid}} ->
+          H.Extensions.Observers.notify(observers_server, :command_committed, %{
+            session_id: state.session_id,
+            conversation_id: to_string(cid),
+            seq: batch_seq,
+            command: command,
+            receipt: Map.get(staged, :receipt) || %{}
+          })
+
+        _ ->
+          :ok
+      end
+
+      Enum.each(staged.writes, fn
+        {:put_task, %{status: "terminal"} = task} ->
+          cid = get_in(task.checkpoint, ["conversation_id"])
+
+          H.Extensions.Observers.notify(observers_server, :work_settled, %{
+            session_id: state.session_id,
+            conversation_id: if(cid, do: to_string(cid), else: ""),
+            seq: batch_seq,
+            task_id: to_string(task.id),
+            task_kind: task.kind,
+            outcome: task.outcome || %{}
+          })
+
+        _ ->
+          :ok
+      end)
+    end
+
+    :ok
   end
 end
