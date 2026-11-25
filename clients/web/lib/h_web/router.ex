@@ -36,6 +36,7 @@ defmodule HWeb.Router do
     post("/settings/providers", ProviderConfigController, :create)
     post("/settings/accounts/keys", AccountKeyController, :create)
     post("/settings/accounts/keys/use", AccountKeyController, :use)
+    post("/settings/accounts/keys/remove", AccountKeyController, :remove)
 
     live_session :owner, on_mount: [{HWeb.Auth, :require_owner}] do
       live("/", WorkspaceLive, :index)

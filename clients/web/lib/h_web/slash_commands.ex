@@ -12,6 +12,8 @@ defmodule HWeb.SlashCommands do
   @thinking_levels ~w(off minimal low medium high xhigh)
   @attention_args ~w(on off)
   @archive_args ~w(force off)
+  @approval_args ~w(never mutating)
+  @budget_args ~w(clear)
 
   @commands [
     %{
@@ -149,10 +151,10 @@ defmodule HWeb.SlashCommands do
     },
     %{
       name: "/abort",
-      usage: "/abort",
-      arg_hint: nil,
-      takes_arg: false,
-      description: "Abort active work in this conversation"
+      usage: "/abort [<task_id>]",
+      arg_hint: "[<task_id>]",
+      takes_arg: true,
+      description: "Abort active work (or a specific task ID) in this conversation"
     },
     %{
       name: "/stop",
@@ -202,6 +204,41 @@ defmodule HWeb.SlashCommands do
       arg_hint: "<message>",
       takes_arg: true,
       description: "Queue follow-up message"
+    },
+    %{
+      name: "/harness",
+      usage: "/harness",
+      arg_hint: nil,
+      takes_arg: false,
+      description: "Show session harness profile and extension status"
+    },
+    %{
+      name: "/budget",
+      usage: "/budget [turns=N] [cost=USD] [ms=N] | clear",
+      arg_hint: "[turns=N cost=USD ms=N | clear]",
+      takes_arg: true,
+      description: "Show, configure, or clear conversation run budget"
+    },
+    %{
+      name: "/approve",
+      usage: "/approve <task_id> [<reason>]",
+      arg_hint: "<task_id> [<reason>]",
+      takes_arg: true,
+      description: "Approve a waiting tool call"
+    },
+    %{
+      name: "/deny",
+      usage: "/deny <task_id> [<reason>]",
+      arg_hint: "<task_id> [<reason>]",
+      takes_arg: true,
+      description: "Deny a waiting tool call"
+    },
+    %{
+      name: "/approval",
+      usage: "/approval [never|mutating|tools=<t1,t2>]",
+      arg_hint: "[never|mutating|tools=t1,t2]",
+      takes_arg: true,
+      description: "Show or configure tool approval policy"
     }
   ]
 
@@ -239,6 +276,8 @@ defmodule HWeb.SlashCommands do
       thinking_levels: @thinking_levels,
       attention_args: @attention_args,
       archive_args: @archive_args,
+      approval_args: @approval_args,
+      budget_args: @budget_args,
       models: models
     }
   end
@@ -388,6 +427,38 @@ defmodule HWeb.SlashCommands do
         else
           []
         end
+
+      "/approval" ->
+        @approval_args
+        |> Enum.filter(&String.starts_with?(&1, q))
+        |> Enum.map(fn val ->
+          desc =
+            if val == "never",
+              do: "Run all tools without approval",
+              else: "Require approval for mutating tools"
+
+          %{value: val, label: val, description: desc}
+        end)
+
+      "/budget" ->
+        @budget_args
+        |> Enum.filter(&String.starts_with?(&1, q))
+        |> Enum.map(fn val ->
+          %{value: val, label: val, description: "Clear conversation run budget"}
+        end)
+
+      cmd when cmd in ["/approve", "/deny", "/abort"] ->
+        approvals = Keyword.get(opts, :approvals, %{})
+
+        approvals
+        |> Map.values()
+        |> Enum.map(fn rec ->
+          tid = to_string(rec["task_id"] || "")
+          name = rec["tool_name"] || "tool"
+          %{value: tid, label: tid, description: "Pending approval: #{name}"}
+        end)
+        |> Enum.filter(fn item -> item.value != "" and String.starts_with?(item.value, q) end)
+        |> Enum.sort_by(& &1.value)
 
       "/model" ->
         models = Keyword.get(opts, :models, [])

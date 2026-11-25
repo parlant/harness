@@ -9,6 +9,7 @@ defmodule HWeb.WorkspaceLive do
   @impl true
   def mount(params, _session, socket) do
     environments = Backend.list_environments()
+    harnesses = Backend.list_harnesses()
     models = Backend.list_models()
 
     initial_env =
@@ -23,8 +24,10 @@ defmodule HWeb.WorkspaceLive do
       socket
       |> assign(
         environments: environments,
+        harnesses: harnesses,
         models: models,
         env_id: initial_env,
+        selected_harness: first_harness_id(harnesses),
         path: "",
         parent_path: nil,
         directories: [],
@@ -139,11 +142,13 @@ defmodule HWeb.WorkspaceLive do
       non_empty(params["cwd"]) || non_empty(socket.assigns.selected_dir) || socket.assigns.path
 
     env_id = non_empty(params["env_id"]) || socket.assigns.env_id
+    harness_id = non_empty(params["harness_id"]) || socket.assigns.selected_harness
     session_id = non_empty(params["session_id"])
     model = non_empty(params["model"]) || non_empty(socket.assigns.selected_model)
 
     create_params =
       %{"env_id" => env_id, "cwd" => cwd}
+      |> maybe_put("harness_id", harness_id)
       |> maybe_put("session_id", session_id)
       |> maybe_put("agent", if(model, do: %{"model" => model}, else: nil))
 
@@ -246,6 +251,22 @@ defmodule HWeb.WorkspaceLive do
 
   defp first_env_id([%{id: id} | _]), do: id
   defp first_env_id(_), do: "host"
+
+  defp first_harness_id(harnesses) when is_list(harnesses) do
+    cond do
+      Enum.any?(harnesses, &((&1["id"] || &1[:id]) == "coding")) ->
+        "coding"
+
+      match?([_ | _], harnesses) ->
+        first = hd(harnesses)
+        first["id"] || first[:id] || "coding"
+
+      true ->
+        "coding"
+    end
+  end
+
+  defp first_harness_id(_), do: "coding"
 
   defp first_model_id([%{id: id} | _]), do: id
   defp first_model_id(_), do: ""

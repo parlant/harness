@@ -114,4 +114,62 @@ defmodule HWeb.AccountsLiveTest do
     assert html =~ "temporarily resting"
     assert html =~ "ready"
   end
+
+  test "owner can remove API keys via POST and Codex accounts via LiveView", ctx do
+    accounts =
+      start_supervised!(
+        {H.Accounts, data_dir: ctx.data_dir, sources: ["personal", "work"], active: "personal"}
+      )
+
+    assert {:ok, _} =
+             H.Accounts.put_api_key(accounts, %{
+               "provider" => "openai",
+               "source" => "primary",
+               "api_key" => "sk-fixture-primary"
+             })
+
+    assert {:ok, _} =
+             H.Accounts.put_api_key(accounts, %{
+               "provider" => "openai",
+               "source" => "backup",
+               "api_key" => "sk-fixture-backup"
+             })
+
+    Application.put_env(
+      :harness_web,
+      :daemon_opts,
+      Keyword.put(ctx.daemon_opts, :accounts, accounts)
+    )
+
+    conn = log_in_owner(ctx.conn, ctx.owner_token)
+    {:ok, _view, html} = live(conn, "/settings/accounts")
+    assert html =~ ~s(id="key-openai-primary")
+    assert html =~ ~s(id="key-openai-backup")
+    assert html =~ ~s(id="account-personal")
+    assert html =~ ~s(id="account-work")
+
+    # Remove API key via CSRF-protected POST
+    page = get(conn, "/settings/accounts")
+    [_, csrf] = Regex.run(~r/name="_csrf_token"\s+value="([^"]+)"/, page.resp_body)
+
+    removed_conn =
+      post(recycle(page), "/settings/accounts/keys/remove", %{
+        "_csrf_token" => csrf,
+        "provider" => "openai",
+        "source" => "primary"
+      })
+
+    assert redirected_to(removed_conn) == "/settings/accounts"
+    after_page = get(recycle(removed_conn), "/settings/accounts")
+    refute after_page.resp_body =~ ~s(id="key-openai-primary")
+    assert after_page.resp_body =~ ~s(id="key-openai-backup")
+    assert {:ok, %{api_key: "sk-fixture-backup"}} = H.Accounts.resolve_api_key(accounts, :openai)
+
+    # Remove Codex account via LiveView
+    {:ok, view, _} = live(conn, "/settings/accounts")
+    render_click(element(view, "#account-personal button", "Remove"))
+    refute has_element?(view, "#account-personal")
+    assert has_element?(view, "#account-work")
+    assert H.Accounts.Config.read(ctx.data_dir) == {:ok, ["work"], "work"}
+  end
 end

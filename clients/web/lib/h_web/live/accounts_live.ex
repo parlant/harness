@@ -1,18 +1,13 @@
 defmodule HWeb.AccountsLive do
   use HWeb, :live_view
 
-  alias H.Accounts
-  alias HWeb.Layouts
+  alias HWeb.{Backend, Layouts}
 
   @impl true
   def mount(_params, _session, socket) do
-    opts = H.Daemon.instance_options() || Application.get_env(:harness_web, :daemon_opts, [])
-
     {:ok,
      socket
      |> assign(
-       accounts: opts[:accounts],
-       codex_account_policy: opts[:codex_account_policy],
        flow: nil,
        sources: [],
        provider_status_note: nil,
@@ -23,21 +18,25 @@ defmodule HWeb.AccountsLive do
 
   @impl true
   def handle_event("add", %{"source" => source}, socket) do
-    result(socket, Accounts.add(socket.assigns.accounts, %{"source" => source}))
+    result(socket, Backend.add_account(%{"source" => source}))
   end
 
   def handle_event("activate", %{"source" => source}, socket) do
-    result(socket, Accounts.activate(socket.assigns.accounts, %{"source" => source}))
+    result(socket, Backend.activate_account(%{"source" => source}))
+  end
+
+  def handle_event("remove", %{"source" => source}, socket) do
+    result(socket, Backend.remove_account(%{"source" => source}))
   end
 
   def handle_event("login", %{"source" => source}, socket) do
     id = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
     params = %{"provider" => "openai_codex", "request_id" => id, "source" => source}
-    operation(socket, Accounts.start(socket.assigns.accounts, params))
+    operation(socket, Backend.start_login(params))
   end
 
   def handle_event("cancel", _params, %{assigns: %{flow: %{operation: ref}}} = socket) do
-    operation(socket, Accounts.operation(socket.assigns.accounts, :cancel, %{"operation" => ref}))
+    operation(socket, Backend.login_operation(:cancel, %{"operation" => ref}))
   end
 
   def handle_event(_, _, socket), do: {:noreply, socket}
@@ -45,7 +44,7 @@ defmodule HWeb.AccountsLive do
   @impl true
   def handle_info({:poll, ref}, %{assigns: %{flow: %{operation: ref, state: state}}} = socket)
       when state in ["starting", "pending"] do
-    operation(socket, Accounts.operation(socket.assigns.accounts, :status, %{"operation" => ref}))
+    operation(socket, Backend.login_operation(:status, %{"operation" => ref}))
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -65,11 +64,8 @@ defmodule HWeb.AccountsLive do
   defp operation(socket, {:error, reason}), do: result(socket, {:error, reason})
 
   defp refresh(socket) do
-    server = socket.assigns.accounts
-    policy = socket.assigns.codex_account_policy
-
     {sources, provider_status_note} =
-      case Accounts.discover(server, policy) do
+      case Backend.discover_logins() do
         {:ok, %{providers: [%{sources: sources} = provider]}} ->
           {sources, provider[:status_note]}
 
@@ -78,7 +74,7 @@ defmodule HWeb.AccountsLive do
       end
 
     keys =
-      case Accounts.api_keys(server) do
+      case Backend.api_keys() do
         {:ok, %{providers: providers}} -> providers
         _ -> []
       end
@@ -90,6 +86,7 @@ defmodule HWeb.AccountsLive do
   defp error(:login_busy), do: "A login or credential refresh is already running."
   defp error(:too_many_account_sources), do: "At most eight aliases can be configured."
   defp error(:invalid_login_request), do: "Enter a valid account alias."
+  defp error(:unknown_account_source), do: "Account alias not found."
   defp error(_), do: "The daemon could not complete the account operation."
 
   @impl true
@@ -138,22 +135,30 @@ defmodule HWeb.AccountsLive do
               <li :for={profile <- @keys}>
                 <span>{profile.provider}</span>
                 <span :if={profile.sources == []}> · no stored key</span>
-                <form
-                  :for={source <- profile.sources}
-                  action={~p"/settings/accounts/keys/use"}
-                  method="post"
-                >
-                  <input
-                    type="hidden"
-                    name="_csrf_token"
-                    value={Plug.CSRFProtection.get_csrf_token()}
-                  />
-                  <input type="hidden" name="provider" value={profile.provider} />
-                  <input type="hidden" name="source" value={source} />
-                  <span>{source}</span>
-                  <span :if={source == profile.active}> · active</span>
-                  <button :if={source != profile.active} type="submit" class="btn btn-sm">Use alias</button>
-                </form>
+                <div :for={source <- profile.sources} id={"key-#{profile.provider}-#{source}"}>
+                  <form action={~p"/settings/accounts/keys/use"} method="post">
+                    <input
+                      type="hidden"
+                      name="_csrf_token"
+                      value={Plug.CSRFProtection.get_csrf_token()}
+                    />
+                    <input type="hidden" name="provider" value={profile.provider} />
+                    <input type="hidden" name="source" value={source} />
+                    <span>{source}</span>
+                    <span :if={source == profile.active}> · active</span>
+                    <button :if={source != profile.active} type="submit" class="btn btn-sm">Use alias</button>
+                  </form>
+                  <form action={~p"/settings/accounts/keys/remove"} method="post">
+                    <input
+                      type="hidden"
+                      name="_csrf_token"
+                      value={Plug.CSRFProtection.get_csrf_token()}
+                    />
+                    <input type="hidden" name="provider" value={profile.provider} />
+                    <input type="hidden" name="source" value={source} />
+                    <button type="submit" class="btn btn-sm">Remove</button>
+                  </form>
+                </div>
               </li>
             </ul>
           </section>
@@ -190,6 +195,11 @@ defmodule HWeb.AccountsLive do
                   phx-click="activate"
                   phx-value-source={source.id}
                 >Use in stock mode</button>
+                <button
+                  class="btn btn-sm"
+                  phx-click="remove"
+                  phx-value-source={source.id}
+                >Remove</button>
               </li>
             </ul>
             <button :if={@sources == []} class="btn" phx-click="login" phx-value-source="default">Set up device login</button>

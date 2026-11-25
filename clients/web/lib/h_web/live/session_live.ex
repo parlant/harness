@@ -68,6 +68,7 @@ defmodule HWeb.SessionLive do
         before_entry_id: nil,
         has_more: false,
         run_active?: false,
+        extension_status: nil,
         composer_text: "",
         attachment_error: nil,
         cwd_missing?: false,
@@ -123,6 +124,7 @@ defmodule HWeb.SessionLive do
            show_fork_picker?: false,
            picker_error: nil,
            info_banner: nil,
+           extension_status: nil,
            fork_edit: nil,
            tree_raw: nil,
            tree_view: SessionTree.project(nil, current_conversation_id: cid),
@@ -142,6 +144,7 @@ defmodule HWeb.SessionLive do
            conversation_id: cid,
            provider_filter: nil,
            info_banner: nil,
+           extension_status: nil,
            fork_edit: nil
          )
          |> recompute_tree_view()
@@ -627,6 +630,92 @@ defmodule HWeb.SessionLive do
     end
   end
 
+  def handle_event("abort_task", %{"task-id" => task_id_raw} = params, socket) do
+    abort_specific_task(socket, task_id_raw, params["request_id"], clear_composer?: false)
+  end
+
+  def handle_event("abort_task", %{"task_id" => task_id_raw} = params, socket) do
+    abort_specific_task(socket, task_id_raw, params["request_id"], clear_composer?: false)
+  end
+
+  def handle_event("approve_tool", params, socket) do
+    task_id_raw = params["task-id"] || params["task_id"]
+    decision = params["decision"]
+    reason = non_empty(params["reason"])
+
+    case {parse_pos_int(task_id_raw), decision} do
+      {{:ok, task_id}, d} when d in ["allow", "deny"] ->
+        args =
+          %{"task_id" => task_id, "decision" => d}
+          |> maybe_put("reason", reason)
+
+        envelope = build_envelope(socket, "approve_tool", args, params["request_id"])
+
+        case Backend.execute_command(socket.assigns.session_id, envelope) do
+          {:ok, _receipt} ->
+            {:noreply, assign(socket, :error_banner, nil)}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :error_banner, format_error(reason))}
+        end
+
+      _ ->
+        {:noreply, assign(socket, :error_banner, "Invalid tool approval parameters.")}
+    end
+  end
+
+  def handle_event("configure_approval_policy", params, socket) do
+    raw = params["approval_policy"] || params["policy"] || ""
+
+    case parse_approval_policy(raw) do
+      {:ok, policy} ->
+        envelope =
+          build_envelope(
+            socket,
+            "configure",
+            %{"approval_policy" => policy},
+            params["request_id"]
+          )
+
+        case Backend.execute_command(socket.assigns.session_id, envelope) do
+          {:ok, _receipt} ->
+            {:noreply, assign(socket, :error_banner, nil)}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :error_banner, format_error(reason))}
+        end
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :error_banner, msg)}
+    end
+  end
+
+  def handle_event("configure_budget", params, socket) do
+    budget_res =
+      if params["clear"] in [true, "true", "1"] do
+        {:ok, nil}
+      else
+        parse_budget_params(params)
+      end
+
+    case budget_res do
+      {:ok, budget} ->
+        envelope =
+          build_envelope(socket, "configure", %{"budget" => budget}, params["request_id"])
+
+        case Backend.execute_command(socket.assigns.session_id, envelope) do
+          {:ok, _receipt} ->
+            {:noreply, assign(socket, :error_banner, nil)}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :error_banner, format_error(reason))}
+        end
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :error_banner, msg)}
+    end
+  end
+
   def handle_event("workspace_wait", params, socket) do
     args = Map.take(params, ["action", "task_id", "lease_id"])
     envelope = build_envelope(socket, "workspace_wait", args, params["request_id"])
@@ -929,13 +1018,20 @@ defmodule HWeb.SessionLive do
 
   defp apply_transcript(socket, transcript) do
     assigns = Transcript.compact_assigns(transcript)
+    model_changed? = socket.assigns.agent["model"] != assigns.agent["model"]
 
     socket =
-      if socket.assigns.agent["model"] != assigns.agent["model"],
+      if model_changed?,
         do: assign(socket, :provider_filter, nil),
         else: socket
 
-    socket |> assign(:transcript, transcript) |> assign(assigns)
+    socket = socket |> assign(:transcript, transcript) |> assign(assigns)
+
+    if model_changed? or is_nil(socket.assigns.extension_status) do
+      refresh_extension_status(socket)
+    else
+      socket
+    end
   end
 
   defp profile(session, false, groups, provider_filter, agent) when not is_nil(session) do
@@ -2034,7 +2130,7 @@ defmodule HWeb.SessionLive do
     send_submit(socket, %{"type" => "continue"}, request_id, clear_composer?: true)
   end
 
-  defp execute_slash_command(socket, "/abort", _arg, request_id) do
+  defp execute_slash_command(socket, "/abort", "", request_id) do
     envelope = build_envelope(socket, "abort", %{}, request_id)
 
     case Backend.execute_command(socket.assigns.session_id, envelope) do
@@ -2046,6 +2142,111 @@ defmodule HWeb.SessionLive do
 
       {:error, reason} ->
         {:noreply, assign(socket, :error_banner, format_error(reason))}
+    end
+  end
+
+  defp execute_slash_command(socket, "/abort", arg, request_id) do
+    abort_specific_task(socket, arg, request_id, clear_composer?: true)
+  end
+
+  defp execute_slash_command(socket, "/harness", _arg, _request_id) do
+    socket = refresh_extension_status(socket)
+
+    harness_id =
+      (socket.assigns.session && Map.get(socket.assigns.session, :harness_id)) || "coding"
+
+    ext_summary = format_extension_status_summary(socket.assigns.extension_status)
+
+    msg =
+      if ext_summary != "" do
+        "Harness: #{harness_id} · #{ext_summary}"
+      else
+        "Harness: #{harness_id}"
+      end
+
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: msg)
+     |> clear_composer_and_draft()}
+  end
+
+  defp execute_slash_command(socket, "/budget", "", _request_id) do
+    budget = get_in(socket.assigns.agent, ["budget"])
+    summary = format_budget_summary(budget)
+
+    {:noreply,
+     socket
+     |> assign(error_banner: nil, info_banner: "Budget: #{summary}")
+     |> clear_composer_and_draft()}
+  end
+
+  defp execute_slash_command(socket, "/budget", arg, request_id) do
+    case parse_budget_slash_arg(arg) do
+      {:ok, budget} ->
+        envelope = build_envelope(socket, "configure", %{"budget" => budget}, request_id)
+
+        case Backend.execute_command(socket.assigns.session_id, envelope) do
+          {:ok, _receipt} ->
+            label =
+              if is_nil(budget),
+                do: "Budget cleared.",
+                else: "Budget set: #{format_budget_summary(budget)}."
+
+            {:noreply,
+             socket
+             |> assign(error_banner: nil, info_banner: label)
+             |> clear_composer_and_draft()}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :error_banner, format_error(reason))}
+        end
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :error_banner, msg)}
+    end
+  end
+
+  defp execute_slash_command(socket, "/approve", arg, request_id) do
+    handle_approval_slash_command(socket, "allow", arg, request_id)
+  end
+
+  defp execute_slash_command(socket, "/deny", arg, request_id) do
+    handle_approval_slash_command(socket, "deny", arg, request_id)
+  end
+
+  defp execute_slash_command(socket, "/approval", "", _request_id) do
+    policy = get_in(socket.assigns.agent, ["approval_policy"]) || "never"
+
+    {:noreply,
+     socket
+     |> assign(
+       error_banner: nil,
+       info_banner: "Approval policy: #{format_approval_policy(policy)}"
+     )
+     |> clear_composer_and_draft()}
+  end
+
+  defp execute_slash_command(socket, "/approval", arg, request_id) do
+    case parse_approval_policy(arg) do
+      {:ok, policy} ->
+        envelope = build_envelope(socket, "configure", %{"approval_policy" => policy}, request_id)
+
+        case Backend.execute_command(socket.assigns.session_id, envelope) do
+          {:ok, _receipt} ->
+            {:noreply,
+             socket
+             |> assign(
+               error_banner: nil,
+               info_banner: "Approval policy set to #{format_approval_policy(policy)}."
+             )
+             |> clear_composer_and_draft()}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :error_banner, format_error(reason))}
+        end
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :error_banner, msg)}
     end
   end
 
@@ -2425,4 +2626,287 @@ defmodule HWeb.SessionLive do
   defp format_error(:workspace_unavailable), do: "Workspace environment is unavailable."
   defp format_error(:harness_unavailable), do: "Harness profile is unavailable."
   defp format_error(other), do: inspect(other)
+
+  defp abort_specific_task(socket, task_id_raw, request_id, opts) do
+    case parse_pos_int(task_id_raw) do
+      {:ok, task_id} ->
+        envelope = build_envelope(socket, "abort", %{"task_id" => task_id}, request_id)
+
+        case Backend.execute_command(socket.assigns.session_id, envelope) do
+          {:ok, _receipt} ->
+            socket = assign(socket, :error_banner, nil)
+
+            socket =
+              if Keyword.get(opts, :clear_composer?, false) do
+                socket
+                |> assign(:info_banner, "Abort requested for task ##{task_id}.")
+                |> clear_composer_and_draft()
+              else
+                socket
+              end
+
+            {:noreply, socket}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, :error_banner, format_error(reason))}
+        end
+
+      :error ->
+        {:noreply, assign(socket, :error_banner, "Usage: /abort [<task_id>]")}
+    end
+  end
+
+  defp handle_approval_slash_command(socket, decision, arg, request_id) do
+    cmd_name = if decision == "allow", do: "/approve", else: "/deny"
+
+    case String.split(String.trim(arg), ~r/\s+/, parts: 2) do
+      [tid_str | rest] when tid_str != "" ->
+        case parse_pos_int(tid_str) do
+          {:ok, task_id} ->
+            reason = rest |> List.first() |> non_empty()
+
+            args =
+              %{"task_id" => task_id, "decision" => decision}
+              |> maybe_put("reason", reason)
+
+            envelope = build_envelope(socket, "approve_tool", args, request_id)
+
+            case Backend.execute_command(socket.assigns.session_id, envelope) do
+              {:ok, _receipt} ->
+                verb = if decision == "allow", do: "Approved", else: "Denied"
+
+                {:noreply,
+                 socket
+                 |> assign(error_banner: nil, info_banner: "#{verb} tool task ##{task_id}.")
+                 |> clear_composer_and_draft()}
+
+              {:error, err} ->
+                {:noreply, assign(socket, :error_banner, format_error(err))}
+            end
+
+          :error ->
+            {:noreply, assign(socket, :error_banner, "Usage: #{cmd_name} <task_id> [<reason>]")}
+        end
+
+      _ ->
+        {:noreply, assign(socket, :error_banner, "Usage: #{cmd_name} <task_id> [<reason>]")}
+    end
+  end
+
+  defp parse_pos_int(val) when is_integer(val) and val > 0, do: {:ok, val}
+
+  defp parse_pos_int(val) when is_binary(val) do
+    clean = val |> String.trim() |> String.trim_leading("#")
+
+    case Integer.parse(clean) do
+      {n, ""} when n > 0 -> {:ok, n}
+      _ -> :error
+    end
+  end
+
+  defp parse_pos_int(_), do: :error
+
+  defp parse_approval_policy(raw) when is_list(raw) do
+    tools =
+      raw |> Enum.map(&String.trim(to_string(&1))) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
+
+    if tools == [],
+      do: {:error, "Usage: /approval [never|mutating|tools=t1,t2]"},
+      else: {:ok, tools}
+  end
+
+  defp parse_approval_policy(raw) when is_binary(raw) do
+    trimmed = String.trim(raw)
+    lower = String.downcase(trimmed)
+
+    cond do
+      lower in ["never", "mutating"] ->
+        {:ok, lower}
+
+      String.starts_with?(lower, "tools=") ->
+        parse_approval_tool_list(String.slice(trimmed, 6..-1//1))
+
+      String.contains?(trimmed, ",") ->
+        parse_approval_tool_list(trimmed)
+
+      true ->
+        {:error, "Usage: /approval [never|mutating|tools=t1,t2]"}
+    end
+  end
+
+  defp parse_approval_policy(_), do: {:error, "Usage: /approval [never|mutating|tools=t1,t2]"}
+
+  defp parse_approval_tool_list(raw) do
+    tools =
+      raw
+      |> String.split(",")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+
+    if tools == [] do
+      {:error, "Usage: /approval [never|mutating|tools=t1,t2]"}
+    else
+      {:ok, tools}
+    end
+  end
+
+  defp parse_budget_slash_arg(arg) do
+    trimmed = String.trim(arg)
+
+    if String.downcase(trimmed) == "clear" do
+      {:ok, nil}
+    else
+      tokens = String.split(trimmed, ~r/\s+/, trim: true)
+
+      Enum.reduce_while(tokens, {:ok, %{}}, fn token, {:ok, acc} ->
+        case String.split(token, "=", parts: 2) do
+          [k, v] ->
+            key = String.downcase(k)
+
+            case {key, v} do
+              {turns_key, raw_int} when turns_key in ["turns", "max_turns"] ->
+                case parse_pos_int(raw_int) do
+                  {:ok, n} -> {:cont, {:ok, Map.put(acc, "max_turns", n)}}
+                  :error -> {:halt, {:error, "Invalid turns value: #{raw_int}"}}
+                end
+
+              {ms_key, raw_int} when ms_key in ["ms", "max_elapsed_ms"] ->
+                case parse_pos_int(raw_int) do
+                  {:ok, n} -> {:cont, {:ok, Map.put(acc, "max_elapsed_ms", n)}}
+                  :error -> {:halt, {:error, "Invalid ms value: #{raw_int}"}}
+                end
+
+              {cost_key, raw_float} when cost_key in ["cost", "max_cost_usd"] ->
+                case parse_pos_float(raw_float) do
+                  {:ok, f} -> {:cont, {:ok, Map.put(acc, "max_cost_usd", f)}}
+                  :error -> {:halt, {:error, "Invalid cost value: #{raw_float}"}}
+                end
+
+              _ ->
+                {:halt, {:error, "Usage: /budget [turns=N] [cost=USD] [ms=N] | clear"}}
+            end
+
+          _ ->
+            {:halt, {:error, "Usage: /budget [turns=N] [cost=USD] [ms=N] | clear"}}
+        end
+      end)
+      |> case do
+        {:ok, map} when map_size(map) == 0 ->
+          {:error, "Usage: /budget [turns=N] [cost=USD] [ms=N] | clear"}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  defp parse_budget_params(params) do
+    turns_raw = non_empty(params["max_turns"] || params["turns"])
+    cost_raw = non_empty(params["max_cost_usd"] || params["cost"])
+    ms_raw = non_empty(params["max_elapsed_ms"] || params["ms"])
+
+    with {:ok, m1} <- maybe_parse_pos_int_field(%{}, "max_turns", turns_raw),
+         {:ok, m2} <- maybe_parse_pos_float_field(m1, "max_cost_usd", cost_raw),
+         {:ok, m3} <- maybe_parse_pos_int_field(m2, "max_elapsed_ms", ms_raw) do
+      if map_size(m3) == 0, do: {:ok, nil}, else: {:ok, m3}
+    end
+  end
+
+  defp maybe_parse_pos_int_field(acc, _key, nil), do: {:ok, acc}
+
+  defp maybe_parse_pos_int_field(acc, key, raw) do
+    case parse_pos_int(raw) do
+      {:ok, n} -> {:ok, Map.put(acc, key, n)}
+      :error -> {:error, "Invalid #{key}: #{raw}"}
+    end
+  end
+
+  defp maybe_parse_pos_float_field(acc, _key, nil), do: {:ok, acc}
+
+  defp maybe_parse_pos_float_field(acc, key, raw) do
+    case parse_pos_float(raw) do
+      {:ok, f} -> {:ok, Map.put(acc, key, f)}
+      :error -> {:error, "Invalid #{key}: #{raw}"}
+    end
+  end
+
+  defp parse_pos_float(val) when is_number(val) and val > 0, do: {:ok, val * 1.0}
+
+  defp parse_pos_float(val) when is_binary(val) do
+    case Float.parse(String.trim(val)) do
+      {f, ""} when f > 0 -> {:ok, f}
+      _ -> :error
+    end
+  end
+
+  defp parse_pos_float(_), do: :error
+
+  defp format_approval_policy(tools) when is_list(tools), do: Enum.join(tools, ", ")
+  defp format_approval_policy(other) when is_binary(other), do: other
+  defp format_approval_policy(_), do: "never"
+
+  defp format_budget_summary(budget) when is_map(budget) and map_size(budget) > 0 do
+    parts =
+      []
+      |> then(fn acc ->
+        if budget["max_turns"], do: acc ++ ["turns=#{budget["max_turns"]}"], else: acc
+      end)
+      |> then(fn acc ->
+        if budget["max_cost_usd"], do: acc ++ ["cost=$#{budget["max_cost_usd"]}"], else: acc
+      end)
+      |> then(fn acc ->
+        if budget["max_elapsed_ms"], do: acc ++ ["ms=#{budget["max_elapsed_ms"]}"], else: acc
+      end)
+
+    if parts == [], do: "none", else: Enum.join(parts, ", ")
+  end
+
+  defp format_budget_summary(_), do: "none"
+
+  defp refresh_extension_status(socket) do
+    case Backend.get_extension_status(socket.assigns.session_id, socket.assigns.conversation_id) do
+      {:ok, status} when is_map(status) -> assign(socket, :extension_status, status)
+      _ -> assign(socket, :extension_status, nil)
+    end
+  end
+
+  defp format_extension_status_summary(%{"extensions" => extensions})
+       when is_map(extensions) and map_size(extensions) > 0 do
+    extensions
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map_join(" · ", fn {ns, data} ->
+      details =
+        if is_map(data) do
+          data
+          |> Enum.sort_by(&elem(&1, 0))
+          |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{v}" end)
+        else
+          inspect(data)
+        end
+
+      if details == "", do: ns, else: "#{ns} (#{details})"
+    end)
+  end
+
+  defp format_extension_status_summary(_), do: ""
+
+  defp active_subagent_task_id(child_id, tasks) when is_binary(child_id) and is_list(tasks) do
+    Enum.find_value(tasks, fn task ->
+      tid = task[:id] || task["id"]
+      kind = task[:kind] || task["kind"]
+      status = task[:status] || task["status"]
+      memos = task[:memos] || task["memos"] || %{}
+      checkpoint = task[:checkpoint] || task["checkpoint"] || %{}
+      name = checkpoint["name"] || checkpoint[:name]
+      task_child_id = memos["child_session_id"] || memos[:child_session_id]
+
+      if kind == "tool_call" and name == "subagent" and task_child_id == child_id and
+           status in ["pending", "running", "sleeping", "retrying", "waiting"] do
+        to_string(tid)
+      end
+    end)
+  end
+
+  defp active_subagent_task_id(_, _), do: nil
 end

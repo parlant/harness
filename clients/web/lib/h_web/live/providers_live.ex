@@ -1,7 +1,6 @@
 defmodule HWeb.ProvidersLive do
   use HWeb, :live_view
 
-  alias H.Accounts
   alias HWeb.{Backend, Layouts}
 
   @example_model %{
@@ -22,33 +21,29 @@ defmodule HWeb.ProvidersLive do
 
   @impl true
   def mount(params, _session, socket) do
-    opts = Backend.InVM.daemon_opts()
-
-    server = opts[:accounts]
-
     profiles =
-      case Accounts.api_keys(server) do
+      case Backend.api_keys() do
         {:ok, %{providers: providers}} -> providers
         _ -> []
       end
 
-    {catalog, editor} =
-      case Accounts.provider_catalog(server) do
+    {catalog, editor, running} =
+      case Backend.provider_catalog() do
         {:ok, catalog} ->
           selected = params["provider"]
 
           selected =
             if is_binary(selected) and is_map_key(catalog.providers, selected), do: selected
 
-          {catalog, edit_form(catalog, selected)}
+          {catalog, edit_form(catalog, selected), Map.get(catalog, :running, [])}
 
         {:error, _} ->
-          {nil, nil}
+          {nil, nil, []}
       end
 
     {:ok,
      assign(socket,
-       running: Map.keys(opts[:compatible_providers] || %{}),
+       running: running,
        model_groups: Backend.list_models() |> Enum.group_by(& &1.provider),
        profiles: profiles,
        catalog: catalog,

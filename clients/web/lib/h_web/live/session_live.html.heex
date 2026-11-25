@@ -144,6 +144,7 @@
                   card={card}
                   child={@catalog.by_id[card.child_id]}
                   can_fork?={@session != nil && @session.status != "archived"}
+                  active_task_id={active_subagent_task_id(card.child_id, @tasks)}
                 />
               <% true -> %>
                 <ConversationComponents.entry_card
@@ -209,6 +210,7 @@
           live={@ephemeral_live}
           inbox={@inbox}
           tail_activity={@tail_activity}
+          tasks={@tasks}
         />
         <div :if={@session && @session.status == "archived"} class="session-recovery">
           <div class="archive-readonly-bar">
@@ -652,8 +654,17 @@
       </div>
       <div class="session-meta-lines mono muted">
         <div class="session-id-label">id: {@session_id}</div>
+        <div :if={@session} id="hdr-harness" class="session-harness">
+          harness: {Map.get(@session, :harness_id) || "coding"}
+        </div>
         <div :if={@session} class="session-cwd">{@session.env_id}: {@session.cwd}</div>
         <div :if={usage_summary(@usage)} id="hdr-usage">{usage_summary(@usage)}</div>
+        <div
+          :if={format_extension_status_summary(@extension_status) != ""}
+          id="hdr-extension-status"
+        >
+          extensions: {format_extension_status_summary(@extension_status)}
+        </div>
         <div>
           <span id="hdr-conv">conv: #{@conversation_id}</span>
           <span :if={!is_nil(@cursor_seq)} id="hdr-seq"> · seq: {@cursor_seq}</span>
@@ -878,6 +889,90 @@
     <p :if={profile.unavailable_reason} id="model-unavailable-note" class="muted agent-note">
       {profile.unavailable_reason}
     </p>
+    <div class="agent-policy-section">
+      <div class="agent-current">
+        <span class="section-title">Tool approval policy</span>
+        <span class="mono" id="current-approval-policy">
+          {format_approval_policy(Map.get(@agent, "approval_policy"))}
+        </span>
+      </div>
+      <form
+        id="approval-policy-form"
+        phx-submit="configure_approval_policy"
+        class="agent-config-fields"
+      >
+        <label class="field-group">
+          <span class="field-label">Approval policy</span>
+          <input
+            id="approval-policy-input"
+            type="text"
+            name="approval_policy"
+            value={format_approval_policy(Map.get(@agent, "approval_policy"))}
+            placeholder="never | mutating | tools=bash,write_file"
+            class="input mono"
+          />
+        </label>
+        <button id="save-approval-policy-btn" type="submit" class="btn btn-sm">
+          Apply policy
+        </button>
+      </form>
+    </div>
+    <div class="agent-budget-section">
+      <div class="agent-current">
+        <span class="section-title">Run budget</span>
+        <span class="mono" id="current-run-budget">
+          {format_budget_summary(Map.get(@agent, "budget"))}
+        </span>
+      </div>
+      <form id="budget-config-form" phx-submit="configure_budget" class="agent-config-fields">
+        <label class="field-group">
+          <span class="field-label">Max turns</span>
+          <input
+            id="budget-max-turns"
+            type="number"
+            min="1"
+            name="max_turns"
+            value={get_in(@agent, ["budget", "max_turns"])}
+            class="input mono"
+          />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Max cost (USD)</span>
+          <input
+            id="budget-max-cost"
+            type="number"
+            step="any"
+            min="0.0001"
+            name="max_cost_usd"
+            value={get_in(@agent, ["budget", "max_cost_usd"])}
+            class="input mono"
+          />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Max elapsed (ms)</span>
+          <input
+            id="budget-max-elapsed"
+            type="number"
+            min="1"
+            name="max_elapsed_ms"
+            value={get_in(@agent, ["budget", "max_elapsed_ms"])}
+            class="input mono"
+          />
+        </label>
+        <div class="agent-budget-actions">
+          <button id="save-budget-btn" type="submit" class="btn btn-sm">Apply budget</button>
+          <button
+            id="clear-budget-btn"
+            type="button"
+            class="btn btn-sm btn-ghost"
+            phx-click="configure_budget"
+            phx-value-clear="true"
+          >
+            Clear
+          </button>
+        </div>
+      </form>
+    </div>
     <p :if={@error_banner} role="alert" class="flash-banner flash-error">{@error_banner}</p>
     <div class="agent-panel-actions">
       <.link id="provider-settings-link" navigate={~p"/settings/providers"}>Manage providers</.link>

@@ -4,7 +4,7 @@ function parseMeta(raw) {
   let meta;
   try { meta = JSON.parse(raw); } catch { /* No catalog yet. */ }
   return Object.fromEntries(
-    ["commands", "thinking_levels", "attention_args", "archive_args", "models"].map(key =>
+    ["commands", "thinking_levels", "attention_args", "archive_args", "approval_args", "budget_args", "models"].map(key =>
       [key, Array.isArray(meta?.[key]) ? meta[key] : []]
     )
   );
@@ -23,7 +23,7 @@ function slashLine(value) {
   return line.startsWith("/") && !line.startsWith("//") && !line.includes("\n");
 }
 
-const staticArgs = ["/thinking", "/model", "/attention", "/archive", "/fork"];
+const staticArgs = ["/thinking", "/model", "/attention", "/archive", "/fork", "/approval", "/budget"];
 
 export function composerContext(value, cursor, explicit = false, allowCommands = true) {
   if (allowCommands && slashLine(value) && !value.slice(0, cursor).trimStart().includes("\n")) {
@@ -81,12 +81,16 @@ function localItems(ctx, meta) {
     "/thinking": meta.thinking_levels,
     "/attention": meta.attention_args,
     "/archive": meta.archive_args,
+    "/approval": meta.approval_args,
+    "/budget": meta.budget_args,
     "/fork": ["cancel"]
   };
   const descriptions = {
     "/thinking": { default: "Reasoning effort" },
     "/attention": { on: "Mark for attention", off: "Mark as read" },
     "/archive": { force: "Stop work and archive", off: "Restore from archive" },
+    "/approval": { never: "Run all tools without approval", mutating: "Require approval for mutating tools" },
+    "/budget": { clear: "Clear conversation run budget" },
     "/fork": { cancel: "Cancel active fork edit" }
   }[ctx.cmd];
   return (choices[ctx.cmd] || []).filter(value => value.startsWith(q)).map(value => ({

@@ -5,6 +5,8 @@ defmodule HWeb.Standalone do
   import Plug.Conn
 
   def configure(addresses) do
+    HWeb.Backend.HTTP.configure_from_env()
+
     if System.get_env("H_WEB") == "0" do
       :disabled
     else

@@ -8,8 +8,12 @@ defmodule HWeb.Application do
 
   @impl true
   def start(_type, _args) do
+    HWeb.Backend.HTTP.configure_from_env()
+
     children = [
       {Phoenix.PubSub, name: HWeb.PubSub},
+      {Registry, keys: :unique, name: HWeb.Backend.HTTP.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: HWeb.Backend.HTTP.SSESupervisor},
       HWeb.Endpoint
     ]
 

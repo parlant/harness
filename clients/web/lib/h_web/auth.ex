@@ -36,30 +36,42 @@ defmodule HWeb.Auth do
     end
   end
 
-  @doc "Verifies a browser session token against `H.Auth`'s ETS table."
+  @doc "Verifies a browser session token against `H.Auth`'s ETS table or the HTTP backend."
   @spec verify_session_token(term()) :: boolean()
   def verify_session_token(token) when is_binary(token) and byte_size(token) > 0 do
-    table = auth_table()
+    backend = HWeb.Backend.impl()
 
-    case :ets.whereis(table) do
-      :undefined -> false
-      _ref -> H.Auth.verify_cookie(token, table)
+    if Code.ensure_loaded?(backend) and function_exported?(backend, :verify_browser_session, 2) do
+      backend.verify_browser_session(token, [])
+    else
+      table = auth_table()
+
+      case :ets.whereis(table) do
+        :undefined -> false
+        _ref -> H.Auth.verify_cookie(token, table)
+      end
     end
   end
 
   def verify_session_token(_), do: false
 
-  @doc "Exchanges an owner bearer token for a browser session token via `H.Auth`."
+  @doc "Exchanges an owner bearer token for a browser session token via `H.Auth` or the HTTP backend."
   @spec create_browser_session(term()) ::
           {:ok, String.t()} | {:error, :unauthorized | :auth_unavailable}
   def create_browser_session(owner_token) when is_binary(owner_token) do
-    server = auth_server()
-    table = auth_table()
+    backend = HWeb.Backend.impl()
 
-    if :ets.whereis(table) != :undefined and GenServer.whereis(server) != nil do
-      H.Auth.create_browser_session(owner_token, server, table)
+    if Code.ensure_loaded?(backend) and function_exported?(backend, :create_browser_session, 2) do
+      backend.create_browser_session(owner_token, [])
     else
-      {:error, :auth_unavailable}
+      server = auth_server()
+      table = auth_table()
+
+      if :ets.whereis(table) != :undefined and GenServer.whereis(server) != nil do
+        H.Auth.create_browser_session(owner_token, server, table)
+      else
+        {:error, :auth_unavailable}
+      end
     end
   end
 
