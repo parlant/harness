@@ -26,7 +26,7 @@ defmodule HWeb.SessionCommandAndTreeTest do
     end)
   end
 
-  test "slash commands configure model/thinking, rename, triage, fork cwd, create new session, and reject unknown commands without calling LLM",
+  test "slash commands configure model/thinking, approval policy, budget, harness, approve/deny/abort, rename, triage, fork cwd, create new session, and reject unknown commands without calling LLM",
        %{
          conn: conn,
          projects_dir: projects_dir,
@@ -58,6 +58,82 @@ defmodule HWeb.SessionCommandAndTreeTest do
 
     wait_until(fn -> has_element?(view, ~s(#thinking-select option[value="high"][selected])) end)
     assert has_element?(view, "#session-info-banner", "Reasoning effort set to high.")
+
+    # /harness
+    view
+    |> form("#composer-form", %{content: "/harness"})
+    |> render_submit()
+
+    assert has_element?(view, "#session-info-banner", "Harness: coding")
+    assert has_element?(view, "#hdr-harness", "harness: coding")
+
+    # /approval mutating and /approval
+    view
+    |> form("#composer-form", %{content: "/approval mutating"})
+    |> render_submit()
+
+    wait_until(fn -> has_element?(view, "#current-approval-policy", "mutating") end)
+    assert has_element?(view, "#session-info-banner", "Approval policy set to mutating.")
+
+    view
+    |> form("#composer-form", %{content: "/approval"})
+    |> render_submit()
+
+    assert has_element?(view, "#session-info-banner", "Approval policy: mutating")
+
+    # /budget turns=3 cost=0.5 and /budget clear
+    view
+    |> form("#composer-form", %{content: "/budget turns=3 cost=0.5"})
+    |> render_submit()
+
+    wait_until(fn -> has_element?(view, "#current-run-budget", "turns=3") end)
+    assert has_element?(view, "#session-info-banner", "Budget set: turns=3, cost=$0.5.")
+
+    view
+    |> form("#composer-form", %{content: "/budget clear"})
+    |> render_submit()
+
+    wait_until(fn -> has_element?(view, "#current-run-budget", "none") end)
+    assert has_element?(view, "#session-info-banner", "Budget cleared.")
+
+    # /approve, /deny, and /abort <task_id> usage/error handling without calling LLM
+    view
+    |> form("#composer-form", %{content: "/approve"})
+    |> render_submit()
+
+    assert has_element?(view, "#session-error-banner", "Usage: /approve <task_id>")
+
+    view
+    |> form("#composer-form", %{content: "/deny 9999 nope"})
+    |> render_submit()
+
+    assert has_element?(view, "#session-error-banner", "Not found")
+
+    view
+    |> form("#composer-form", %{content: "/abort 9999"})
+    |> render_submit()
+
+    assert has_element?(view, "#session-error-banner", "Not found")
+    assert Fake.requests(fake) == []
+
+    # Agent panel forms configure approval_policy and budget
+    view
+    |> form("#approval-policy-form", %{approval_policy: "tools=bash,write_file"})
+    |> render_submit()
+
+    wait_until(fn -> has_element?(view, "#current-approval-policy", "bash, write_file") end)
+
+    view
+    |> form("#budget-config-form", %{max_turns: "5", max_cost_usd: "2.5", max_elapsed_ms: "15000"})
+    |> render_submit()
+
+    wait_until(fn -> has_element?(view, "#current-run-budget", "turns=5") end)
+
+    view
+    |> element("#clear-budget-btn")
+    |> render_click()
+
+    wait_until(fn -> has_element?(view, "#current-run-budget", "none") end)
 
     # /model fake:chat
     view

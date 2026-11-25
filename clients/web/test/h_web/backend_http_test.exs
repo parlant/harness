@@ -396,6 +396,66 @@ defmodule HWeb.BackendHTTPTest do
     assert archived.archived == true
   end
 
+  test "supports configure approval_policy/budget, approve_tool, and abort task_id over HTTP",
+       ctx do
+    assert {:ok, %{session: sess}} =
+             HTTP.create_session(
+               %{"cwd" => ctx.projects_dir, "harness_id" => "coding"},
+               ctx.http_opts
+             )
+
+    sid = sess.session_id
+    assert sess.harness_id == "coding"
+
+    assert {:ok, ext_status} = HTTP.get_extension_status(sid, "1", ctx.http_opts)
+    assert ext_status["session_id"] == sid
+    assert ext_status["conversation_id"] == "1"
+
+    assert {:ok, cfg_receipt} =
+             HTTP.execute_command(
+               sid,
+               %{
+                 "version" => 1,
+                 "conversation_id" => 1,
+                 "request_id" => "http-cfg-policy-budget",
+                 "command" => "configure",
+                 "args" => %{
+                   "approval_policy" => "mutating",
+                   "budget" => %{"max_turns" => 3, "max_cost_usd" => 1.5}
+                 }
+               },
+               ctx.http_opts
+             )
+
+    assert cfg_receipt.status == "done"
+
+    assert {:error, :not_found} =
+             HTTP.execute_command(
+               sid,
+               %{
+                 "version" => 1,
+                 "conversation_id" => 1,
+                 "request_id" => "http-approve-missing",
+                 "command" => "approve_tool",
+                 "args" => %{"task_id" => 9999, "decision" => "allow"}
+               },
+               ctx.http_opts
+             )
+
+    assert {:error, :not_found} =
+             HTTP.execute_command(
+               sid,
+               %{
+                 "version" => 1,
+                 "conversation_id" => 1,
+                 "request_id" => "http-abort-missing",
+                 "command" => "abort",
+                 "args" => %{"task_id" => 9999}
+               },
+               ctx.http_opts
+             )
+  end
+
   test "SSE bridge streams catalog frames, conversation commits, and ephemeral deltas", ctx do
     assert {:ok, {:snapshot, cat_seq, cat_bin}} = HTTP.subscribe_sessions(self(), ctx.http_opts)
     assert is_integer(cat_seq)
@@ -439,10 +499,15 @@ defmodule HWeb.BackendHTTPTest do
     assert JSON.decode!(commit_bin)["session_id"] == sid
 
     # Verify replay when re-subscribing with last_event_id
+    # Keep another subscriber attached or wait for bridge shutdown; re-subscribing
+    # after the last subscriber leaves starts a fresh bridge with a snapshot at commit_seq.
     assert :ok = HTTP.unsubscribe_conversation(sid, "1", ctx.http_opts)
 
-    assert {:ok, {:replay, []}} =
+    assert {:ok, initial_rejoin} =
              HTTP.subscribe_conversation(sid, "1", self(), commit_seq, ctx.http_opts)
+
+    assert initial_rejoin == {:replay, []} or
+             match?({:snapshot, ^commit_seq, _bin}, initial_rejoin)
 
     # Also verify replay when a new subscriber joins with an older seq
     assert {:ok, _} =

@@ -123,6 +123,49 @@ defmodule HWeb.SlashCommandsTest do
 
       assert [%{value: "openai:gpt-5"}] =
                SlashCommands.complete_command_args("/model", "gpt", models: models)
+
+      assert Enum.map(SlashCommands.complete_command_args("/approval", ""), & &1.value) == [
+               "never",
+               "mutating"
+             ]
+
+      assert [%{value: "clear"}] = SlashCommands.complete_command_args("/budget", "cl")
+
+      approvals = %{
+        "42" => %{"task_id" => "42", "tool_name" => "bash"},
+        "7" => %{"task_id" => "7", "tool_name" => "write_file"}
+      }
+
+      assert Enum.map(
+               SlashCommands.complete_command_args("/approve", "", approvals: approvals),
+               & &1.value
+             ) == ["42", "7"]
+
+      assert [%{value: "42", description: "Pending approval: bash"}] =
+               SlashCommands.complete_command_args("/deny", "4", approvals: approvals)
+
+      assert [%{value: "7"}] =
+               SlashCommands.complete_command_args("/abort", "7", approvals: approvals)
+    end
+  end
+
+  describe "new v0.4.0 command parsing and client metadata" do
+    test "parses /harness, /budget, /approve, /deny, /approval, and /abort <task_id>" do
+      assert {:command, "/harness", ""} = SlashCommands.parse_input("/harness")
+
+      assert {:command, "/budget", "turns=3 cost=0.25"} =
+               SlashCommands.parse_input("/budget turns=3 cost=0.25")
+
+      assert {:command, "/approve", "42 ok"} = SlashCommands.parse_input("/approve 42 ok")
+      assert {:command, "/deny", "42 nope"} = SlashCommands.parse_input("/deny 42 nope")
+      assert {:command, "/approval", "mutating"} = SlashCommands.parse_input("/approval mutating")
+      assert {:command, "/abort", "42"} = SlashCommands.parse_input("/abort 42")
+
+      meta = SlashCommands.client_metadata([])
+      assert meta.approval_args == ["never", "mutating"]
+      assert meta.budget_args == ["clear"]
+      assert Enum.any?(meta.commands, &(&1.name == "/harness"))
+      assert Enum.any?(meta.commands, &(&1.name == "/approve"))
     end
   end
 

@@ -147,6 +147,19 @@
           </label>
 
           <label class="field-group">
+            <span class="field-label">Harness</span>
+            <select id="workspace-harness-select" name="harness_id" class="input">
+              <option
+                :for={harness <- @harnesses}
+                value={harness["id"] || harness[:id]}
+                selected={(harness["id"] || harness[:id]) == @selected_harness}
+              >
+                {harness["name"] || harness[:name] || harness["id"] || harness[:id]}
+              </option>
+            </select>
+          </label>
+
+          <label class="field-group">
             <span class="field-label">Model</span>
             <select id="workspace-model-select" name="model" class="input">
               <option

@@ -321,6 +321,7 @@ defmodule HWeb.ConversationComponents do
   attr(:live, :map, required: true)
   attr(:inbox, :list, required: true)
   attr(:tail_activity, :any, default: nil)
+  attr(:tasks, :list, default: [])
 
   def live_region(assigns) do
     live = assigns.live || %{}
@@ -332,6 +333,9 @@ defmodule HWeb.ConversationComponents do
 
     {failure, failure_label} =
       case {live["run_failure"], live["compaction_failure"]} do
+        {%{"reason" => "budget_exceeded"} = run_failure, _} ->
+          {run_failure, "Budget reached"}
+
         {run_failure, _} when not is_nil(run_failure) ->
           {run_failure, "Run paused"}
 
@@ -344,6 +348,13 @@ defmodule HWeb.ConversationComponents do
 
     retry = get_in(live, ["generation", "retry"]) || get_in(live, ["compaction", "retry"])
     wait = get_in(live, ["generation", "wait"]) || get_in(live, ["compaction", "wait"])
+    approvals = pending_approvals(live)
+    active_tools = active_tool_slots(live)
+
+    waiting_signals =
+      Enum.filter(active_tools, fn slot ->
+        slot["name"] == "wait_signal" and slot["status"] == "waiting"
+      end)
 
     assigns =
       assign(assigns,
@@ -352,13 +363,20 @@ defmodule HWeb.ConversationComponents do
         text: text,
         failure: failure,
         failure_label: failure_label,
+        budget_exceeded?: match?(%{"reason" => "budget_exceeded"}, failure),
         retry: retry,
-        wait: wait
+        wait: wait,
+        approvals: approvals,
+        active_tools: active_tools,
+        waiting_signals: waiting_signals
       )
 
     ~H"""
     <section
-      :if={@streaming_text? || @activity || @inbox != [] || @failure || @retry || @wait}
+      :if={
+        @streaming_text? || @activity || @inbox != [] || @failure || @retry || @wait ||
+          @approvals != [] || @active_tools != []
+      }
       id="live-region"
       class="live-region"
       aria-live="polite"
@@ -368,6 +386,82 @@ defmodule HWeb.ConversationComponents do
         id="live-activity"
         activity={@activity}
       />
+      <div :if={@waiting_signals != []} id="wait-signal-badges" class="wait-signal-badges">
+        <span :for={slot <- @waiting_signals} class="badge badge-active mono">
+          wait_signal · waiting
+        </span>
+      </div>
+      <div :if={@approvals != []} id="pending-approvals" class="approval-list">
+        <article
+          :for={approval <- @approvals}
+          id={"approval-card-#{approval["task_id"]}"}
+          class="approval-card"
+          role="region"
+          aria-label={"Approval required for #{approval["tool_name"]}"}
+        >
+          <div class="approval-card-head">
+            <span class="badge badge-warn mono">approval</span>
+            <strong class="mono">{approval["tool_name"]}</strong>
+            <span class="muted mono">task #{approval["task_id"]}</span>
+          </div>
+          <div :if={approval["cwd"]} class="approval-cwd mono muted">
+            cwd: {approval["cwd"]}
+          </div>
+          <pre :if={approval["arguments"]} class="approval-args mono">{format_json_pretty(approval["arguments"])}</pre>
+          <div class="approval-actions">
+            <button
+              id={"approve-tool-#{approval["task_id"]}"}
+              type="button"
+              class="btn btn-sm btn-primary"
+              phx-click="approve_tool"
+              phx-value-task-id={approval["task_id"]}
+              phx-value-decision="allow"
+            >
+              Approve
+            </button>
+            <button
+              id={"deny-tool-#{approval["task_id"]}"}
+              type="button"
+              class="btn btn-sm btn-danger"
+              phx-click="approve_tool"
+              phx-value-task-id={approval["task_id"]}
+              phx-value-decision="deny"
+            >
+              Deny
+            </button>
+            <button
+              id={"abort-approval-task-#{approval["task_id"]}"}
+              type="button"
+              class="btn btn-sm btn-ghost"
+              phx-click="abort_task"
+              phx-value-task-id={approval["task_id"]}
+            >
+              Abort
+            </button>
+          </div>
+        </article>
+      </div>
+      <div :if={@active_tools != []} id="live-active-tools" class="active-tool-controls">
+        <div
+          :for={slot <- @active_tools}
+          :if={slot_task_id(slot, @approvals)}
+          id={"active-tool-#{slot["id"]}"}
+          class="active-tool-row"
+        >
+          <% tid = slot_task_id(slot, @approvals) %>
+          <span class="mono">{slot["name"]}</span>
+          <span class="badge mono">{slot["status"]}</span>
+          <button
+            id={"abort-task-#{tid}"}
+            type="button"
+            class="btn btn-sm btn-ghost"
+            phx-click="abort_task"
+            phx-value-task-id={tid}
+          >
+            Abort
+          </button>
+        </div>
+      </div>
       <div :if={@wait} id="wait-banner" class="retry-banner" role="status">
         <strong>{@wait["title"] || "Waiting to continue"}</strong>
         <p>{@wait["code"]}: {@wait["message"]}</p>
@@ -421,10 +515,18 @@ defmodule HWeb.ConversationComponents do
         </div>
       </div>
 
-      <div :if={@failure} id="run-failure-banner" class="run-failure-banner">
+      <div
+        :if={@failure}
+        id="run-failure-banner"
+        class={["run-failure-banner", @budget_exceeded? && "is-budget-exceeded"]}
+        data-failure-reason={if(is_map(@failure), do: @failure["reason"])}
+      >
         <div>
           <strong>{@failure_label}:</strong>
           <span>{format_failure(@failure)}</span>
+          <span :if={@budget_exceeded? && @failure["limit"]} class="badge badge-warn mono">
+            {@failure["limit"]}
+          </span>
         </div>
         <p :if={@failure_label == "Compaction failed"}>
           History preserved. Retry with <code>/compact</code> in hi.
@@ -436,7 +538,7 @@ defmodule HWeb.ConversationComponents do
           class="btn btn-sm btn-primary"
           phx-click="continue_run"
         >
-          Continue Run
+          {if @budget_exceeded?, do: "Continue", else: "Continue Run"}
         </button>
       </div>
     </section>
@@ -447,6 +549,7 @@ defmodule HWeb.ConversationComponents do
   attr(:card, :map, required: true)
   attr(:child, :map, default: nil)
   attr(:can_fork?, :boolean, default: false)
+  attr(:active_task_id, :string, default: nil)
 
   def subagent_card(assigns) do
     %{card: card, child: child} = assigns
@@ -465,12 +568,18 @@ defmodule HWeb.ConversationComponents do
         true -> nil
       end
 
+    abortable_task_id =
+      if status in ["pending", "running", "sleeping", "retrying", "waiting"],
+        do: assigns.active_task_id || child_parent_task_id(child),
+        else: nil
+
     assigns =
       assign(assigns,
         title: card.title || (child && child.title),
         prompt_preview: preview_text(card.prompt),
         status: status,
-        status_class: status_class
+        status_class: status_class,
+        abortable_task_id: abortable_task_id
       )
 
     ~H"""
@@ -483,6 +592,16 @@ defmodule HWeb.ConversationComponents do
         <div class="subagent-card-head">
           <span class="badge mono">subagent</span>
           <span class={["badge mono subagent-status-pill", @status_class]}>{@status}</span>
+          <button
+            :if={@abortable_task_id}
+            id={"abort-subagent-#{@abortable_task_id}"}
+            type="button"
+            class="btn btn-sm btn-ghost"
+            phx-click="abort_task"
+            phx-value-task-id={@abortable_task_id}
+          >
+            Abort
+          </button>
         </div>
         <div :if={@title} class="subagent-card-title">{@title}</div>
         <p :if={@prompt_preview} class="subagent-card-preview muted">{@prompt_preview}</p>
@@ -594,4 +713,56 @@ defmodule HWeb.ConversationComponents do
   rescue
     _ -> inspect(value)
   end
+
+  defp format_json_pretty(value) when is_binary(value), do: value
+
+  defp format_json_pretty(value) do
+    Jason.encode!(value, pretty: true)
+  rescue
+    _ -> format_json(value)
+  end
+
+  defp pending_approvals(%{"approvals" => approvals}) when is_map(approvals) do
+    approvals
+    |> Map.values()
+    |> Enum.filter(&is_map/1)
+    |> Enum.sort_by(fn rec -> to_string(rec["task_id"] || "") end)
+  end
+
+  defp pending_approvals(_), do: []
+
+  defp active_tool_slots(%{"tools" => tools}) when is_map(tools) do
+    tools
+    |> Enum.map(fn {id, slot} -> Map.put_new(slot, "id", id) end)
+    |> Enum.filter(fn slot ->
+      is_map(slot) and slot["status"] in ["pending", "running", "waiting", "retrying"]
+    end)
+    |> Enum.sort_by(fn slot -> to_string(slot["task_id"] || slot["id"] || "") end)
+  end
+
+  defp active_tool_slots(%{"tools" => tools}) when is_list(tools) do
+    tools
+    |> Enum.filter(fn slot ->
+      is_map(slot) and slot["status"] in ["pending", "running", "waiting", "retrying"]
+    end)
+    |> Enum.sort_by(fn slot -> to_string(slot["task_id"] || slot["id"] || "") end)
+  end
+
+  defp active_tool_slots(_), do: []
+
+  defp child_parent_task_id(%{parent: %{task_id: tid}}) when not is_nil(tid), do: to_string(tid)
+
+  defp child_parent_task_id(%{"parent" => %{"task_id" => tid}}) when not is_nil(tid),
+    do: to_string(tid)
+
+  defp child_parent_task_id(_), do: nil
+
+  defp slot_task_id(slot, approvals) when is_map(slot) do
+    slot["task_id"] ||
+      Enum.find_value(approvals, fn rec ->
+        if rec["call_id"] && rec["call_id"] == slot["id"], do: rec["task_id"]
+      end)
+  end
+
+  defp slot_task_id(_, _), do: nil
 end
