@@ -7,7 +7,7 @@ cast:
   - goya-charles-iv
   - vigee-lebrun-uffizi
 
-# Cord anchors: x and y within the cutout (%), then tilt (degrees).
+# Facing describes the unmirrored cutout. For frontal portraits, use the body's turn.
 cutouts:
   charles-i-ngi:
     width: 540
@@ -16,11 +16,11 @@ cutouts:
     width: 546
     height: 680
   farnese-ngi:
-    cords: [[56, 9, 0], [29, 64, -6], [71, 68, 6]]
+    facing: right
     width: 512
     height: 680
   goya-charles-iv:
-    cords: [[50, 8, 0], [31, 31, -4], [63, 46, 6]]
+    facing: left
     width: 213
     height: 680
     sitter: King Charles IV of Spain
@@ -28,16 +28,16 @@ cutouts:
     width: 531
     height: 680
   jane-seymour-khm:
-    cords: [[55, 10, 0], [25, 38, -5], [68, 61, 5]]
+    facing: left
     width: 442
     height: 680
   las-meninas-prado:
-    cords: [[50, 9, 0], [14, 46, -6], [75, 57, 5]]
+    facing: right
     width: 504
     height: 680
     sitter: Infanta Margarita Teresa as a child
   leopold-gallery-khm:
-    cords: [[51, 6, 0], [34, 32, -4], [73, 48, 6]]
+    facing: right
     width: 221
     height: 680
     sitter: A courtier from the gallery of Archduke Leopold Wilhelm
@@ -45,14 +45,14 @@ cutouts:
     width: 510
     height: 680
   margarita-khm:
-    cords: [[54, 9, 0], [30, 38, -6], [76, 43, 5]]
+    facing: left
     width: 621
     height: 680
   maximilian-khm:
     width: 639
     height: 680
   vigee-lebrun-uffizi:
-    cords: [[57, 14, 0], [12, 40, -6], [79, 46, 5]]
+    facing: left
     width: 552
     height: 680
   william-silent-rijks:

@@ -27,80 +27,51 @@
     radial-gradient(ellipse at 50% 46%, transparent 40%, #1014228c 100%);
 }
 .ballroom-cast { z-index: 2; }
+.ballroom[data-dance="running"] .ballroom-puppet { will-change: transform; }
+.ballroom[data-dance="running"] .puppet-portrait { transition: transform 140ms ease-in-out; }
 .ballroom-puppet {
+  --rod-anchor: 76%;
   position: absolute;
   bottom: var(--y);
   left: var(--x);
   height: var(--size);
   aspect-ratio: var(--puppet-shape);
   transform: translateX(-50%) rotate(var(--angle));
-  transform-origin: center top;
+  transform-origin: center var(--rod-anchor);
 }
-.ballroom-puppet::before {
-  content: '';
-  position: absolute;
-  inset: 97% -12% auto;
-  height: 6%;
-  border-radius: 50%;
-  background: #090e20a6;
-  filter: blur(5px);
-}
+.puppet-portrait { position: absolute; inset: 0; }
 .ballroom-puppet img {
-  position: relative;
   display: block;
   height: 100%;
   width: 100%;
   filter: drop-shadow(3px 5px 4px #090e20bb);
 }
-.puppet-cord {
+.puppet-rod {
   position: absolute;
-  z-index: 1;
-  width: clamp(1.5px, .17vw, 2.5px);
+  top: var(--rod-anchor);
+  left: 50%;
+  width: clamp(4px, .48vw, 7px);
   height: 44rem;
-  left: var(--cord-x);
-  bottom: calc(100% - var(--cord-y));
-  transform-origin: center bottom;
-  transform: rotate(var(--cord-angle));
-  background: repeating-linear-gradient(151deg, #a8b5cf 0 1.6px, #697891 1.8px 3px, #d2dbee 3.2px 4px);
-  box-shadow: 1px 0 1px #101422a8;
+  transform: translateX(-50%);
+  background: linear-gradient(to right, #513421, #ac7a4f 36%, #895c38 56%, #583921);
+  box-shadow: 1px 0 2px #090e20a6;
 }
-.puppet-cord::after {
-  content: '';
-  position: absolute;
-  bottom: -1px;
-  left: -1px;
-  width: calc(100% + 2px);
-  height: 4px;
-  border-radius: 50%;
-  background: #c1cee4;
-  box-shadow: 0 1px 1px #101422;
-}
-/* Separate lanes and scales give the promenade depth. */
-.ballroom-puppet-1 { --x: 13%; --y: 23%; --size: 40%; --angle: -4deg; --stride: 68%; }
-.ballroom-puppet-2 { --x: 25%; --y: 17%; --size: 45%; --angle: 2deg; --stride: -24%; }
-.ballroom-puppet-3 { --x: 78%; --y: 22%; --size: 41%; --angle: 4deg; --stride: -33%; }
-.ballroom-puppet-4 { --x: 38%; --y: 10%; --size: 56%; --angle: -3deg; --stride: 43%; }
-.ballroom-puppet-5 { --x: 55%; --y: 12%; --size: 44%; --angle: 3deg; --stride: -32%; }
-.ballroom-puppet-6 { --x: 65%; --y: 20%; --size: 50%; --angle: -2deg; --stride: 58%; }
-.ballroom-puppet-7 { --x: 87%; --y: 9%; --size: 39%; --angle: 3deg; --stride: -32%; }
+/* Resting positions also serve as the starting marks for the dance. */
+.ballroom-puppet-1 { --x: 13%; --y: 23%; --size: 40%; --angle: -4deg; }
+.ballroom-puppet-2 { --x: 25%; --y: 17%; --size: 45%; --angle: 2deg; }
+.ballroom-puppet-3 { --x: 78%; --y: 22%; --size: 41%; --angle: 4deg; }
+.ballroom-puppet-4 { --x: 38%; --y: 10%; --size: 56%; --angle: -3deg; }
+.ballroom-puppet-5 { --x: 55%; --y: 12%; --size: 44%; --angle: 3deg; }
+.ballroom-puppet-6 { --x: 65%; --y: 20%; --size: 50%; --angle: -2deg; }
+.ballroom-puppet-7 { --x: 87%; --y: 9%; --size: 39%; --angle: 3deg; }
 
-/* One short entrance, not an indefinitely running animation without controls. */
-@media (prefers-reduced-motion: no-preference) {
-  .ballroom-entered .ballroom-puppet { animation: promenade 4.5s ease-in-out; }
-}
-@keyframes promenade {
-  0%, 100% { translate: 0 0; rotate: 0deg; }
-  32% { translate: var(--stride) -6%; rotate: 4deg; }
-  60% { translate: calc(var(--stride) * .64) -2%; rotate: -3deg; }
-  82% { translate: calc(var(--stride) * -.1) 1%; rotate: -1deg; }
-}
 @media (max-width: 42rem) {
   .ballroom-puppet-1, .ballroom-puppet-2 { display: none; }
-  .ballroom-puppet-3 { --x: 16%; --y: 27%; --size: 35%; --stride: 26%; }
-  .ballroom-puppet-4 { --x: 28%; --size: 43%; --stride: 18%; }
-  .ballroom-puppet-5 { --x: 53%; --size: 36%; --stride: 15%; }
-  .ballroom-puppet-6 { --x: 68%; --y: 26%; --size: 41%; --stride: -48%; }
-  .ballroom-puppet-7 { --x: 82%; --size: 31%; --stride: -25%; }
+  .ballroom-puppet-3 { --x: 16%; --y: 27%; --size: 35%; }
+  .ballroom-puppet-4 { --x: 28%; --size: 43%; }
+  .ballroom-puppet-5 { --x: 53%; --size: 36%; }
+  .ballroom-puppet-6 { --x: 68%; --y: 26%; --size: 41%; }
+  .ballroom-puppet-7 { --x: 82%; --size: 31%; }
 }
 
 /* Captionless portraits elsewhere on the sites share the stage's paper cutouts. */
@@ -113,7 +84,9 @@
 }
 .gallery-card { margin: 0; padding: 1rem; aspect-ratio: 6 / 7; }
 .gallery-card-wide { aspect-ratio: 4 / 3; }
-.house-portrait { margin-bottom: .8rem; padding: .75rem; aspect-ratio: 6 / 7; }
+.house-portrait { margin-bottom: .8rem; padding: .75rem; aspect-ratio: 6 / 7; min-height: 0; }
+/* Keep the portrait frame sized by its column, not by the source image's aspect ratio. */
+.house-portrait .paper-cutout { contain: size; }
 .paper-cutout {
   box-sizing: border-box;
   display: block;

@@ -6,9 +6,9 @@ description: Drag H.app to Applications on macOS Sonoma or later to launch the l
 sections:
   - layout: app-hero
     kicker: H.app · macOS Sonoma 14+ · Apple Silicon
-    title: Drag H.app to Applications.
-    emphasis: Your Mac keeps court.
-    body: H.app wraps a native Swift AppKit menu-bar supervisor around the self-contained H daemon, hiweb browser workbench, and hi terminal client. Launch it once to supervise ~/.local/share/h and open your session inbox with zero Dock clutter and zero runtime dependencies.
+    title: Run H from
+    emphasis: your Mac menu bar.
+    body: Drag H.app to Applications and open it. The app starts the local H daemon, opens your hiweb session inbox, and lets you install the bundled hi command from the menu bar.
     requirements: Requires macOS 14.0+ on Apple Silicon (arm64) · Signed .dmg & .app.zip · Bundle ID co.parlant.harness
     domain_links:
       - label: hiness.app · macOS H.app bundle
@@ -25,7 +25,7 @@ sections:
 
   - layout: install
     id: download
-    kicker: Coronation / Get H.app on macOS
+    kicker: Install H.app
     title: Choose how to install H on your Mac.
     body: Download the signed disk image for drag-and-drop installation into /Applications, unpack the .app.zip archive in automation scripts, or pair H.app with the standalone CLI installer from hiness.dev.
     tablist_label: macOS installation options
@@ -93,7 +93,6 @@ sections:
     id: menubar
     kicker: 01 / Native AppKit Menu-Bar Control
     title: Control the local daemon from your macOS status bar.
-    motto: Always within reach of Command-O; never in your Cmd-Tab switcher.
     artwork: margarita_khm
     body: H.app runs with LSUIElement enabled so your Dock and application switcher stay clear while you work in Xcode, Neovim, Zed, or Terminal. Every three seconds it inspects ~/.local/share/h/daemon.json and updates the status indicator between H (running) and H· (stopped).
     items:
@@ -134,7 +133,7 @@ sections:
 
   - layout: principle
     id: continuity
-    kicker: 03 / Shared Reign with Terminal & Browser
+    kicker: 03 / Terminal and browser clients
     title: Start in Terminal. Review diffs in Safari.
     motto: One local store under ~/.local/share/h.
     artwork: leopold_gallery_khm

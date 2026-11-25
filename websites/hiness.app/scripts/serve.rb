@@ -24,8 +24,9 @@ module LocalServer
     port = available_port(ENV.fetch("PORT", DEFAULT_PORT), host: HOST)
     puts "Starting Jekyll at http://#{HOST}:#{port}"
     $stdout.flush
-    # Copy shared static assets instead of leaving source-relative symlinks in the preview.
-    exec({ "JEKYLL_ENV" => "production" }, "bundle", "exec", "jekyll", "serve", "--host", HOST, "--livereload", "--livereload-port", "35730", "--port", port.to_s, *ARGV)
+    # Production mode copies shared assets instead of emitting broken relative symlinks.
+    # Keep LiveReload opt-in so a WebSocket failure cannot take down the preview.
+    exec({ "JEKYLL_ENV" => "production" }, "bundle", "exec", "jekyll", "serve", "--host", HOST, "--livereload-port", "35730", "--port", port.to_s, *ARGV)
   rescue ArgumentError
     abort "PORT must be an integer between 1 and #{MAX_PORT}"
   end

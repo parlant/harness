@@ -6,10 +6,10 @@ Read the H operator manual, client walkthroughs, and alternative installation me
 
 ## Install H with `mix h.setup`
 
-Install the `h_setup` archive from Hex, then run `mix h.setup`:
+Install the `h_setup` archive from the signed release, then run `mix h.setup`:
 
 ```sh
-mix archive.install hex h_setup
+mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
 mix h.setup --service
 hi daemon status
 ```
@@ -21,4 +21,4 @@ hi daemon status
 - [Set up H and make the first connection](https://hiness.dev/docs/setup/)
 - [Configure model providers (`/login` and `/key set`)](https://hiness.dev/docs/providers/)
 - [Manage and upgrade the background daemon](https://hiness.dev/docs/daemon/)
-- [Embed `:harness` in an Elixir/OTP application (`hiness` on HexDocs)](https://hexdocs.pm/hiness)
+- [Embed `:harness` in an Elixir/OTP application](https://hiness.hexdocs.pm/overview.html#embed-harness-in-an-elixir-otp-application) · [`hiness` on Hex](https://hex.pm/packages/hiness)

@@ -36,6 +36,10 @@ ssh-keygen -Y verify -f release-signers -I bingboombam@parlant.xyz -n file -s SH
 shasum -a 256 -c SHA256SUMS
 ```
 
+## Embed H in an Elixir application
+
+Install [`hiness` from Hex](https://hex.pm/packages/hiness) to run the core daemon inside your application's BEAM VM. Use the signed bundles to run `hi`, `hiweb`, or `H.app`. Follow the [embedding guide](/docs/architecture/#embed-the-core-in-an-otp-application) and browse the [Elixir API reference on HexDocs](https://hiness.hexdocs.pm/).
+
 ## Build a bundle from source (terminal and web)
 
 Clone the [H repository on GitHub](https://github.com/parlant/harness) or [GitLab](https://gitlab.com/parlant-co/harness) on macOS or Linux. Building from source requires Elixir 1.20 with Erlang/OTP 29, Rust with Cargo, Node with npm for the web assets, and Python 3 for packaging and smoke checks. Build the self-contained release bundle and start the foreground daemon:

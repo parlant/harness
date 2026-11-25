@@ -1,13 +1,13 @@
-<div class="ballroom" role="img" aria-label="A painted ballroom with court figures cut from paper and suspended like marionettes.">
+<div class="ballroom" role="img" aria-label="A painted ballroom with paper court figures mounted on wooden rods.">
   <img class="ballroom-backdrop" src="{{ '/assets/theatre/ballroom.webp' | relative_url }}" width="1476" height="1081" alt="" decoding="async">
   <div class="ballroom-cast" aria-hidden="true">
     {% for name in site.data.ballroom.cast %}
     {% assign puppet = site.data.ballroom.cutouts[name] %}
-    <div class="ballroom-puppet ballroom-puppet-{{ forloop.index }}" style="--puppet-shape: {{ puppet.width }} / {{ puppet.height }}">
-      {% for anchor in puppet.cords %}
-      <span class="puppet-cord" style="--cord-x: {{ anchor[0] }}%; --cord-y: {{ anchor[1] }}%; --cord-angle: {{ anchor[2] }}deg"></span>
-      {% endfor %}
-      <img src="{{ '/assets/theatre/cast/' | append: name | append: '.webp' | relative_url }}" width="{{ puppet.width }}" height="{{ puppet.height }}" alt="" decoding="async">
+    <div class="ballroom-puppet ballroom-puppet-{{ forloop.index }}" data-facing="{{ puppet.facing }}" style="--puppet-shape: {{ puppet.width }} / {{ puppet.height }}">
+      <span class="puppet-rod"></span>
+      <div class="puppet-portrait">
+        <img src="{{ '/assets/theatre/cast/' | append: name | append: '.webp' | relative_url }}" width="{{ puppet.width }}" height="{{ puppet.height }}" alt="" decoding="async">
+      </div>
     </div>
     {% endfor %}
   </div>

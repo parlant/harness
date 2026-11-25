@@ -1,15 +1,15 @@
 session:
-  label: Royal ledger · Active session
+  label: Active session
   name: Parser review
   steps:
-    - {surface: 'Terminal · hi', action: 'Summon Your Hiness on a code review'}
-    - {surface: 'Terminal · /quit', action: 'Retire the terminal view'}
+    - {surface: 'Terminal · hi', action: 'Start a code review'}
+    - {surface: 'Terminal · /quit', action: 'Close the terminal client'}
     - {surface: 'Browser · hiweb', action: 'Watch the same reply stream live'}
-  outcome: One reign. Two chambers.
-  caption: The daemon holds court on disk while you switch between hi and hiweb.
+  outcome: Same run in both clients
+  caption: The daemon keeps the run active and saves its state to disk as you switch clients.
 lifetimes:
-  number: Plate II · Succession & Authority
-  title: Four separate lines of authority
+  number: Fig. 02 · Session architecture
+  title: Four separate structures
   intro: H keeps history ancestry, active task ownership, process supervision, and client reading position in four distinct structures.
   instruction: Open a row to inspect what each structure governs.
   entries:

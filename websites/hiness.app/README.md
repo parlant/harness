@@ -14,7 +14,7 @@ make verify
 make serve
 ```
 
-`make serve` defaults to port `8082` (override with `HOST=...` and `PORT=...`). `make verify` compiles Tailwind v4 CSS, builds production HTML, and validates all routes (`/`, `/bundle/`, `/ios/`, `/releases/`, `/legal-notice/`, `/privacy/`), anchors, `sitemap.xml`, `llms.txt` / `llms-full.txt`, straight quotes, and editorial rules.
+`make serve` defaults to port `8082` (override with `HOST=...` and `PORT=...`). Reload the browser after changes; LiveReload is off by default. If an older preview left broken symlinks in `_site`, run `make clean` once. `make verify` compiles Tailwind v4 CSS, builds production HTML, and validates all routes (`/`, `/bundle/`, `/ios/`, `/releases/`, `/legal-notice/`, `/privacy/`), anchors, `sitemap.xml`, `llms.txt` / `llms-full.txt`, straight quotes, and editorial rules.
 
 ## Production build (`https://hiness.app`)
 

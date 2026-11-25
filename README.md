@@ -27,7 +27,13 @@ mix h.setup --service
 
 ### Embed H in an Elixir project
 
-Once `hiness` is available on Hex, use Elixir 1.20 / OTP 29 and add `{:harness, "~> 0.3.0", hex: :hiness}` to `mix.exs`. `hiness` is the Hex package; `:harness` is the OTP application and configuration key. See the [embedding guide](docs/hexdocs.md) and [HexDocs](https://hexdocs.pm/hiness).
+With Elixir 1.20 / OTP 29, add the core daemon from [Hex](https://hex.pm/packages/hiness) to your `mix.exs` dependencies and run `mix deps.get`:
+
+```elixir
+{:harness, "~> 0.3.0", hex: :hiness}
+```
+
+`hiness` is the package name; `:harness` is the OTP application and configuration key. Follow the [embedding guide](https://hiness.hexdocs.pm/overview.html#embed-harness-in-an-elixir-otp-application) or browse the [Elixir API on HexDocs](https://hiness.hexdocs.pm/). Use the signed bundles above for `hi`, `hiweb`, and `H.app`.
 
 ### macOS application bundle (`H.app`)
 

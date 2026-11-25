@@ -7,8 +7,8 @@ sections:
   - layout: hero
     kicker: H / Your Hiness · Local coding harness
     title: Close your terminal.
-    emphasis: Your Hiness keeps court.
-    body: H runs your coding-agent sessions in a local daemon. Summon a code review in your terminal, retire the client, and follow the active run in your browser while H commits every turn to disk.
+    emphasis: Your session keeps running.
+    body: H runs your coding-agent sessions in a local daemon. Start a code review in your terminal, close the client, and follow the same run in your browser. H commits each turn to disk.
     domain_links:
       - label: hiness.dev · CLI & OTP daemon
         url: "#install"
@@ -23,7 +23,7 @@ sections:
       url: /docs/guides/resume/
   - layout: install
     id: install
-    kicker: Coronation / Install H
+    kicker: Install H
     title: Pick your installation method.
     body: Install a signed release bundle for macOS or Linux, run the Mix archive, drag H.app to Applications, or compile from a checkout. Every release verifies its OpenSSH signature and SHA-256 checksum before activating ~/.local/opt/harness/current.
     tablist_label: Installation methods
@@ -93,18 +93,16 @@ sections:
     id: houses
   - layout: principle
     id: recovery
-    kicker: 01 / Regnal continuity
+    kicker: 01 / Session recovery
     title: Keep your session across restarts.
-    motto: The crown outlives the terminal window.
     artwork: maximilian_khm
     body: Disconnect a client at any time while the daemon keeps running. When the daemon itself restarts, H reloads committed session state from local files. If an unexpected crash interrupts a shell command or file edit, H records the interruption so you can inspect the checkout before deciding what to run next.
     links:
       - label: Inspect how H recovers work
         url: /docs/architecture/#storage-and-recovery
   - layout: clients
-    kicker: 02 / Two chambers, one throne
+    kicker: 02 / Terminal and browser clients
     title: Switch clients. Stay in sync.
-    motto: Hold court in your terminal and your browser at once.
     artwork: leopold_gallery_khm
     artwork_wide: true
     body: Watch replies and tool calls stream to the terminal and browser at the same time. Start a turn in hi, open hiweb to review a diff, and keep each window on its own scroll position and branch.
@@ -123,21 +121,24 @@ sections:
         url: /demo/hiweb/
   - layout: principle
     id: extensibility
-    kicker: 03 / Self-portrait commissions
+    kicker: 03 / Extensions and embedding
     title: Build on a lean core.
-    motto: Paint your own profile at the royal easel.
     artwork: vigee_lebrun_uffizi
-    body: Connect your own client to the local HTTP and SSE API, package a harness profile or execution environment as a startup extension, or embed the :harness OTP application directly in your own BEAM VM. H uses a small set of direct dependencies and stores sessions in local files without an external database service.
+    body: Connect your own client to the local HTTP and SSE API, package a harness profile or execution environment as a startup extension, or install hiness from Hex to embed the :harness OTP application directly in your own BEAM VM. H uses a small set of direct dependencies and stores sessions in local files without an external database service.
     links:
       - label: Build a custom client
         url: /docs/guides/build-a-client/
       - label: Write a startup extension
         url: /docs/extensions/
       - label: Embed H in an Elixir/OTP application
-        url: /features/#embed-h-in-an-elixirotp-application
+        url: /docs/architecture/#embed-the-core-in-an-otp-application
+      - label: View hiness on Hex
+        url: https://hex.pm/packages/hiness
+      - label: Read the Elixir API on HexDocs
+        url: https://hiness.hexdocs.pm/
   - layout: principle
     id: environments
-    kicker: 04 / Sovereign estates
+    kicker: 04 / Execution environments
     title: Separate session state from tool execution.
     motto: One writer lease per workspace domain.
     artwork: jane_seymour_khm
@@ -147,9 +148,8 @@ sections:
         url: /features/#local-or-remote-execution-environments
   - layout: principle
     id: signals
-    kicker: 05 / Royal envoys
+    kicker: 05 / Subagents and signals
     title: Coordinate sessions without polling.
-    motto: Dispatch a subagent and wake on its return.
     artwork: las_meninas_prado
     body: Delegate a bounded task to a subagent and let the parent session park until the child finishes. H wakes the waiting parent on completion without occupying a worker process. External scripts can also queue follow-up turns through the authenticated local API while a run is active.
     links:
@@ -157,7 +157,7 @@ sections:
         url: /features/#signal-and-wake-sessions-without-polling
   - layout: architecture
   - layout: operating
-    kicker: Before you take the throne
+    kicker: Local setup
     title: Run H on your machine.
     body: Start one daemon for your data directory and attach hi or hiweb. Host tools run with your OS user's file and shell permissions, and remote model providers receive the conversation context required for each request.
     link:

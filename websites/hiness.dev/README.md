@@ -16,7 +16,7 @@ make verify
 make serve
 ```
 
-`make serve` binds loopback (`127.0.0.1` by default, override with `HOST=...` and `PORT=...`). Rebuild styles after changing templates (`npm run css:build`), or run `npm run css:watch` alongside the server. `make verify` builds production-mode HTML and checks routes, fragments, sitemap membership, `llms.txt` / `llms-full.txt`, straight-quote punctuation, and slop vocabulary.
+`make serve` binds loopback (`127.0.0.1` by default, override with `HOST=...` and `PORT=...`). Rebuild styles after changing templates (`npm run css:build`), or run `npm run css:watch` alongside the server. Reload the browser after changes; LiveReload is off by default. If an older preview left broken symlinks in `_site`, run `make clean` once. `make verify` builds production-mode HTML and checks routes, fragments, sitemap membership, `llms.txt` / `llms-full.txt`, straight-quote punctuation, and slop vocabulary.
 
 ## Shared records across hiness.dev and hiness.app
 

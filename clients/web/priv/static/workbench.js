@@ -195,7 +195,7 @@ export const InboxBrowser = {
 
     this.onKeydown = event => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (document.querySelector("dialog[open], #app-menu:popover-open") || isEditable(event.target)) return;
+      if (document.querySelector("dialog[open], .app-menu:popover-open") || isEditable(event.target)) return;
 
       if (event.key === "j" || event.key === "ArrowDown") {
         event.preventDefault();

@@ -211,14 +211,36 @@ a.hero-domain-pill:hover {
   font: .73rem/1.5 var(--manual-mono);
   color: var(--muted);
 }
-.house-meta div { display: flex; justify-content: space-between; gap: .5rem; }
-.house-meta code { color: var(--accent-strong); }
+.house-meta div { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; }
+.house-meta code { color: var(--accent-strong); overflow-wrap: anywhere; text-align: right; }
 .house-summary {
   margin: 0 0 .9rem;
   font-size: .9rem;
   line-height: 1.56;
   color: var(--muted);
   flex: 1;
+}
+@supports (grid-template-rows: subgrid) {
+  /* Each row of cards shares tracks, so wrapping in one card moves the entire row. */
+  .house-card {
+    display: grid;
+    grid-row: span 8;
+    grid-template-rows: subgrid;
+    row-gap: 0;
+    align-items: start;
+  }
+  .house-portrait { grid-row: 1; }
+  .house-status { grid-row: 2; }
+  .house-name { grid-row: 3; }
+  .house-motto { grid-row: 4; }
+  .house-meta {
+    display: grid;
+    grid-row: 5 / span 2;
+    grid-template-rows: subgrid;
+    align-self: stretch;
+  }
+  .house-summary { grid-row: 7; }
+  .house-card > .manual-secondary { grid-row: 8; justify-self: start; }
 }
 @media (max-width: 68rem) {
   .houses-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

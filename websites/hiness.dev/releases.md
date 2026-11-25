@@ -3,7 +3,7 @@ layout: releases
 lang: en
 permalink: /releases/
 title: News, releases, and changelog
-kicker: Synchronized Ledger · hiness.dev & hiness.app
+kicker: hiness.dev & hiness.app
 lead: Official announcements, signed multi-platform release bundles, and version history shared across hiness.dev and hiness.app.
 description: Synchronized news, signed release bundles, and changelog for H (hiness.dev and hiness.app) across GitHub and GitLab.
 ---
