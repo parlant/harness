@@ -1222,17 +1222,20 @@ summary.activity-caption:hover { background: var(--surface-2); }
   position: relative;
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: stretch;
   justify-content: flex-end;
-  column-gap: 6px;
+  column-gap: 0;
   width: min(100%, 50rem);
   margin-inline: auto;
-  padding: 0 max(10px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(10px, env(safe-area-inset-left));
+  padding: 0 max(10px, env(safe-area-inset-right)) 0 max(10px, env(safe-area-inset-left));
 }
 .session-footer > :is(.flash-banner, .reply) { flex: 0 0 100%; min-width: 0; }
-.session-footer:has(.reply, .stop-run-compact) { padding-bottom: max(6px, env(safe-area-inset-bottom)); }
-/* Stop shares the collapsed reply row, so it cannot cover the transcript. */
-.session-footer:has(> .stop-run-compact) > .reply:not([open]) { flex: 1 1 0; }
+.session-footer:has(.flash-banner:last-child) { padding-bottom: max(6px, env(safe-area-inset-bottom)); }
+/* Stop shares the collapsed reply row as a joined dock group, so it cannot cover the transcript. */
+.session-footer:has(> .stop-run-compact) > .reply:not([open]) {
+  flex: 1 1 0;
+  border-start-end-radius: 0;
+}
 .reply[open] ~ .stop-run-compact { display: none; }
 .session-footer > .jump-latest {
   position: absolute;
@@ -1257,29 +1260,25 @@ summary.activity-caption:hover { background: var(--surface-2); }
 .stop-run:hover { color: var(--danger); background: var(--danger-soft); }
 .stop-run svg { display: block; width: 16px; height: 16px; }
 .stop-run-compact {
-  position: relative;
   width: 44px;
-  min-height: 44px;
-  border-radius: 50%;
-  border: 0;
-  background: transparent;
-}
-.stop-run-compact:hover { background: transparent; }
-.stop-run-compact::before {
-  content: "";
-  position: absolute;
-  inset: 5px;
+  min-height: 39px;
+  margin-left: -1px;
+  padding-bottom: env(safe-area-inset-bottom);
   border: 1px solid var(--border);
-  border-radius: inherit;
+  border-bottom: 0;
+  border-radius: 0 12px 0 0;
+  color: var(--muted);
   background: var(--surface);
 }
-.stop-run-compact:hover::before { background: var(--danger-soft); }
-.stop-run-compact svg { position: relative; }
+.stop-run-compact:hover { color: var(--danger); background: var(--danger-soft); }
+.stop-run-compact svg { width: 12px; height: 12px; }
 [hidden] { display: none !important; }
 .reply {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-bottom: 0;
+  border-radius: 12px 12px 0 0;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 .reply-toggle {
   display: flex;
@@ -1297,7 +1296,24 @@ summary.activity-caption:hover { background: var(--surface-2); }
 .reply-toggle::-webkit-details-marker { display: none; }
 .reply-toggle .reply-close-label, .reply[open] .reply-open-label, .reply[open] .reply-draft-indicator { display: none; }
 .reply-draft-indicator { color: var(--muted); font-size: 11px; font-weight: 500; }
-.reply-chevron { margin-left: auto; transform: rotate(180deg); }
+.reply-toggle-end {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.reply-chevron {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform: rotate(180deg);
+}
 .reply[open] .reply-chevron { transform: none; }
 .reply[open] .reply-close-label { display: inline; }
 .reply[open] .reply-toggle { min-height: 32px; color: var(--muted); font-size: 12px; }

@@ -476,13 +476,17 @@
           <span class="reply-open-label">
             {if @run_active? && !@fork_edit, do: "Enqueue or steer reply", else: "Reply"}
           </span>
-          <span class="reply-close-label">Hide reply</span>
           <span
             :if={@composer_text != "" || @uploads.attachment.entries != []}
             id="reply-draft-indicator"
             class="reply-draft-indicator"
           >Draft</span>
-          <span class="reply-chevron" aria-hidden="true">⌄</span>
+          <span class="reply-toggle-end">
+            <span class="reply-close-label">Hide reply</span>
+            <svg class="reply-chevron" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </span>
         </summary>
         <form
           id="composer-form"

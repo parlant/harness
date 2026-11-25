@@ -148,6 +148,7 @@ import {Completer, DirectoryComplete} from "./completion.js";
         let open = false;
         try { open = localStorage.getItem(key) === "open"; } catch {}
 
+        const narrow = matchMedia("(max-width: 860px)");
         const trigger = () => this.el.querySelector("#session-details-button");
         this.renderSidebar = () => {
           this.el.toggleAttribute("data-sidebar-open", open);
@@ -163,7 +164,7 @@ import {Completer, DirectoryComplete} from "./completion.js";
         this.el.addEventListener("click", event => {
           if (event.target.closest("[data-session-sidebar-toggle]")) {
             setOpen(!open);
-          } else if (open && event.button === 0 &&
+          } else if (open && narrow.matches && event.button === 0 &&
               !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey &&
               event.target.closest("#session-sidebar-inbox-tree a[data-session-id], #sidebar-parent-lineage a")) {
             setOpen(false, false);
