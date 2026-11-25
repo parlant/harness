@@ -150,9 +150,16 @@ defmodule H.Session.Server.Submissions do
   Mints and stages a new pending `"generation"` task and initial `"live"` document
   for `cid`, updating `state.store`, `state.tasks`, and `state.docs[cid]["live"]`.
   """
-  def start_pending_generation(cid, sub_ids, state, now, turns \\ 1) do
+  def start_pending_generation(cid, sub_ids, state, now, turns \\ 1, run_opts \\ []) do
     {:ok, gen_task_id, store} = Storage.mint_id(state.store)
     state = %{state | store: store}
+
+    run_started_at = Keyword.get(run_opts, :run_started_at, now)
+
+    run_start_cost =
+      Keyword.get_lazy(run_opts, :run_start_cost, fn ->
+        get_in(state.docs, [cid, "usage", "cost"]) || 0.0
+      end)
 
     gen_task =
       Task.new(%{
@@ -165,7 +172,9 @@ defmodule H.Session.Server.Submissions do
           "turns" => turns,
           "retry_count" => 0,
           "phase" => "stream",
-          "submission_ids" => sub_ids
+          "submission_ids" => sub_ids,
+          "run_started_at" => run_started_at,
+          "run_start_cost" => run_start_cost
         },
         created_at: now
       })

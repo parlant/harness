@@ -116,6 +116,7 @@ defmodule H.HarnessTest do
                H.Tools.Edit,
                H.Tools.Bash,
                H.Tools.SearchHistory,
+               H.Tools.WaitSignal,
                H.Tools.Subagent
              ]
 
@@ -124,7 +125,8 @@ defmodule H.HarnessTest do
                H.Tools.Write,
                H.Tools.Edit,
                H.Tools.Bash,
-               H.Tools.SearchHistory
+               H.Tools.SearchHistory,
+               H.Tools.WaitSignal
              ]
     end
   end
@@ -148,7 +150,17 @@ defmodule H.HarnessTest do
                Coding.bootstrap_agent(env, %{"model" => "fake:test"}, stop_dir: workspace)
 
       assert overrides["model"] == "fake:test"
-      assert overrides["tools"] == ["read", "write", "edit", "bash", "search_history", "subagent"]
+
+      assert overrides["tools"] == [
+               "read",
+               "write",
+               "edit",
+               "bash",
+               "search_history",
+               "wait_signal",
+               "subagent"
+             ]
+
       assert overrides["instructions"] == "# Workspace rules\n\n# API rules"
 
       {agent, _ops} = Document.configure_agent(Document.initial("agent"), overrides)

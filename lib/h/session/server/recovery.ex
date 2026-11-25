@@ -6,7 +6,7 @@ defmodule H.Session.Server.Recovery do
   """
 
   alias H.{Document, Storage, Submission, Task}
-  alias H.Session.UserShell
+  alias H.Session.{Signals, UserShell}
   alias H.Session.Server.{Generation, State, Stream, Submissions, Tools}
 
   @default_persist_within_ms 1_000
@@ -20,7 +20,8 @@ defmodule H.Session.Server.Recovery do
     H.Tools.Write,
     H.Tools.Edit,
     H.Tools.Bash,
-    H.Tools.SearchHistory
+    H.Tools.SearchHistory,
+    H.Tools.WaitSignal
   ]
 
   @default_max_subagent_depth 1
@@ -159,6 +160,9 @@ defmodule H.Session.Server.Recovery do
       recent_subs =
         Map.new(bootstrap.submissions || %{}, fn {rid, s} -> {rid, Submission.from_storage(s)} end)
 
+      signals_doc =
+        Signals.from_doc(Map.get(bootstrap.docs || %{}, {:session, "signals"}))
+
       harness_id = Keyword.get(opts, :harness_id) || Map.get(meta, :harness_id) || "coding"
 
       state = %{
@@ -191,6 +195,7 @@ defmodule H.Session.Server.Recovery do
         conversations: conversations,
         tasks: tasks,
         docs: docs,
+        signals: signals_doc,
         recent_submissions: recent_subs,
         workers: %{},
         subagent_watches: %{},
@@ -440,7 +445,9 @@ defmodule H.Session.Server.Recovery do
       )
       |> Enum.map(&{:spawn_user_shell, &1.checkpoint["conversation_id"], &1.id})
 
-    inference_effects ++ tool_effects ++ shell_effects
+    signal_effects = Signals.recovery_wake_effects(state.tasks, now)
+
+    inference_effects ++ tool_effects ++ shell_effects ++ signal_effects
   end
 
   def stage_worker_crashed(tid, attempt_id, reason, state) do

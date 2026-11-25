@@ -13,7 +13,7 @@ defmodule H.Session.Server do
   require Logger
 
   alias H.Storage
-  alias H.Session.{Subagents, UserShell}
+  alias H.Session.{Signals, Subagents, UserShell}
 
   alias H.Session.Server.{
     Commands,
@@ -89,6 +89,11 @@ defmodule H.Session.Server do
   @spec execute_command(GenServer.server(), map()) :: {:ok, map()} | {:error, term()}
   def execute_command(server, cmd) when is_map(cmd) do
     GenServer.call(server, {:command, cmd}, 30_000)
+  end
+
+  @spec deliver_signal(GenServer.server(), map()) :: {:ok, map()} | {:error, term()}
+  def deliver_signal(server, params) when is_map(params) do
+    GenServer.call(server, {:deliver_signal, params}, 30_000)
   end
 
   @spec abort_all(GenServer.server(), String.t()) :: {:ok, map()} | {:error, term()}
@@ -284,6 +289,10 @@ defmodule H.Session.Server do
 
   defp dispatch_call({:command, cmd}, from, state) do
     process_with_drain({:command, from, cmd}, state)
+  end
+
+  defp dispatch_call({:deliver_signal, params}, from, state) do
+    process_with_drain({:deliver_signal, from, params}, state)
   end
 
   defp dispatch_call({:abort_all, reason}, from, state) do
@@ -506,6 +515,9 @@ defmodule H.Session.Server do
       {:"$gen_call", from, {:command, cmd}} ->
         drain_mailbox(remaining - 1, [{:command, from, cmd} | acc])
 
+      {:"$gen_call", from, {:deliver_signal, params}} ->
+        drain_mailbox(remaining - 1, [{:deliver_signal, from, params} | acc])
+
       {:worker_done, inc, tid, attempt_id, result} ->
         drain_mailbox(remaining - 1, [{:worker_done_fenced, inc, tid, attempt_id, result} | acc])
 
@@ -654,6 +666,15 @@ defmodule H.Session.Server do
     end
   end
 
+  defp stage_single_item({:deliver_signal, from, params}, state, _staged_rev) do
+    if state.maintenance_table &&
+         not :ets.lookup_element(state.maintenance_table, :open, 2, false) do
+      {:immediate, from, {:error, :daemon_draining}, [], state}
+    else
+      Signals.stage_deliver(from, params, state)
+    end
+  end
+
   defp stage_single_item({:stop_workspace_holder, cwd, holder, lease_id}, state, _staged_rev) do
     Commands.stage_stop_workspace_holder(cwd, holder, lease_id, state)
   end
@@ -720,7 +741,13 @@ defmodule H.Session.Server do
     if State.draining?(state) do
       {:skip, state}
     else
-      Generation.stage_wake(tid, state)
+      case Map.get(state.tasks, tid) do
+        %{kind: "tool_call", status: "waiting", wake: %{"on" => "signal"}} = task ->
+          Signals.stage_timeout(task, state)
+
+        _ ->
+          Generation.stage_wake(tid, state)
+      end
     end
   end
 

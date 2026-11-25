@@ -199,12 +199,16 @@ defmodule H.Session.Server.State do
       activity_kind: activity_kind,
       activity_label: Catalog.sanitize_activity_label(activity_label),
       queued_count: queued_count,
+      needs_attention:
+        if(Enum.any?(active_tasks, &awaiting_approval_task?/1), do: true, else: nil),
       next_wake_at:
         sleeping_tasks
         |> Enum.map(&get_in(&1, [Access.key(:wake, %{}), "until"]))
         |> Enum.reject(&is_nil/1)
         |> Enum.min(fn -> nil end)
     }
+    |> Enum.reject(fn {k, v} -> k == :needs_attention and is_nil(v) end)
+    |> Map.new()
   end
 
   def maybe_report_catalog_runtime(prev_state, next_state) do
@@ -231,6 +235,8 @@ defmodule H.Session.Server.State do
   defp derive_active_activity(active_tasks) do
     sorted = Enum.sort_by(active_tasks, &{status_priority(&1.status), &1.id})
 
+    approval_task = Enum.find(sorted, &awaiting_approval_task?/1)
+
     tool_task =
       Enum.find(sorted, fn t ->
         t.kind == "tool_call" and t.status in ["running", "pending", "waiting"]
@@ -251,6 +257,15 @@ defmodule H.Session.Server.State do
       end)
 
     cond do
+      approval_task != nil ->
+        name =
+          case get_in(approval_task, [:checkpoint, "name"]) do
+            n when is_binary(n) and n != "" -> n
+            _ -> "tool"
+          end
+
+        {"running", "tool", "approval · #{name}"}
+
       tool_task != nil ->
         label =
           case get_in(tool_task, [:checkpoint, "name"]) do
@@ -273,6 +288,15 @@ defmodule H.Session.Server.State do
         {"running", "generation", nil}
     end
   end
+
+  defp awaiting_approval_task?(%{
+         kind: "tool_call",
+         status: "waiting",
+         wake: %{"on" => "approval"}
+       }),
+       do: true
+
+  defp awaiting_approval_task?(_), do: false
 
   defp retry_label(task, waiting?) do
     case {task.checkpoint["wait"], task.checkpoint["retry"]} do

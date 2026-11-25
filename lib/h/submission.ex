@@ -132,6 +132,9 @@ defmodule H.Submission do
       "abort" ->
         Map.put(base, :status, s.status)
 
+      "approve_tool" ->
+        Map.put(base, :status, s.status)
+
       "withdraw" ->
         base
         |> Map.put(:status, s.status)

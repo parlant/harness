@@ -380,6 +380,7 @@ defmodule H.Session.Server.Generation do
       |> Map.delete("run")
       |> Map.delete("generation")
       |> Map.delete("tools")
+      |> Map.delete("approvals")
       |> Map.delete("workspace_wait")
       |> Map.put("run_failure", %{"reason" => reason})
 
@@ -972,81 +973,227 @@ defmodule H.Session.Server.Generation do
 
       {:batch, staged, state}
     else
-      {tool_tasks, live_tools, store} =
-        tool_calls
-        |> Enum.with_index()
-        |> Enum.reduce({[], %{}, state.store}, fn {tc, idx}, {acc_t, acc_lt, acc_store} ->
-          {:ok, tid, next_store} = Storage.mint_id(acc_store)
-          call_id = tc["id"] || "call_#{tid}"
-          name = tc["name"]
+      case check_run_budget(gen_task, cid, state, now, check_turns?: false) do
+        {:exceeded, failure} ->
+          {synthetic_entries, state} =
+            Enum.reduce(tool_calls, {[], state}, fn tc, {acc_e, acc_st} ->
+              {:ok, tr_id, next_store} = Storage.mint_id(acc_st.store)
+              acc_st = %{acc_st | store: next_store}
+              call_id = tc["id"] || "call_#{tr_id}"
+              name = tc["name"]
 
-          t =
-            Task.new(%{
-              id: tid,
-              kind: "tool_call",
-              owner: {:task, gen_task.id},
-              status: "pending",
-              checkpoint: %{
-                "conversation_id" => cid,
-                "assistant_entry_id" => entry_id,
-                "call_id" => call_id,
+              tr_data = %{
+                "tool_call_id" => call_id,
                 "name" => name,
-                "arguments" => tc["arguments"] || %{},
-                "index" => idx,
-                "phase" => "pending",
-                "replay" => State.tool_replay_string(state.tools, name)
-              },
-              created_at: now
+                "content" => [%{"type" => "text", "text" => failure["message"]}],
+                "details" => %{
+                  "budget_exceeded" => true,
+                  "limit" => failure["limit"]
+                },
+                "is_error" => true,
+                "diagnostic" => "budget_exceeded"
+              }
+
+              tr_entry = State.build_entry(tr_id, cid, "tool_result", tr_data, now)
+              acc_st = State.record_entry(acc_st, cid, tr_id)
+              {acc_e ++ [tr_entry], acc_st}
+            end)
+
+          done_gen =
+            Task.complete(
+              gen_task,
+              %{"status" => "unanswered", "reason" => "budget_exceeded"},
+              now
+            )
+
+          sub_ids = gen_task.checkpoint["submission_ids"] || []
+
+          {sub_writes, state} =
+            Submissions.settle(sub_ids, :unanswered, "budget_exceeded", state, now)
+
+          next_live =
+            (state.docs[cid]["live"] || %{})
+            |> Map.delete("run")
+            |> Map.delete("generation")
+            |> Map.delete("tools")
+            |> Map.delete("approvals")
+            |> Map.delete("workspace_wait")
+            |> Map.put("run_failure", failure)
+
+          state =
+            state
+            |> State.put_task(done_gen)
+            |> State.put_doc(cid, "live", next_live)
+
+          all_entries = [entry | synthetic_entries]
+
+          writes =
+            Enum.map(all_entries, &{:append_entry, &1}) ++
+              usage_writes ++
+              sub_writes ++
+              [
+                {:put_task, done_gen},
+                {:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}
+              ]
+
+          doc_ops =
+            %{"live" => [["replace", next_live]]}
+            |> then(fn m -> if usage_ops == [], do: m, else: Map.put(m, "usage", usage_ops) end)
+
+          staged = %{
+            raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:ok, resp}}},
+            writes: writes,
+            conv_events: %{cid => %{entries: all_entries, doc_ops: doc_ops}},
+            submissions: [],
+            effects: [],
+            reply_from: nil,
+            receipt: nil
+          }
+
+          {:batch, staged, state}
+
+        :ok ->
+          {tool_tasks, live_tools, store} =
+            tool_calls
+            |> Enum.with_index()
+            |> Enum.reduce({[], %{}, state.store}, fn {tc, idx}, {acc_t, acc_lt, acc_store} ->
+              {:ok, tid, next_store} = Storage.mint_id(acc_store)
+              call_id = tc["id"] || "call_#{tid}"
+              name = tc["name"]
+
+              t =
+                Task.new(%{
+                  id: tid,
+                  kind: "tool_call",
+                  owner: {:task, gen_task.id},
+                  status: "pending",
+                  checkpoint: %{
+                    "conversation_id" => cid,
+                    "assistant_entry_id" => entry_id,
+                    "call_id" => call_id,
+                    "name" => name,
+                    "arguments" => tc["arguments"] || %{},
+                    "index" => idx,
+                    "phase" => "pending",
+                    "replay" => State.tool_replay_string(state.tools, name)
+                  },
+                  created_at: now
+                })
+
+              slot = %{"id" => call_id, "name" => name, "status" => "pending", "output" => ""}
+              {[t | acc_t], Map.put(acc_lt, call_id, slot), next_store}
+            end)
+
+          tool_tasks = Enum.reverse(tool_tasks)
+          tool_task_ids = Enum.map(tool_tasks, & &1.id)
+          state = %{state | store: store}
+
+          waiting_gen =
+            Task.start_waiting(gen_task, now, %{
+              "phase" => "tools",
+              "tool_task_ids" => tool_task_ids
             })
 
-          slot = %{"id" => call_id, "name" => name, "status" => "pending", "output" => ""}
-          {[t | acc_t], Map.put(acc_lt, call_id, slot), next_store}
-        end)
+          next_live =
+            state.docs[cid]["live"]
+            |> Map.delete("generation")
+            |> Map.put("tools", live_tools)
 
-      tool_tasks = Enum.reverse(tool_tasks)
-      tool_task_ids = Enum.map(tool_tasks, & &1.id)
-      state = %{state | store: store}
+          state =
+            Enum.reduce(tool_tasks, state, &State.put_task(&2, &1))
+            |> State.put_task(waiting_gen)
+            |> State.put_doc(cid, "live", next_live)
 
-      waiting_gen =
-        Task.start_waiting(gen_task, now, %{
-          "phase" => "tools",
-          "tool_task_ids" => tool_task_ids
-        })
+          spawn_effects = Tools.next_tool_spawn_effects(cid, tool_task_ids, state)
 
-      next_live =
-        state.docs[cid]["live"]
-        |> Map.delete("generation")
-        |> Map.put("tools", live_tools)
+          writes =
+            [{:append_entry, entry}] ++
+              usage_writes ++
+              [{:put_task, waiting_gen}] ++
+              Enum.map(tool_tasks, &{:put_task, &1}) ++
+              [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
 
-      state =
-        Enum.reduce(tool_tasks, state, &State.put_task(&2, &1))
-        |> State.put_task(waiting_gen)
-        |> State.put_doc(cid, "live", next_live)
+          doc_ops =
+            %{"live" => [["replace", next_live]]}
+            |> then(fn m -> if usage_ops == [], do: m, else: Map.put(m, "usage", usage_ops) end)
 
-      spawn_effects = Tools.next_tool_spawn_effects(cid, tool_task_ids, state)
+          staged = %{
+            raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:ok, resp}}},
+            writes: writes,
+            conv_events: %{cid => %{entries: [entry], doc_ops: doc_ops}},
+            submissions: [],
+            effects: spawn_effects,
+            reply_from: nil,
+            receipt: nil
+          }
 
-      writes =
-        [{:append_entry, entry}] ++
-          usage_writes ++
-          [{:put_task, waiting_gen}] ++
-          Enum.map(tool_tasks, &{:put_task, &1}) ++
-          [{:put_doc, {:conversation, cid, "live"}, Document.wrap("live", next_live)}]
+          {:batch, staged, state}
+      end
+    end
+  end
 
-      doc_ops =
-        %{"live" => [["replace", next_live]]}
-        |> then(fn m -> if usage_ops == [], do: m, else: Map.put(m, "usage", usage_ops) end)
+  @doc """
+  Checks whether `gen_task` has reached or exceeded the conversation's configured
+  `agent["budget"]` (`max_turns`, `max_cost_usd`, `max_elapsed_ms`).
+  """
+  def check_run_budget(gen_task, cid, state, now, opts \\ []) do
+    budget = get_in(state.docs, [cid, "agent", "budget"])
 
-      staged = %{
-        raw_item: {:worker_done, gen_task.id, :none, {:generation_result, {:ok, resp}}},
-        writes: writes,
-        conv_events: %{cid => %{entries: [entry], doc_ops: doc_ops}},
-        submissions: [],
-        effects: spawn_effects,
-        reply_from: nil,
-        receipt: nil
-      }
+    if not is_map(budget) or map_size(budget) == 0 do
+      :ok
+    else
+      turns = gen_task.checkpoint["turns"] || 1
+      started_at = gen_task.checkpoint["run_started_at"] || gen_task.created_at || now
+      elapsed_ms = max(0, now - started_at)
+      current_cost = get_in(state.docs, [cid, "usage", "cost"]) || 0.0
+      start_cost = gen_task.checkpoint["run_start_cost"] || 0.0
+      run_cost = Float.round(max(0.0, current_cost * 1.0 - start_cost * 1.0), 8)
 
-      {:batch, staged, state}
+      max_turns = Map.get(budget, "max_turns")
+      max_cost = Map.get(budget, "max_cost_usd")
+      max_elapsed = Map.get(budget, "max_elapsed_ms")
+      check_turns? = Keyword.get(opts, :check_turns?, true)
+
+      exceeded_limit =
+        cond do
+          check_turns? and is_integer(max_turns) and turns >= max_turns ->
+            "max_turns"
+
+          is_number(max_cost) and run_cost >= max_cost ->
+            "max_cost_usd"
+
+          is_integer(max_elapsed) and elapsed_ms >= max_elapsed ->
+            "max_elapsed_ms"
+
+          true ->
+            nil
+        end
+
+      if exceeded_limit do
+        msg =
+          case exceeded_limit do
+            "max_turns" ->
+              "Run paused: turn budget (#{turns}/#{max_turns}) reached. Send continue to resume."
+
+            "max_cost_usd" ->
+              "Run paused: cost budget ($#{run_cost}/$#{max_cost}) reached. Send continue to resume."
+
+            "max_elapsed_ms" ->
+              "Run paused: time budget (#{elapsed_ms}ms/#{max_elapsed}ms) reached. Send continue to resume."
+          end
+
+        {:exceeded,
+         %{
+           "reason" => "budget_exceeded",
+           "limit" => exceeded_limit,
+           "message" => msg,
+           "turns" => turns,
+           "cost_usd" => run_cost,
+           "elapsed_ms" => elapsed_ms
+         }}
+      else
+        :ok
+      end
     end
   end
 
@@ -1248,8 +1395,27 @@ defmodule H.Session.Server.Generation do
             live = Map.delete(state.docs[cid]["live"] || %{}, "compaction")
             {[], live, [], State.put_doc(state, cid, "live", live)}
           else
+            run_opts =
+              if automatic? do
+                [
+                  run_started_at: comp_task.checkpoint["run_started_at"] || now,
+                  run_start_cost:
+                    comp_task.checkpoint["run_start_cost"] ||
+                      get_in(state.docs, [cid, "usage", "cost"]) || 0.0
+                ]
+              else
+                []
+              end
+
             {next_gen, live, state} =
-              Submissions.start_pending_generation(cid, next_sub_ids, state, now)
+              Submissions.start_pending_generation(
+                cid,
+                next_sub_ids,
+                state,
+                now,
+                comp_task.checkpoint["turns"] || 1,
+                run_opts
+              )
 
             {[{:put_task, next_gen}], live, [{:spawn_generation, cid, next_gen.id}], state}
           end

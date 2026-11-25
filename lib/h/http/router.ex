@@ -520,6 +520,27 @@ defmodule H.HTTP.Router do
     end
   end
 
+  post "/api/v1/sessions/:sid/signals" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :deliver_signal, [sid, conn.body_params, daemon_opts]) do
+      {:ok, receipt_map} ->
+        send_json(conn, 200, receipt_map)
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{"error" => "not found"})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
   match _ do
     send_json(conn, 404, %{"error" => "not found"})
   end

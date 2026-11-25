@@ -21,6 +21,7 @@ defmodule H.Catalog do
     :activity_kind,
     :activity_label,
     :queued_count,
+    :needs_attention,
     :next_wake_at,
     :updated_at,
     :applied_edit_rev
@@ -463,12 +464,13 @@ defmodule H.Catalog do
       {:ok, existing} ->
         now = System.system_time(:millisecond)
         updates = extract_runtime_fields(runtime_fields, existing.status)
+        explicit_needs_attention? = Map.has_key?(updates, :needs_attention)
 
         candidate =
           existing
           |> Map.merge(updates)
           |> enforce_status_attention()
-          |> apply_runtime_triage_transitions(existing)
+          |> apply_runtime_triage_transitions(existing, explicit_needs_attention?)
 
         changed? = runtime_changed?(existing, candidate)
 
@@ -857,6 +859,9 @@ defmodule H.Catalog do
        when is_integer(val) and val >= 0,
        do: {:ok, val}
 
+  defp validate_runtime_field(:needs_attention, val, _status) when is_boolean(val),
+    do: {:ok, val}
+
   defp validate_runtime_field(:next_wake_at, nil, _status), do: {:ok, nil}
 
   defp validate_runtime_field(:next_wake_at, val, _status) when is_integer(val),
@@ -879,8 +884,11 @@ defmodule H.Catalog do
   defp enforce_archived_triage(%{archived: true} = entry), do: %{entry | needs_attention: false}
   defp enforce_archived_triage(entry), do: entry
 
-  defp apply_runtime_triage_transitions(candidate, existing) do
+  defp apply_runtime_triage_transitions(candidate, existing, explicitly_set_needs_attention?) do
     cond do
+      explicitly_set_needs_attention? ->
+        %{candidate | archived: false}
+
       candidate.attention in ["running", "sleeping", "retrying"] ->
         %{candidate | needs_attention: false, archived: false}
 
