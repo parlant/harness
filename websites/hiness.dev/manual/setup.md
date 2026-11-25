@@ -20,10 +20,10 @@ Download a prebuilt release for **macOS (`darwin-arm64`)** or **Linux (`linux-ar
 curl -fsSL https://hiness.dev/install.sh | sh -s -- --service
 ```
 
-- **Install with the Hex archive**: when Elixir and Mix are installed on your machine, install the `h_setup` archive from Hex (or directly from `https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez`) and run `mix h.setup`:
+- **Install with the Mix archive**: when Elixir and Mix are installed on your machine, install `h_setup.ez` from the signed release and run `mix h.setup`:
 
 ```sh
-mix archive.install hex h_setup
+mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
 mix h.setup --service
 ```
 

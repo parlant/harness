@@ -49,29 +49,24 @@ sections:
           - label: Verify release signatures manually
             url: /docs/setup/#install-a-signed-release
       - id: hex
-        label: Hex / Mix
+        label: Mix archive
         meta: Elixir 1.18+
-        heading: Install with the h_setup Hex archive
+        heading: Install with the h_setup Mix archive
         platform: Erlang :crypto verification
         command: |
-          mix archive.install hex h_setup
+          mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
           mix h.setup --service
           hi daemon status
-        alt_label: "Or install directly from the release archive:"
-        alt_command: |
-          mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
         body: The Mix task verifies the same Ed25519 signature and SHA-256 checksum in Erlang :crypto, installs the self-contained runtime bundle under ~/.local/opt/harness/current so H runs independently of your project's Elixir version, and links hi onto PATH.
         links:
-          - label: Browse h_setup on HexDocs
-            url: https://hexdocs.pm/h_setup
           - label: Configure providers after setup
             url: /docs/providers/
       - id: macos-app
         label: macOS app
         meta: hiness.app · Apple Silicon
         heading: Install H.app from the disk image
-        platform: H-v0.2.0-darwin-arm64.dmg
-        body: Visit hiness.app or download H-v0.2.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, drag H.app to /Applications, and open it. H.app starts the bundled daemon on ~/.local/share/h, opens hiweb at http://127.0.0.1:4200/inbox, and adds the H menu-bar item to copy your sign-in token, link hi onto PATH, or drain and restart the daemon.
+        platform: H-v0.3.0-darwin-arm64.dmg
+        body: Visit hiness.app or download H-v0.3.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, drag H.app to /Applications, and open it. H.app starts the bundled daemon on ~/.local/share/h, opens hiweb at http://127.0.0.1:4200/inbox, and adds the H menu-bar item to copy your sign-in token, link hi onto PATH, or drain and restart the daemon.
         links:
           - label: Explore hiness.app for macOS
             url: https://hiness.app

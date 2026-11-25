@@ -16,18 +16,18 @@ curl -fsSL https://hiness.dev/install.sh | sh -s -- --service
 
 The script verifies `SHA256SUMS.sig` with `ssh-keygen -Y verify` (`bingboombam@parlant.xyz` in `packaging/keys/release-signers`), checks the archive SHA-256, installs the bundle under `~/.local/opt/harness/current`, cascades writable `PATH` locations (preferring `/usr/local/bin`, `/opt/local/bin`, `/opt/homebrew/bin`, `~/.local/bin`, or other writable `PATH` directories, falling back to `~/.bin` last; override with `--bin-dir`), and optionally registers a per-user macOS LaunchAgent or Linux `systemd --user` service (`--service`).
 
-### Elixir / Hex archive (`mix h.setup`)
+### Elixir / Mix archive (`mix h.setup`)
 
-If Elixir and Mix are already installed, install the zero-dependency `h_setup` archive from Hex and run `mix h.setup`:
+If Elixir and Mix are already installed, install the zero-dependency `h_setup` archive from the signed release and run `mix h.setup`:
 
 ```sh
-mix archive.install hex h_setup
+mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
 mix h.setup --service
 ```
 
 ### Embed H in an Elixir project
 
-With Elixir 1.20 / OTP 29, add `{:harness, "~> 0.3.0", hex: :hiness}` to `mix.exs`. `hiness` is the Hex package; `:harness` is the OTP application and configuration key. See the [embedding guide](docs/hexdocs.md) and [HexDocs](https://hexdocs.pm/hiness).
+Once `hiness` is available on Hex, use Elixir 1.20 / OTP 29 and add `{:harness, "~> 0.3.0", hex: :hiness}` to `mix.exs`. `hiness` is the Hex package; `:harness` is the OTP application and configuration key. See the [embedding guide](docs/hexdocs.md) and [HexDocs](https://hexdocs.pm/hiness).
 
 ### macOS application bundle (`H.app`)
 

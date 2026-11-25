@@ -41,8 +41,8 @@ sections:
         label: Disk Image (.dmg)
         meta: Recommended · Apple Silicon
         heading: Drag H.app to /Applications
-        platform: H-v0.2.0-darwin-arm64.dmg · macOS 14.0+
-        body: Download H-v0.2.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, open the disk image, and drag H.app into /Applications. On first launch, H.app prepares ~/.local/share/h (mode 0700), starts the embedded OTP daemon, places the bold H item in your macOS menu bar, and opens http://127.0.0.1:4200/inbox in your default browser.
+        platform: H-v0.3.0-darwin-arm64.dmg · macOS 14.0+
+        body: Download H-v0.3.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, open the disk image, and drag H.app into /Applications. On first launch, H.app prepares ~/.local/share/h (mode 0700), starts the embedded OTP daemon, places the bold H item in your macOS menu bar, and opens http://127.0.0.1:4200/inbox in your default browser.
         verify: codesign --verify --deep --strict --verbose=2 /Applications/H.app
         links:
           - label: Download from GitHub Releases
@@ -53,10 +53,10 @@ sections:
         label: App Archive (.app.zip)
         meta: Dotfiles & Automation
         heading: Unpack H.app with ditto on macOS
-        platform: H-v0.2.0-darwin-arm64.app.zip
+        platform: H-v0.3.0-darwin-arm64.app.zip
         command: |
-          curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.2.0-darwin-arm64.app.zip
-          ditto -x -k H-v0.2.0-darwin-arm64.app.zip /Applications
+          curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.3.0-darwin-arm64.app.zip
+          ditto -x -k H-v0.3.0-darwin-arm64.app.zip /Applications
           open /Applications/H.app
         body: Use Apple's ditto utility so Mach-O code signatures, symbolic links, and extended attributes inside Contents/Resources/harness stay intact when extracting from the terminal.
         links:
