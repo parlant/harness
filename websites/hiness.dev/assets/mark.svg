@@ -1,6 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
-  <rect width="40" height="40" rx="6" fill="#13100d"/>
-  <rect x="1.5" y="1.5" width="37" height="37" rx="4.5" fill="none" stroke="#c8a45d" stroke-opacity=".55" stroke-width="1.2"/>
-  <path d="M12 10.5l3.6 3.2L20 9.5l4.4 4.2 3.6-3.2" fill="none" stroke="#d4af64" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M12.5 30.5V16m15 14.5V16M12.5 23.8l15-3.4" stroke="#f2ece1" stroke-width="3.2" stroke-linecap="round" fill="none"/>
-</svg>
+../../shared/assets/mark.svg

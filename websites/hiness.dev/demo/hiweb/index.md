@@ -5,7 +5,6 @@ title: Review the session in hiweb.
 description: Open the same parser session in the Phoenix web workbench, switch between conversation branches, and inspect the working tree.
 kicker: Study 03 / Gallery workbench
 artwork: leopold_gallery_khm
-artwork_hook: Browser gallery · hiweb
 artwork_wide: true
 specimen:
   client: browser

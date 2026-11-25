@@ -7,7 +7,7 @@
     <p>{{ clients.body }}</p>
     {% if clients.artwork %}
     <div style="margin-top: 1.4rem; max-width: 19rem;">
-      {% include gallery-card.html artwork=clients.artwork hook=clients.artwork_hook wide=clients.artwork_wide %}
+      {% include gallery-card.html artwork=clients.artwork wide=clients.artwork_wide %}
     </div>
     {% endif %}
   </div>

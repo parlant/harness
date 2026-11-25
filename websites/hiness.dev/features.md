@@ -8,14 +8,10 @@ lead: "Your Hiness runs durable coding sessions in a local Elixir/OTP daemon, in
 description: "Run durable coding sessions in a local daemon, switch between terminal and browser clients, delegate to subagents, and extend or embed the Elixir/OTP core."
 gallery:
   - artwork: margarita_khm
-    hook: Regnal continuity · Durable commits
   - artwork: goya_charles_iv
-    hook: Line of succession · Conversation forks
     wide: true
   - artwork: henry_stuart_ngi
-    hook: Privy council · File review in context
   - artwork: william_silent_rijks
-    hook: Quiet stewardship · Zero polling
 ---
 
 * On this page

@@ -7,7 +7,6 @@ kicker: Apple Ecosystem · macOS Today · iOS Companion Next
 lead: Use hiweb from iPhone or iPad over an encrypted tailnet today while native iOS and iPadOS companion views are shaped around H's HTTP and SSE session protocol.
 description: How to review and steer H sessions from iPhone and iPad today via hiweb, and the architectural roadmap for a native iOS companion app on hiness.app.
 artwork: vigee_lebrun_uffizi
-artwork_hook: Portable Easel · Uffizi
 specs_title: Mobile access model
 specs:
   - label: Shipping Today

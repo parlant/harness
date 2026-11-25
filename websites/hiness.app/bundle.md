@@ -7,7 +7,6 @@ kicker: macOS Packaging · co.parlant.harness
 lead: How H.app packages a native AppKit menu-bar supervisor, an embedded Erlang/OTP 29 release, and native Rust CLI tools into a single relocatable macOS application bundle.
 description: Technical reference for the H.app macOS application bundle on hiness.app, covering directory layout, PATH linking, daemon ownership, and code signing.
 artwork: maximilian_khm
-artwork_hook: Imperial Seal · KHM Vienna
 specs_title: H.app technical profile
 specs:
   - label: Bundle ID

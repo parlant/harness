@@ -24,7 +24,8 @@ module LocalServer
     port = available_port(ENV.fetch("PORT", DEFAULT_PORT), host: HOST)
     puts "Starting Jekyll at http://#{HOST}:#{port}"
     $stdout.flush
-    exec "bundle", "exec", "jekyll", "serve", "--host", HOST, "--livereload", "--livereload-port", "35730", "--port", port.to_s, *ARGV
+    # Copy shared static assets instead of leaving source-relative symlinks in the preview.
+    exec({ "JEKYLL_ENV" => "production" }, "bundle", "exec", "jekyll", "serve", "--host", HOST, "--livereload", "--livereload-port", "35730", "--port", port.to_s, *ARGV)
   rescue ArgumentError
     abort "PORT must be an integer between 1 and #{MAX_PORT}"
   end

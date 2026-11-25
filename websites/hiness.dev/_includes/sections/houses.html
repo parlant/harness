@@ -13,12 +13,7 @@
     <article class="house-card">
       {% if art %}
       <div class="house-portrait">
-        <img
-          src="{{ art.src | relative_url }}"
-          width="{{ art.width }}"
-          height="{{ art.height }}"
-          decoding="async"
-          alt="{{ art.alt | escape }}">
+        {% include cutout.html art=art %}
       </div>
       {% endif %}
       <span class="house-status">{{ h.status | escape }}</span>
@@ -29,9 +24,6 @@
         <div><span>Contract</span><code>{{ h.module | escape }}</code></div>
       </div>
       <p class="house-summary">{{ h.summary | escape }}</p>
-      {% if art %}
-      <div class="house-plaque">{{ art.sitter | escape }} · {{ art.museum_short | escape }}</div>
-      {% endif %}
       <a class="manual-secondary" href="{{ h.cta.url | relative_url }}">{{ h.cta.label | escape }} <span aria-hidden="true">→</span></a>
     </article>
     {% endfor %}

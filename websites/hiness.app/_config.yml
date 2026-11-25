@@ -22,6 +22,8 @@ llms_txt:
       paths: ["/releases/"]
     - title: Legal and privacy
       paths: ["/legal-notice/", "/privacy/"]
+    - title: Artwork
+      paths: ["/artwork/"]
 exclude:
   - AGENTS.md
   - README.md
@@ -36,4 +38,6 @@ exclude:
   - scripts
   - assets/css/input.css
   - assets/css/site.css
+  - assets/css/theatre.css
+  - assets/css/palette.css
   - vendor

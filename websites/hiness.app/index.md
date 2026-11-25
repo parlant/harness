@@ -10,8 +10,6 @@ sections:
     emphasis: Your Mac keeps court.
     body: H.app wraps a native Swift AppKit menu-bar supervisor around the self-contained H daemon, hiweb browser workbench, and hi terminal client. Launch it once to supervise ~/.local/share/h and open your session inbox with zero Dock clutter and zero runtime dependencies.
     requirements: Requires macOS 14.0+ on Apple Silicon (arm64) · Signed .dmg & .app.zip · Bundle ID co.parlant.harness
-    artwork: charles_i_ngi
-    artwork_hook: Sovereign Menu-Bar Seal · NGI Dublin
     domain_links:
       - label: hiness.app · macOS H.app bundle
         url: "#download"
@@ -97,7 +95,6 @@ sections:
     title: Control the local daemon from your macOS status bar.
     motto: Always within reach of Command-O; never in your Cmd-Tab switcher.
     artwork: margarita_khm
-    artwork_hook: Court Chamberlain · KHM Vienna
     body: H.app runs with LSUIElement enabled so your Dock and application switcher stay clear while you work in Xcode, Neovim, Zed, or Terminal. Every three seconds it inspects ~/.local/share/h/daemon.json and updates the status indicator between H (running) and H· (stopped).
     items:
       - title: Open H Web UI
@@ -141,7 +138,6 @@ sections:
     title: Start in Terminal. Review diffs in Safari.
     motto: One local store under ~/.local/share/h.
     artwork: leopold_gallery_khm
-    artwork_hook: Shared Gallery · KHM Vienna
     artwork_wide: true
     body: Once H.app links hi onto your PATH, any terminal tab in Ghostty, iTerm2, Kitty, or Terminal.app connects to the exact same daemon that powers hiweb. Kick off a refactor from your repository checkout, close the terminal window, and comment on line-pinned diffs in the browser.
     links:

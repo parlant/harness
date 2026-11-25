@@ -1,26 +1,13 @@
 @import "tailwindcss" source(none);
 @source "../../_layouts";
 @source "../../_includes";
+@import "./palette.css";
 @import "./site.css";
+@import "./theatre.css";
 @plugin "@tailwindcss/typography";
-@plugin "daisyui" {
-  themes: luxury --default;
-}
 
 /* See docs/style-guide.md. Utility CSS is built here; no styles or fonts are fetched at runtime. */
 :root {
-  color-scheme: dark;
-  --paper: #0e0d0b;
-  --surface: #161411;
-  --surface-raised: #1d1a16;
-  --ink: #f1ebe0;
-  --muted: #b0a695;
-  --accent: #d4af64;
-  --accent-strong: #e3c481;
-  --crimson: #8e353d;
-  --verdigris: #4f8c7a;
-  --rule: #2d2821;
-  --frame-gold: #7f6535;
   --royal-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --royal-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --royal-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -31,7 +18,6 @@
 body {
   margin: 0;
   overflow-x: clip;
-  background: radial-gradient(circle at 50% 0%, #191611 0%, var(--paper) 58%);
   color: var(--ink);
   font-family: var(--royal-sans);
 }
@@ -42,18 +28,17 @@ body {
 
 .masthead {
   border-block-end: 1px solid var(--rule);
-  background: color-mix(in srgb, var(--paper) 88%, transparent);
-  backdrop-filter: blur(8px);
+  background: var(--paper);
 }
 .site-foot { border-block-start: 1px solid var(--rule); background: var(--surface); }
 .mast-row, .primary-links, .wordmark, .mast-right, .mast-meta { display: flex; align-items: center; }
 .mast-row { justify-content: space-between; gap: .85rem 1.4rem; flex-wrap: wrap; padding-block: 1rem; }
 .mast-right { gap: 1rem 1.65rem; flex-wrap: wrap; }
 .wordmark { gap: .75rem; text-decoration: none; color: var(--ink); }
-.wordmark-copy { display: flex; flex-direction: column; line-height: 1.15; }
-.wordmark-title { font-weight: 700; font-size: 1.05rem; letter-spacing: -.02em; color: var(--ink); }
-.wordmark-title em { font-family: var(--royal-serif); font-style: italic; font-weight: 400; color: var(--accent); margin-left: .25rem; }
-.wordmark-sub { font: 500 .7rem/1.3 var(--royal-mono); color: var(--muted); letter-spacing: .04em; }
+.wordmark img { flex: none; }
+.wordmark-copy { display: grid; gap: .15rem; }
+.wordmark-title { font: 700 1.125rem/1.1 var(--royal-sans); letter-spacing: -.02em; }
+.wordmark-sub { font: 500 .78rem/1.25 var(--royal-sans); color: var(--muted); }
 .primary-links { gap: clamp(.85rem, 2.1vw, 1.7rem); flex-wrap: wrap; }
 .primary-links a { font-size: .88rem; padding-block: .4rem; color: var(--muted); text-decoration: none; transition: color .15s ease; }
 .primary-links a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: .35em; }
@@ -70,7 +55,7 @@ body {
 }
 .companion-pill {
   padding: .34rem .62rem;
-  border: 1px solid var(--frame-gold);
+  border: 1px solid var(--rule-strong);
   background: var(--surface);
   color: var(--accent-strong);
 }
@@ -81,7 +66,7 @@ body {
   background: var(--surface);
   color: var(--muted);
 }
-.forge-link:hover { border-color: var(--frame-gold); color: var(--ink); }
+.forge-link:hover { border-color: var(--rule-strong); color: var(--ink); }
 .forge-icon { flex-shrink: 0; display: inline-block; vertical-align: -2px; }
 
 .foot-grid {
@@ -142,14 +127,13 @@ body {
   --tw-prose-captions: var(--muted);
   --tw-prose-code: var(--accent-strong);
   --tw-prose-pre-code: var(--ink);
-  --tw-prose-pre-bg: #12100d;
+  --tw-prose-pre-bg: var(--surface-inset);
   --tw-prose-th-borders: var(--rule);
   --tw-prose-td-borders: var(--rule);
   max-width: 70ch;
   overflow-wrap: anywhere;
   color: var(--ink);
 }
-.manual-prose :is(p, li, td), .single-page .prose :is(p, li, td) { color: #dfd8ca; }
 .manual-prose strong, .single-page .prose strong { color: var(--ink); }
 .manual-prose code:not(pre code), .single-page .prose code:not(pre code) {
   background: var(--surface-raised);
@@ -162,9 +146,9 @@ body {
 }
 .manual-prose code::before, .manual-prose code::after { content: none; }
 .manual-prose pre {
-  background: #12100d;
+  background: var(--surface-inset);
   border: 1px solid var(--rule);
-  border-left: 2px solid var(--frame-gold);
+  border-left: 2px solid var(--rule-strong);
   max-width: 100%;
   padding: 1rem 1.15rem;
   overflow-x: auto;
@@ -195,7 +179,7 @@ body {
 .single-page > .manual-lead { margin-bottom: 2rem; max-width: 64ch; }
 .releases-ledger { display: grid; gap: 3rem; margin-top: 2rem; }
 .news-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1.15rem; margin-top: 1.25rem; }
-.news-card { background: var(--surface); border: 1px solid var(--rule); border-top: 2px solid var(--frame-gold); padding: 1.1rem 1.2rem; }
+.news-card { background: var(--surface); border: 1px solid var(--rule); border-top: 2px solid var(--rule-strong); padding: 1.1rem 1.2rem; }
 .news-meta { display: flex; justify-content: space-between; gap: .75rem; font: 550 .7rem/1.4 var(--royal-mono); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: .5rem; }
 .news-tag { color: var(--accent); }
 .news-card h3 { font: 630 1.05rem/1.32 var(--royal-sans); color: var(--ink); margin: 0 0 .5rem; }

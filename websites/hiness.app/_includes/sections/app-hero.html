@@ -1,6 +1,5 @@
 {% assign hero = include.section %}
-{% assign art = site.data.artworks[hero.artwork] %}
-<section class="manual-hero app-hero" aria-labelledby="app-hero-heading">
+<section class="manual-hero wrap app-hero" aria-labelledby="app-hero-heading">
   <div>
     <p class="manual-kicker"><span class="manual-dash" aria-hidden="true"></span>{{ hero.kicker }}</p>
     <h1 id="app-hero-heading" class="manual-display">{{ hero.title }} <em>{{ hero.emphasis }}</em></h1>
@@ -24,6 +23,7 @@
     <p class="app-hero-req">{{ hero.requirements }}</p>
     {% endif %}
   </div>
+  {% include ballroom.html %}
   <div class="hero-stage">
     <figure class="macos-menubar-specimen" aria-label="macOS menu bar and H.app status menu preview">
       <div class="macos-bar">
@@ -74,8 +74,5 @@
         <span>Native AppKit <code>HApp</code> binary supervises <code>Contents/Resources/harness/bin/h-daemon</code> on <code>~/.local/share/h</code> and opens <code>http://127.0.0.1:4200/inbox</code>.</span>
       </figcaption>
     </figure>
-    {% if art %}
-      {% include gallery-card.html artwork=hero.artwork hook=hero.artwork_hook wide=hero.artwork_wide %}
-    {% endif %}
   </div>
 </section>

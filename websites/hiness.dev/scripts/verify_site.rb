@@ -4,12 +4,13 @@ require "pathname"
 require "cgi"
 require "uri"
 require "rexml/document"
+require_relative "../../shared/scripts/verify_artwork"
 
 root = Pathname(ARGV.fetch(0, "_site"))
 files = root.glob("**/*.html").to_h do |file|
   ["/#{file.relative_path_from(root)}".sub(/index\.html$/, ""), file.read(encoding: "utf-8")]
 end
-required = %w[/ /features/ /demo/ /docs/ /docs/setup/ /docs/security/ /extensions/ /releases/ /legal-notice/ /privacy/]
+required = %w[/ /features/ /demo/ /docs/ /docs/setup/ /docs/security/ /extensions/ /releases/ /legal-notice/ /privacy/ /artwork/]
 missing = required - files.keys
 abort "Missing pages: #{missing.join(', ')}" unless missing.empty?
 
@@ -17,7 +18,7 @@ llms = root.join("llms.txt").read(encoding: "utf-8")
 full = root.join("llms-full.txt").read(encoding: "utf-8")
 sitemap = REXML::Document.new(root.join("sitemap.xml").read(encoding: "utf-8"))
 locations = sitemap.root.get_elements("url/loc").map { |loc| loc.text }
-errors = []
+errors = artwork_errors(files)
 files.each do |route, html|
   errors << "#{route}: expected one h1" unless html.scan(/<h1\b/).size == 1
   errors << "#{route}: missing page description" unless html.include?('name="description"') || route == "/404.html"

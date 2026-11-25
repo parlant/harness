@@ -1,5 +1,5 @@
 brand: H
-brand_descriptor: hiness.dev · Local coding harness
+brand_descriptor: Local coding harness
 brand_domain: hiness.dev
 app_domain: hiness.app
 navigation: Main navigation
@@ -9,6 +9,7 @@ github: GitHub
 gitlab: GitLab
 legal_notice: Legal notice
 privacy: Privacy
+artwork_credits: Artwork credits
 releases: Releases
 home: Home
 docs: Documentation
@@ -16,6 +17,6 @@ extensions: Extensions
 chapters: In the manual
 chapter_navigation: Browse chapters
 footer_brand: "hiness is a brand of Parlant GmbH, Berlin."
-footer_note: "H (hiness.dev & hiness.app) runs local coding-agent sessions on Elixir/OTP. Public-domain royal portraits courtesy of Kunsthistorisches Museum Wien, National Gallery of Ireland, Museo del Prado, Gallerie degli Uffizi, Rijksmuseum, and Princeton University Art Museum."
+footer_note: "H (hiness.dev & hiness.app) runs local coding-agent sessions on Elixir/OTP."
 sitemap: Sitemap
 context: llms.txt

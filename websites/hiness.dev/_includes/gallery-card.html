@@ -1,18 +1,1 @@
-{% assign art = site.data.artworks[include.artwork] %}
-{% if art %}
-<figure class="gallery-card{% if include.wide %} gallery-card-wide{% endif %}">
-  <div class="gallery-card-media">
-    <img
-      src="{{ art.src | relative_url }}"
-      width="{{ art.width }}"
-      height="{{ art.height }}"
-      decoding="async"
-      alt="{{ art.alt | escape }}">
-  </div>
-  <figcaption>
-    {% if include.hook %}<span class="gallery-card-hook">{{ include.hook | escape }}</span>{% endif %}
-    <span class="gallery-card-work">{{ art.title | escape }} ({{ art.year | escape }})</span>
-    <span class="gallery-card-credit">{{ art.artist | escape }} · {{ art.museum_short | escape }}</span>
-  </figcaption>
-</figure>
-{% endif %}
+../../shared/includes/gallery-card.html

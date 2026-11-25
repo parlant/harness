@@ -5,7 +5,6 @@ description: 'Set up H locally, connect a model provider, switch between termina
 lang: en
 permalink: /docs/
 artwork: farnese_ngi
-artwork_hook: Your Hiness · hiness.dev & hiness.app
 ---
 H (`hiness.dev` and `hiness.app`) runs your coding sessions in a local daemon and stores committed history on disk. Start a turn in `hi`, inspect the working tree in `hiweb`, and reconnect to the same session at any time.
 

@@ -1,0 +1,44 @@
+---
+layout: default
+---
+<article class="wrap single-page artwork-credits">
+  <header class="artwork-credits-header">
+    <h1>{{ page.title | escape }}</h1>
+    <div class="prose">{{ content }}</div>
+  </header>
+  <ul class="artwork-credits-list prose" role="list">
+    {% for entry in site.data.artworks %}
+      {% assign art = entry[1] %}
+      <li class="artwork-credit" id="{{ art.id | escape }}">
+        <div class="artwork-credit-details">
+          <h2>{{ art.title | escape }}</h2>
+          <p class="artwork-credit-byline">{{ art.artist | escape }}, {{ art.year | escape }}</p>
+          <dl class="artwork-credit-meta">
+            {% if art.sitter %}
+              <dt>Subject</dt>
+              <dd>{{ art.sitter | escape }}{% if art.house %} · {{ art.house | escape }}{% endif %}</dd>
+            {% endif %}
+            <dt>Collection</dt>
+            <dd>{{ art.museum | escape }}{% if art.inventory %} · {{ art.inventory | escape }}{% endif %}</dd>
+            {% if art.work_url %}
+              <dt>Work record</dt>
+              <dd><a href="{{ art.work_url | escape }}">View work record</a></dd>
+            {% endif %}
+            {% if art.image_source_url %}
+              <dt>Image source</dt>
+              <dd><a href="{{ art.image_source_url | escape }}">View source file on Wikimedia Commons</a></dd>
+            {% endif %}
+            <dt>Rights</dt>
+            <dd><a href="{{ art.rights_url | escape }}">{{ art.rights | escape }}</a></dd>
+          </dl>
+          {% if art.source_note %}<p class="artwork-credit-note">{{ art.source_note | escape }}</p>{% endif %}
+          {% if art.rights_note %}<p class="artwork-credit-note">{{ art.rights_note | escape }}</p>{% endif %}
+          {% if art.rights_policy_url %}<p class="artwork-credit-note"><a href="{{ art.rights_policy_url | escape }}">Check the collection's image licensing</a></p>{% endif %}
+        </div>
+        <a class="artwork-credit-image" href="{{ art.src | relative_url }}" aria-label="Open full-size image: {{ art.title | escape }}">
+          <img src="{{ art.src | relative_url }}" width="{{ art.width }}" height="{{ art.height }}" alt="{{ art.alt | escape }}" loading="lazy" decoding="async">
+        </a>
+      </li>
+    {% endfor %}
+  </ul>
+</article>

@@ -1,0 +1,6 @@
+{% assign art = site.data.artworks[include.artwork] %}
+{% if art %}
+<figure class="gallery-card{% if include.wide %} gallery-card-wide{% endif %}">
+  {% include cutout.html art=art %}
+</figure>
+{% endif %}

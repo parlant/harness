@@ -1,0 +1,9 @@
+{% assign cutout_name = include.art.src | split: '/' | last | remove: '.webp' %}
+{% assign cutout = site.data.ballroom.cutouts[cutout_name] %}
+{% if cutout %}
+<img class="paper-cutout"
+  src="{{ '/assets/theatre/cast/' | append: cutout_name | append: '.webp' | relative_url }}"
+  width="{{ cutout.width }}" height="{{ cutout.height }}"
+  alt="Paper cutout of {{ cutout.sitter | default: include.art.sitter | escape }}"
+  decoding="async" loading="lazy">
+{% endif %}

@@ -5,7 +5,6 @@ title: Read the fork in hi.
 description: Follow the date parser discussion from the terminal and switch branches or detach while the daemon keeps running.
 kicker: Study 02 / Terminal chamber
 artwork: charles_i_ngi
-artwork_hook: Terminal audience · hi
 specimen:
   client: terminal
   label: Terminal illustration · hi

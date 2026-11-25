@@ -20,7 +20,7 @@ layout: default
       </nav>
       <p class="study-status"><strong>{{ guide.status }}</strong>{{ guide.status_note }}</p>
       {% if page.artwork %}
-        {% include gallery-card.html artwork=page.artwork hook=page.artwork_hook wide=page.artwork_wide %}
+        {% include gallery-card.html artwork=page.artwork wide=page.artwork_wide %}
       {% endif %}
     </aside>
     <div class="study-main">

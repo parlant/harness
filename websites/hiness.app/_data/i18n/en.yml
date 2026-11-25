@@ -1,5 +1,5 @@
 brand: H.app
-brand_descriptor: hiness.app · macOS Application Bundle
+brand_descriptor: For macOS
 brand_domain: hiness.app
 dev_domain: hiness.dev
 navigation: Main navigation
@@ -9,6 +9,7 @@ github: GitHub
 gitlab: GitLab
 legal_notice: Legal notice
 privacy: Privacy
+artwork_credits: Artwork credits
 releases: Releases
 home: Home
 footer_brand: "hiness is a brand of Parlant GmbH, Berlin."

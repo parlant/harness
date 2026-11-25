@@ -14,7 +14,7 @@ layout: default
     </article>
     <aside class="feature-gallery-rail" aria-label="Curated museum portrait and bundle quickfacts">
       {% if art %}
-        {% include gallery-card.html artwork=page.artwork hook=page.artwork_hook wide=page.artwork_wide %}
+        {% include gallery-card.html artwork=page.artwork wide=page.artwork_wide %}
       {% endif %}
       {% if page.specs %}
       <div class="app-spec-card">

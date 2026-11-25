@@ -13,7 +13,7 @@ layout: default
     </header>
     {% if page.artwork %}
     <div style="margin: 0 0 1.65rem; max-width: 24rem;">
-      {% include gallery-card.html artwork=page.artwork hook=page.artwork_hook wide=page.artwork_wide %}
+      {% include gallery-card.html artwork=page.artwork wide=page.artwork_wide %}
     </div>
     {% endif %}
     {% if page.figure == 'lifetimes' %}{% include lifetimes.html %}{% elsif page.figure == 'extension-path' %}{% include extension-path.html %}{% endif %}

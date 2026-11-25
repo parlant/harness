@@ -6,7 +6,6 @@ lang: en
 permalink: /docs/extensions/
 figure: extension-path
 artwork: louise_hollandine
-artwork_hook: Painter princess · H.Harness & H.Tool
 ---
 Build a local startup extension when you want to register a custom harness profile, tool set, execution environment, or Codex account policy in the daemon VM. To add a Chat Completions endpoint, use the [provider catalog](/docs/providers/) instead; to customize the terminal status bar, edit your [terminal footer template](/docs/terminal/#configure-the-terminal-footer).
 

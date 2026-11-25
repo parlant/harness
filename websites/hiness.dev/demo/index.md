@@ -5,7 +5,6 @@ title: Two paths from one entry.
 description: Follow a parser change through two conversation branches in the same session.
 kicker: Study 01 / Line of succession
 artwork: goya_charles_iv
-artwork_hook: Line of succession · Shared prefix
 artwork_wide: true
 record:
   label: Shared prefix

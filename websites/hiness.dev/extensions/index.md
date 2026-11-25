@@ -5,7 +5,6 @@ description: 'Browse the bundled MultiCodex startup package, enable a trusted lo
 lang: en
 permalink: /extensions/
 artwork: charlotte_bonaparte
-artwork_hook: Royal self-portrait · Custom startup packages
 ---
 H loads optional startup packages from explicit local directory paths listed in `<data_dir>/extensions.json`. Review the available package below or follow the authoring guide to build your own.
 

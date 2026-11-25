@@ -9,7 +9,6 @@ sections:
     title: Close your terminal.
     emphasis: Your Hiness keeps court.
     body: H runs your coding-agent sessions in a local daemon. Summon a code review in your terminal, retire the client, and follow the active run in your browser while H commits every turn to disk.
-    artwork: farnese_ngi
     domain_links:
       - label: hiness.dev · CLI & OTP daemon
         url: "#install"
@@ -98,7 +97,6 @@ sections:
     title: Keep your session across restarts.
     motto: The crown outlives the terminal window.
     artwork: maximilian_khm
-    artwork_hook: Regnal continuity
     body: Disconnect a client at any time while the daemon keeps running. When the daemon itself restarts, H reloads committed session state from local files. If an unexpected crash interrupts a shell command or file edit, H records the interruption so you can inspect the checkout before deciding what to run next.
     links:
       - label: Inspect how H recovers work
@@ -108,7 +106,6 @@ sections:
     title: Switch clients. Stay in sync.
     motto: Hold court in your terminal and your browser at once.
     artwork: leopold_gallery_khm
-    artwork_hook: Shared gallery · Independent cursors
     artwork_wide: true
     body: Watch replies and tool calls stream to the terminal and browser at the same time. Start a turn in hi, open hiweb to review a diff, and keep each window on its own scroll position and branch.
     note: Run hi in your terminal or open hiweb in a desktop or mobile browser.
@@ -130,7 +127,6 @@ sections:
     title: Build on a lean core.
     motto: Paint your own profile at the royal easel.
     artwork: vigee_lebrun_uffizi
-    artwork_hook: Court self-portrait · Custom H.Harness
     body: Connect your own client to the local HTTP and SSE API, package a harness profile or execution environment as a startup extension, or embed the :harness OTP application directly in your own BEAM VM. H uses a small set of direct dependencies and stores sessions in local files without an external database service.
     links:
       - label: Build a custom client
@@ -145,7 +141,6 @@ sections:
     title: Separate session state from tool execution.
     motto: One writer lease per workspace domain.
     artwork: jane_seymour_khm
-    artwork_hook: Sovereign boundary · Lease fencing
     body: Run file and shell tools in your local checkout through H's execution environment contract. Because the session store and client connections stay independent of the workspace adapter, you can switch views freely while tools run in place. A built-in remote adapter exercises lease fencing inside the VM as the prototype for future off-machine execution.
     links:
       - label: Compare local execution and the remote prototype
@@ -156,7 +151,6 @@ sections:
     title: Coordinate sessions without polling.
     motto: Dispatch a subagent and wake on its return.
     artwork: las_meninas_prado
-    artwork_hook: Court envoys · Parent-child wakeups
     body: Delegate a bounded task to a subagent and let the parent session park until the child finishes. H wakes the waiting parent on completion without occupying a worker process. External scripts can also queue follow-up turns through the authenticated local API while a run is active.
     links:
       - label: Delegate work and queue follow-ups

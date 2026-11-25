@@ -327,10 +327,13 @@ release:hex-installer:
   image: ${RUBY_IMAGE}
   resource_group: ${CF_PAGES_PROJECT}
   rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CLOUDFLARE_API_TOKEN'
+    # Environment-scoped credentials are available to the job, not pipeline rules.
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
       when: on_success
     - when: never
   before_script:
+    - ': "${CLOUDFLARE_ACCOUNT_ID:?Set CLOUDFLARE_ACCOUNT_ID for this environment}"'
+    - ': "${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN for this environment}"'
     - apt-get update -qq
     - apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg
     - curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
