@@ -228,6 +228,51 @@ defmodule H.HTTP.Router do
     send_login(conn, result)
   end
 
+  get "/api/v1/provider-catalog" do
+    {_daemon, opts} = daemon_config(conn)
+
+    case H.Accounts.provider_catalog(opts[:accounts]) do
+      {:ok, catalog} ->
+        running = opts |> Keyword.get(:compatible_providers, %{}) |> Map.keys() |> Enum.sort()
+        send_login(conn, {:ok, Map.put(catalog, :running, running)})
+
+      error ->
+        send_login(conn, error)
+    end
+  end
+
+  post "/api/v1/provider-catalog" do
+    {_daemon, opts} = daemon_config(conn)
+
+    result =
+      H.Daemon.Maintenance.admit(opts, fn ->
+        case H.Accounts.stage_provider(opts[:accounts], conn.body_params) do
+          :ok -> {:ok, %{"ok" => true}}
+          other -> other
+        end
+      end)
+
+    send_login(conn, result)
+  end
+
+  post "/api/v1/workspaces/review" do
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    case apply(daemon, :open_workspace_review, [conn.body_params, daemon_opts]) do
+      {:ok, %{session: session, seq: seq}} ->
+        send_json(conn, 200, %{"session" => session, "seq" => seq})
+
+      {:error, {:bad_request, msg}} ->
+        send_json(conn, 422, %{"error" => msg})
+
+      {:error, {:conflict, msg}} ->
+        send_json(conn, 409, %{"error" => msg})
+
+      {:error, reason} ->
+        send_session_error(conn, reason)
+    end
+  end
+
   get "/api/v1/sessions" do
     conn = fetch_query_params(conn)
     {daemon, daemon_opts} = daemon_config(conn)
@@ -353,6 +398,50 @@ defmodule H.HTTP.Router do
     case apply(daemon, :read_session_file, [sid, conn.query_params, daemon_opts]) do
       {:ok, payload_map} -> send_json(conn, 200, payload_map)
       {:error, reason} -> send_fs_error(conn, reason)
+    end
+  end
+
+  get "/api/v1/sessions/:sid/review" do
+    conn = fetch_query_params(conn)
+    {daemon, daemon_opts} = daemon_config(conn)
+
+    with {:ok, review_params} <- parse_review_query(conn.query_params),
+         {:ok, payload} <- apply(daemon, :review_workspace, [sid, review_params, daemon_opts]) do
+      send_json(conn, 200, wire_review_browse(payload))
+    else
+      {:error, reason} -> send_review_error(conn, reason)
+    end
+  end
+
+  get "/api/v1/sessions/:sid/review/file" do
+    conn = fetch_query_params(conn)
+    {daemon, daemon_opts} = daemon_config(conn)
+    path = conn.query_params["path"]
+    source = Map.get(conn.query_params, "source", "working")
+
+    if is_binary(path) and path != "" and is_binary(source) and source != "" do
+      case apply(daemon, :read_review_file, [sid, path, source, daemon_opts]) do
+        {:ok, file} -> send_json(conn, 200, wire_review_file(file))
+        {:error, reason} -> send_review_error(conn, reason)
+      end
+    else
+      send_review_error(conn, :invalid_path)
+    end
+  end
+
+  post "/api/v1/sessions/:sid/review/file" do
+    {daemon, daemon_opts} = daemon_config(conn)
+    body = if is_map(conn.body_params), do: conn.body_params, else: %{}
+
+    with path when is_binary(path) <- Map.get(body, "path"),
+         revision when is_binary(revision) <- Map.get(body, "revision"),
+         text when is_binary(text) <- Map.get(body, "text") do
+      case apply(daemon, :save_review_file, [sid, path, revision, text, daemon_opts]) do
+        {:ok, new_rev} -> send_json(conn, 200, %{"revision" => new_rev})
+        {:error, reason} -> send_review_error(conn, reason)
+      end
+    else
+      _ -> send_review_error(conn, :invalid_edit)
     end
   end
 
@@ -631,6 +720,140 @@ defmodule H.HTTP.Router do
 
   defp send_session_error(conn, _reason),
     do: send_json(conn, 503, %{"error" => "session unavailable"})
+
+  defp parse_review_query(params) when is_map(params) do
+    cond do
+      Map.has_key?(params, "history") ->
+        case parse_review_page(params["history"]) do
+          {:ok, page} -> {:ok, %{history: page}}
+          :error -> {:error, :invalid_path}
+        end
+
+      Map.has_key?(params, "commit") and not Map.has_key?(params, "dir") and
+          not Map.has_key?(params, "page") ->
+        commit = params["commit"]
+
+        if is_binary(commit) do
+          {:ok, %{commit: commit}}
+        else
+          {:error, :invalid_commit}
+        end
+
+      true ->
+        dir = Map.get(params, "dir", "")
+        changes? = Map.get(params, "changes") in ["true", "1"]
+
+        with true <- is_binary(dir) || {:error, :invalid_path},
+             {:ok, page} <- parse_review_page(Map.get(params, "page", "0")) do
+          base = %{dir: dir, page: page}
+
+          case Map.fetch(params, "commit") do
+            {:ok, commit} when is_binary(commit) -> {:ok, Map.put(base, :commit, commit)}
+            {:ok, _} -> {:error, :invalid_commit}
+            :error -> {:ok, Map.put(base, :changes?, changes?)}
+          end
+        else
+          :error -> {:error, :invalid_path}
+          {:error, _} = err -> err
+        end
+    end
+  end
+
+  defp parse_review_page(page) when is_integer(page) and page in 0..100_000, do: {:ok, page}
+
+  defp parse_review_page(page) when is_binary(page) do
+    case Integer.parse(page) do
+      {n, ""} when n in 0..100_000 -> {:ok, n}
+      _ -> :error
+    end
+  end
+
+  defp parse_review_page(_), do: :error
+
+  defp wire_review_browse(payload) when is_map(payload) do
+    Map.new(payload, fn
+      {:git, :not_git} -> {"git", "not_git"}
+      {:git, :git_unavailable} -> {"git", "git_unavailable"}
+      {:git, :parent_unavailable} -> {"git", "parent_unavailable"}
+      {k, v} -> {Atom.to_string(k), v}
+    end)
+  end
+
+  defp wire_review_file(%{kind: :text, preview: preview} = file) do
+    wired_preview =
+      case preview do
+        {mode, mime} -> %{"mode" => Atom.to_string(mode), "mime" => mime}
+        nil -> nil
+      end
+
+    %{
+      "kind" => "text",
+      "text" => file.text,
+      "revision" => file.revision,
+      "preview" => wired_preview,
+      "archived" => file.archived
+    }
+  end
+
+  defp wire_review_file(%{kind: :media} = file) do
+    %{
+      "kind" => "media",
+      "mode" => Atom.to_string(file.mode),
+      "mime" => file.mime,
+      "bytes" => Base.encode64(file.bytes),
+      "revision" => file.revision,
+      "archived" => file.archived
+    }
+  end
+
+  defp send_review_error(conn, :not_found),
+    do: send_json(conn, 404, %{"error" => "session not found", "code" => "not_found"})
+
+  defp send_review_error(conn, reason) when reason in [:enoent, :not_in_head, :not_in_commit],
+    do:
+      send_json(conn, 404, %{"error" => Atom.to_string(reason), "code" => Atom.to_string(reason)})
+
+  defp send_review_error(conn, reason)
+       when reason in [:file_changed, :workspace_busy, :read_only],
+       do:
+         send_json(conn, 409, %{
+           "error" => Atom.to_string(reason),
+           "code" => Atom.to_string(reason)
+         })
+
+  defp send_review_error(conn, :symlink_not_followed),
+    do:
+      send_json(conn, 403, %{"error" => "symlink_not_followed", "code" => "symlink_not_followed"})
+
+  defp send_review_error(conn, reason)
+       when reason in [
+              :invalid_path,
+              :invalid_commit,
+              :commit_unavailable,
+              :tree_too_large,
+              :file_too_large,
+              :unsupported_binary,
+              :not_text,
+              :invalid_edit
+            ],
+       do:
+         send_json(conn, 422, %{
+           "error" => Atom.to_string(reason),
+           "code" => Atom.to_string(reason)
+         })
+
+  defp send_review_error(conn, {:quarantined, _} = reason),
+    do: send_session_error(conn, reason)
+
+  defp send_review_error(conn, reason)
+       when reason in [:daemon_draining, :workspace_unavailable, :harness_unavailable],
+       do: send_session_error(conn, reason)
+
+  defp send_review_error(conn, :git_unavailable),
+    do: send_json(conn, 503, %{"error" => "git_unavailable", "code" => "git_unavailable"})
+
+  defp send_review_error(conn, _reason),
+    do: send_json(conn, 503, %{"error" => "review_unavailable", "code" => "review_unavailable"})
 
   defp send_json(conn, status, payload) do
     conn

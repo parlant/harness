@@ -1,15 +1,10 @@
 defmodule HWeb.ProviderConfigController do
   use HWeb, :controller
 
+  alias HWeb.Backend
+
   def create(conn, %{"provider" => params}) when is_map(params) do
-    opts = HWeb.Backend.InVM.daemon_opts()
-
-    result =
-      H.Daemon.Maintenance.admit(opts, fn ->
-        H.Accounts.stage_provider(opts[:accounts], params)
-      end)
-
-    case result do
+    case Backend.stage_provider(params) do
       :ok ->
         conn
         |> put_flash(:info, "Provider configuration saved for the next daemon restart.")

@@ -21,6 +21,11 @@ defmodule HWeb.Backend.InVM do
   end
 
   @impl HWeb.Backend
+  def list_harnesses(opts \\ []) do
+    H.Daemon.list_harnesses(daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
   def browse_workspace(params \\ %{}, opts \\ []) do
     H.Daemon.browse_workspace(params, daemon_opts(opts))
   end
@@ -77,6 +82,11 @@ defmodule HWeb.Backend.InVM do
   end
 
   @impl HWeb.Backend
+  def get_extension_status(session_id, conversation_id, opts \\ []) do
+    H.Daemon.extension_status(session_id, conversation_id, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
   def list_models(opts \\ []) do
     H.Daemon.list_models(daemon_opts(opts))
   end
@@ -84,6 +94,11 @@ defmodule HWeb.Backend.InVM do
   @impl HWeb.Backend
   def execute_command(session_id, envelope, opts \\ []) do
     H.Daemon.execute_command(session_id, envelope, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
+  def deliver_signal(session_id, params, opts \\ []) do
+    H.Daemon.deliver_signal(session_id, params, daemon_opts(opts))
   end
 
   @impl HWeb.Backend
@@ -104,6 +119,106 @@ defmodule HWeb.Backend.InVM do
   @impl HWeb.Backend
   def fork_session(session_id, params, opts \\ []) do
     H.Daemon.fork_session(session_id, params, daemon_opts(opts))
+  end
+
+  @impl HWeb.Backend
+  def api_keys(opts \\ []) do
+    resolved = daemon_opts(opts)
+    H.Accounts.api_keys(resolved[:accounts])
+  end
+
+  @impl HWeb.Backend
+  def put_api_key(params, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    H.Daemon.Maintenance.admit(resolved, fn ->
+      H.Accounts.put_api_key(resolved[:accounts], params)
+    end)
+  end
+
+  @impl HWeb.Backend
+  def use_api_key(params, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    H.Daemon.Maintenance.admit(resolved, fn ->
+      H.Accounts.use_api_key(resolved[:accounts], params)
+    end)
+  end
+
+  @impl HWeb.Backend
+  def remove_api_key(params, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    H.Daemon.Maintenance.admit(resolved, fn ->
+      H.Accounts.remove_api_key(resolved[:accounts], params)
+    end)
+  end
+
+  @impl HWeb.Backend
+  def discover_logins(opts \\ []) do
+    resolved = daemon_opts(opts)
+    H.Accounts.discover(resolved[:accounts], resolved[:codex_account_policy])
+  end
+
+  @impl HWeb.Backend
+  def start_login(params, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    H.Daemon.Maintenance.admit(resolved, fn ->
+      H.Accounts.start(resolved[:accounts], params)
+    end)
+  end
+
+  @impl HWeb.Backend
+  def login_operation(action, params, opts \\ []) when action in [:status, :cancel] do
+    resolved = daemon_opts(opts)
+    H.Accounts.operation(resolved[:accounts], action, params)
+  end
+
+  @impl HWeb.Backend
+  def add_account(params, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    H.Daemon.Maintenance.admit(resolved, fn ->
+      H.Accounts.add(resolved[:accounts], params)
+    end)
+  end
+
+  @impl HWeb.Backend
+  def activate_account(params, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    H.Daemon.Maintenance.admit(resolved, fn ->
+      H.Accounts.activate(resolved[:accounts], params)
+    end)
+  end
+
+  @impl HWeb.Backend
+  def remove_account(params, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    H.Daemon.Maintenance.admit(resolved, fn ->
+      H.Accounts.remove(resolved[:accounts], params)
+    end)
+  end
+
+  @impl HWeb.Backend
+  def provider_catalog(opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    with {:ok, catalog} <- H.Accounts.provider_catalog(resolved[:accounts]) do
+      running = resolved |> Keyword.get(:compatible_providers, %{}) |> Map.keys() |> Enum.sort()
+      {:ok, Map.put(catalog, :running, running)}
+    end
+  end
+
+  @impl HWeb.Backend
+  def stage_provider(params, opts \\ []) do
+    resolved = daemon_opts(opts)
+
+    H.Daemon.Maintenance.admit(resolved, fn ->
+      H.Accounts.stage_provider(resolved[:accounts], params)
+    end)
   end
 
   @impl HWeb.Backend
