@@ -149,13 +149,49 @@ defmodule H.Session.Server.Generation do
                 inc = state.incarnation
                 agent = state.docs[cid]["agent"]
                 provider_mod = state.provider_mod
+                session_id = state.session_id
+                harness_id = Map.get(state, :harness_id) || "coding"
+                daemon_opts = state.daemon_opts || []
 
                 {:ok, worker_pid} =
                   Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
                     res =
-                      Compaction.summarize(prep, agent, provider_mod, config,
-                        instructions: instructions
-                      )
+                      with {:ok, harness_mod} <- resolve_harness_mod(harness_id, daemon_opts),
+                           req =
+                             Compaction.build_request(prep, agent,
+                               instructions: instructions,
+                               model: Map.get(agent, "model") || Map.get(agent, :model)
+                             ),
+                           projection = %{
+                             session_id: session_id,
+                             conversation_id: cid,
+                             purpose: :compaction,
+                             agent: agent,
+                             request: req
+                           },
+                           {:ok, prepared_req} <-
+                             H.Harness.apply_prepare_context(
+                               harness_mod,
+                               projection,
+                               req,
+                               daemon_opts
+                             ) do
+                        Compaction.summarize(prep, agent, provider_mod, config,
+                          instructions: instructions,
+                          request: prepared_req
+                        )
+                      else
+                        {:error, %{code: "context_preparation_failed"} = err} ->
+                          {:error, err}
+
+                        {:error, :unknown_harness} ->
+                          {:error,
+                           %{
+                             code: "context_preparation_failed",
+                             message: "Context preparation failed (:unknown_harness).",
+                             retryable: false
+                           }}
+                      end
 
                     send(
                       server_pid,
@@ -743,6 +779,10 @@ defmodule H.Session.Server.Generation do
         server_pid = self()
         inc = state.incarnation
         provider_mod = state.provider_mod
+        session_id = state.session_id
+        agent = state.docs[cid]["agent"]
+        harness_id = Map.get(state, :harness_id) || "coding"
+        daemon_opts = state.daemon_opts || []
 
         {:ok, worker_pid} =
           Elixir.Task.Supervisor.start_child(state.task_sup, fn ->
@@ -750,7 +790,35 @@ defmodule H.Session.Server.Generation do
               send(server_pid, {:gen_chunk, inc, gen_task_id, attempt_id, cid, ev})
             end
 
-            res = provider_mod.stream_turn(config, request, emit)
+            res =
+              with {:ok, harness_mod} <- resolve_harness_mod(harness_id, daemon_opts),
+                   projection = %{
+                     session_id: session_id,
+                     conversation_id: cid,
+                     purpose: :generation,
+                     agent: agent,
+                     request: request
+                   },
+                   {:ok, prepared_request} <-
+                     H.Harness.apply_prepare_context(
+                       harness_mod,
+                       projection,
+                       request,
+                       daemon_opts
+                     ) do
+                provider_mod.stream_turn(config, prepared_request, emit)
+              else
+                {:error, %{code: "context_preparation_failed"} = err} ->
+                  {:error, err}
+
+                {:error, :unknown_harness} ->
+                  {:error,
+                   %{
+                     code: "context_preparation_failed",
+                     message: "Context preparation failed (:unknown_harness).",
+                     retryable: false
+                   }}
+              end
 
             send(
               server_pid,
@@ -836,6 +904,8 @@ defmodule H.Session.Server.Generation do
         _ ->
           entry_data
       end
+
+    entry_data = maybe_put_harness_annotation(entry_data, resp, cid, state)
 
     entry = State.build_entry(entry_id, cid, "assistant", entry_data, now)
     state = State.record_entry(state, cid, entry_id)
@@ -1249,6 +1319,33 @@ defmodule H.Session.Server.Generation do
       "message" => message,
       "retry_count" => count
     }
+  end
+
+  defp resolve_harness_mod(harness_id, daemon_opts) do
+    H.Harness.resolve(harness_id, daemon_opts)
+  end
+
+  defp maybe_put_harness_annotation(entry_data, resp, cid, state) do
+    harness_id = Map.get(state, :harness_id) || "coding"
+    daemon_opts = Map.get(state, :daemon_opts) || []
+
+    case resolve_harness_mod(harness_id, daemon_opts) do
+      {:ok, harness_mod} ->
+        scope = %{
+          session_id: state.session_id,
+          conversation_id: cid,
+          model: get_in(state.docs, [cid, "agent", "model"]),
+          finish_reason: to_string(Map.get(resp, :finish_reason) || "stop")
+        }
+
+        case H.Harness.safe_project_response(harness_mod, resp, scope) do
+          {:ok, annotation} -> Map.put(entry_data, "harness_annotation", annotation)
+          :ignore -> entry_data
+        end
+
+      {:error, :unknown_harness} ->
+        entry_data
+    end
   end
 
   defp stage_compaction_error(comp_task, cid, err, state, now) do

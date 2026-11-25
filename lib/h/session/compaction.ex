@@ -234,7 +234,10 @@ defmodule H.Session.Compaction do
        %{code: "missing_model", message: "No model configured for compaction", retryable: false}}
     else
       emit = Keyword.get(opts, :emit, fn _ev -> :ok end)
-      request = build_request(preparation, agent, Keyword.put(opts, :model, model))
+
+      request =
+        Keyword.get(opts, :request) ||
+          build_request(preparation, agent, Keyword.put(opts, :model, model))
 
       case provider_mod.stream_turn(provider_config, request, emit) do
         {:ok, resp} ->

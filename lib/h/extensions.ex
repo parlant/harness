@@ -10,14 +10,13 @@ defmodule H.Extensions do
   @namespace ~r/\AElixir\.[A-Z][A-Za-z0-9]*(\.[A-Z][A-Za-z0-9]*)+\z/
 
   @type loaded_state :: %{
-          generation: pos_integer(),
-          reloaded_at_ms: integer(),
           no_extensions: boolean(),
           packages: [map()],
-          modules: %{module() => %{path: charlist(), binary: binary(), md5: binary()}},
           harnesses: %{String.t() => module()},
           environments: %{String.t() => map()},
           codex_account_policy: nil | map(),
+          observers: [module()],
+          status_projections: [map()],
           children: [Supervisor.child_spec()]
         }
 
@@ -35,7 +34,7 @@ defmodule H.Extensions do
     base_environments = normalize_base_environments(opts[:environments])
 
     if Keyword.get(opts, :no_extensions, false) do
-      ext_state = empty_state(true, 1, base_harnesses, base_environments)
+      ext_state = empty_state(true, base_harnesses, base_environments)
       {:ok, opts, ext_state}
     else
       data_dir = Keyword.fetch!(opts, :data_dir)
@@ -44,10 +43,10 @@ defmodule H.Extensions do
       with {:ok, entries} <- entries(config),
            {:ok, packages} <- map_ok(entries, &manifest(&1, data_dir)),
            :ok <- unique(Enum.map(packages, & &1.id), :extension_id),
-           {:ok, packages} <- map_ok(packages, &read_package(&1, %{})),
+           {:ok, packages} <- map_ok(packages, &read_package/1),
            :ok <- unique(Enum.flat_map(packages, &Map.keys(&1.beams)), :module),
            {:ok, opts, ext_state} <-
-             compose(packages, opts, %{}, 1, base_harnesses, base_environments) do
+             compose(packages, opts, base_harnesses, base_environments) do
         {:ok, opts, ext_state}
       else
         {:error, reason} -> {:error, {:extensions, reason}}
@@ -55,98 +54,9 @@ defmodule H.Extensions do
     end
   end
 
-  @doc """
-  Prepares and applies a transactional hot reload of extension BEAMs and
-  `configure/2` contributions against `previous_state`.
-
-  Returns `{:ok, updated_opts, new_ext_state, rollback_info}` where
-  `rollback_info` can be passed to `rollback_code/1` if reconciling supervised
-  extension children fails.
-  """
-  def reload_code(base_opts, previous_state) when is_list(base_opts) and is_map(previous_state) do
-    base_harnesses = normalize_base_harnesses(base_opts[:harnesses])
-    base_environments = normalize_base_environments(base_opts[:environments])
-    next_gen = previous_state.generation + 1
-
-    if Keyword.get(base_opts, :no_extensions, false) or previous_state.no_extensions do
-      {:error, {:extensions, :extensions_disabled}}
-    else
-      data_dir = Keyword.fetch!(base_opts, :data_dir)
-      config = Path.join(data_dir, "extensions.json")
-      managed_modules = previous_state.modules
-
-      with {:ok, entries} <- entries(config),
-           {:ok, packages} <- map_ok(entries, &manifest(&1, data_dir)),
-           :ok <- unique(Enum.map(packages, & &1.id), :extension_id),
-           {:ok, packages} <- map_ok(packages, &read_package(&1, managed_modules)),
-           :ok <- unique(Enum.flat_map(packages, &Map.keys(&1.beams)), :module),
-           {:ok, next_modules, to_load, to_unload} <- plan_module_swap(packages, managed_modules),
-           :ok <- check_soft_purgeable(to_load, to_unload),
-           {:ok, prepared} <- prepare_beams(to_load),
-           :ok <- apply_module_swap(prepared, to_load, to_unload),
-           {:ok, composed_opts, ext_state} <-
-             configure_after_swap(
-               packages,
-               base_opts,
-               next_modules,
-               next_gen,
-               base_harnesses,
-               base_environments,
-               managed_modules,
-               to_load,
-               to_unload
-             ) do
-        rollback_info = %{
-          previous_modules: managed_modules,
-          loaded_modules: Enum.map(to_load, &elem(&1, 0)),
-          unloaded_modules: to_unload
-        }
-
-        {:ok, composed_opts, ext_state, rollback_info}
-      else
-        {:error, reason} -> {:error, {:extensions, reason}}
-      end
-    end
-  end
-
-  @doc false
-  def rollback_code(%{
-        previous_modules: previous_modules,
-        loaded_modules: loaded_modules,
-        unloaded_modules: unloaded_modules
-      }) do
-    restore_mods =
-      Enum.uniq(loaded_modules ++ unloaded_modules)
-      |> Enum.filter(&Map.has_key?(previous_modules, &1))
-
-    new_only_mods =
-      Enum.reject(loaded_modules, &Map.has_key?(previous_modules, &1))
-
-    restore_beams =
-      Enum.map(restore_mods, fn mod ->
-        %{path: path, binary: binary} = Map.fetch!(previous_modules, mod)
-        {mod, path, binary}
-      end)
-
-    Enum.each(restore_mods, &:code.soft_purge/1)
-
-    if restore_beams != [] do
-      _ = :code.atomic_load(restore_beams)
-    end
-
-    Enum.each(new_only_mods, fn mod ->
-      _ = :code.delete(mod)
-      _ = :code.soft_purge(mod)
-    end)
-
-    :ok
-  end
-
   @doc false
   def summarize(ext_state) when is_map(ext_state) do
     %{
-      "generation" => ext_state.generation,
-      "reloaded_at_ms" => ext_state.reloaded_at_ms,
       "no_extensions" => ext_state.no_extensions,
       "extensions" =>
         Enum.map(ext_state.packages, fn pkg ->
@@ -158,6 +68,8 @@ defmodule H.Extensions do
             "harnesses" => pkg.harness_ids,
             "environments" => pkg.environment_ids,
             "children" => length(pkg.child_ids),
+            "observers" => pkg.observer_count,
+            "status_projections" => pkg.status_namespaces,
             "codex_account_policy" => pkg.has_codex_account_policy
           }
         end)
@@ -165,16 +77,15 @@ defmodule H.Extensions do
   end
 
   @doc false
-  def empty_state(no_extensions, generation, base_harnesses \\ %{}, base_environments \\ %{}) do
+  def empty_state(no_extensions, base_harnesses \\ %{}, base_environments \\ %{}) do
     %{
-      generation: generation,
-      reloaded_at_ms: System.system_time(:millisecond),
       no_extensions: no_extensions,
       packages: [],
-      modules: %{},
       harnesses: base_harnesses,
       environments: base_environments,
       codex_account_policy: nil,
+      observers: [],
+      status_projections: [],
       children: []
     }
   end
@@ -233,13 +144,13 @@ defmodule H.Extensions do
     end
   end
 
-  defp read_package(package, managed_modules) do
+  defp read_package(package) do
     ebin = Path.join(package.path, "ebin")
 
     with {:ok, files} <- File.ls(ebin),
          files = Enum.filter(files, &String.ends_with?(&1, ".beam")),
          true <- length(files) in 1..@max_modules,
-         {:ok, beams} <- map_ok(Enum.sort(files), &beam(&1, ebin, package.root, managed_modules)),
+         {:ok, beams} <- map_ok(Enum.sort(files), &beam(&1, ebin, package.root)),
          beams = Map.new(beams),
          true <- Map.has_key?(beams, package.root) do
       {:ok, Map.put(package, :beams, beams)}
@@ -249,7 +160,7 @@ defmodule H.Extensions do
     end
   end
 
-  defp beam(file, ebin, root, managed_modules) do
+  defp beam(file, ebin, root) do
     name = Path.rootname(file, ".beam")
     path = Path.join(ebin, file)
 
@@ -259,203 +170,73 @@ defmodule H.Extensions do
          {:ok, binary} when byte_size(binary) <= @max_beam_bytes <- File.read(path),
          {:ok, {module, md5}} <- :beam_lib.md5(binary),
          true <- Atom.to_string(module) == name,
-         true <- compatible_module?(module, path, md5, managed_modules) do
-      {:ok, {name, {module, String.to_charlist(path), binary, md5}}}
+         true <- compatible_module?(module, path, md5) do
+      {:ok, {name, {module, String.to_charlist(path), binary}}}
     else
       _ -> {:error, {:invalid_or_conflicting_beam, file}}
     end
   end
 
   # No code path mutation or loading by a string-derived atom. Modules come
-  # from explicitly trusted BEAM files.
-  # - Unloaded modules are always eligible.
-  # - Modules previously loaded by H.Extensions (`managed_modules`) may be
-  #   hot-reloaded from a new path or with new bytecode.
-  # - Unmanaged loaded modules may only be reused if they match the exact same
-  #   file path and MD5 digest (e.g. restarted supervision tree in the same VM).
-  defp compatible_module?(module, path, md5, managed_modules) do
-    if Map.has_key?(managed_modules, module) do
-      true
-    else
-      case :code.which(module) do
-        :non_existing ->
-          true
+  # from explicitly trusted BEAM files and are loaded once at boot.
+  defp compatible_module?(module, path, md5) do
+    case :code.which(module) do
+      :non_existing ->
+        true
 
-        loaded when is_list(loaded) ->
-          loaded == String.to_charlist(path) and :code.is_loaded(module) != false and
-            module.module_info(:md5) == md5
+      loaded when is_list(loaded) ->
+        loaded == String.to_charlist(path) and :code.is_loaded(module) != false and
+          module.module_info(:md5) == md5
 
-        _ ->
-          false
-      end
+      _ ->
+        false
     end
   end
 
-  defp compose([], opts, _managed_modules, generation, base_harnesses, base_environments) do
-    {:ok, opts, empty_state(false, generation, base_harnesses, base_environments)}
+  defp compose([], opts, base_harnesses, base_environments) do
+    {:ok, opts, empty_state(false, base_harnesses, base_environments)}
   end
 
-  defp compose(packages, opts, _managed_modules, generation, base_harnesses, base_environments) do
-    modules =
-      for pkg <- packages,
-          {_name, {mod, path, binary, md5}} <- pkg.beams,
-          into: %{} do
-        {mod, %{path: path, binary: binary, md5: md5}}
-      end
-
+  defp compose(packages, opts, base_harnesses, base_environments) do
     beams =
       packages
       |> Enum.flat_map(&Map.values(&1.beams))
-      |> Enum.reject(fn {mod, _, _, _} -> :code.is_loaded(mod) != false end)
-      |> Enum.map(fn {mod, path, binary, _md5} -> {mod, path, binary} end)
+      |> Enum.reject(fn {mod, _, _} -> :code.is_loaded(mod) != false end)
+
+    base_observers = List.wrap(opts[:observers])
+    base_projections = List.wrap(opts[:status_projections])
 
     with :ok <- load_beams(beams),
-         {:ok, {harnesses, environments, children, policy, pkg_summaries}} <-
-           merge_packages(packages, opts, {base_harnesses, base_environments, [], nil, []}) do
-      opts = Keyword.merge(opts, harnesses: harnesses, environments: environments)
-      opts = if policy, do: Keyword.put(opts, :codex_account_policy, policy), else: opts
+         {:ok, {harnesses, environments, children, policy, observers, projections, pkg_summaries}} <-
+           merge_packages(
+             packages,
+             opts,
+             {base_harnesses, base_environments, [], nil, base_observers, base_projections, []}
+           ) do
+      opts =
+        opts
+        |> Keyword.merge(
+          harnesses: harnesses,
+          environments: environments,
+          observers: Enum.uniq(observers),
+          status_projections: projections
+        )
+        |> then(fn o ->
+          if policy, do: Keyword.put(o, :codex_account_policy, policy), else: o
+        end)
 
       ext_state = %{
-        generation: generation,
-        reloaded_at_ms: System.system_time(:millisecond),
         no_extensions: false,
         packages: pkg_summaries,
-        modules: modules,
         harnesses: harnesses,
         environments: environments,
         codex_account_policy: policy,
+        observers: Enum.uniq(observers),
+        status_projections: projections,
         children: children
       }
 
       {:ok, opts, ext_state}
-    end
-  end
-
-  defp plan_module_swap(packages, managed_modules) do
-    next_modules =
-      for pkg <- packages,
-          {_name, {mod, path, binary, md5}} <- pkg.beams,
-          into: %{} do
-        {mod, %{path: path, binary: binary, md5: md5}}
-      end
-
-    to_load =
-      for {mod, %{path: path, binary: binary, md5: md5}} <- next_modules,
-          needs_load?(mod, path, md5, managed_modules) do
-        {mod, path, binary}
-      end
-
-    to_unload =
-      for {mod, _info} <- managed_modules, not Map.has_key?(next_modules, mod), do: mod
-
-    {:ok, next_modules, to_load, to_unload}
-  end
-
-  defp needs_load?(mod, path, md5, managed_modules) do
-    case :code.is_loaded(mod) do
-      false ->
-        true
-
-      {:file, loaded_path} ->
-        case Map.get(managed_modules, mod) do
-          %{md5: ^md5, path: ^path} when loaded_path == path -> false
-          _ -> true
-        end
-    end
-  end
-
-  # Verify no lingering processes block replacing or removing old code before
-  # mutating the VM code table. Never hard-kill workers with :code.purge/1.
-  defp check_soft_purgeable(to_load, to_unload) do
-    replace_mods =
-      to_load
-      |> Enum.map(&elem(&1, 0))
-      |> Enum.filter(&(:code.is_loaded(&1) != false))
-
-    in_use =
-      Enum.filter(replace_mods ++ to_unload, fn mod ->
-        not :code.soft_purge(mod)
-      end)
-
-    case in_use do
-      [] -> :ok
-      mods -> {:error, {:modules_in_use, Enum.sort(mods)}}
-    end
-  end
-
-  defp prepare_beams([]), do: {:ok, nil}
-
-  defp prepare_beams(beams) do
-    case :code.prepare_loading(beams) do
-      {:ok, prepared} -> {:ok, prepared}
-      {:error, reason} -> {:error, {:prepare_loading_failed, reason}}
-    end
-  end
-
-  defp apply_module_swap(prepared, _to_load, to_unload) do
-    with :ok <- finish_prepared(prepared) do
-      Enum.each(to_unload, fn mod ->
-        _ = :code.delete(mod)
-        _ = :code.soft_purge(mod)
-      end)
-
-      :ok
-    end
-  end
-
-  defp finish_prepared(nil), do: :ok
-
-  defp finish_prepared(prepared) do
-    case :code.finish_loading(prepared) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:finish_loading_failed, reason}}
-    end
-  end
-
-  defp configure_after_swap(
-         packages,
-         base_opts,
-         next_modules,
-         next_gen,
-         base_harnesses,
-         base_environments,
-         managed_modules,
-         to_load,
-         to_unload
-       ) do
-    case merge_packages(packages, base_opts, {base_harnesses, base_environments, [], nil, []}) do
-      {:ok, {harnesses, environments, children, policy, pkg_summaries}} ->
-        opts =
-          base_opts
-          |> Keyword.merge(harnesses: harnesses, environments: environments)
-          |> then(fn o ->
-            if policy,
-              do: Keyword.put(o, :codex_account_policy, policy),
-              else: Keyword.delete(o, :codex_account_policy)
-          end)
-
-        ext_state = %{
-          generation: next_gen,
-          reloaded_at_ms: System.system_time(:millisecond),
-          no_extensions: false,
-          packages: pkg_summaries,
-          modules: next_modules,
-          harnesses: harnesses,
-          environments: environments,
-          codex_account_policy: policy,
-          children: children
-        }
-
-        {:ok, opts, ext_state}
-
-      {:error, reason} ->
-        rollback_code(%{
-          previous_modules: managed_modules,
-          loaded_modules: Enum.map(to_load, &elem(&1, 0)),
-          unloaded_modules: to_unload
-        })
-
-        {:error, reason}
     end
   end
 
@@ -476,8 +257,10 @@ defmodule H.Extensions do
 
   defp merge_packages(packages, opts, base) do
     Enum.reduce_while(packages, {:ok, base}, fn package,
-                                                {:ok, {harnesses, envs, children, policy, pkgs}} ->
-      {mod, _, _, _} = Map.fetch!(package.beams, package.root)
+                                                {:ok,
+                                                 {harnesses, envs, children, policy, observers,
+                                                  projections, pkgs}} ->
+      {mod, _, _} = Map.fetch!(package.beams, package.root)
 
       context = %{
         id: package.id,
@@ -485,7 +268,8 @@ defmodule H.Extensions do
         pubsub: Keyword.get(opts, :pubsub, H.PubSub)
       }
 
-      with {:ok, package_harnesses, package_envs, specs, package_policy} <-
+      with {:ok, package_harnesses, package_envs, specs, package_policy, package_observers,
+            package_projections} <-
              validate_configure(mod, package.settings, context, opts),
            :ok <-
              if(policy && package_policy,
@@ -502,12 +286,19 @@ defmodule H.Extensions do
              unique(
                ["host"] ++ Map.keys(envs) ++ Enum.map(package_envs, &elem(&1, 0)),
                :environment_id
+             ),
+           :ok <-
+             unique(
+               Enum.map(projections ++ package_projections, & &1.namespace),
+               :status_projection_namespace
              ) do
         pkg_summary =
           Map.merge(package, %{
             harness_ids: Enum.map(package_harnesses, &elem(&1, 0)),
             environment_ids: Enum.map(package_envs, &elem(&1, 0)),
             child_ids: Enum.map(specs, & &1.id),
+            observer_count: length(package_observers),
+            status_namespaces: Enum.map(package_projections, & &1.namespace),
             has_codex_account_policy: not is_nil(package_policy)
           })
 
@@ -515,6 +306,7 @@ defmodule H.Extensions do
          {:ok,
           {Map.merge(harnesses, Map.new(package_harnesses)),
            Map.merge(envs, Map.new(package_envs)), children ++ specs, policy || package_policy,
+           observers ++ package_observers, projections ++ package_projections,
            pkgs ++ [pkg_summary]}}}
       else
         {:error, reason} -> {:halt, {:error, {package.id, reason}}}
@@ -523,17 +315,27 @@ defmodule H.Extensions do
   end
 
   defp validate_configure(mod, settings, context, opts) do
+    allowed_keys = [
+      :harnesses,
+      :environments,
+      :children,
+      :codex_account_policy,
+      :observers,
+      :status_projections
+    ]
+
     with true <- function_exported?(mod, :configure, 2),
          {:ok, contributions} when is_map(contributions) <- mod.configure(settings, context),
-         [] <-
-           Map.keys(contributions) --
-             [:harnesses, :environments, :children, :codex_account_policy],
+         [] <- Map.keys(contributions) -- allowed_keys,
          {:ok, harnesses} <- registrations(contributions, :harnesses, &harness(&1, opts)),
          {:ok, envs} <- registrations(contributions, :environments, &environment/1),
          {:ok, specs} <- registrations(contributions, :children, &child(&1, context.id)),
          :ok <- unique(Enum.map(specs, & &1.id), :child_id),
-         {:ok, policy} <- account_policy(contributions[:codex_account_policy]) do
-      {:ok, harnesses, envs, specs, policy}
+         {:ok, policy} <- account_policy(contributions[:codex_account_policy]),
+         {:ok, observers} <- registrations(contributions, :observers, &observer/1),
+         {:ok, projections} <-
+           registrations(contributions, :status_projections, &status_projection/1) do
+      {:ok, harnesses, envs, specs, policy, observers, projections}
     else
       {:error, reason} when is_atom(reason) -> {:error, reason}
       _ -> {:error, :invalid_contributions}
@@ -556,6 +358,26 @@ defmodule H.Extensions do
   end
 
   defp account_policy(_), do: {:error, :invalid_codex_account_policy}
+
+  defp observer(mod) when is_atom(mod) do
+    if Code.ensure_loaded?(mod) and
+         (function_exported?(mod, :command_committed, 1) or
+            function_exported?(mod, :work_settled, 1)) do
+      {:ok, mod}
+    else
+      {:error, :invalid_observer}
+    end
+  end
+
+  defp observer(_), do: {:error, :invalid_observer}
+
+  defp status_projection(spec) do
+    if H.Extensions.Status.valid_spec?(spec) do
+      {:ok, spec}
+    else
+      {:error, :invalid_status_projection}
+    end
+  end
 
   defp registrations(contributions, key, fun) do
     case Map.get(contributions, key, []) do

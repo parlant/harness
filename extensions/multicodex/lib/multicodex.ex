@@ -4,6 +4,7 @@ defmodule Extensions.MultiCodex do
   and makes no inference requests; H retains authority over every dispatch.
   """
   @behaviour H.Extension
+  @behaviour H.Extension.StatusProjection
   @behaviour H.Provider.AccountPolicy
   use GenServer
 
@@ -36,7 +37,8 @@ defmodule Extensions.MultiCodex do
             wait_when_exhausted: wait,
             pubsub: pubsub}
          ],
-         codex_account_policy: %{module: __MODULE__, sources: sources}
+         codex_account_policy: %{module: __MODULE__, sources: sources},
+         status_projections: [%{namespace: "account_pool", module: __MODULE__}]
        }}
     else
       _ -> {:error, :invalid_multicodex_settings}
@@ -59,6 +61,21 @@ defmodule Extensions.MultiCodex do
   @impl H.Provider.AccountPolicy
   def status(sources),
     do: GenServer.call(__MODULE__, {:status, sources}, 500)
+
+  @impl H.Extension.StatusProjection
+  def project(scope) when is_map(scope) do
+    if Process.whereis(__MODULE__) do
+      try do
+        GenServer.call(__MODULE__, {:project_status, scope}, 250)
+      catch
+        :exit, _ -> :omit
+      end
+    else
+      :omit
+    end
+  end
+
+  def project(_), do: :omit
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -190,6 +207,10 @@ defmodule Extensions.MultiCodex do
        status_note: format_provider_status_note(state),
        sources: source_notes
      }, state}
+  end
+
+  def handle_call({:project_status, _scope}, _from, state) do
+    {:reply, build_status_projection(state), state}
   end
 
   def handle_call({:rejected, _source, :rate_limited}, _from, state) do
@@ -419,6 +440,40 @@ defmodule Extensions.MultiCodex do
   end
 
   defp clamp(val, min_val, max_val), do: val |> max(min_val) |> min(max_val)
+
+  defp build_status_projection(state) do
+    now_mono = System.monotonic_time(:millisecond)
+
+    {eligible_count, min_remaining_ms, has_fresh?} =
+      Enum.reduce(state.sources, {0, nil, false}, fn id, {count, min_rem, fresh?} ->
+        blocked_until = Map.get(state.blocked, id)
+        is_blocked? = is_integer(blocked_until) and blocked_until > now_mono
+
+        case state.cache[id] do
+          {expires, capacity, _reset_at_ms} when expires > now_mono ->
+            rem_ms = expires - now_mono
+            next_min = if is_nil(min_rem), do: rem_ms, else: min(min_rem, rem_ms)
+
+            eligible? = not is_blocked? and rank(capacity, state.allow_credits) != nil
+            next_count = if eligible?, do: count + 1, else: count
+            {next_count, next_min, true}
+
+          _ ->
+            {count, min_rem, fresh?}
+        end
+      end)
+
+    cond do
+      not has_fresh? ->
+        :omit
+
+      eligible_count > 0 ->
+        {:ok, %{"state" => "available", "eligible_sources" => eligible_count}, min_remaining_ms}
+
+      true ->
+        {:ok, %{"state" => "unavailable", "eligible_sources" => 0}, min_remaining_ms}
+    end
+  end
 
   defp format_provider_status_note(state) do
     credits_label = if state.allow_credits, do: "credits enabled", else: "credits disabled"

@@ -131,7 +131,9 @@ defmodule H.Session.Server.Recovery do
           :compaction_keep_recent_chars,
           :compaction_max_tokens,
           :max_restarts,
-          :max_seconds
+          :max_seconds,
+          :observers_server,
+          :prepare_context_timeout_ms
         ])
 
       default_model =
@@ -220,6 +222,7 @@ defmodule H.Session.Server.Recovery do
         ephemeral_interval_ms:
           Keyword.get(opts, :ephemeral_interval_ms, @default_ephemeral_interval_ms),
         maintenance_table: opts[:maintenance_table],
+        observers_server: opts[:observers_server],
         retry_limit: Keyword.get(opts, :retry_limit, @default_retry_limit),
         retry_backoff_ms: Keyword.get(opts, :retry_backoff_ms, @default_retry_backoff_ms),
         restart_limit: Keyword.get(opts, :restart_limit, @default_restart_limit),

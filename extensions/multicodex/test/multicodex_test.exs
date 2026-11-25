@@ -17,6 +17,7 @@ defmodule Extensions.MultiCodexTest do
     assert {:ok,
             %{
               codex_account_policy: %{sources: ["one", "two"], module: MultiCodex},
+              status_projections: [%{namespace: "account_pool", module: MultiCodex}],
               children: [{MultiCodex, child_opts}]
             }} =
              MultiCodex.configure(
@@ -137,6 +138,88 @@ defmodule Extensions.MultiCodexTest do
     assert MultiCodex.order("model", ["not-configured"]) == []
     assert MultiCodex.rejected("model", "full", :rate_limited) == :ok
     assert MultiCodex.order("model", sources) == []
+  end
+
+  test "projects cached account_pool status with remaining TTL and zero provider I/O" do
+    dir = Path.join(System.tmp_dir!(), "multicodex-proj-#{System.unique_integer([:positive])}")
+    File.mkdir!(dir)
+    File.chmod!(dir, 0o700)
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    sources = ~w(alpha beta)
+    {:ok, vault, _} = H.Accounts.Vault.open(dir, [])
+
+    for source <- sources do
+      :ok =
+        H.Accounts.Vault.write(vault, source, %{
+          "account_id" => source,
+          "subject" => source,
+          "access_token" => "token-#{source}",
+          "refresh_token" => "refresh-#{source}",
+          "expires_at_ms" => System.system_time(:millisecond) + 120_000
+        })
+    end
+
+    accounts =
+      start_supervised!(
+        {H.Accounts,
+         sources: sources, data_dir: dir, http: fn _ -> flunk("unexpected authentication") end}
+      )
+
+    # Not running yet -> :omit
+    scope = %{session_id: "s1", conversation_id: "1", model: "openai_codex:gpt-6.2-sol"}
+    assert MultiCodex.project(scope) == :omit
+
+    probes = :atomics.new(1, [])
+    test = self()
+
+    fetch = fn %{account_id: source} ->
+      count = :atomics.add_get(probes, 1, 1)
+      send(test, {:proj_probe, source, count})
+
+      case source do
+        "alpha" -> {:ok, {:quota, 25}, 5_000}
+        "beta" -> {:ok, :exhausted, 8_000}
+      end
+    end
+
+    start_supervised!(
+      {MultiCodex,
+       sources: sources, accounts: accounts, poll_ms: 30_000, allow_credits: false, fetch: fetch}
+    )
+
+    assert_receive {:proj_probe, "alpha", 1}, 1_000
+    assert_receive {:proj_probe, "beta", 2}, 1_000
+    assert_order(sources, ["alpha"])
+
+    probes_before = :atomics.get(probes, 1)
+
+    assert {:ok, %{"state" => "available", "eligible_sources" => 1}, ttl1} =
+             MultiCodex.project(scope)
+
+    assert ttl1 > 0 and ttl1 <= 5_000
+
+    Process.sleep(40)
+
+    assert {:ok, %{"state" => "available", "eligible_sources" => 1}, ttl2} =
+             MultiCodex.project(scope)
+
+    assert ttl2 < ttl1
+    # Zero provider I/O on projection reads
+    assert :atomics.get(probes, 1) == probes_before
+
+    # When alpha is rejected, eligible_sources drops to 0 ("unavailable")
+    assert MultiCodex.rejected("openai_codex:gpt-6.2-sol", "alpha", :invalid_token) == :ok
+
+    assert {:ok, %{"state" => "unavailable", "eligible_sources" => 0}, ttl3} =
+             MultiCodex.project(scope)
+
+    assert ttl3 > 0 and ttl3 <= 8_000
+
+    # Rate limit clears cache -> :omit until next poll
+    assert MultiCodex.rejected("openai_codex:gpt-6.2-sol", "beta", :rate_limited) == :ok
+    assert MultiCodex.project(scope) == :omit
+    assert :atomics.get(probes, 1) == probes_before
   end
 
   test "reports unavailable diagnostics, status notes, wait_when_exhausted: false, and broadcasts generic wait_signal on recovery" do
