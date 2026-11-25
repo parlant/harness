@@ -21,6 +21,8 @@
 | `POST /provider-accounts/add` | Add a local Codex alias (idempotent, no provider I/O). |
 | `POST /provider-accounts/activate` | Persist selection of the stock Codex alias for new requests; independent of a session, no effect on a loaded pool. |
 | `GET /provider-logins`; `POST /provider-logins/{start,status,cancel}` | [Owner device login](extensions/clients.md#implemented-device-login), independent of session state. Providers and individual source entries may include an optional sanitized `status_note` string when an active policy supplies one. |
+| `GET /extensions` | Owner read-only summary of loaded extensions, reload `generation`, `reloaded_at_ms`, `no_extensions`, and per-extension module/harness/environment counts. |
+| `POST /extensions/reload` | Owner hot-reload of `<data_dir>/extensions.json` without stopping the daemon or dropping live session state. Returns `200` with the updated extension summary; returns `409` (`extensions_disabled`, `modules_in_use`, or `reload_not_supported`), `422` (`extension_reload_failed` with rollback intact), or `503` (`daemon_draining`). |
 | `GET /environments` | Configured `environments` and their default directories. |
 | `GET /fs` | Browse `env_id` and `path`; returns the resolved path, parent, annotated directories and sessions rooted there. Excludes subsessions (`parent != null`) by default unless `include_subsessions=true`. |
 | `GET /fs/files` | Bounded read-only workspace file discovery. Required `env_id` and absolute `cwd` (never falls back to daemon cwd); optional `query`, `include_hidden` (default `false`), `include_dirs` (default `true`), `exclude`, `limit` 1–500 (default 200), `max_depth` 1–32 (default 32). Skips `.git` and does not traverse symlinks. |

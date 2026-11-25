@@ -53,15 +53,34 @@ defmodule H.Daemon.Runtime do
   use Supervisor
 
   def start_link(opts) do
-    with {:ok, opts, extension_children} <- H.Extensions.load(opts),
+    base_opts = opts
+
+    with {:ok, opts, ext_state} <- H.Extensions.load_state(opts),
          {:ok, opts} <- H.Provider.Compatible.load(opts),
          {:ok, opts, account_children} <- H.Accounts.boot(opts) do
-      Supervisor.start_link(__MODULE__, {opts, account_children ++ extension_children})
+      # Preserve base options (including compatible providers & accounts, before
+      # extension overrides) so live extension reloads re-compose cleanly.
+      reload_base_opts =
+        opts
+        |> Keyword.put(:harnesses, Keyword.get(base_opts, :harnesses))
+        |> Keyword.put(:environments, Keyword.get(base_opts, :environments))
+        |> Keyword.delete(:codex_account_policy)
+        |> then(fn o ->
+          case Keyword.fetch(base_opts, :codex_account_policy) do
+            {:ok, policy} -> Keyword.put(o, :codex_account_policy, policy)
+            :error -> o
+          end
+        end)
+
+      Supervisor.start_link(
+        __MODULE__,
+        {opts, reload_base_opts, ext_state, account_children}
+      )
     end
   end
 
   @impl true
-  def init({opts, service_children}) do
+  def init({opts, reload_base_opts, ext_state, account_children}) do
     table = :ets.new(:h_daemon_admission, [:set, :public, read_concurrency: true])
 
     :ets.insert(table, [
@@ -71,11 +90,16 @@ defmodule H.Daemon.Runtime do
     ])
 
     opts = Keyword.put(opts, :maintenance_table, table)
+    reload_base_opts = Keyword.put(reload_base_opts, :maintenance_table, table)
+    extensions_sup = Keyword.get(opts, :extensions_sup, H.Extensions.Supervisor)
+    opts = Keyword.put(opts, :extensions_sup, extensions_sup)
+    reload_base_opts = Keyword.put(reload_base_opts, :extensions_sup, extensions_sup)
 
     router = [
       auth_server: opts[:auth_server],
       auth_table: opts[:auth_table],
       daemon_opts: opts,
+      use_live_instance_options: true,
       port: opts[:http_port]
     ]
 
@@ -104,27 +128,36 @@ defmodule H.Daemon.Runtime do
 
     unix = if socket, do: [{H.HTTP.UnixListener, {socket, router}}], else: []
 
-    services =
-      if service_children == [] do
+    account_services =
+      if account_children == [] do
         []
       else
         [
           %{
-            id: :instance_services,
-            start: {Supervisor, :start_link, [service_children, [strategy: :one_for_one]]},
+            id: :account_services,
+            start: {Supervisor, :start_link, [account_children, [strategy: :one_for_one]]},
             type: :supervisor
           }
         ]
       end
 
+    extension_supervisor = %{
+      id: :extension_services,
+      start:
+        {Supervisor, :start_link,
+         [ext_state.children, [strategy: :one_for_one, name: extensions_sup]]},
+      type: :supervisor
+    }
+
     Supervisor.init(
-      services ++
+      account_services ++
         [
+          extension_supervisor,
           {Registry, keys: :unique, name: opts[:registry]},
           Supervisor.child_spec({Registry, keys: :duplicate, name: opts[:pubsub]}, id: :pubsub),
           {H.WorkspaceLease, name: opts[:workspace_lease]},
           {DynamicSupervisor, strategy: :one_for_one, name: opts[:runtime_sup]},
-          {H.Daemon.Boot, opts}
+          {H.Daemon.Boot, %{opts: opts, reload_base_opts: reload_base_opts, ext_state: ext_state}}
         ] ++
         tcp ++
         unix ++
@@ -175,15 +208,22 @@ defmodule H.Daemon.Boot do
   @account_refresh_timeout_ms 14_000
 
   @impl true
-  def init(opts) do
+  def init(%{opts: opts, reload_base_opts: reload_base_opts, ext_state: ext_state}) do
     {:ok,
      %{
        opts: opts,
+       reload_base_opts: reload_base_opts,
+       ext_state: ext_state,
        reservations: %{},
        phase: :running,
        drain_timer: nil,
        recovery_ref: nil
      }, {:continue, :recover_sessions}}
+  end
+
+  def init(opts) when is_list(opts) do
+    ext_state = H.Extensions.empty_state(Keyword.get(opts, :no_extensions, false), 1)
+    init(%{opts: opts, reload_base_opts: opts, ext_state: ext_state})
   end
 
   @impl true
@@ -198,6 +238,26 @@ defmodule H.Daemon.Boot do
 
   @impl true
   def handle_call(:options, _from, state), do: {:reply, state.opts, state}
+
+  def handle_call(:extensions_status, _from, state) do
+    {:reply, {:ok, H.Extensions.summarize(state.ext_state)}, state}
+  end
+
+  def handle_call(:reload_extensions, _from, state) do
+    cond do
+      state.phase != :running ->
+        {:reply, {:error, :daemon_draining}, state}
+
+      true ->
+        case do_reload_extensions(state) do
+          {:ok, next_state} ->
+            {:reply, {:ok, H.Extensions.summarize(next_state.ext_state)}, next_state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+    end
+  end
 
   def handle_call(:status, _from, state) do
     workers = count_active_workers(state.opts)
@@ -488,6 +548,88 @@ defmodule H.Daemon.Boot do
   defp phase_string(:running), do: "running"
   defp phase_string(:draining), do: "draining"
   defp phase_string(:stopping), do: "stopping"
+
+  defp do_reload_extensions(state) do
+    ext_sup = state.opts[:extensions_sup] || H.Extensions.Supervisor
+    prev_ext = state.ext_state
+
+    with {:ok, next_opts, next_ext, rollback_info} <-
+           H.Extensions.reload_code(state.reload_base_opts, prev_ext) do
+      case reconcile_extension_children(ext_sup, prev_ext.children, next_ext.children) do
+        :ok ->
+          notify_sessions_extensions_reloaded(next_opts)
+          {:ok, %{state | opts: next_opts, ext_state: next_ext}}
+
+        {:error, reason} ->
+          H.Extensions.rollback_code(rollback_info)
+          _ = restore_extension_children(ext_sup, prev_ext.children)
+          {:error, {:extensions, reason}}
+      end
+    end
+  end
+
+  defp reconcile_extension_children(ext_sup, old_specs, new_specs) do
+    stop_all_extension_children(ext_sup, old_specs)
+
+    case start_extension_children(ext_sup, new_specs, []) do
+      :ok ->
+        :ok
+
+      {:error, started_ids, reason} ->
+        Enum.each(started_ids, fn id ->
+          _ = Supervisor.terminate_child(ext_sup, id)
+          _ = Supervisor.delete_child(ext_sup, id)
+        end)
+
+        {:error, reason}
+    end
+  end
+
+  defp restore_extension_children(ext_sup, old_specs) do
+    stop_all_extension_children(ext_sup, old_specs)
+    start_extension_children(ext_sup, old_specs, [])
+  end
+
+  defp stop_all_extension_children(ext_sup, known_specs) do
+    running_ids =
+      try do
+        ext_sup
+        |> Supervisor.which_children()
+        |> Enum.map(&elem(&1, 0))
+      catch
+        :exit, _ -> []
+      end
+
+    all_ids = Enum.uniq(running_ids ++ Enum.map(known_specs, & &1.id))
+
+    Enum.each(all_ids, fn id ->
+      _ = Supervisor.terminate_child(ext_sup, id)
+      _ = Supervisor.delete_child(ext_sup, id)
+    end)
+  end
+
+  defp start_extension_children(_ext_sup, [], _started), do: :ok
+
+  defp start_extension_children(ext_sup, [spec | rest], started) do
+    case Supervisor.start_child(ext_sup, spec) do
+      {:ok, _pid} ->
+        start_extension_children(ext_sup, rest, [spec.id | started])
+
+      {:ok, _pid, _info} ->
+        start_extension_children(ext_sup, rest, [spec.id | started])
+
+      {:error, reason} ->
+        {:error, started, {:child_start_failed, spec.id, reason}}
+    end
+  end
+
+  defp notify_sessions_extensions_reloaded(opts) do
+    for pid <- live_session_pids(opts) do
+      send(pid, {:extensions_reloaded, opts})
+    end
+
+    :ok
+  end
 
   defp idle?(opts) do
     # A canceled caller may already be past the gate in a coordinator.

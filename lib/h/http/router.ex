@@ -73,6 +73,51 @@ defmodule H.HTTP.Router do
     end
   end
 
+  get "/api/v1/extensions" do
+    {_daemon, opts} = daemon_config(conn)
+
+    case H.Daemon.Maintenance.extensions_status(opts) do
+      {:ok, payload} ->
+        send_json(conn, 200, payload)
+
+      {:error, _} ->
+        send_json(conn, 503, %{"error" => "daemon unavailable"})
+    end
+  end
+
+  post "/api/v1/extensions/reload" do
+    {_daemon, opts} = daemon_config(conn)
+
+    case H.Daemon.Maintenance.reload_extensions(opts) do
+      {:ok, payload} ->
+        send_json(conn, 200, payload)
+
+      {:error, :daemon_draining} ->
+        send_json(conn, 503, %{"error" => "daemon_draining"})
+
+      {:error, :daemon_unavailable} ->
+        send_json(conn, 503, %{"error" => "daemon unavailable"})
+
+      {:error, :reload_not_supported} ->
+        send_json(conn, 409, %{"error" => "reload_not_supported"})
+
+      {:error, {:extensions, :extensions_disabled}} ->
+        send_json(conn, 409, %{"error" => "extensions_disabled"})
+
+      {:error, {:extensions, {:modules_in_use, mods}}} ->
+        send_json(conn, 409, %{
+          "error" => "modules_in_use",
+          "modules" => Enum.map(mods, &Atom.to_string/1)
+        })
+
+      {:error, {:extensions, reason}} ->
+        send_json(conn, 422, %{"error" => "extension_reload_failed", "reason" => inspect(reason)})
+
+      {:error, reason} ->
+        send_json(conn, 422, %{"error" => inspect(reason)})
+    end
+  end
+
   get "/api/v1/environments" do
     {daemon, daemon_opts} = daemon_config(conn)
     envs = apply(daemon, :list_environments, [daemon_opts])
@@ -507,7 +552,22 @@ defmodule H.HTTP.Router do
 
   defp daemon_config(conn) do
     opts = router_opts(conn)
-    {Keyword.get(opts, :daemon, H.Daemon), Keyword.get(opts, :daemon_opts, [])}
+    daemon = Keyword.get(opts, :daemon, H.Daemon)
+
+    daemon_opts =
+      if Keyword.get(opts, :use_live_instance_options, false) do
+        live_instance_options() || Keyword.get(opts, :daemon_opts, [])
+      else
+        Keyword.get(opts, :daemon_opts, [])
+      end
+
+    {daemon, daemon_opts}
+  end
+
+  defp live_instance_options do
+    H.Daemon.instance_options()
+  catch
+    :exit, _ -> nil
   end
 
   defp send_fs_error(conn, :not_found),

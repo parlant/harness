@@ -6,7 +6,7 @@ This is the entry point for extending H. **Existing** sections describe code you
 
 | I want to… | Start here | Status |
 |---|---|---|
-| Install a local package and enable it for a daemon | [Daemon composition and core hooks](extensions/daemon.md) | Startup loading, bypass flag, and developer template exist; common hooks are proposed |
+| Install a local package and enable or hot-reload it for a daemon | [Daemon composition and core hooks](extensions/daemon.md) | Startup loading, transactional hot reload, bypass flag, and developer template exist; common hooks are proposed |
 | Change instructions, context, or tool set without replacing the session engine | [Harness profiles and tools](extensions/harness.md) | Behaviours exist; profile-specific hooks and discoverable selection are proposed |
 | Change where or under what constraints tools operate | [Execution environments](extensions/execution-env.md) | Environment behaviour and registry exist; env-specific hooks are optional design |
 | Log a daemon into Codex or use multiple credential sources | [Providers](extensions/providers.md) | Stock device login; MultiCodex path policy polls usage and ranks eligible aliases |
@@ -29,7 +29,7 @@ A hook is a call site with one owner, purpose, and stated guarantees, not permis
 
 | Earlier idea | Refined decision |
 |---|---|
-| Load path packages from an H config file | Load explicitly selected, prebuilt local artifacts at startup. No custom Mix project for operators, no workspace discovery, and no build or hot loading at boot. |
+| Load path packages from an H config file | Load explicitly selected, prebuilt local artifacts at startup, with explicit owner-triggered transactional hot reload (`POST /api/v1/extensions/reload` / `H.Daemon.reload_extensions/1`). No custom Mix project for operators, no workspace discovery, and no automatic compilation at boot. |
 | One registry of daemon, harness, and env hooks | Keep shared semantics small: common command and task milestones are candidate core observations. Profile and env owners define their own opt-in contracts. None of these observers or profile/env hooks is required for login. |
 | Wrap any provider stream and retry when nothing was rendered | Reuse the credential path at the actual dispatch boundary. No output is not proof of rejection. The adapter must prove both pre-acceptance rejection and account-local scope; the persisted attempt policy governs interruption. |
 | A generic owner command and UI engine for `/login` | Ship only a versioned provider-login interaction. Don't invent generic action handlers, client forms or conversation commands for it. |

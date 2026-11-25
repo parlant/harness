@@ -157,9 +157,12 @@ defmodule H.Session.Server.Recovery do
       recent_subs =
         Map.new(bootstrap.submissions || %{}, fn {rid, s} -> {rid, Submission.from_storage(s)} end)
 
+      harness_id = Keyword.get(opts, :harness_id) || Map.get(meta, :harness_id) || "coding"
+
       state = %{
         session_id: session_id,
         env_id: env_id,
+        harness_id: harness_id,
         cwd: cwd,
         store: store,
         seq: bootstrap.seq || 0,

@@ -325,6 +325,14 @@ impl DaemonClient {
         }
     }
 
+    pub(crate) fn reload_extensions(&self) -> Result<serde_json::Value, ClientError> {
+        self.post_json("/api/v1/extensions/reload", &serde_json::json!({}))
+    }
+
+    pub(crate) fn list_extensions(&self) -> Result<serde_json::Value, ClientError> {
+        self.get_json("/api/v1/extensions")
+    }
+
     pub fn get_environments(&self) -> Result<Vec<EnvironmentInfo>, ClientError> {
         let resp: EnvironmentsResponse = self.get_json("/api/v1/environments")?;
         Ok(resp.environments)

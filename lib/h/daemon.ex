@@ -43,6 +43,29 @@ defmodule H.Daemon do
       if Process.whereis(H.Daemon.Instance), do: exit(:daemon_not_ready), else: nil
   end
 
+  @doc "Lists loaded extensions and current reload generation for the running daemon."
+  @spec list_extensions(keyword()) :: {:ok, map()} | {:error, term()}
+  def list_extensions(opts \\ []) when is_list(opts) do
+    opts = if opts == [], do: instance_options() || [], else: opts
+    H.Daemon.Maintenance.extensions_status(opts)
+  end
+
+  @doc """
+  Hot-reloads configured extensions from `<data_dir>/extensions.json` in-place
+  without stopping the daemon or dropping live session state.
+
+  Validates all manifests, BEAM files, and `configure/2` contributions before
+  reconciling supervised extension children and refreshing live session
+  coordinators. Fails cleanly without mutating running extensions if any
+  module still has lingering old code (`{:extensions, {:modules_in_use, mods}}`)
+  or if configuration/child startup fails.
+  """
+  @spec reload_extensions(keyword()) :: {:ok, map()} | {:error, term()}
+  def reload_extensions(opts \\ []) when is_list(opts) do
+    opts = if opts == [], do: instance_options() || [], else: opts
+    H.Daemon.Maintenance.reload_extensions(opts)
+  end
+
   @doc "Lists configured execution environments (`\"host\"` plus any custom/remote environments)."
   @spec list_environments(keyword()) :: [map()]
   def list_environments(opts \\ []) when is_list(opts) do
@@ -1658,6 +1681,7 @@ defmodule H.Daemon do
         [
           session_id: entry.session_id,
           env_id: env_id,
+          harness_id: harness_id,
           cwd: entry.cwd,
           title: entry.title,
           parent: Map.get(entry, :parent),

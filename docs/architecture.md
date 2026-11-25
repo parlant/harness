@@ -73,7 +73,7 @@ The coding tools (`bash`, `read`, `write`, `edit`) accept a per-call `cwd` in th
 
 Mutating tools and user-shell commands queue at `H.WorkspaceLease` when another conversation owns the workspace. The manager monitors waiters and reserves the next lease before signalling its session coordinator; the coordinator stays responsive while waiting. A persisted `workspace_wait` checkpoint pins the resolved directory but has no execution attempt, so it can safely requeue after restart. Runtime lease ownership and handoff use the captured key, not a recomputation from the session’s original directory. Client actions can cancel the waiting run or request cancellation of the specific current holder, with a lease-generation token fencing stale stop requests. Stop-holder prioritizes that waiter but does not revoke the lease: the owning coordinator commits cancellation, stops its workers, and releases normally. Running unsafe effects retain the interruption policy above.
 
-`H.ExecutionEnv.Remote` delegates to `H.RemoteAgent`. The implementation exercises stale-attempt fencing, lease renewal, expiry and process-group cleanup **in the same VM**. It is not an authenticated transport to another machine.
+`H.ExecutionEnv.Remote` delegates to `H.RemoteAgent` either in-VM or across connected Erlang nodes (`H.ExecutionEnv.Remote.connect_node/3` and `env_spec_for_node/3`), allowing a local daemon ("brains": model + session) to coordinate sandboxed tool execution on one or more separate BEAM nodes ("hands": Docker containers or remote hosts over Erlang distribution) with stale-attempt fencing, lease renewal, expiry, and cross-node process-group cleanup. It is not an internet-facing mTLS/SSH transport across untrusted networks.
 
 ## Client boundary
 

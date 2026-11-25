@@ -42,6 +42,33 @@ defmodule H.Daemon.Maintenance do
     :exit, _ -> {:error, :daemon_unavailable}
   end
 
+  def extensions_status(opts) do
+    case opts[:maintenance_table] do
+      table when is_reference(table) ->
+        GenServer.call(H.Daemon.Boot, :extensions_status, 5_000)
+
+      _ ->
+        {:ok,
+         H.Extensions.summarize(
+           H.Extensions.empty_state(Keyword.get(opts, :no_extensions, false), 1)
+         )}
+    end
+  catch
+    :exit, _ -> {:error, :daemon_unavailable}
+  end
+
+  def reload_extensions(opts) do
+    case opts[:maintenance_table] do
+      table when is_reference(table) ->
+        GenServer.call(H.Daemon.Boot, :reload_extensions, 30_000)
+
+      _ ->
+        {:error, :reload_not_supported}
+    end
+  catch
+    :exit, _ -> {:error, :daemon_unavailable}
+  end
+
   def status(opts) do
     case opts[:maintenance_table] do
       table when is_reference(table) ->

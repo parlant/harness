@@ -59,6 +59,10 @@ pub(crate) enum Account {
 pub(crate) enum Daemon {
     /// Check that the configured daemon responds to authenticated requests
     Status,
+    /// List currently loaded daemon extensions and reload generation
+    Extensions,
+    /// Hot-reload extensions from extensions.json without restarting the daemon
+    ReloadExtensions,
     /// Install the prebuilt launcher as a per-user macOS LaunchAgent
     InstallService {
         #[arg(long)]
@@ -305,6 +309,16 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
             action: Daemon::Status,
         } => client.get_environments().map(|_| {
             println!("Running: {}", client.target().display_endpoint());
+        }),
+        Command::Daemon {
+            action: Daemon::Extensions,
+        } => client.list_extensions().map(|info| {
+            print_extensions_summary(&info, false);
+        }),
+        Command::Daemon {
+            action: Daemon::ReloadExtensions,
+        } => client.reload_extensions().map(|info| {
+            print_extensions_summary(&info, true);
         }),
         Command::Daemon {
             action:
@@ -620,6 +634,28 @@ pub(crate) fn daemon_launcher(
         std::path::absolute(executable).map_err(|e| e.to_string())
     } else {
         Ok(resolved)
+    }
+}
+
+fn print_extensions_summary(info: &serde_json::Value, reloaded: bool) {
+    let gen = info["generation"].as_u64().unwrap_or(0);
+    let disabled = info["no_extensions"].as_bool().unwrap_or(false);
+    let extensions = info["extensions"].as_array();
+    let count = extensions.map_or(0, Vec::len);
+    if reloaded {
+        println!("Reloaded extensions (generation {gen}, {count} loaded).");
+    } else if disabled {
+        println!("Extensions disabled (--no-extensions, generation {gen}).");
+    } else {
+        println!("Extensions (generation {gen}, {count} loaded):");
+    }
+    if let Some(items) = extensions {
+        for ext in items {
+            let id = ext["id"].as_str().unwrap_or("?");
+            let module = ext["module"].as_str().unwrap_or("?");
+            let mods = ext["module_count"].as_u64().unwrap_or(0);
+            println!("  {id}\t{module}\t({mods} modules)");
+        }
     }
 }
 

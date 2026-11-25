@@ -380,6 +380,10 @@ defmodule H.Session.Server do
     {:noreply, cancel_idle_timer(%{state | wake_timers: %{}})}
   end
 
+  def handle_info({:extensions_reloaded, next_opts}, state) when is_list(next_opts) do
+    {:noreply, refresh_from_reloaded_extensions(state, next_opts)}
+  end
+
   def handle_info({:idle_timeout, token}, %{idle_timer: {_, token}} = state) do
     state = %{state | idle_timer: nil}
 
@@ -834,6 +838,52 @@ defmodule H.Session.Server do
 
   defp apply_effect({:abort_subagent, child_sid, child_cid, reason}, state) do
     Subagents.abort_child(child_sid, child_cid, reason, state)
+  end
+
+  defp refresh_from_reloaded_extensions(state, next_opts) do
+    next_daemon_opts =
+      state.daemon_opts
+      |> Keyword.merge(Keyword.take(next_opts, [:environments, :harnesses]))
+
+    next_provider_config =
+      case Keyword.fetch(next_opts, :codex_account_policy) do
+        {:ok, policy} -> Map.put(state.provider_config, :codex_account_policy, policy)
+        :error -> Map.delete(state.provider_config, :codex_account_policy)
+      end
+
+    next_tools =
+      if Keyword.get(state.daemon_opts, :explicit_tools) != nil do
+        state.tools
+      else
+        harness_id = Map.get(state, :harness_id) || "coding"
+        session_depth = get_in(state.session_meta, [:parent, :depth]) || 0
+
+        case H.Harness.resolve(harness_id, next_daemon_opts) do
+          {:ok, harness_mod} ->
+            harness_opts =
+              next_daemon_opts
+              |> Keyword.put(:session_depth, session_depth)
+              |> Keyword.put(:max_subagent_depth, state.max_subagent_depth)
+
+            try do
+              State.resolve_tools(harness_mod.tools(harness_opts))
+            rescue
+              _ -> state.tools
+            catch
+              _, _ -> state.tools
+            end
+
+          {:error, :unknown_harness} ->
+            %{}
+        end
+      end
+
+    %{
+      state
+      | daemon_opts: next_daemon_opts,
+        provider_config: next_provider_config,
+        tools: next_tools
+    }
   end
 
   defp cancel_wake_timer(tid, state) do

@@ -6,7 +6,7 @@
 
 [`H.ExecutionEnv`](../../lib/h/execution_env.ex) is the boundary for path resolution, workspace binding, filesystem operations and command execution. [`H.EnvRegistry`](../../lib/h/env_registry.ex) builds runtime handles from trusted `:environments` specs and publishes plain descriptors (`id`, `kind`, `label`, `default_cwd`). A session binds an environment and a working directory. Catalog queries and leases distinguish workspaces by `{env_id, cwd}`; an environment ID is not just a display label. The handle (`{module, state}`) is runtime data, never a session record or client value.
 
-`Host` uses the daemon user's access, not an OS sandbox. A workspace lease coordinates writers; it does not confine paths or stop arbitrary commands. Session file browse/read has its own path checks. Those checks do not imply containment for `exec`. `Remote` plus `H.RemoteAgent` exercise attempt fencing, heartbeat leases and cleanup **in the same VM**; they are not yet a network service or a security boundary.
+`Host` uses the daemon user's access, not an OS sandbox. A workspace lease coordinates writers; it does not confine paths or stop arbitrary commands. Session file browse/read has its own path checks. Those checks do not imply containment for `exec`. `Remote` plus `H.RemoteAgent` exercise attempt fencing, heartbeat leases, and cleanup both in-VM and across connected Erlang nodes (`H.ExecutionEnv.Remote.connect_node/3`, `env_spec_for_node/3`), allowing one local daemon ("brains") to coordinate tools on one or more separate BEAM nodes ("hands", e.g., inside Docker or on remote hosts over Erlang distribution). An internet-facing mTLS/SSH network transport across untrusted networks remains a separate future step.
 
 ## How to add one
 
