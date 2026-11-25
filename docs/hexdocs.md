@@ -2,7 +2,7 @@
 
 `hiness` packages the `:harness` OTP application (`H.*`): the local coding-agent daemon with branched conversations, file-backed WAL commits, and behaviour contracts for extensions, tools, storage backends, and execution environments.
 
-For binary installation (`hi`, `h-daemon`, `H.app`), interactive walkthroughs, and the full operator manual, visit **[hiness.dev](https://hiness.dev)** and **[hiness.app](https://hiness.app)**. Find published versions and dependency metadata on **[Hex](https://hex.pm/packages/hiness)**.
+For binary installation (`hi`, `h-daemon`, `H.app`), interactive walkthroughs, and the full operator manual, visit **[hiness.dev](https://hiness.dev)** and **[hiness.app](https://hiness.app)**.
 
 ## Embed `:harness` in an Elixir/OTP application
 

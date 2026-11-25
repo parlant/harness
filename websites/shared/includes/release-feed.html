@@ -12,13 +12,6 @@
         </div>
         <h3>{{ item.title | escape }}</h3>
         <p>{{ item.summary | escape }}</p>
-        {% if item.links %}
-        <ul class="principle-links">
-          {% for link in item.links %}
-          <li><a class="manual-secondary" href="{{ link.url | escape }}">{{ link.label | escape }}</a></li>
-          {% endfor %}
-        </ul>
-        {% endif %}
       </article>
       {% endfor %}
     </div>

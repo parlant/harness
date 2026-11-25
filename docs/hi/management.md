@@ -220,10 +220,9 @@ Prebuilt signed releases target `darwin-arm64`, `linux-arm64`, and `linux-x86_64
   back to `~/.bin` last; with optional `--service` for macOS LaunchAgent or
   Linux `systemd --user`).
 - **Mix archive installer (`installer/`, `h_setup`)**: zero-dependency Mix
-  archive. Install `h_setup.ez` from [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez)
-  to get `mix h.setup`, which verifies the same Ed25519 OpenSSH signature and
-  SHA-256 in pure Erlang/OTP `:crypto`. To embed the daemon instead, use
-  [`hiness` on Hex](https://hex.pm/packages/hiness) and follow the [Elixir API guide](https://hiness.hexdocs.pm/).
+  archive (`mix archive.install hex h_setup` or `mix archive.install <url>/h_setup.ez`)
+  providing `mix h.setup`, which verifies the same Ed25519 OpenSSH signature and
+  SHA-256 in pure Erlang/OTP `:crypto`.
 - **macOS application bundle (`H.app`, packaged as `.dmg` and `.app.zip`)**:
   built by `scripts/build-macos-app.sh` from a tested `darwin-arm64` bundle,
   embedding `Contents/Resources/harness` with a menu-bar controller for web UI

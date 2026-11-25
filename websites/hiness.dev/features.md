@@ -83,9 +83,9 @@ Connect a custom UI or automation script to H's `/api/v1` JSON commands and Serv
 
 ## Embed H in an Elixir/OTP application
 
-Add [`hiness` from Hex](https://hex.pm/packages/hiness) and run the supervised `:harness` daemon directly inside your application's BEAM VM. You get H's file-backed session store, recovery coordinator, and default host execution environment in-process, using the same pattern that powers `hiweb`. Supply a custom harness profile to define your application's agent instructions and tools, or implement `H.ExecutionEnv` to control how tools access files and commands.
+Add `:harness` as a Mix dependency and run the supervised daemon directly inside your application's BEAM VM. You get H's file-backed session store, recovery coordinator, and default host execution environment in-process, using the same pattern that powers `hiweb`. Supply a custom harness profile to define your application's agent instructions and tools, or implement `H.ExecutionEnv` to control how tools access files and commands.
 
-[Embed `:harness` in your OTP application](/docs/architecture/#embed-the-core-in-an-otp-application) or [browse the Elixir API on HexDocs](https://hiness.hexdocs.pm/).
+[Embed `:harness` in your OTP application](/docs/architecture/#embed-the-core-in-an-otp-application).
 
 ## Lean core, few dependencies
 

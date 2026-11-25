@@ -74,26 +74,6 @@ import {Completer, DirectoryComplete} from "./completion.js";
     }
   });
 
-  // Position row action popovers relative to their 3-dot trigger button.
-  document.addEventListener("toggle", event => {
-    const menu = event.target;
-    if (!(menu instanceof Element) || !menu.matches(".inbox-row-actions-menu[popover]")) return;
-    if (event.newState !== "open") return;
-    const trigger = document.querySelector(`[popovertarget="${CSS.escape(menu.id)}"]`);
-    if (!trigger) return;
-    const rect = trigger.getBoundingClientRect();
-    const gap = 4;
-    const menuWidth = menu.offsetWidth || 176;
-    const menuHeight = menu.offsetHeight || 160;
-    const left = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
-    const spaceBelow = window.innerHeight - rect.bottom - gap - 8;
-    const top = spaceBelow >= menuHeight || rect.top < menuHeight + gap + 8
-      ? Math.min(rect.bottom + gap, window.innerHeight - menuHeight - 8)
-      : Math.max(8, rect.top - menuHeight - gap);
-    menu.style.left = `${Math.round(left)}px`;
-    menu.style.top = `${Math.round(top)}px`;
-  }, true);
-
   // Native popovers and modal dialogs keep chrome out of the page's scroll flow.
   document.addEventListener("click", event => {
     if (event.defaultPrevented || !(event.target instanceof Element)) return;
@@ -154,20 +134,14 @@ import {Completer, DirectoryComplete} from "./completion.js";
           this.el.querySelector("#session-details").hidden = !open;
           trigger().setAttribute("aria-expanded", String(open));
         };
-        const setOpen = (value, returnFocus = true) => {
+        const setOpen = value => {
           open = value;
           this.renderSidebar();
           try { localStorage.setItem(key, open ? "open" : "closed"); } catch {}
-          if (!open && returnFocus) trigger().focus({preventScroll: true});
+          if (!open) trigger().focus({preventScroll: true});
         };
         this.el.addEventListener("click", event => {
-          if (event.target.closest("[data-session-sidebar-toggle]")) {
-            setOpen(!open);
-          } else if (open && event.button === 0 &&
-              !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey &&
-              event.target.closest("#session-sidebar-inbox-tree a[data-session-id], #sidebar-parent-lineage a")) {
-            setOpen(false, false);
-          }
+          if (event.target.closest("[data-session-sidebar-toggle]")) setOpen(!open);
         }, {signal});
         this.el.addEventListener("keydown", event => {
           if (event.key === "Escape" && !event.defaultPrevented && open &&
@@ -204,14 +178,8 @@ import {Completer, DirectoryComplete} from "./completion.js";
         this.reply = reply;
         this.completer = new Completer(this, this.el);
         this.onToggle = () => {
-          if (reply.open) {
-            this.scheduleAutogrow?.();
-            if (!reply.contains(document.activeElement) || document.activeElement.closest("summary")) {
-              this.el.focus({ preventScroll: true });
-            }
-          } else {
-            this.completer?.dismiss();
-          }
+          if (reply.open) this.scheduleAutogrow?.();
+          else this.completer?.dismiss();
         };
         reply.addEventListener("toggle", this.onToggle);
         const key = this.key = draftKey(this.el);

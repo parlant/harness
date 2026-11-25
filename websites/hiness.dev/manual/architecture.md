@@ -39,13 +39,7 @@ When a provider returns a retryable error, `H.Session.Server.Generation` commits
 
 ## Embed the core in an OTP application
 
-Add [`hiness` from Hex](https://hex.pm/packages/hiness) to an Elixir 1.20 / Erlang/OTP 29 project. Put this entry in your `mix.exs` dependencies and run `mix deps.get`:
-
-```elixir
-{:harness, "~> 0.3.0", hex: :hiness}
-```
-
-`hiness` is the package name. `:harness` is the OTP application and configuration key. Set `config :harness, data_dir: "/path/to/private/store"` in `config/runtime.exs` to start the supervised daemon without opening an HTTP port or API socket. Call `H.Daemon` in the same BEAM VM. Browse the [Elixir API reference on HexDocs](https://hiness.hexdocs.pm/), or inspect [the OTP application entry point](https://github.com/parlant/harness/blob/main/lib/h/application.ex) and [the Phoenix in-VM backend](https://github.com/parlant/harness/blob/main/clients/web/lib/h_web/backend/in_vm.ex).
+Once `hiness` is available on Hex, use Elixir 1.20 and Erlang/OTP 29, add `{:harness, "~> 0.3.0", hex: :hiness}` to `mix.exs` and run `mix deps.get`. `hiness` is the Hex package. `:harness` is the OTP application and configuration key. Set `config :harness, data_dir: "/path/to/private/store"` in `config/runtime.exs` to start the supervised daemon without opening an HTTP port or API socket. Call `H.Daemon` in the same BEAM VM. Browse the [Elixir API reference on HexDocs](https://hexdocs.pm/hiness), or inspect [the OTP application entry point](https://github.com/parlant/harness/blob/main/lib/h/application.ex) and [the Phoenix in-VM backend](https://github.com/parlant/harness/blob/main/clients/web/lib/h_web/backend/in_vm.ex).
 
 Start with the built-in file store and host execution environment. To customize agent instructions and tools for your application, [author a harness profile](/docs/extensions/#author-a-harness-profile). To control how tools read files or execute commands, implement the [`H.ExecutionEnv` behaviour](/docs/extensions/#choose-a-contract). Assign the session a dedicated workspace directory, remembering that the default host environment executes with your BEAM process's OS user permissions.
 

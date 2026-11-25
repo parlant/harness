@@ -7,19 +7,11 @@ gitlab_repo: "https://gitlab.com/parlant-co/harness"
 gitlab_releases: "https://gitlab.com/parlant-co/harness/-/releases"
 gitlab_latest_downloads: "https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads"
 hex_hiness: "https://hex.pm/packages/hiness"
-hexdocs_hiness: "https://hiness.hexdocs.pm/"
+hexdocs_hiness: "https://hexdocs.pm/hiness"
+hex_h_setup: "https://hex.pm/packages/h_setup"
+hexdocs_h_setup: "https://hexdocs.pm/h_setup"
 
 news:
-  - id: hiness-on-hex
-    date: "2026-11-25"
-    tag: "Hex package"
-    title: "hiness 0.3.0 is available on Hex"
-    summary: "Embed the H daemon in an Elixir application and call its API in the same BEAM VM. Use hiness as the Hex package name and :harness as the OTP application name."
-    links:
-      - label: View hiness on Hex
-        url: "https://hex.pm/packages/hiness"
-      - label: Read the Elixir API on HexDocs
-        url: "https://hiness.hexdocs.pm/"
   - id: domains-and-brand
     date: "2026-11-23"
     tag: "Brand & Domains"

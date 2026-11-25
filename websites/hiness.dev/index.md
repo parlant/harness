@@ -124,18 +124,14 @@ sections:
     kicker: 03 / Extensions and embedding
     title: Build on a lean core.
     artwork: vigee_lebrun_uffizi
-    body: Connect your own client to the local HTTP and SSE API, package a harness profile or execution environment as a startup extension, or install hiness from Hex to embed the :harness OTP application directly in your own BEAM VM. H uses a small set of direct dependencies and stores sessions in local files without an external database service.
+    body: Connect your own client to the local HTTP and SSE API, package a harness profile or execution environment as a startup extension, or embed the :harness OTP application directly in your own BEAM VM. H uses a small set of direct dependencies and stores sessions in local files without an external database service.
     links:
       - label: Build a custom client
         url: /docs/guides/build-a-client/
       - label: Write a startup extension
         url: /docs/extensions/
       - label: Embed H in an Elixir/OTP application
-        url: /docs/architecture/#embed-the-core-in-an-otp-application
-      - label: View hiness on Hex
-        url: https://hex.pm/packages/hiness
-      - label: Read the Elixir API on HexDocs
-        url: https://hiness.hexdocs.pm/
+        url: /features/#embed-h-in-an-elixirotp-application
   - layout: principle
     id: environments
     kicker: 04 / Execution environments
