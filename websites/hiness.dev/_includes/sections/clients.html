@@ -20,6 +20,6 @@
       </a>
     {% endfor %}
     {% if clients.note %}<p class="client-platforms">{{ clients.note }}</p>{% endif %}
-    {% if clients.demo %}<a class="manual-secondary" href="{{ clients.demo.url | relative_url }}">{{ clients.demo.label }} <span aria-hidden="true">→</span></a>{% endif %}
+    {% if clients.demo %}<a class="manual-secondary" href="{{ clients.demo.url | relative_url }}">{{ clients.demo.label }} {% include link-arrow.html %}</a>{% endif %}
   </div>
 </section>

@@ -6,6 +6,6 @@
   </div>
   <div>
     <p class="manual-lead">{{ operating.body }}</p>
-    <a class="manual-secondary" href="{{ operating.link.url | relative_url }}">{{ operating.link.label }} <span aria-hidden="true">→</span></a>
+    <a class="manual-secondary" href="{{ operating.link.url | relative_url }}">{{ operating.link.label }} {% include link-arrow.html %}</a>
   </div>
 </section>

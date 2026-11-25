@@ -28,8 +28,8 @@
     {% endfor %}
   </div>
   <div style="margin-top: 1.5rem; display: flex; gap: 1.5rem; flex-wrap: wrap;">
-    <a class="manual-secondary" href="{{ '/releases/' | relative_url }}">Read full changelog &amp; artifacts <span aria-hidden="true">→</span></a>
-    <a class="manual-secondary" href="{{ rel.github_releases }}">Download on GitHub Releases <span aria-hidden="true">→</span></a>
-    <a class="manual-secondary" href="{{ rel.gitlab_releases }}">Download on GitLab Releases <span aria-hidden="true">→</span></a>
+    <a class="manual-secondary" href="{{ '/releases/' | relative_url }}">Read full changelog &amp; artifacts {% include link-arrow.html %}</a>
+    <a class="manual-secondary" href="{{ rel.github_releases }}">Download on GitHub Releases {% include link-arrow.html %}</a>
+    <a class="manual-secondary" href="{{ rel.gitlab_releases }}">Download on GitLab Releases {% include link-arrow.html %}</a>
   </div>
 </section>

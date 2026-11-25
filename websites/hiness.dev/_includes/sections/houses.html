@@ -24,7 +24,7 @@
         <div><span>Contract</span><code>{{ h.module | escape }}</code></div>
       </div>
       <p class="house-summary">{{ h.summary | escape }}</p>
-      <a class="manual-secondary" href="{{ h.cta.url | relative_url }}">{{ h.cta.label | escape }} <span aria-hidden="true">→</span></a>
+      <a class="manual-secondary" href="{{ h.cta.url | relative_url }}">{{ h.cta.label | escape }} {% include link-arrow.html %}</a>
     </article>
     {% endfor %}
   </div>

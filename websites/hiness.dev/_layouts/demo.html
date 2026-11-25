@@ -46,7 +46,7 @@ layout: default
           </details>
         {% endfor %}
       </section>
-      <a class="manual-secondary" href="{{ guide.setup_url | relative_url }}">{{ guide.setup }} <span aria-hidden="true">→</span></a>
+      <a class="manual-secondary" href="{{ guide.setup_url | relative_url }}">{{ guide.setup }} {% include link-arrow.html %}</a>
     </div>
   </div>
 </div>

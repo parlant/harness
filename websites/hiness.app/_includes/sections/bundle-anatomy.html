@@ -32,7 +32,7 @@
       </article>
       {% endfor %}
       {% if sec.cta %}
-      <a class="manual-secondary" href="{{ sec.cta.url | relative_url }}">{{ sec.cta.label }} <span aria-hidden="true">→</span></a>
+      <a class="manual-secondary" href="{{ sec.cta.url | relative_url }}">{{ sec.cta.label }} {% include link-arrow.html %}</a>
       {% endif %}
     </div>
   </div>

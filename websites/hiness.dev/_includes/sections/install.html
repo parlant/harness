@@ -8,7 +8,7 @@
     {% if install.links %}
     <ul class="principle-links">
       {% for link in install.links %}
-      <li><a class="manual-secondary" href="{{ link.url | relative_url }}">{{ link.label }} <span aria-hidden="true">→</span></a></li>
+      <li><a class="manual-secondary" href="{{ link.url | relative_url }}">{{ link.label }} {% include link-arrow.html %}</a></li>
       {% endfor %}
     </ul>
     {% endif %}
@@ -55,9 +55,9 @@
           <li>
             {% assign is_external = link.url | slice: 0, 4 %}
             {% if is_external == "http" %}
-            <a class="manual-secondary" href="{{ link.url }}">{{ link.label }} <span aria-hidden="true">→</span></a>
+            <a class="manual-secondary" href="{{ link.url }}">{{ link.label }} {% include link-arrow.html %}</a>
             {% else %}
-            <a class="manual-secondary" href="{{ link.url | relative_url }}">{{ link.label }} <span aria-hidden="true">→</span></a>
+            <a class="manual-secondary" href="{{ link.url | relative_url }}">{{ link.label }} {% include link-arrow.html %}</a>
             {% endif %}
           </li>
           {% endfor %}
