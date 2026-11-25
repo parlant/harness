@@ -1,7 +1,7 @@
 defmodule H.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.3.1"
   @source_url "https://github.com/parlant/harness"
   @gitlab_url "https://gitlab.com/parlant-co/harness"
   @homepage_url "https://hiness.dev"
@@ -39,7 +39,7 @@ defmodule H.MixProject do
       },
       # The native bundle Mix tasks need a source checkout (clients/, scripts/, rel/).
       files:
-        ~w(lib/h lib/h.ex docs/hexdocs.md docs/hexdocs-logo.svg .formatter.exs mix.exs LICENSE)
+        ~w(lib/h lib/h.ex docs/hexdocs.md docs/hexdocs-logo.svg .formatter.exs mix.exs README.md LICENSE)
     ]
   end
 

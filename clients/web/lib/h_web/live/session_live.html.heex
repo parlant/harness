@@ -471,7 +471,9 @@
         phx-mounted={JS.ignore_attributes("open")}
       >
         <summary id="reply-toggle" class="reply-toggle">
-          <span class="reply-open-label">Reply</span>
+          <span class="reply-open-label">
+            {if @run_active? && !@fork_edit, do: "Enqueue or steer reply", else: "Reply"}
+          </span>
           <span class="reply-close-label">Hide reply</span>
           <span
             :if={@composer_text != "" || @uploads.attachment.entries != []}
@@ -564,7 +566,7 @@
           <p :if={@attachment_error} role="alert" class="attachment-error">{@attachment_error}</p>
 
           <div class="composer-actions">
-            <label class="btn composer-attach" title="Attach files">
+            <label class="bar-button composer-attach" title="Attach files">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
               </svg>
@@ -585,13 +587,15 @@
             >
               <span class="composer-profile-name">{profile.model_label}</span>
               <span class="composer-profile-effort muted" aria-hidden="true">· {profile.thinking_label}</span>
-              <span aria-hidden="true">⌄</span>
+              <svg class="composer-profile-caret" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m6 9 6 6 6-6" />
+              </svg>
             </button>
             <div class="composer-send-actions" role="group" aria-label="Message actions">
               <button
                 id="send-btn"
                 type="submit"
-                class="btn btn-primary"
+                class={["btn", if(!(@run_active? && !@fork_edit), do: "btn-primary")]}
                 title={
                   if @run_active? && !@fork_edit,
                     do: "Queue (Shift+Enter)",
@@ -604,7 +608,7 @@
                 type="submit"
                 name="mode"
                 value="steer"
-                class="btn btn-warn"
+                class="btn"
               >Steer</button>
               <ConversationComponents.stop_button :if={@run_active?} id="composer-stop-btn" />
             </div>
@@ -708,10 +712,11 @@
       <InboxComponents.workspace_tree
         id="session-sidebar-inbox-tree"
         groups={@folder_groups}
+        current_session_id={@session_id}
         inbox_filter={@folder_filter}
         compact={true}
         show_workspace_header={false}
-        empty_message="No other inbox sessions in this folder."
+        empty_message="No sessions in this folder."
       />
     </div>
   </aside>

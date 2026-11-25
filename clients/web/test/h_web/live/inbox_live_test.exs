@@ -233,7 +233,7 @@ defmodule HWeb.InboxLiveTest do
   end
 
   describe "navigation between /inbox and SessionLive switcher" do
-    test "navigates in inbox order while the sidebar shows only other sessions in its folder",
+    test "navigates in inbox order while the sidebar highlights the current session among its folder peers",
          %{
            conn: conn,
            projects_dir: cwd,
@@ -261,7 +261,12 @@ defmodule HWeb.InboxLiveTest do
       assert Enum.any?(Registry.lookup(pubsub, :catalog), fn {pid, _} -> pid == view.pid end)
       assert has_element?(view, ~s(#app-menu a[href="/inbox"]), "Inbox")
       assert has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="peer"]))
-      refute has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="current"]))
+
+      assert has_element?(
+               view,
+               ~s(#session-sidebar-inbox-tree a[data-session-id="current"].is-current[aria-current="page"])
+             )
+
       refute has_element?(view, ~s(#session-sidebar-inbox-tree a[data-session-id="elsewhere"]))
 
       assert {:ok, _} =

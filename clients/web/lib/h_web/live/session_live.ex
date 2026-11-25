@@ -843,7 +843,7 @@ defmodule HWeb.SessionLive do
 
     folder_sessions =
       Enum.filter(catalog.sessions, fn s ->
-        workspace == {s.env_id, s.cwd} and s.session_id != sid and not s.archived
+        workspace == {s.env_id, s.cwd} and (s.session_id == sid or not s.archived)
       end)
 
     folder_groups =

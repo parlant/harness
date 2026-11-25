@@ -334,6 +334,7 @@ defmodule HWeb.InboxComponents do
       end
 
     href = InboxFilter.session_path(session.session_id, assigns.inbox_filter, assigns.from_inbox)
+    actions_menu_id = "inbox-row-actions-#{session.session_id}"
 
     assigns =
       assigns
@@ -348,6 +349,7 @@ defmodule HWeb.InboxComponents do
       |> assign(:at_entry_id, at_entry_id)
       |> assign(:worktree_label, worktree_label)
       |> assign(:href, href)
+      |> assign(:actions_menu_id, actions_menu_id)
 
     ~H"""
     <div
@@ -372,6 +374,7 @@ defmodule HWeb.InboxComponents do
         data-needs-attention={to_string(@needs_attention?)}
         data-subsession={to_string(@subsession?)}
         data-archived={to_string(@session.archived)}
+        aria-current={if @current?, do: "page"}
         class={[
           "inbox-row",
           if(@compact, do: "is-compact"),
@@ -459,74 +462,107 @@ defmodule HWeb.InboxComponents do
       </.link>
 
       <div :if={not @compact and not @imported_archive?} class="inbox-row-actions">
-        <.link
-          :if={not @missing_cwd? and @session.status != "quarantined"}
-          navigate={InboxFilter.review_path(@session.session_id, @inbox_filter, @from_inbox)}
-          class="btn btn-sm btn-ghost inbox-action-btn"
-          aria-label={"Review files for #{@session.session_id}"}
-        >
-          Files
-        </.link>
         <button
-          :if={not @subsession? and not @processing? and not @session.archived}
           type="button"
-          class={[
-            "btn btn-sm btn-ghost inbox-action-btn",
-            if(@needs_attention?, do: "is-attention-on")
-          ]}
-          phx-click="toggle_attention"
-          phx-value-sid={@session.session_id}
-          phx-value-needs-attention={to_string(!@session.needs_attention)}
-          title={
-            if @session.needs_attention,
-              do: "Mark as not needing attention",
-              else: "Mark as needing attention"
-          }
-          aria-label={
-            if @session.needs_attention,
-              do: "Mark #{@session.session_id} as not needing attention",
-              else: "Mark #{@session.session_id} as needing attention"
-          }
+          class="bar-button inbox-row-menu-button"
+          popovertarget={@actions_menu_id}
+          aria-haspopup="menu"
+          aria-controls={@actions_menu_id}
+          aria-label={"Session actions for #{@session.session_id}"}
+          title="Session actions"
         >
-          {if @session.needs_attention, do: "✓ Done", else: "● Attention"}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.5" />
+            <circle cx="12" cy="12" r="1.5" />
+            <circle cx="19" cy="12" r="1.5" />
+          </svg>
         </button>
 
-        <button
-          :if={@processing?}
-          type="button"
-          class="btn btn-sm btn-danger inbox-action-btn"
-          phx-click="stop_session"
-          phx-value-sid={@session.session_id}
-          title="Stop active work in this session"
-          aria-label={"Stop #{@session.session_id}"}
+        <div
+          id={@actions_menu_id}
+          class="app-menu inbox-row-actions-menu"
+          popover
+          role="menu"
+          aria-label={"Actions for #{@session.session_id}"}
         >
-          Stop
-        </button>
+          <.link
+            :if={not @missing_cwd? and @session.status != "quarantined"}
+            navigate={InboxFilter.review_path(@session.session_id, @inbox_filter, @from_inbox)}
+            class="inbox-action-btn"
+            role="menuitem"
+            aria-label={"Review files for #{@session.session_id}"}
+          >
+            Files
+          </.link>
+          <button
+            :if={not @subsession? and not @processing? and not @session.archived}
+            type="button"
+            role="menuitem"
+            class={[
+              "inbox-action-btn",
+              if(@needs_attention?, do: "is-attention-on")
+            ]}
+            phx-click="toggle_attention"
+            phx-value-sid={@session.session_id}
+            phx-value-needs-attention={to_string(!@session.needs_attention)}
+            data-dismiss-menu
+            title={
+              if @session.needs_attention,
+                do: "Mark as not needing attention",
+                else: "Mark as needing attention"
+            }
+            aria-label={
+              if @session.needs_attention,
+                do: "Mark #{@session.session_id} as not needing attention",
+                else: "Mark #{@session.session_id} as needing attention"
+            }
+          >
+            {if @session.needs_attention, do: "✓ Done", else: "● Attention"}
+          </button>
 
-        <button
-          :if={not @session.archived}
-          type="button"
-          class="btn btn-sm btn-ghost inbox-action-btn"
-          phx-click="archive_session"
-          phx-value-sid={@session.session_id}
-          phx-value-stop={to_string(@processing?)}
-          title="Archive and unload session"
-          aria-label={"Archive #{@session.session_id}"}
-        >
-          Archive
-        </button>
+          <button
+            :if={@processing?}
+            type="button"
+            role="menuitem"
+            class="inbox-action-btn is-danger"
+            phx-click="stop_session"
+            phx-value-sid={@session.session_id}
+            data-dismiss-menu
+            title="Stop active work in this session"
+            aria-label={"Stop #{@session.session_id}"}
+          >
+            Stop
+          </button>
 
-        <button
-          :if={@session.archived}
-          type="button"
-          class="btn btn-sm btn-ghost inbox-action-btn"
-          phx-click="unarchive_session"
-          phx-value-sid={@session.session_id}
-          title="Restore session to Inbox"
-          aria-label={"Unarchive #{@session.session_id}"}
-        >
-          Unarchive
-        </button>
+          <button
+            :if={not @session.archived}
+            type="button"
+            role="menuitem"
+            class="inbox-action-btn"
+            phx-click="archive_session"
+            phx-value-sid={@session.session_id}
+            phx-value-stop={to_string(@processing?)}
+            data-dismiss-menu
+            title="Archive and unload session"
+            aria-label={"Archive #{@session.session_id}"}
+          >
+            Archive
+          </button>
+
+          <button
+            :if={@session.archived}
+            type="button"
+            role="menuitem"
+            class="inbox-action-btn"
+            phx-click="unarchive_session"
+            phx-value-sid={@session.session_id}
+            data-dismiss-menu
+            title="Restore session to Inbox"
+            aria-label={"Unarchive #{@session.session_id}"}
+          >
+            Unarchive
+          </button>
+        </div>
       </div>
     </div>
     """

@@ -1,8 +1,15 @@
 # H (`hiness`) Elixir API Reference
 
-`hiness` packages the `:harness` OTP application (`H.*`): the local coding-agent daemon with branched conversations, file-backed WAL commits, and behaviour contracts for extensions, tools, storage backends, and execution environments.
+`hiness` packages the `:harness` OTP application (`H.*`): a local coding-agent daemon built on Elixir/OTP with durable branched conversations, file-backed WAL commits, multi-client streaming, and behaviour contracts for extensions, tools, storage backends, providers, and execution environments.
 
-For binary installation (`hi`, `h-daemon`, `H.app`), interactive walkthroughs, and the full operator manual, visit **[hiness.dev](https://hiness.dev)** and **[hiness.app](https://hiness.app)**.
+For binary installation (`hi`, `h-daemon`, `hiweb`, `H.app`), interactive walkthroughs, and the full operator manual, visit **[hiness.dev](https://hiness.dev)** and **[hiness.app](https://hiness.app)**. Find published versions and dependency metadata on **[Hex](https://hex.pm/packages/hiness)**.
+
+## Why `:harness`
+
+- **Durable branched sessions**: Every session is backed by an append-only WAL and snapshots (`H.Storage.File`). Conversations branch without copying transcripts, and interrupted work recovers cleanly across daemon restarts without replaying unsafe external side effects.
+- **Process-per-session runtime**: Each active session runs under `H.Session.Supervisor` with explicit state transitions, workspace leasing (`H.WorkspaceLease`), cooperative draining, and idle unloading.
+- **Multi-client by design**: Terminal (`hi`), web (`hiweb`), and in-VM Elixir callers share the same conversation over `H.Daemon` or local HTTP/SSE; disconnecting a client never stops a run.
+- **Pluggable OTP contracts**: Implement `H.Extension`, `H.Harness`, `H.Tool`, `H.Storage`, `H.Provider`, `H.Provider.AccountPolicy`, or `H.ExecutionEnv` to customize behavior without forking the daemon.
 
 ## Embed `:harness` in an Elixir/OTP application
 
@@ -11,7 +18,7 @@ Use Elixir 1.20 and Erlang/OTP 29. Add this dependency to `mix.exs` and run `mix
 ```elixir
 def deps do
   [
-    {:harness, "~> 0.3.0", hex: :hiness}
+    {:harness, "~> 0.3.1", hex: :hiness}
   ]
 end
 ```
@@ -24,17 +31,31 @@ import Config
 config :harness, data_dir: "/path/to/private/store"
 ```
 
-With this configuration, `H.Application` starts the daemon without TCP or Unix API listeners by default. Call `H.Daemon` in-VM to create sessions, submit commands, and read conversation or catalog streams. Give the instance its own `:data_dir`; `H.StoreLock` holds the store exclusively. Host tools execute with the OS user's file and shell permissions.
+With this configuration, `H.Application` starts the daemon without TCP or Unix API listeners by default. Call `H.Daemon` in-VM to create sessions, submit commands, and read conversation or catalog streams:
 
-For a standalone listener, leave the embedded configuration unset and call `H.serve/1` instead:
+```elixir
+{:ok, %{session_id: sid}} = H.Daemon.create_session(%{cwd: "/path/to/project"})
+{:ok, _} = H.Daemon.submit(sid, %{"content" => "Summarize this repository."})
+{:ok, session} = H.Daemon.get_session(sid)
+```
+
+Give each instance its own `:data_dir`; `H.StoreLock` holds the store exclusively. Host tools execute with the OS user's file and shell permissions.
+
+For a standalone HTTP/SSE listener, leave the embedded configuration unset and call `H.serve/1` instead:
 
 ```elixir
 {:ok, info} = H.serve(data_dir: "/path/to/private/store", port: 4100)
 ```
 
-## Install the standalone CLI and web workbench
+## Install the standalone CLI, web workbench, and macOS app
 
-The Hex package contains the daemon and its Elixir API. To run `hi` and `hiweb`, follow the [signed bundle installation guide](https://hiness.dev/docs/setup/).
+The Hex package contains the core daemon and its Elixir API. To install the signed native bundle (`hi`, `hiweb`, `h-daemon`), run the shell installer or Mix archive from **[hiness.dev](https://hiness.dev/docs/setup/)**:
+
+```sh
+curl -fsSL https://hiness.dev/install.sh | sh -s -- --service
+```
+
+On macOS (`arm64`), download `H.app` from **[hiness.app](https://hiness.app)** or the GitHub/GitLab releases.
 
 ## Module map and canonical guides
 

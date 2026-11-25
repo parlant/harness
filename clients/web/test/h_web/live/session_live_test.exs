@@ -452,7 +452,7 @@ defmodule HWeb.SessionLiveTest do
         daemon_opts
       )
 
-    # A sibling in the same folder can be shown, but not the session already open.
+    # Both the current subsession and sibling subsessions appear under the parent once toggled on.
     assert has_element?(
              view,
              ~s(#session-sidebar-inbox-tree a[data-session-id="#{parent_session.session_id}"])
@@ -463,7 +463,7 @@ defmodule HWeb.SessionLiveTest do
              ~s(#session-sidebar-inbox-tree a[data-session-id="#{child_session.session_id}"])
            )
 
-    wait_until(fn -> has_element?(view, "#session-sidebar-subsessions-toggle", "1") end)
+    wait_until(fn -> has_element?(view, "#session-sidebar-subsessions-toggle", "2") end)
 
     refute has_element?(
              view,
@@ -477,9 +477,9 @@ defmodule HWeb.SessionLiveTest do
              ~s(#session-sidebar-inbox-tree .inbox-subsession-list a[data-session-id="#{sibling.session_id}"])
            )
 
-    refute has_element?(
+    assert has_element?(
              view,
-             ~s(#session-sidebar-inbox-tree a[data-session-id="#{child_session.session_id}"])
+             ~s(#session-sidebar-inbox-tree .inbox-subsession-list a[data-session-id="#{child_session.session_id}"].is-current[aria-current="page"])
            )
   end
 
