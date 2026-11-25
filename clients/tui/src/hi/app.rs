@@ -211,6 +211,7 @@ struct Ui {
     pending_cwd_fork: Option<PendingCwdFork>,
     pending_tree_fork_edit: Option<PendingTreeForkEdit>,
     config: UserConfig,
+    config_gen: u64,
     status_metadata: StatusMetadata,
     data_dir: PathBuf,
     job: Option<Job>,
@@ -271,6 +272,7 @@ pub fn run(
         pending_cwd_fork: None,
         pending_tree_fork_edit: None,
         config,
+        config_gen: 0,
         status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
         job: None,
@@ -333,6 +335,7 @@ pub fn run_inbox(
         pending_cwd_fork: None,
         pending_tree_fork_edit: None,
         config,
+        config_gen: 0,
         status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
         job: None,
@@ -387,9 +390,17 @@ fn run_loop(
             }
             repaint |= ui.drain_session_catalog_updates();
             repaint |= ui.complete_path_lookup();
-            repaint |=
-                ui.status_metadata
-                    .tick(&ui.target, &ui.client, &ui.config.status, ui.online);
+            let ext_scope = ui
+                .config
+                .extension_status
+                .then(|| (ui.state.agent_model().unwrap_or("default"), ui.config_gen));
+            repaint |= ui.status_metadata.tick(
+                &ui.target,
+                &ui.client,
+                &ui.config.status,
+                ui.online,
+                ext_scope,
+            );
             repaint |= ui.login.as_mut().is_some_and(|flow| flow.tick(&ui.client));
             if ui.online && ui.state.seq.is_some() && ui.job.is_none() {
                 if let Some(text) = initial.take() {
@@ -2013,6 +2024,7 @@ impl Ui {
                 match candidate {
                     Ok(config) => {
                         self.config = config;
+                        self.config_gen = self.config_gen.wrapping_add(1);
                         self.rows_dirty = true;
                         self.note = "Hi configuration reloaded".into();
                     }
@@ -3100,6 +3112,7 @@ mod tests {
             pending_cwd_fork: None,
             pending_tree_fork_edit: None,
             config: UserConfig::default(),
+            config_gen: 0,
             status_metadata: StatusMetadata::default(),
             data_dir: std::env::temp_dir().join("hi-app-nonexistent-config"),
             job: None,

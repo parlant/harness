@@ -71,6 +71,10 @@ struct Cli {
     #[arg(long = "env", value_name = "ID", default_value = "host")]
     env_id: String,
 
+    /// Agent harness profile ID
+    #[arg(long = "harness", value_name = "ID")]
+    harness_id: Option<String>,
+
     /// Attach to a specific session ID
     #[arg(short = 's', long = "session", value_name = "ID")]
     session: Option<String>,
@@ -161,7 +165,7 @@ pub fn hi_main() -> ExitCode {
     if args
         .get(1)
         .and_then(|arg| arg.to_str())
-        .is_some_and(|arg| matches!(arg, "login" | "account" | "daemon"))
+        .is_some_and(|arg| matches!(arg, "login" | "logout" | "account" | "key" | "daemon"))
     {
         return report(
             crate::manage::run(crate::manage::Manage::parse_from(args)).map_err(AppError::Message),
@@ -187,7 +191,7 @@ pub fn hi_main() -> ExitCode {
         }
     }
     let cmd = Cli::command().after_help(
-        "Subcommands: hi inbox, hi login, hi account, hi daemon. Extensions: hi <name> runs hi-<name> from PATH (e.g. hi import). Use -- for a literal prompt.",
+        "Subcommands: hi inbox, hi login, hi logout, hi account, hi key, hi daemon. Extensions: hi <name> runs hi-<name> from PATH (e.g. hi import). Use -- for a literal prompt.",
     );
     let cli = Cli::from_arg_matches(&cmd.get_matches_from(args)).unwrap_or_else(|err| err.exit());
     report(run(cli))
@@ -372,6 +376,7 @@ struct AttachedTarget {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SessionCreateOptions {
+    harness_id: Option<String>,
     model: Option<String>,
     thinking: Option<String>,
     title: Option<String>,
@@ -380,6 +385,12 @@ struct SessionCreateOptions {
 
 impl SessionCreateOptions {
     fn from_cli(cli: &Cli) -> Self {
+        let harness_id = cli
+            .harness_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let model = cli
             .model
             .as_deref()
@@ -411,6 +422,7 @@ impl SessionCreateOptions {
                 depth: None,
             });
         Self {
+            harness_id,
             model,
             thinking,
             title,
@@ -419,7 +431,8 @@ impl SessionCreateOptions {
     }
 
     fn has_creation_flags(&self) -> bool {
-        self.model.is_some()
+        self.harness_id.is_some()
+            || self.model.is_some()
             || self.thinking.is_some()
             || self.title.is_some()
             || self.parent.is_some()
@@ -515,6 +528,8 @@ fn apply_attached_overrides(
             cid_num,
             opts.model.as_deref(),
             opts.thinking.as_deref(),
+            None,
+            None,
         );
         post_command_with_retry(client, &target.session_id, &env)?;
     }
@@ -591,6 +606,7 @@ fn create_session_with_options(
         version: 1,
         request_id: generate_request_id(),
         env_id: env_id.to_string(),
+        harness_id: opts.harness_id.clone(),
         cwd: cwd.to_string(),
         session_id,
         title: opts.title.clone(),
@@ -882,6 +898,8 @@ mod tests {
             "http://127.0.0.1:4100",
             "--env",
             "vm-1",
+            "--harness",
+            "acme.review.v1",
             "-s",
             "sess-9",
             "-c",
@@ -893,6 +911,7 @@ mod tests {
         assert_eq!(cli.data_dir, Some(PathBuf::from("/tmp/h-data")));
         assert_eq!(cli.daemon_url.as_deref(), Some("http://127.0.0.1:4100"));
         assert_eq!(cli.env_id, "vm-1");
+        assert_eq!(cli.harness_id.as_deref(), Some("acme.review.v1"));
         assert_eq!(cli.session.as_deref(), Some("sess-9"));
         assert!(cli.continue_latest);
         assert_eq!(cli.print_prompt.as_deref(), Some("hello"));
@@ -1386,6 +1405,7 @@ mod tests {
         );
 
         let opts = SessionCreateOptions {
+            harness_id: Some("acme.review.v1".to_string()),
             model: Some("google:gemini-4-neon".to_string()),
             thinking: Some("high".to_string()),
             title: Some("Worker".to_string()),
@@ -1446,6 +1466,7 @@ mod tests {
         let reqs = captured.lock().unwrap();
         assert_eq!(reqs.len(), 4);
         assert_eq!(reqs[0].0, "POST /api/v1/sessions HTTP/1.1");
+        assert_eq!(reqs[0].1["harness_id"], "acme.review.v1");
         assert_eq!(reqs[0].1["title"], "Worker");
         assert_eq!(reqs[0].1["agent"]["model"], "google:gemini-4-neon");
         assert_eq!(reqs[0].1["agent"]["thinking"], "high");

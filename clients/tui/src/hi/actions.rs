@@ -537,7 +537,7 @@ pub fn execute(
             }
             let cid_num = parse_cid(&target.cid)?;
             let envelope =
-                CommandEnvelope::abort(generate_request_id(), cid_num, Some("user_abort"));
+                CommandEnvelope::abort(generate_request_id(), cid_num, None, Some("user_abort"));
             let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
             Ok(Reply::Receipt(receipt))
         }
@@ -1040,6 +1040,7 @@ fn create_new_session(client: &DaemonClient, target: &Target) -> Result<Reply, S
         version: 1,
         request_id: generate_request_id(),
         env_id: expected_env_id.clone(),
+        harness_id: None,
         cwd: target.cwd.clone(),
         session_id: Some(stable_sid.clone()),
         title: None,

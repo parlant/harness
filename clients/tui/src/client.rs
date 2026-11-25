@@ -1,9 +1,10 @@
 use crate::config::{DaemonTarget, LoopbackHost, SecretToken};
 use crate::protocol::{
     CommandEnvelope, CommandReceipt, CreateSessionRequest, CreateSessionResponse,
-    EntriesPageResponse, EnvironmentInfo, EnvironmentsResponse, ErrorResponse, ModelInfo,
-    ModelsResponse, SessionDetailResponse, SessionSummary, SessionTreeResponse, SessionsResponse,
-    SseEvent, SseParser,
+    EntriesPageResponse, EnvironmentInfo, EnvironmentsResponse, ErrorResponse,
+    ExtensionStatusResponse, HarnessDescriptor, HarnessesResponse, ModelInfo, ModelsResponse,
+    SessionDetailResponse, SessionSummary, SessionTreeResponse, SessionsResponse, SseEvent,
+    SseParser,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -325,12 +326,28 @@ impl DaemonClient {
         }
     }
 
-    pub(crate) fn reload_extensions(&self) -> Result<serde_json::Value, ClientError> {
-        self.post_json("/api/v1/extensions/reload", &serde_json::json!({}))
-    }
-
     pub(crate) fn list_extensions(&self) -> Result<serde_json::Value, ClientError> {
         self.get_json("/api/v1/extensions")
+    }
+
+    pub fn list_harnesses(&self) -> Result<Vec<HarnessDescriptor>, ClientError> {
+        let resp: HarnessesResponse = self.get_json("/api/v1/harnesses")?;
+        Ok(resp.harnesses)
+    }
+
+    pub fn extension_status(
+        &self,
+        sid: &str,
+        cid: &str,
+    ) -> Result<ExtensionStatusResponse, ClientError> {
+        validate_path_segment("session_id", sid)?;
+        validate_path_segment("conversation_id", cid)?;
+        let path = format!(
+            "/api/v1/sessions/{}/conversations/{}/extension-status",
+            percent_encode(sid),
+            percent_encode(cid)
+        );
+        self.get_json(&path)
     }
 
     pub fn get_environments(&self) -> Result<Vec<EnvironmentInfo>, ClientError> {
@@ -368,6 +385,14 @@ impl DaemonClient {
     pub fn use_api_key(&self, provider: &str, source: &str) -> Result<(), ClientError> {
         let _: serde_json::Value = self.post_json(
             "/api/v1/provider-keys/use",
+            &serde_json::json!({"provider": provider, "source": source}),
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_api_key(&self, provider: &str, source: &str) -> Result<(), ClientError> {
+        let _: serde_json::Value = self.post_json(
+            "/api/v1/provider-keys/remove",
             &serde_json::json!({"provider": provider, "source": source}),
         )?;
         Ok(())
@@ -416,6 +441,14 @@ impl DaemonClient {
     pub fn activate_codex_account(&self, source: &str) -> Result<(), ClientError> {
         let _: serde_json::Value = self.post_json(
             "/api/v1/provider-accounts/activate",
+            &serde_json::json!({"source": source}),
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_codex_account(&self, source: &str) -> Result<(), ClientError> {
+        let _: serde_json::Value = self.post_json(
+            "/api/v1/provider-accounts/remove",
             &serde_json::json!({"source": source}),
         )?;
         Ok(())
@@ -1474,6 +1507,7 @@ mod tests {
                 version: 1,
                 request_id: "c1".to_string(),
                 env_id: "host".to_string(),
+                harness_id: None,
                 cwd: "/tmp/my proj".to_string(),
                 session_id: None,
                 title: None,
@@ -1768,6 +1802,77 @@ mod tests {
 
         let err = client.list_session_files("s1", None, None).unwrap_err();
         assert!(matches!(err, ClientError::HttpStatus { status: 503, .. }));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn r6a_management_harnesses_and_extension_status_endpoints() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock_path = std::env::temp_dir().join(format!("h-client-r6a-{nanos}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let handle = thread::spawn(move || {
+            let reply_ok = |s: &mut UnixStream, body: &str| {
+                write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            };
+
+            let (mut s1, _) = listener.accept().unwrap();
+            let req1 = read_http_req(&mut s1);
+            assert!(req1.starts_with("POST /api/v1/provider-accounts/remove HTTP/1.1"));
+            assert!(req1.contains(r#""source":"work""#));
+            reply_ok(&mut s1, r#"{"removed":"work"}"#);
+
+            let (mut s2, _) = listener.accept().unwrap();
+            let req2 = read_http_req(&mut s2);
+            assert!(req2.starts_with("POST /api/v1/provider-keys/remove HTTP/1.1"));
+            assert!(req2.contains(r#""provider":"openai""#));
+            assert!(req2.contains(r#""source":"work""#));
+            reply_ok(&mut s2, r#"{"removed":true}"#);
+
+            let (mut s3, _) = listener.accept().unwrap();
+            let req3 = read_http_req(&mut s3);
+            assert!(req3.starts_with("GET /api/v1/harnesses HTTP/1.1"));
+            reply_ok(
+                &mut s3,
+                r#"{"harnesses":[{"id":"coding","name":"Coding","description":"Default","aliases":["pi"]}]}"#,
+            );
+
+            let (mut s4, _) = listener.accept().unwrap();
+            let req4 = read_http_req(&mut s4);
+            assert!(req4
+                .starts_with("GET /api/v1/sessions/s1/conversations/1/extension-status HTTP/1.1"));
+            reply_ok(
+                &mut s4,
+                r#"{"version":1,"session_id":"s1","conversation_id":"1","model":"fake/m","max_age_ms":2500,"extensions":{"pool":{"eligible_sources":2}}}"#,
+            );
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::UnixSocket(sock_path.clone()),
+            SecretToken::new("tok-r6a").unwrap(),
+        );
+        client.remove_codex_account("work").unwrap();
+        client.remove_api_key("openai", "work").unwrap();
+        let harnesses = client.list_harnesses().unwrap();
+        assert_eq!(harnesses.len(), 1);
+        assert_eq!(harnesses[0].id, "coding");
+        let ext = client.extension_status("s1", "1").unwrap();
+        assert_eq!(ext.max_age_ms, Some(2500));
+        assert_eq!(
+            ext.extensions["pool"]["eligible_sources"],
+            serde_json::json!(2)
+        );
 
         handle.join().unwrap();
         let _ = std::fs::remove_file(&sock_path);

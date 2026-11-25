@@ -4,7 +4,7 @@ use crate::{client::DaemonClient, render::sanitize_single_line, transcript::Tran
 use minijinja::{escape_formatter, Environment, UndefinedBehavior, Value};
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env, fs,
     io::{self, Read},
     path::Path,
@@ -80,6 +80,7 @@ pub(super) struct StatusFields<'a> {
     shell_preview: String,
     shell_status: Option<&'a str>,
     shell_prefix: Option<&'static str>,
+    extensions: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 impl<'a> StatusFields<'a> {
@@ -177,6 +178,26 @@ pub(super) struct StatusMetadata {
     catalog: HashMap<String, u64>,
     next_catalog_check: Option<Instant>,
     catalog_job: Option<Receiver<Option<HashMap<String, u64>>>>,
+    extension_scope: Option<(String, String, String, u64)>,
+    extensions: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    extensions_expires_at: Option<Instant>,
+    next_extension_check: Option<Instant>,
+    extension_not_found: bool,
+    extension_job: Option<Receiver<ExtensionStatusFetch>>,
+}
+
+struct ExtensionStatusFetch {
+    scope: (String, String, String, u64),
+    outcome: ExtensionStatusOutcome,
+}
+
+enum ExtensionStatusOutcome {
+    Ok {
+        extensions: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+        max_age_ms: u64,
+    },
+    NotFound,
+    Error,
 }
 
 impl StatusMetadata {
@@ -186,6 +207,7 @@ impl StatusMetadata {
         client: &DaemonClient,
         status: &StatusLines,
         online: bool,
+        extension_scope: Option<(&str, u64)>,
     ) -> bool {
         let mut changed = false;
         if self.workspace.0 != target.env_id || self.workspace.1 != target.cwd {
@@ -242,6 +264,107 @@ impl StatusMetadata {
             }));
             self.next_catalog_check = Some(now + Duration::from_secs(30));
         }
+
+        let desired_scope = extension_scope.map(|(model, config_gen)| {
+            (
+                target.sid.clone(),
+                target.cid.clone(),
+                model.to_string(),
+                config_gen,
+            )
+        });
+        if desired_scope != self.extension_scope {
+            self.extension_scope = desired_scope.clone();
+            if !self.extensions.is_empty() {
+                self.extensions.clear();
+                changed = true;
+            }
+            self.extensions_expires_at = None;
+            self.next_extension_check = None;
+            self.extension_not_found = false;
+            self.extension_job = None;
+        }
+
+        let Some(desired_scope) = desired_scope else {
+            return changed;
+        };
+        if !online {
+            if !self.extensions.is_empty() {
+                self.extensions.clear();
+                changed = true;
+            }
+            self.extensions_expires_at = None;
+            return changed;
+        }
+
+        if self.extensions_expires_at.is_some_and(|exp| now >= exp) {
+            self.extensions_expires_at = None;
+            if !self.extensions.is_empty() {
+                self.extensions.clear();
+                changed = true;
+            }
+        }
+
+        if let Some(fetch) = take_ready(&mut self.extension_job) {
+            if fetch.scope == desired_scope {
+                match fetch.outcome {
+                    ExtensionStatusOutcome::Ok {
+                        extensions,
+                        max_age_ms,
+                    } => {
+                        changed |= extensions != self.extensions;
+                        self.extensions = extensions;
+                        let ttl = Duration::from_millis(max_age_ms.max(1));
+                        self.extensions_expires_at = Some(now + ttl);
+                        self.next_extension_check = Some(now + ttl.min(Duration::from_secs(5)));
+                        self.extension_not_found = false;
+                    }
+                    ExtensionStatusOutcome::NotFound => {
+                        if !self.extensions.is_empty() {
+                            self.extensions.clear();
+                            changed = true;
+                        }
+                        self.extensions_expires_at = None;
+                        self.extension_not_found = true;
+                    }
+                    ExtensionStatusOutcome::Error => {
+                        if !self.extensions.is_empty() {
+                            self.extensions.clear();
+                            changed = true;
+                        }
+                        self.extensions_expires_at = None;
+                        self.next_extension_check = Some(now + Duration::from_secs(5));
+                    }
+                }
+            }
+        }
+
+        if !self.extension_not_found
+            && !target.sid.trim().is_empty()
+            && !target.cid.trim().is_empty()
+            && self.extension_job.is_none()
+            && self.next_extension_check.is_none_or(|due| now >= due)
+        {
+            let client = client.clone();
+            let sid = target.sid.clone();
+            let cid = target.cid.clone();
+            let scope = desired_scope;
+            self.extension_job = Some(background(move || {
+                let outcome = match client.extension_status(&sid, &cid) {
+                    Ok(resp) => ExtensionStatusOutcome::Ok {
+                        extensions: resp.extensions,
+                        max_age_ms: resp.max_age_ms.unwrap_or(5_000),
+                    },
+                    Err(crate::client::ClientError::HttpStatus { status: 404, .. }) => {
+                        ExtensionStatusOutcome::NotFound
+                    }
+                    Err(_) => ExtensionStatusOutcome::Error,
+                };
+                ExtensionStatusFetch { scope, outcome }
+            }));
+            self.next_extension_check = Some(now + Duration::from_secs(5));
+        }
+
         changed
     }
 
@@ -249,6 +372,13 @@ impl StatusMetadata {
         if self.workspace.0 == fields.env_id && self.workspace.1 == fields.cwd {
             fields.cwd_short = &self.cwd_short;
             fields.git_branch = self.branch.as_deref();
+        }
+        if !self.extensions.is_empty()
+            && self
+                .extensions_expires_at
+                .is_none_or(|exp| Instant::now() < exp)
+        {
+            fields.extensions = self.extensions.clone();
         }
         if self.catalog.is_empty() {
             return;
@@ -746,5 +876,177 @@ mod tests {
         let rows = lines.render(&fields);
         assert!(rows[0].starts_with("Status template: status_lines[1]:"));
         assert_eq!(rows[1], "still here");
+    }
+
+    #[test]
+    fn extensions_field_works_in_strict_minijinja_while_rejecting_unknown_top_level_vars() {
+        let status = StatusLines::compile(
+            None,
+            vec![
+                "{% if extensions.account_pool is defined and extensions.account_pool.eligible_sources is defined %}pool {{ extensions.account_pool.eligible_sources }}{% endif %}".into(),
+            ],
+        )
+        .unwrap();
+        let target = target();
+        let state = TranscriptState::default();
+        let mut fields = StatusFields::from_session(&target, &state);
+        // Empty by default: template renders empty append line (filtered out)
+        assert_eq!(status.render(&fields).len(), 2);
+
+        let mut pool = BTreeMap::new();
+        pool.insert("eligible_sources".to_string(), json!(3));
+        fields.extensions.insert("account_pool".to_string(), pool);
+        let rendered = status.render(&fields);
+        assert_eq!(rendered.len(), 3);
+        assert_eq!(rendered[2], "pool 3");
+
+        let err = StatusLines::compile(Some(vec!["{{ unknown_top_level }}".into()]), vec![])
+            .err()
+            .unwrap();
+        assert!(err.contains("unknown status field(s): unknown_top_level"));
+    }
+
+    #[test]
+    fn extension_status_polls_only_when_enabled_fences_scope_expires_and_stops_on_404() {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock_path = std::env::temp_dir().join(format!("h-ext-status-{nanos}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let req_count = Arc::new(AtomicUsize::new(0));
+        let req_count_srv = Arc::clone(&req_count);
+
+        let handle = thread::spawn(move || {
+            let reply = |s: &mut UnixStream, status_line: &str, body: &str| {
+                write!(
+                    s,
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            };
+            let read_req = |s: &mut UnixStream| {
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap();
+                String::from_utf8_lossy(&buf[..n]).to_string()
+            };
+
+            // 1. First poll returns max_age_ms=80
+            let (mut s1, _) = listener.accept().unwrap();
+            let r1 = read_req(&mut s1);
+            assert!(r1.starts_with("GET /api/v1/sessions/demo/conversations/3/extension-status "));
+            req_count_srv.fetch_add(1, Ordering::SeqCst);
+            reply(
+                &mut s1,
+                "200 OK",
+                r#"{"version":1,"session_id":"demo","conversation_id":"3","model":"m1","max_age_ms":80,"extensions":{"account_pool":{"eligible_sources":4}}}"#,
+            );
+
+            // 2. Scope change after config_gen bump gets 404
+            let (mut s2, _) = listener.accept().unwrap();
+            let r2 = read_req(&mut s2);
+            assert!(r2.starts_with("GET /api/v1/sessions/demo/conversations/3/extension-status "));
+            req_count_srv.fetch_add(1, Ordering::SeqCst);
+            reply(&mut s2, "404 Not Found", r#"{"error":"not found"}"#);
+
+            // 3. New session s2 recovers from 404
+            let (mut s3, _) = listener.accept().unwrap();
+            let r3 = read_req(&mut s3);
+            assert!(r3.starts_with("GET /api/v1/sessions/s2/conversations/3/extension-status "));
+            req_count_srv.fetch_add(1, Ordering::SeqCst);
+            reply(
+                &mut s3,
+                "200 OK",
+                r#"{"version":1,"session_id":"s2","conversation_id":"3","model":"m1","max_age_ms":5000,"extensions":{"account_pool":{"eligible_sources":2}}}"#,
+            );
+        });
+
+        let client = DaemonClient::new(
+            crate::config::DaemonTarget::UnixSocket(sock_path.clone()),
+            crate::config::SecretToken::new("tok-status").unwrap(),
+        );
+        let status = StatusLines::default();
+        let mut t = target();
+        let state = TranscriptState::default();
+        let mut meta = StatusMetadata::default();
+
+        // Disabled -> first tick initializes workspace cwd_short; second tick does nothing and never polls
+        let _ = meta.tick(&t, &client, &status, true, None);
+        assert!(!meta.tick(&t, &client, &status, true, None));
+        assert_eq!(req_count.load(Ordering::SeqCst), 0);
+
+        // Enabled -> starts 1 poll; wait for it to finish
+        meta.tick(&t, &client, &status, true, Some(("m1", 0)));
+        let mut got_poll = false;
+        for _ in 0..50 {
+            if meta.tick(&t, &client, &status, true, Some(("m1", 0))) {
+                got_poll = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(got_poll);
+        assert_eq!(req_count.load(Ordering::SeqCst), 1);
+
+        let mut fields = StatusFields::from_session(&t, &state);
+        meta.apply(&mut fields, &state);
+        assert_eq!(
+            fields.extensions["account_pool"]["eligible_sources"],
+            json!(4)
+        );
+
+        // Offline clears extensions immediately
+        assert!(meta.tick(&t, &client, &status, false, Some(("m1", 0))));
+        let mut fields_off = StatusFields::from_session(&t, &state);
+        meta.apply(&mut fields_off, &state);
+        assert!(fields_off.extensions.is_empty());
+
+        // Wait past max_age_ms (80ms) and bump config_gen=1 -> triggers 404 poll
+        thread::sleep(Duration::from_millis(90));
+        meta.tick(&t, &client, &status, true, Some(("m1", 1)));
+        for _ in 0..50 {
+            meta.tick(&t, &client, &status, true, Some(("m1", 1)));
+            if meta.extension_not_found {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(meta.extension_not_found);
+        assert_eq!(req_count.load(Ordering::SeqCst), 2);
+
+        // Further ticks under same scope do NOT re-poll after 404
+        meta.tick(&t, &client, &status, true, Some(("m1", 1)));
+        thread::sleep(Duration::from_millis(15));
+        assert_eq!(req_count.load(Ordering::SeqCst), 2);
+
+        // Changing session resets 404 suppression and fetches new scope
+        t.sid = "s2".into();
+        meta.tick(&t, &client, &status, true, Some(("m1", 1)));
+        let mut got_s2 = false;
+        for _ in 0..50 {
+            if meta.tick(&t, &client, &status, true, Some(("m1", 1))) {
+                got_s2 = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(got_s2);
+        let mut fields_s2 = StatusFields::from_session(&t, &state);
+        meta.apply(&mut fields_s2, &state);
+        assert_eq!(
+            fields_s2.extensions["account_pool"]["eligible_sources"],
+            json!(2)
+        );
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
     }
 }
