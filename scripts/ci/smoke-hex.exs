@@ -32,17 +32,14 @@ try do
     if status != 0, do: raise("mix #{Enum.join(args, " ")} failed (exit #{status})")
   end
 
+  # Read mix.exs without evaluating runtime config or starting the project.
   read_version = fn cwd ->
     {version, 0} =
       System.cmd(
-        "mix",
+        "elixir",
         [
-          "run",
-          "--no-start",
-          "--no-compile",
-          "--no-deps-check",
           "-e",
-          "IO.write(Mix.Project.config()[:version])"
+          ~s|Mix.start(); Code.require_file("mix.exs"); IO.write(Mix.Project.config()[:version])|
         ],
         cd: cwd,
         env: env
