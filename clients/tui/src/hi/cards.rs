@@ -1,3 +1,4 @@
+use super::images::validate_image_block;
 use super::markdown::{diff_line_style, render_markdown_lines, StyledRow, StyledSpan};
 use super::theme::Theme;
 use crate::protocol::TranscriptEntry;
@@ -240,6 +241,7 @@ fn render_entry(
             render_blocks(
                 out,
                 &entry.data,
+                Some(&entry.id),
                 tools_expanded,
                 thinking_expanded,
                 false,
@@ -255,6 +257,7 @@ fn render_entry(
             render_blocks(
                 out,
                 &entry.data,
+                Some(&entry.id),
                 tools_expanded,
                 thinking_expanded,
                 false,
@@ -294,6 +297,7 @@ fn render_entry(
             let has_body = render_blocks(
                 out,
                 &entry.data,
+                Some(&entry.id),
                 tools_expanded,
                 thinking_expanded,
                 false,
@@ -370,9 +374,15 @@ fn render_entry(
                 }
             }
         }
-        "tool_result" => {
-            render_tool_result(out, &id, &entry.data, calls_by_id, tools_expanded, theme)
-        }
+        "tool_result" => render_tool_result(
+            out,
+            &id,
+            &entry.id,
+            &entry.data,
+            calls_by_id,
+            tools_expanded,
+            theme,
+        ),
         "user_shell" => render_user_shell(out, &id, &entry.data, tools_expanded, theme),
         "compaction" | "reset" => {
             let body = ["summary", "handoff", "note", "reason", "text"]
@@ -409,6 +419,7 @@ fn render_entry(
             if !render_blocks(
                 out,
                 &entry.data,
+                Some(&entry.id),
                 tools_expanded,
                 thinking_expanded,
                 false,
@@ -429,9 +440,11 @@ fn render_entry(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_blocks(
     out: &mut Vec<StyledRow>,
     data: &Value,
+    entry_id: Option<&str>,
     tools_expanded: bool,
     thinking_expanded: bool,
     streaming: bool,
@@ -462,7 +475,7 @@ fn render_blocks(
             emitted = true;
         }
         Some(Value::Array(blocks)) => {
-            for block in blocks {
+            for (block_idx, block) in blocks.iter().enumerate() {
                 if let Some(s) = block.as_str().filter(|s| !s.is_empty()) {
                     push_text(out, s);
                     emitted = true;
@@ -494,10 +507,17 @@ fn render_blocks(
                         let size = str_at(block, "data")
                             .map(|d| format!(" ~{} bytes", (d.len() * 3) / 4))
                             .unwrap_or_default();
-                        out.push(StyledRow::plain(
-                            format!("[image: {}{size}]", sanitize_single_line(mime)),
-                            theme.tool_meta,
-                        ));
+                        let inline_image = entry_id.and_then(|eid| {
+                            let raw_data = str_at(block, "data")?;
+                            validate_image_block(format!("{eid}:{block_idx}"), mime, raw_data)
+                        });
+                        out.push(
+                            StyledRow::plain(
+                                format!("[image: {}{size}]", sanitize_single_line(mime)),
+                                theme.tool_meta,
+                            )
+                            .with_inline_image(inline_image),
+                        );
                         emitted = true;
                     }
                     other => {
@@ -588,6 +608,7 @@ fn render_thinking(
 fn render_tool_result(
     out: &mut Vec<StyledRow>,
     id: &str,
+    raw_entry_id: &str,
     data: &Value,
     calls_by_id: &HashMap<&str, (&str, &Value)>,
     tools_expanded: bool,
@@ -685,7 +706,16 @@ fn render_tool_result(
             "content".into(),
             Value::Array(non_text_blocks),
         )]));
-        render_blocks(out, &synthetic, tools_expanded, false, false, false, theme);
+        render_blocks(
+            out,
+            &synthetic,
+            Some(raw_entry_id),
+            tools_expanded,
+            false,
+            false,
+            false,
+            theme,
+        );
     }
 
     if tools_expanded
@@ -1178,6 +1208,7 @@ fn render_live(
         let has_body = render_blocks(
             out,
             &msg_val,
+            None,
             tools_expanded,
             thinking_expanded,
             true,
@@ -1305,7 +1336,7 @@ fn render_inbox(out: &mut Vec<StyledRow>, state: &TranscriptState, theme: &Theme
             .map(|m| format!("[{}] ", sanitize_single_line(m)))
             .unwrap_or_default();
         let mut lines = Vec::new();
-        render_blocks(&mut lines, item, false, false, false, false, theme);
+        render_blocks(&mut lines, item, None, false, false, false, false, theme);
         let preview = if lines.is_empty() {
             truncate(&sanitize_single_line(&item.to_string()), COMPACT_CHARS)
         } else {

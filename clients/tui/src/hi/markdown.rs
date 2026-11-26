@@ -1,3 +1,4 @@
+use super::images::InlineImageBlock;
 use super::theme::Theme;
 use crate::render::sanitize_terminal_text;
 use ratatui::style::Style;
@@ -24,6 +25,7 @@ pub struct StyledRow {
     pub hang_prefix: Vec<StyledSpan>,
     pub fill_style: Option<Style>,
     pub hr_style: Option<Style>,
+    pub inline_image: Option<InlineImageBlock>,
 }
 
 impl StyledRow {
@@ -39,6 +41,7 @@ impl StyledRow {
             hang_prefix: Vec::new(),
             fill_style: None,
             hr_style: None,
+            inline_image: None,
         }
     }
 
@@ -48,6 +51,7 @@ impl StyledRow {
             hang_prefix: Vec::new(),
             fill_style: None,
             hr_style: None,
+            inline_image: None,
         }
     }
 
@@ -61,12 +65,18 @@ impl StyledRow {
         self
     }
 
+    pub fn with_inline_image(mut self, image: Option<InlineImageBlock>) -> Self {
+        self.inline_image = image;
+        self
+    }
+
     pub fn hr(style: Style) -> Self {
         Self {
             spans: vec![StyledSpan::new("---", style)],
             hang_prefix: Vec::new(),
             fill_style: None,
             hr_style: Some(style),
+            inline_image: None,
         }
     }
 
@@ -96,6 +106,12 @@ impl StyledRow {
         self.hr_style.is_some().hash(state);
         if let Some(s) = self.hr_style.as_ref() {
             hash_style(s, state);
+        }
+        self.inline_image.is_some().hash(state);
+        if let Some(img) = self.inline_image.as_ref() {
+            img.key.hash(state);
+            img.media_type.hash(state);
+            img.decoded_bytes.hash(state);
         }
     }
 }

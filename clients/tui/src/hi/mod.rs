@@ -6,6 +6,7 @@ pub mod editor;
 pub mod export;
 pub mod external;
 pub mod files;
+pub mod images;
 pub mod inbox;
 pub(crate) mod login;
 pub mod markdown;
