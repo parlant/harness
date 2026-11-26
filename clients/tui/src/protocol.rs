@@ -79,6 +79,65 @@ pub struct ModelInfo {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HarnessDescriptor {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HarnessesResponse {
+    pub harnesses: Vec<HarnessDescriptor>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ExtensionStatusResponse {
+    #[serde(default)]
+    pub version: Option<u32>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string_or_u64")]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub max_age_ms: Option<u64>,
+    #[serde(default)]
+    pub extensions: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Value>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RunBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_elapsed_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ApprovalPolicy {
+    Mode(String),
+    Tools(Vec<String>),
+}
+
+impl ApprovalPolicy {
+    pub fn never() -> Self {
+        Self::Mode("never".to_string())
+    }
+
+    pub fn mutating() -> Self {
+        Self::Mode("mutating".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ModelsResponse {
     pub models: Vec<ModelInfo>,
 }
@@ -249,6 +308,8 @@ pub struct CreateSessionRequest {
     pub version: u32,
     pub request_id: String,
     pub env_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_id: Option<String>,
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -436,9 +497,13 @@ impl CommandEnvelope {
     pub fn abort(
         request_id: impl Into<String>,
         conversation_id: u64,
+        task_id: Option<u64>,
         reason: Option<&str>,
     ) -> Self {
         let mut args = Map::new();
+        if let Some(tid) = task_id {
+            args.insert("task_id".to_string(), Value::Number(tid.into()));
+        }
         if let Some(r) = reason {
             args.insert("reason".to_string(), Value::String(r.to_string()));
         }
@@ -446,6 +511,28 @@ impl CommandEnvelope {
             version: 1,
             request_id: request_id.into(),
             command: "abort".to_string(),
+            conversation_id,
+            args: Value::Object(args),
+        }
+    }
+
+    pub fn approve_tool(
+        request_id: impl Into<String>,
+        conversation_id: u64,
+        task_id: u64,
+        decision: &str,
+        reason: Option<&str>,
+    ) -> Self {
+        let mut args = Map::new();
+        args.insert("task_id".to_string(), Value::Number(task_id.into()));
+        args.insert("decision".to_string(), Value::String(decision.to_string()));
+        if let Some(r) = reason {
+            args.insert("reason".to_string(), Value::String(r.to_string()));
+        }
+        Self {
+            version: 1,
+            request_id: request_id.into(),
+            command: "approve_tool".to_string(),
             conversation_id,
             args: Value::Object(args),
         }
@@ -490,6 +577,8 @@ impl CommandEnvelope {
         conversation_id: u64,
         model: Option<&str>,
         thinking: Option<&str>,
+        budget: Option<Option<RunBudget>>,
+        approval_policy: Option<ApprovalPolicy>,
     ) -> Self {
         let mut args = Map::new();
         if let Some(m) = model {
@@ -497,6 +586,18 @@ impl CommandEnvelope {
         }
         if let Some(t) = thinking {
             args.insert("thinking".to_string(), Value::String(t.to_string()));
+        }
+        if let Some(b) = budget {
+            let val = match b {
+                Some(inner) => serde_json::to_value(inner).unwrap_or(Value::Null),
+                None => Value::Null,
+            };
+            args.insert("budget".to_string(), val);
+        }
+        if let Some(policy) = approval_policy {
+            if let Ok(val) = serde_json::to_value(policy) {
+                args.insert("approval_policy".to_string(), val);
+            }
         }
         Self {
             version: 1,
@@ -1190,6 +1291,7 @@ mod tests {
             version: 1,
             request_id: "req-sub".to_string(),
             env_id: "host".to_string(),
+            harness_id: Some("coding".to_string()),
             cwd: "/private/tmp/wt-1".to_string(),
             session_id: Some("sub-1".to_string()),
             title: Some("Worker".to_string()),
@@ -1210,6 +1312,7 @@ mod tests {
         assert!(req_val["parent"].get("task_id").is_none());
         assert!(req_val["parent"].get("depth").is_none());
         assert_eq!(req_val["role"], "subagent");
+        assert_eq!(req_val["harness_id"], "coding");
         let req_back: CreateSessionRequest = serde_json::from_value(req_val).unwrap();
         assert_eq!(req_back, req_with_parent);
 
@@ -1217,6 +1320,7 @@ mod tests {
             version: 1,
             request_id: "req-root".to_string(),
             env_id: "host".to_string(),
+            harness_id: None,
             cwd: "/tmp/a".to_string(),
             session_id: None,
             title: None,
@@ -1227,5 +1331,86 @@ mod tests {
         let root_val = serde_json::to_value(&req_root).unwrap();
         assert!(root_val.get("parent").is_none());
         assert!(root_val.get("role").is_none());
+        assert!(root_val.get("harness_id").is_none());
+    }
+
+    #[test]
+    fn configure_approve_tool_and_abort_envelopes_serialize_new_fields() {
+        let cfg_omit = CommandEnvelope::configure("req-1", 1, Some("fake/m"), None, None, None);
+        let v_omit = serde_json::to_value(&cfg_omit).unwrap();
+        assert_eq!(v_omit["args"]["model"], "fake/m");
+        assert!(v_omit["args"].get("budget").is_none());
+        assert!(v_omit["args"].get("approval_policy").is_none());
+
+        let cfg_clear = CommandEnvelope::configure(
+            "req-2",
+            1,
+            None,
+            None,
+            Some(None),
+            Some(ApprovalPolicy::Tools(vec!["bash".to_string()])),
+        );
+        let v_clear = serde_json::to_value(&cfg_clear).unwrap();
+        assert_eq!(v_clear["args"]["budget"], Value::Null);
+        assert_eq!(
+            v_clear["args"]["approval_policy"],
+            serde_json::json!(["bash"])
+        );
+
+        let cfg_set = CommandEnvelope::configure(
+            "req-3",
+            2,
+            None,
+            Some("high"),
+            Some(Some(RunBudget {
+                max_turns: Some(12),
+                max_cost_usd: Some(1.5),
+                max_elapsed_ms: Some(60_000),
+            })),
+            Some(ApprovalPolicy::mutating()),
+        );
+        let v_set = serde_json::to_value(&cfg_set).unwrap();
+        assert_eq!(v_set["args"]["thinking"], "high");
+        assert_eq!(v_set["args"]["budget"]["max_turns"], 12);
+        assert_eq!(v_set["args"]["budget"]["max_cost_usd"], 1.5);
+        assert_eq!(v_set["args"]["budget"]["max_elapsed_ms"], 60_000);
+        assert_eq!(v_set["args"]["approval_policy"], "mutating");
+
+        let approve =
+            CommandEnvelope::approve_tool("req-app", 1, 77, "allow", Some("trusted command"));
+        let v_app = serde_json::to_value(&approve).unwrap();
+        assert_eq!(v_app["command"], "approve_tool");
+        assert_eq!(v_app["args"]["task_id"], 77);
+        assert_eq!(v_app["args"]["decision"], "allow");
+        assert_eq!(v_app["args"]["reason"], "trusted command");
+
+        let abort_task = CommandEnvelope::abort("req-ab", 1, Some(99), Some("cancel_tool"));
+        let v_ab = serde_json::to_value(&abort_task).unwrap();
+        assert_eq!(v_ab["command"], "abort");
+        assert_eq!(v_ab["args"]["task_id"], 99);
+        assert_eq!(v_ab["args"]["reason"], "cancel_tool");
+    }
+
+    #[test]
+    fn harness_descriptor_and_extension_status_decode() {
+        let harnesses: HarnessesResponse = serde_json::from_str(
+            r#"{"harnesses":[{"id":"coding","name":"Coding","description":"Default coding harness","aliases":["pi"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(harnesses.harnesses.len(), 1);
+        assert_eq!(harnesses.harnesses[0].id, "coding");
+        assert_eq!(harnesses.harnesses[0].aliases, vec!["pi"]);
+
+        let status: ExtensionStatusResponse = serde_json::from_str(
+            r#"{"version":1,"session_id":"s1","conversation_id":2,"model":"openai_codex:gpt-5","max_age_ms":5000,"extensions":{"account_pool":{"eligible_sources":3,"cooling_sources":1}}}"#,
+        )
+        .unwrap();
+        assert_eq!(status.version, Some(1));
+        assert_eq!(status.conversation_id.as_deref(), Some("2"));
+        assert_eq!(status.max_age_ms, Some(5000));
+        assert_eq!(
+            status.extensions["account_pool"]["eligible_sources"],
+            serde_json::json!(3)
+        );
     }
 }

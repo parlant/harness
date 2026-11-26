@@ -1,3 +1,4 @@
+use super::images::InlineImageProtocol;
 use super::markdown::StyledRow;
 use super::theme::Theme;
 use crate::render::{sanitize_single_line, sanitize_terminal_text};
@@ -17,7 +18,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::fmt::Write as _;
 use std::hash::Hasher;
 use std::io::{self, IsTerminal, Write};
@@ -390,6 +391,8 @@ struct FullscreenState {
 
 struct RegularState {
     target: Box<dyn RegularTarget>,
+    image_protocol: InlineImageProtocol,
+    emitted_image_keys: HashSet<String>,
     flushed_visual_lines: Vec<String>,
     working_lines: Vec<String>,
     cursor_row: usize,
@@ -403,9 +406,11 @@ struct RegularState {
 }
 
 impl RegularState {
-    fn new(target: Box<dyn RegularTarget>) -> Self {
+    fn new(target: Box<dyn RegularTarget>, image_protocol: InlineImageProtocol) -> Self {
         Self {
             target,
+            image_protocol,
+            emitted_image_keys: HashSet::new(),
             flushed_visual_lines: Vec::new(),
             working_lines: Vec::new(),
             cursor_row: 0,
@@ -492,7 +497,10 @@ impl Screen {
             TerminalModeGuard::enter(Box::new(RealTerminalOps::new()), ScreenMode::Regular)?;
 
         Ok(Self {
-            mode: ModeState::Regular(RegularState::new(Box::new(StdoutRegularTarget::new()))),
+            mode: ModeState::Regular(RegularState::new(
+                Box::new(StdoutRegularTarget::new()),
+                InlineImageProtocol::detect(),
+            )),
             _guard: guard,
         })
     }
@@ -513,8 +521,16 @@ impl Screen {
 
     #[cfg(test)]
     fn with_regular_test_target(target: Box<dyn RegularTarget>) -> Self {
+        Self::with_regular_test_target_and_images(target, InlineImageProtocol::Off)
+    }
+
+    #[cfg(test)]
+    fn with_regular_test_target_and_images(
+        target: Box<dyn RegularTarget>,
+        image_protocol: InlineImageProtocol,
+    ) -> Self {
         Self {
-            mode: ModeState::Regular(RegularState::new(target)),
+            mode: ModeState::Regular(RegularState::new(target, image_protocol)),
             _guard: TerminalModeGuard::noop(),
         }
     }
@@ -1132,6 +1148,21 @@ fn draw_regular(
         .map(|y| buffer_row_to_ansi(&buf, y as u16, term_w, theme.is_plain))
         .collect();
 
+    let mut pending_inline_images: Vec<(String, String)> = Vec::new();
+    if reg.image_protocol != InlineImageProtocol::Off {
+        for row in rows {
+            let Some(block) = row.inline_image.as_ref() else {
+                continue;
+            };
+            if reg.emitted_image_keys.contains(&block.key) {
+                continue;
+            }
+            if let Some(seq) = reg.image_protocol.format_validated_block(block) {
+                pending_inline_images.push((block.key.clone(), seq));
+            }
+        }
+    }
+
     let mut out = String::new();
     out.push_str("\x1b[?2026h");
 
@@ -1140,7 +1171,10 @@ fn draw_regular(
     }
 
     let mut hw_row: usize;
-    if !newly_flushed_ansi.is_empty() || reg.working_lines.is_empty() {
+    let needs_working_rewrite = !newly_flushed_ansi.is_empty()
+        || reg.working_lines.is_empty()
+        || !pending_inline_images.is_empty();
+    if needs_working_rewrite {
         if !reg.working_lines.is_empty() && !need_full_clear {
             if reg.cursor_row > 0 {
                 let _ = write!(out, "\x1b[{}A", reg.cursor_row);
@@ -1150,6 +1184,11 @@ fn draw_regular(
         for line in &newly_flushed_ansi {
             out.push_str(line);
             out.push_str("\r\n");
+        }
+        for (key, seq) in &pending_inline_images {
+            out.push_str(seq);
+            out.push_str("\r\n");
+            reg.emitted_image_keys.insert(key.clone());
         }
         for (i, line) in new_working_lines.iter().enumerate() {
             if i > 0 {
@@ -3160,6 +3199,157 @@ mod tests {
             let row2 = buffer_row_text(buf, 2);
             assert!(row2.starts_with("- [x] done"), "row2={row2:?}");
             assert_eq!(buf[(2, 2)].style().fg, theme.tool_ok.fg);
+        }
+    }
+
+    #[test]
+    fn regular_mode_emits_validated_inline_image_once_while_fullscreen_keeps_caption_only() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        use serde_json::json;
+
+        let png_b64 = STANDARD.encode(b"\x89PNG\r\n\x1a\nfake-png-payload");
+        let mut state = crate::transcript::TranscriptState::default();
+        state.apply_snapshot(crate::protocol::SnapshotFrame {
+            version: Some(1),
+            session_id: None,
+            conversation_id: None,
+            seq: 1,
+            before_entry_id: None,
+            has_more: Some(false),
+            entries: vec![crate::protocol::TranscriptEntry {
+                id: "10".to_string(),
+                conversation_id: Some("1".to_string()),
+                seq: Some(1),
+                kind: "user".to_string(),
+                data: json!({
+                    "content": [
+                        {"type": "text", "text": "Look at this"},
+                        {"type": "image", "media_type": "image/png", "data": png_b64}
+                    ]
+                }),
+                created_at: None,
+            }],
+            docs: None,
+        });
+
+        let theme = Theme::dark();
+        let rows = crate::hi::cards::styled_rows(&state, false, false, &theme);
+
+        // Fullscreen mode MUST NEVER emit graphics escape sequences, only the sanitized caption
+        let mut fs_screen = Screen::with_test_backend(60, 12).unwrap();
+        fs_screen
+            .draw_styled_with_overlay(&rows, "", 0, &["ok"], EditorOverlay::None, &theme)
+            .unwrap();
+        let buf = fs_screen.test_backend().buffer();
+        let mut fs_text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                assert!(!sym.contains('\x1b'), "ESC leaked into fullscreen buffer");
+                assert!(!sym.contains('\x07'), "BEL leaked into fullscreen buffer");
+                fs_text.push_str(sym);
+            }
+            fs_text.push('\n');
+        }
+        assert!(fs_text.contains("[image: image/png"));
+        assert!(!fs_text.contains("_Gf="));
+        assert!(!fs_text.contains("1337;File="));
+
+        // Regular mode with Kitty emits Kitty sequence once alongside caption
+        let log = Rc::new(RefCell::new(MockRegularLog {
+            width: 60,
+            height: 12,
+            writes: Vec::new(),
+        }));
+        let mut reg_screen = Screen::with_regular_test_target_and_images(
+            Box::new(MockRegularTarget { log: log.clone() }),
+            InlineImageProtocol::Kitty,
+        );
+        reg_screen
+            .draw_styled_with_overlay(&rows, "draft", 5, &["ok"], EditorOverlay::None, &theme)
+            .unwrap();
+        // Second draw (e.g. typing in editor) must NOT re-emit the image sequence
+        reg_screen
+            .draw_styled_with_overlay(&rows, "draft!", 6, &["ok"], EditorOverlay::None, &theme)
+            .unwrap();
+
+        let first = &log.borrow().writes[0];
+        let second = &log.borrow().writes[1];
+        let expected_kitty = format!("\x1b_Gf=100,a=T,q=2;{png_b64}\x1b\\");
+        assert!(first.contains(&expected_kitty));
+        assert!(first.contains("[image: image/png"));
+        assert!(!second.contains("\x1b_G"));
+
+        // Regular mode with iTerm2 emits OSC 1337 once
+        let iterm_log = Rc::new(RefCell::new(MockRegularLog {
+            width: 60,
+            height: 12,
+            writes: Vec::new(),
+        }));
+        let mut iterm_screen = Screen::with_regular_test_target_and_images(
+            Box::new(MockRegularTarget {
+                log: iterm_log.clone(),
+            }),
+            InlineImageProtocol::ITerm2,
+        );
+        iterm_screen
+            .draw_styled_with_overlay(&rows, "", 0, &["ok"], EditorOverlay::None, &theme)
+            .unwrap();
+        let iterm_first = &iterm_log.borrow().writes[0];
+        assert!(iterm_first.contains("\x1b]1337;File=inline=1;size=24:"));
+        assert!(iterm_first.contains("[image: image/png"));
+    }
+
+    #[test]
+    fn regular_mode_never_emits_escape_sequences_for_untrusted_image_base64() {
+        use serde_json::json;
+
+        let mut state = crate::transcript::TranscriptState::default();
+        state.apply_snapshot(crate::protocol::SnapshotFrame {
+            version: Some(1),
+            session_id: None,
+            conversation_id: None,
+            seq: 1,
+            before_entry_id: None,
+            has_more: Some(false),
+            entries: vec![crate::protocol::TranscriptEntry {
+                id: "11".to_string(),
+                conversation_id: Some("1".to_string()),
+                seq: Some(1),
+                kind: "user".to_string(),
+                data: json!({
+                    "content": [
+                        {"type": "image", "media_type": "image/png", "data": "AAAA\x1b]52;c;YQ==\x07BBBB"}
+                    ]
+                }),
+                created_at: None,
+            }],
+            docs: None,
+        });
+
+        let theme = Theme::dark();
+        let rows = crate::hi::cards::styled_rows(&state, false, false, &theme);
+
+        for proto in [InlineImageProtocol::Kitty, InlineImageProtocol::ITerm2] {
+            let log = Rc::new(RefCell::new(MockRegularLog {
+                width: 60,
+                height: 12,
+                writes: Vec::new(),
+            }));
+            let mut reg_screen = Screen::with_regular_test_target_and_images(
+                Box::new(MockRegularTarget { log: log.clone() }),
+                proto,
+            );
+            reg_screen
+                .draw_styled_with_overlay(&rows, "", 0, &["ok"], EditorOverlay::None, &theme)
+                .unwrap();
+            let written = log.borrow().writes.concat();
+            assert!(!written.contains("\x1b_G"));
+            assert!(!written.contains("\x1b]1337"));
+            assert!(!written.contains("\x1b]52"));
+            assert!(!written.contains('\x07'));
+            assert!(written.contains("[image: image/png"));
         }
     }
 }

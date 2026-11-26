@@ -36,10 +36,17 @@ pub(crate) enum Command {
         provider: String,
         source: Option<String>,
     },
+    /// Remove a Codex account alias (defaults to active account if omitted)
+    Logout { source: Option<String> },
     /// List and configure daemon-owned account aliases
     Account {
         #[command(subcommand)]
         action: Account,
+    },
+    /// List and remove daemon-owned provider API keys
+    Key {
+        #[command(subcommand)]
+        action: Key,
     },
     /// Manage the local H daemon, not a conversation
     Daemon {
@@ -53,6 +60,13 @@ pub(crate) enum Account {
     List,
     Add { source: String },
     Use { source: String },
+    Remove { source: String },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum Key {
+    List,
+    Remove { provider: String, source: String },
 }
 
 #[derive(Subcommand)]
@@ -61,8 +75,6 @@ pub(crate) enum Daemon {
     Status,
     /// List currently loaded daemon extensions and reload generation
     Extensions,
-    /// Hot-reload extensions from extensions.json without restarting the daemon
-    ReloadExtensions,
     /// Install the prebuilt launcher as a per-user macOS LaunchAgent
     InstallService {
         #[arg(long)]
@@ -251,6 +263,7 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
     let client = DaemonClient::new(cfg.target, cfg.token);
     let result = match args.command {
         Command::Login { provider, source } => return login(&client, &provider, source),
+        Command::Logout { source } => logout(&client, source),
         Command::Account {
             action: Account::List,
         } => client.login_providers().map(|providers| {
@@ -305,6 +318,50 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
                 .activate_codex_account(&source)
                 .map(|_| println!("Stock Codex account: {source}"))
         }
+        Command::Account {
+            action: Account::Remove { source },
+        } => {
+            validate_source(&source)?;
+            client
+                .remove_codex_account(&source)
+                .map(|_| println!("Removed {source}"))
+        }
+        Command::Key { action: Key::List } => client.key_profiles().map(|profiles| {
+            let mut found = false;
+            for profile in profiles {
+                if !source_id(&profile.provider) {
+                    continue;
+                }
+                if profile.sources.is_empty() {
+                    found = true;
+                    println!("{}\t(no stored key)", profile.provider);
+                } else {
+                    for source in profile.sources.into_iter().take(8) {
+                        if source_id(&source) {
+                            found = true;
+                            let active = if profile.active.as_deref() == Some(source.as_str()) {
+                                " (active)"
+                            } else {
+                                ""
+                            };
+                            println!("{}\t{}{}", profile.provider, source, active);
+                        }
+                    }
+                }
+            }
+            if !found {
+                println!("No configured API keys.");
+            }
+        }),
+        Command::Key {
+            action: Key::Remove { provider, source },
+        } => {
+            validate_source(&provider)?;
+            validate_source(&source)?;
+            client
+                .remove_api_key(&provider, &source)
+                .map(|_| println!("Removed {provider} key: {source}"))
+        }
         Command::Daemon {
             action: Daemon::Status,
         } => client.get_environments().map(|_| {
@@ -313,12 +370,7 @@ pub(crate) fn run(args: Manage) -> Result<(), String> {
         Command::Daemon {
             action: Daemon::Extensions,
         } => client.list_extensions().map(|info| {
-            print_extensions_summary(&info, false);
-        }),
-        Command::Daemon {
-            action: Daemon::ReloadExtensions,
-        } => client.reload_extensions().map(|info| {
-            print_extensions_summary(&info, true);
+            print_extensions_summary(&info);
         }),
         Command::Daemon {
             action:
@@ -352,6 +404,38 @@ fn validate_source(source: &str) -> Result<(), String> {
     } else {
         Err("Invalid account alias (use lowercase letters, digits, '-' or '_'; start with a letter).".into())
     }
+}
+
+fn logout(client: &DaemonClient, source: Option<String>) -> Result<(), ClientError> {
+    let target_source = match source {
+        Some(s) => {
+            if !source_id(&s) {
+                return Err(ClientError::InvalidInput(
+                    "Invalid account alias (use lowercase letters, digits, '-' or '_'; start with a letter).".into(),
+                ));
+            }
+            s
+        }
+        None => {
+            let providers = client.login_providers()?;
+            let active = providers
+                .into_iter()
+                .filter(|p| p.id == "openai_codex")
+                .flat_map(|p| p.sources.into_iter())
+                .find(|s| s.active && source_id(&s.id))
+                .map(|s| s.id);
+            match active {
+                Some(s) => s,
+                None => {
+                    println!("No active Codex account.");
+                    return Ok(());
+                }
+            }
+        }
+    };
+    client.remove_codex_account(&target_source)?;
+    println!("Removed {target_source}");
+    Ok(())
 }
 
 fn login(client: &DaemonClient, provider: &str, source: Option<String>) -> Result<(), String> {
@@ -637,14 +721,12 @@ pub(crate) fn daemon_launcher(
     }
 }
 
-fn print_extensions_summary(info: &serde_json::Value, reloaded: bool) {
+fn print_extensions_summary(info: &serde_json::Value) {
     let gen = info["generation"].as_u64().unwrap_or(0);
     let disabled = info["no_extensions"].as_bool().unwrap_or(false);
     let extensions = info["extensions"].as_array();
     let count = extensions.map_or(0, Vec::len);
-    if reloaded {
-        println!("Reloaded extensions (generation {gen}, {count} loaded).");
-    } else if disabled {
+    if disabled {
         println!("Extensions disabled (--no-extensions, generation {gen}).");
     } else {
         println!("Extensions (generation {gen}, {count} loaded):");
@@ -675,4 +757,152 @@ fn start(
         command.arg("--no-extensions");
     }
     Err(format!("Could not start daemon: {}", command.exec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DaemonTarget, SecretToken};
+    use std::{
+        io::Read,
+        os::unix::net::{UnixListener, UnixStream},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn read_http_req(stream: &mut UnixStream) -> (String, String) {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        let mut header_end = None;
+        let mut content_len = 0usize;
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            if header_end.is_none() {
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = Some(pos + 4);
+                    let headers = String::from_utf8_lossy(&raw[..pos]);
+                    for line in headers.lines() {
+                        if let Some((k, v)) = line.split_once(':') {
+                            if k.eq_ignore_ascii_case("content-length") {
+                                content_len = v.trim().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(end) = header_end {
+                if raw.len() >= end + content_len {
+                    break;
+                }
+            }
+        }
+        let end = header_end.unwrap_or(raw.len());
+        (
+            String::from_utf8_lossy(&raw[..end]).to_string(),
+            String::from_utf8_lossy(&raw[end..end + content_len]).to_string(),
+        )
+    }
+
+    #[test]
+    fn manage_parses_logout_account_remove_and_key_subcommands() {
+        let logout_default = Manage::try_parse_from(["hi", "logout"]).unwrap();
+        assert!(matches!(
+            logout_default.command,
+            Command::Logout { source: None }
+        ));
+
+        let logout_named = Manage::try_parse_from(["hi", "logout", "work"]).unwrap();
+        assert!(matches!(
+            logout_named.command,
+            Command::Logout { source: Some(ref s) } if s == "work"
+        ));
+
+        let acct_rm = Manage::try_parse_from(["hi", "account", "remove", "work"]).unwrap();
+        assert!(matches!(
+            acct_rm.command,
+            Command::Account {
+                action: Account::Remove { ref source }
+            } if source == "work"
+        ));
+
+        let key_list = Manage::try_parse_from(["hi", "key", "list"]).unwrap();
+        assert!(matches!(
+            key_list.command,
+            Command::Key { action: Key::List }
+        ));
+
+        let key_rm = Manage::try_parse_from(["hi", "key", "remove", "openai", "work"]).unwrap();
+        assert!(matches!(
+            key_rm.command,
+            Command::Key {
+                action: Key::Remove {
+                    ref provider,
+                    ref source
+                }
+            } if provider == "openai" && source == "work"
+        ));
+
+        // reload-extensions was removed
+        assert!(Manage::try_parse_from(["hi", "daemon", "reload-extensions"]).is_err());
+    }
+
+    #[test]
+    fn logout_resolves_active_codex_account_when_source_omitted() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock_path = std::env::temp_dir().join(format!("h-manage-logout-{nanos}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let handle = thread::spawn(move || {
+            let reply_ok = |s: &mut UnixStream, body: &str| {
+                write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            };
+            let (mut s1, _) = listener.accept().unwrap();
+            let (h1, _) = read_http_req(&mut s1);
+            assert!(h1.starts_with("GET /api/v1/provider-logins HTTP/1.1"));
+            reply_ok(
+                &mut s1,
+                r#"{"providers":[{"id":"openai_codex","interaction":"device","sources":[{"id":"personal","state":"ready","active":false},{"id":"work","state":"ready","active":true}]}]}"#,
+            );
+
+            let (mut s2, _) = listener.accept().unwrap();
+            let (h2, b2) = read_http_req(&mut s2);
+            assert!(h2.starts_with("POST /api/v1/provider-accounts/remove HTTP/1.1"));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&b2).unwrap()["source"],
+                "work"
+            );
+            reply_ok(&mut s2, r#"{"removed":"work"}"#);
+
+            let (mut s3, _) = listener.accept().unwrap();
+            let (h3, b3) = read_http_req(&mut s3);
+            assert!(h3.starts_with("POST /api/v1/provider-accounts/remove HTTP/1.1"));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&b3).unwrap()["source"],
+                "personal"
+            );
+            reply_ok(&mut s3, r#"{"removed":"personal"}"#);
+        });
+
+        let client = DaemonClient::new(
+            DaemonTarget::UnixSocket(sock_path.clone()),
+            SecretToken::new("tok-manage").unwrap(),
+        );
+        logout(&client, None).unwrap();
+        logout(&client, Some("personal".to_string())).unwrap();
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
 }

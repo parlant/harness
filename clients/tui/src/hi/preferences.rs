@@ -472,6 +472,7 @@ pub(super) struct UserConfig {
     pub keys: Preferences,
     pub status: StatusLines,
     pub theme: Theme,
+    pub extension_status: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -480,6 +481,7 @@ struct UserSettings {
     status_lines: Option<Vec<String>>,
     status_lines_append: Vec<String>,
     theme: Option<String>,
+    extension_status: bool,
 }
 
 impl UserConfig {
@@ -498,12 +500,13 @@ impl UserConfig {
         };
         let status = StatusLines::compile(user.status_lines, user.status_lines_append)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        let theme = Theme::resolve(user.theme.as_deref())
+        let theme = Theme::resolve_in_dir(user.theme.as_deref(), Some(data_dir))
             .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(Self {
             keys: Preferences::load(&data_dir.join("hi-keybindings.json"))?,
             status,
             theme,
+            extension_status: user.extension_status,
         })
     }
 }
@@ -867,5 +870,27 @@ mod tests {
         fs::write(&hi_json, r#"{ "theme": "plain" }"#).unwrap();
         let cfg2 = UserConfig::load(data_dir).expect("plain theme loads");
         assert!(cfg2.theme.is_plain);
+        assert!(!cfg2.extension_status);
+
+        // Custom theme + extension_status validation + rollback check
+        let themes_dir = data_dir.join("themes");
+        fs::create_dir_all(&themes_dir).unwrap();
+        fs::write(
+            themes_dir.join("mint.json"),
+            r##"{ "base": "dark", "tool_ok": { "fg": "#00ff88" } }"##,
+        )
+        .unwrap();
+        fs::write(&hi_json, r#"{ "theme": "mint", "extension_status": true }"#).unwrap();
+        let cfg_mint = UserConfig::load(data_dir).expect("custom theme loads");
+        assert_eq!(cfg_mint.theme.name, "mint");
+        assert!(cfg_mint.extension_status);
+
+        // Corrupt custom theme fails UserConfig::load cleanly so /reload keeps active config
+        fs::write(themes_dir.join("mint.json"), r#"{ "unknown_key": 1 }"#).unwrap();
+        assert!(UserConfig::load(data_dir).is_err());
+
+        // Missing custom theme fails UserConfig::load cleanly
+        fs::write(&hi_json, r#"{ "theme": "nonexistent_custom" }"#).unwrap();
+        assert!(UserConfig::load(data_dir).is_err());
     }
 }
