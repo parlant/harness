@@ -95,12 +95,13 @@ Unavailable fields print as empty; the labels around them don't disappear automa
 | Group | Fields |
 | --- | --- |
 | Client feedback | `note`, `connection` (`online`/`offline`), `online` (boolean), `seq` (latest committed sequence, absent before a snapshot), `pending` (local command in flight) |
-| Session and workspace | `session_id`, `conversation_id`, `session_title`, `session_status` (catalog status, e.g. `ok` or `quarantined`), `cwd` (session directory, not the `hi` process directory), `cwd_short`, `git_branch`, `env_id`, `harness_id` |
+| Session and workspace | `session_id`, `conversation_id`, `session_title`, `session_status` (catalog status, e.g. `ok` or `quarantined`), `cwd` (session directory, not the `hi` process directory), `cwd_short`, `git_branch`, `env_id`, `harness_id`, `theme` |
 | Model | `model` (full configured ID), `provider` (prefix of `provider:model` or `provider/model`, absent if unqualified), `model_name` (model part of that ID), `thinking` (configured level), `context_window` (catalog capacity), `context_percent` (latest reply's reported usage as a percentage of that capacity) |
 | Live conversation | `activity` (`busy`, `paused`, or `idle`), `queued` (inbox count), `run_turns`, `compaction_status`, `compaction_failed`, `failure_reason`, `failure_code`, `failure_message` |
 | Usage | `has_usage`, `input_tokens`, `output_tokens`, `total_tokens`, `cost` (reported cumulative dollars; may be zero) |
 | Active user shell | `shell_active`, `shell_prefix` (`!` or `!!`), `shell_command`, `shell_preview` (24 characters of escaped command text), `shell_status` |
 | Editor and view | `width` (terminal columns), `attachments` (count), `fork_entry_id`, `fork_predecessor_id`, `retry_pending`, `historical` (viewing an earlier page), `show_tools`, `show_thinking` (display toggles) |
+| Extension status (`"extension_status": true`) | `extensions` (map of cached extension status namespaces, e.g. `extensions.account_pool.eligible_sources`; defaults to `{}`) |
 
 `activity`, model, thinking level, queue and usage follow the live conversation even while browsing earlier entries. `session_title`, `session_status`, and `harness_id` come from the session metadata `hi` last read on attach/create or a metadata-fetching switch. `/name` also refreshes or changes the local title; updates to catalog metadata from another client aren't streamed in the conversation feed. Use `activity`, not `session_status`, to distinguish an active turn from an idle one.
 
@@ -119,4 +120,4 @@ usage, and draft indicators appear when relevant. At narrow widths, fields on
 the right can be clipped. Custom `status_lines` still replaces both rows.
 The built-in templates are in [`status.rs`](../../clients/tui/src/hi/status.rs).
 
-For proposed data from optional daemon packages, see [one opt-in status projection](../extensions/clients.md#proposed-one-opt-in-status-projection). For possible local executable configuration, see [Dynamic configuration in `hi`](dynamic-config.md). Neither is enabled today.
+For cached data from optional daemon packages (`"extension_status": true` in `hi.json`), see [opt-in extension status projection](../extensions/clients.md#implemented-opt-in-extension-status-projection-get-sessionssidconversationscidextension-status). For possible local executable configuration, see [Dynamic configuration in `hi`](dynamic-config.md).

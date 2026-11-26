@@ -64,8 +64,8 @@ sections:
         label: macOS app
         meta: hiness.app · Apple Silicon
         heading: Install H.app from the disk image
-        platform: H-v0.3.0-darwin-arm64.dmg
-        body: Visit hiness.app or download H-v0.3.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, drag H.app to /Applications, and open it. H.app starts the bundled daemon on ~/.local/share/h, opens hiweb at http://127.0.0.1:4200/inbox, and adds the H menu-bar item to copy your sign-in token, link hi onto PATH, or drain and restart the daemon.
+        platform: H-v0.4.0-darwin-arm64.dmg
+        body: Visit hiness.app or download H-v0.4.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, drag H.app to /Applications, and open it. H.app starts the bundled daemon on ~/.local/share/h, opens hiweb at http://127.0.0.1:4200/inbox, and adds the H menu-bar item to copy your sign-in token, link hi onto PATH, or drain and restart the daemon.
         links:
           - label: Explore hiness.app for macOS
             url: https://hiness.app
@@ -142,16 +142,16 @@ sections:
     title: Separate session state from tool execution.
     motto: One writer lease per workspace domain.
     artwork: jane_seymour_khm
-    body: Run file and shell tools in your local checkout through H's execution environment contract. Because the session store and client connections stay independent of the workspace adapter, you can switch views freely while tools run in place. A built-in remote adapter exercises lease fencing inside the VM as the prototype for future off-machine execution.
+    body: Run file and shell tools in your local checkout or on a standalone remote agent over authenticated HTTP or Unix sockets. Because the session store and client connections stay independent of the workspace adapter, you can switch views freely while tools run under fenced leases and automatic process-group cleanup.
     links:
-      - label: Compare local execution and the remote prototype
+      - label: Compare local and remote execution environments
         url: /features/#local-or-remote-execution-environments
   - layout: principle
     id: signals
     kicker: 05 / Subagents and signals
     title: Coordinate sessions without polling.
     artwork: las_meninas_prado
-    body: Delegate a bounded task to a subagent and let the parent session park until the child finishes. H wakes the waiting parent on completion without occupying a worker process. External scripts can also queue follow-up turns through the authenticated local API while a run is active.
+    body: Park mutating tools for owner approval, wait on external wake signals, or delegate a bounded task to a subagent inside H.Session.Server without occupying a worker process. External scripts can deliver wake signals or queue follow-up turns through the authenticated local API.
     links:
       - label: Delegate work and queue follow-ups
         url: /features/#signal-and-wake-sessions-without-polling

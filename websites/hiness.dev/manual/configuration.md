@@ -16,13 +16,13 @@ All file paths below resolve relative to your selected `<data_dir>`. Create opti
 
 | Setting | Where to change it | When it takes effect |
 |---|---|---|
-| Current conversation model and thinking level | `/model` and `/thinking` in `hi`, or the web session controls | Immediately for that conversation |
-| API-key alias or Codex login | `/key set`, `/key use`, `/login`, `/account` in `hi`, or web **Account settings** | Immediately for subsequent requests through the daemon credential vault |
+| Current conversation model, thinking level, budget, and approval policy | `/model`, `/thinking`, `/budget`, and `/approval` in `hi`, or the web session controls | Immediately for that conversation |
+| API-key alias or Codex login / logout | `/key set`, `/key use`, `/key remove`, `/login`, `/logout`, `/account` in `hi`, or web **Account settings** | Immediately for subsequent requests through the daemon credential vault |
 | Manual provider defaults and new-session default model | Private `providers.json` (regular file, mode `0600`) | Read on demand for new sessions while existing conversations keep their selected model |
 | Custom Chat Completions endpoints and model catalog | Web **Providers** page or `openai-compatible.json` | Next daemon boot (save API keys separately via `/key set`) |
 | Trusted local startup packages | `extensions.json` | Next daemon boot |
 | Standalone listener addresses and web port | `network.json`, `H_WEB_PORT`, or `H_WEB` | Next standalone daemon boot |
-| Terminal status bar and keybindings | `hi.json` and `hi-keybindings.json` | Immediately when you run `/reload` in `hi` |
+| Terminal status bar, custom JSON themes, prompt templates, and keybindings | `hi.json`, `themes/*.json`, `prompts/*.md`, and `hi-keybindings.json` | Immediately when you run `/reload` in `hi` |
 
 ## Project instructions and tools
 

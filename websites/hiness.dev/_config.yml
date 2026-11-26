@@ -17,7 +17,7 @@ plugins:
 llms_txt:
   sections:
     - title: Start here
-      paths: ["/", "/demo/**", "/releases/"]
+      paths: ["/", "/demo/**", "/releases/**"]
       content_paths: ["specimen.caption"]
     - title: Features
       paths: ["/features/"]

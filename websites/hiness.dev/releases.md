@@ -8,4 +8,4 @@ lead: Official announcements, signed multi-platform release bundles, and version
 description: Synchronized news, signed release bundles, and changelog for H (hiness.dev and hiness.app) across GitHub and GitLab.
 ---
 
-Install the latest signed release from [hiness.dev/#install](/#install), download the macOS `H.app` disk image via [hiness.app](https://hiness.app), or inspect the full commit log on the [GitHub mirror](https://github.com/parlant/harness) and [GitLab repository](https://gitlab.com/parlant-co/harness).
+Install the latest signed release from [hiness.dev/#install](/#install), read the [H v0.4.0 architectural walkthrough](/releases/v0.4.0/), download the macOS `H.app` disk image via [hiness.app](https://hiness.app), or inspect the commit log on the [GitHub mirror](https://github.com/parlant/harness) and [GitLab repository](https://gitlab.com/parlant-co/harness).

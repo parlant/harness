@@ -145,7 +145,13 @@ def smoke(source):
                 [archive] = api("archives")["archives"]
                 archived_sid = archive["session_id"]
                 # Both accounts are unsigned; the extension cannot contact OpenAI.
-                config = json.dumps({"version": 1, "extensions": [{"path": str(bundle / "extensions/multicodex"), "settings": {"sources": ["personal", "work"]}}]})
+                config = json.dumps({
+                    "version": 1,
+                    "extensions": [
+                        {"path": str(bundle / "extensions/multicodex"), "settings": {"sources": ["personal", "work"]}},
+                        {"path": str(bundle / "extensions/editor_host"), "settings": {}},
+                    ],
+                })
                 extensions.write_text("malformed")
                 refused = run(hi, "daemon", "restart", "--port", "0", check=False)
                 assert refused.returncode != 0 and "nothing was stopped" in refused.stderr
@@ -177,6 +183,8 @@ def smoke(source):
                 assert [urllib.parse.urlsplit(url).hostname for url in urls] == addresses
                 for ip, url in zip(addresses, urls):
                     assert api("environments", base=url)["environments"]
+                    harnesses = [h["id"] for h in api("harnesses", base=url)["harnesses"]]
+                    assert "coding" in harnesses and "editor_coding" in harnesses
                     reject(url + "/api/v1/environments", 401)
                     reject(url + "/api/v1/environments", 421, {"Host": "unconfigured.invalid:4100"})
                     reject(url + "/api/v1/auth/session", 403, {"Origin": "http://unconfigured.invalid:4100"}, b"{}")

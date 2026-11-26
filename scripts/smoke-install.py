@@ -145,7 +145,13 @@ def smoke(bundle):
             patch.object(module, "service_file", return_value=home / "fake.plist"),
             patch.object(module.sys, "argv", ["install", "--activate", initial.name, "--data-dir", str(data), "--bin-dir", str(hi.parent)]),
         ):
-            assert module.main() == 1
+            with patch("sys.stderr") as stderr:
+                assert module.main() == 1
+                stderr.write.assert_any_call(
+                    f"Installation refused or incomplete: Daemon is busy\n"
+                    f"Check launchctl and {data / 'h-daemon.log'}. "
+                    f"Once the service is stopped, retry with mix h.install --activate {initial.name}."
+                )
             assert current.resolve(strict=True) == second
             assert commands == ["--check-config", "status", "check-service", "stop"]
             commands.clear()

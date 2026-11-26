@@ -1,7 +1,7 @@
 defmodule H.MixProject do
   use Mix.Project
 
-  @version "0.3.1"
+  @version "0.4.0"
   @source_url "https://github.com/parlant/harness"
   @gitlab_url "https://gitlab.com/parlant-co/harness"
   @homepage_url "https://hiness.dev"
@@ -93,11 +93,16 @@ defmodule H.MixProject do
           H.Session.Server.Recovery,
           H.Session.Server.WorkspaceWait,
           H.Session.Compaction,
+          H.Session.Signals,
           H.Session.Subagents,
           H.Session.UserShell
         ],
         "Extensions, Harnesses & Tools": [
           H.Extension,
+          H.Extension.Observer,
+          H.Extension.StatusProjection,
+          H.Extensions.Observers,
+          H.Extensions.Status,
           H.Harness,
           H.Harness.Coding,
           H.Tool,
@@ -106,7 +111,8 @@ defmodule H.MixProject do
           H.Tools.Edit,
           H.Tools.Bash,
           H.Tools.SearchHistory,
-          H.Tools.Subagent
+          H.Tools.Subagent,
+          H.Tools.WaitSignal
         ],
         "Execution Environments": [
           H.EnvRegistry,
@@ -117,6 +123,8 @@ defmodule H.MixProject do
           H.ExecutionEnv.Local,
           H.ExecutionEnv.Remote,
           H.RemoteAgent,
+          H.RemoteAgent.HTTP,
+          H.RemoteAgent.Client,
           H.WorkspaceLease
         ],
         Storage: [

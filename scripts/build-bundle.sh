@@ -48,9 +48,10 @@ cp rel/README.md "$stage/otp/README.md"
 if [ -f LICENSE ]; then
   cp LICENSE "$stage/otp/LICENSE"
 fi
-# Ship the matching optional artifact without enabling it or copying any config.
+# Ship the matching optional artifacts without enabling them or copying any config.
 export H_SOURCE="$root"
 (cd extensions/multicodex; mix deps.get --only prod --check-locked; mix extension.build "$stage/otp/extensions/multicodex")
+(cd extensions/editor_host; mix deps.get --only prod --check-locked; mix extension.build "$stage/otp/extensions/editor_host")
 case $(uname -s) in
   Darwin) python3 scripts/bundle-macos-libs.py "$stage/otp" ;;
   Linux)  python3 scripts/bundle-linux-libs.py "$stage/otp" ;;

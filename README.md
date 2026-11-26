@@ -30,7 +30,7 @@ mix h.setup --service
 With Elixir 1.20 / OTP 29, add the core daemon from [Hex](https://hex.pm/packages/hiness) to your `mix.exs` dependencies and run `mix deps.get`:
 
 ```elixir
-{:harness, "~> 0.3.0", hex: :hiness}
+{:harness, "~> 0.4.0", hex: :hiness}
 ```
 
 `hiness` is the package name; `:harness` is the OTP application and configuration key. Follow the [embedding guide](https://hiness.hexdocs.pm/overview.html#embed-harness-in-an-elixir-otp-application) or browse the [Elixir API on HexDocs](https://hiness.hexdocs.pm/). Use the signed bundles above for `hi`, `hiweb`, and `H.app`.
@@ -76,8 +76,9 @@ The standalone daemon prints its API address. Its default data directory is `~/.
 
 `hi login` sets up the first Codex alias without creating a session or editing
 JSON. It is also available as `/login` during a session and in Phoenix under
-**Account settings**. Use `hi account list`, `hi account add <alias>`, or
-`hi account use <alias>` to manage the daemon's aliases.
+**Account settings**. Use `hi account list`, `hi account add <alias>`,
+`hi account use <alias>`, `hi account remove <alias>`, `hi logout [alias]`, or
+`hi key remove <provider> <alias>` to manage or remove stored credentials.
 
 ```sh
 hi daemon status

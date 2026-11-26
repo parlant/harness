@@ -213,6 +213,7 @@ defmodule H.Daemon.Boot do
        reservations: %{},
        phase: :running,
        drain_timer: nil,
+       drain_deadline: nil,
        recovery_ref: nil
      }, {:continue, :recover_sessions}}
   end
@@ -241,7 +242,7 @@ defmodule H.Daemon.Boot do
 
   def handle_call(:status, _from, state) do
     workers = count_active_workers(state.opts)
-    timeout_ms = compute_shutdown_timeout_ms(state.opts)
+    timeout_ms = shutdown_timeout_ms(state)
 
     payload = %{
       "state" => phase_string(state.phase),
@@ -293,17 +294,18 @@ defmodule H.Daemon.Boot do
         {:reply, {:error, :shutdown_not_supported}, state}
 
       state.phase in [:draining, :stopping] ->
-        timeout_ms = compute_shutdown_timeout_ms(opts)
-
-        {:reply, {:ok, %{state: phase_string(state.phase), shutdown_timeout_ms: timeout_ms}},
+        {:reply,
+         {:ok,
+          %{state: phase_string(state.phase), shutdown_timeout_ms: shutdown_timeout_ms(state)}},
          state}
 
       true ->
         :ets.insert(table, [{:open, false}, {:draining, true}])
         notify_sessions_enter_drain(opts)
-        state = %{state | phase: :draining}
-        state = maybe_finish_drain(state)
         timeout_ms = compute_shutdown_timeout_ms(opts)
+        # Deliver the deadline directly to the launcher even if a later drain probe blocks Boot.
+        deadline = Process.send_after(opts[:shutdown_owner], :drain_timeout, timeout_ms)
+        state = maybe_finish_drain(%{state | phase: :draining, drain_deadline: deadline})
 
         {:reply, {:ok, %{state: phase_string(state.phase), shutdown_timeout_ms: timeout_ms}},
          state}
@@ -371,9 +373,10 @@ defmodule H.Daemon.Boot do
        ) do
     if is_nil(recovery_ref) and map_size(reservations) == 0 and drained?(opts) do
       if state.drain_timer, do: Process.cancel_timer(state.drain_timer)
+      Process.cancel_timer(state.drain_deadline)
       close_all_sse_subscribers(opts)
       send(opts[:shutdown_owner], :shutdown_drained)
-      %{state | phase: :stopping, drain_timer: nil}
+      %{state | phase: :stopping, drain_timer: nil, drain_deadline: nil}
     else
       arm_drain_poll(state)
     end
@@ -466,6 +469,14 @@ defmodule H.Daemon.Boot do
       end
 
     session_workers + account_refreshes
+  end
+
+  defp shutdown_timeout_ms(%{drain_deadline: timer, opts: opts}) do
+    if timer do
+      max(Process.read_timer(timer) || 0, 1)
+    else
+      compute_shutdown_timeout_ms(opts)
+    end
   end
 
   @doc false

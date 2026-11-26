@@ -12,11 +12,11 @@ These are **deferred designs**, not prerequisites for packages, Codex, or `hi` s
 
 **Gate:** before claiming compatibility, test the same language-neutral vectors for duplicate receipts, conflict, gaps, replay-to-snapshot, branch ownership, stale progress, detach, restart and offline. Freeze the smallest backend interface against H plus a deterministic fixture. Don't extract an SDK before a second real backend uses it.
 
-## Live tool hosts
+## Implemented: live tool hosts (`extensions/editor_host`)
 
-**What:** a daemon-owned tool call that needs inherently live external data. A client viewing SSE is **not** a worker; otherwise two watchers could both run one invocation. A host disconnect makes its capability unavailable, not the entire daemon.
+**What:** a daemon-owned tool call that needs inherently live external data (such as an editor's unsaved buffer). A client viewing SSE is **not** a worker; otherwise two watchers could both run one invocation. A host disconnect makes its capability unavailable (`tool_unavailable` / `host_disconnected`), not the entire daemon.
 
-**How:** if an editor integration needs it, prototype one installed static `editor_buffer_summary` proxy and one versioned schema. Keep the broker and any new transport in the optional package; the design assumes a private local channel only after transport review, not public callback URLs or dynamic module registration.
+**Package (`extensions/editor_host`):** ships as an optional startup-loaded API-1 artifact registering the `editor_coding` harness profile, the `editor_buffer_summary` read-only `H.Tool` (requiring `path` and `expected_revision`), the `Extensions.EditorHost.Broker` process, and an `editor_host` status projection.
 
 1. Pair through a trusted owner operation. A host uses a short-lived tool-host-only grant, never the owner token, and connects to the broker. Verify host/tool/schema/scope against installed config, bind one live host generation, cap concurrency, and revoke routing on loss/expiry. A host can't claim another workspace, install a tool, or choose replay policy. Persist only approved plain policy/identity if needed, never live handles or grants.
 2. Core checks effective tool availability, schema, lease, and commits intent as for any tool. After intent the proxy dispatches a one-use invocation ID, binding, validated args and deadline. Bind it to the current worker in the broker; H already fences the worker return. `H.Tool` exposes a task ID and `on_output`, not a stable external deduplication/attempt token. A durable external deduplication ID needs its own contract.

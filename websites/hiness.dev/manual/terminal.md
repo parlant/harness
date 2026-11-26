@@ -19,6 +19,7 @@ permalink: /docs/terminal/
 | `hi -s SESSION_ID --conversation 1` | Attach directly to a specific session ID and conversation branch |
 | `hi --tui-mode regular` | Run with native terminal scrollback and mouse text selection |
 | `hi -p 'Summarize the README'` | Submit a prompt, stream the assistant reply to standard output, and exit while saving the turn in H |
+| `hi --harness editor_coding` | Start a session under a specific registered harness profile (or switch profiles inside `hi` with `/harness`) |
 
 ## Send now, steer or queue
 
@@ -33,12 +34,12 @@ Use `/tools` to expand or collapse tool output blocks. Run `/earlier` to load ol
 
 ## Configure the terminal footer
 
-Add custom lines to `<data_dir>/hi.json` to display local reminders below the default status bar:
+Add custom lines, opt into cached extension status polling (`"extension_status": true`), or select a custom JSON theme (`<data_dir>/themes/<name>.json`) in `<data_dir>/hi.json`:
 
 ```json
-{"status_lines_append":["Use /cwd to check the session workspace."]}
+{"extension_status":true,"status_lines_append":["Use /cwd to check the session workspace."]}
 ```
 
-Run `/reload` inside `hi` to apply changes to `hi.json` and `hi-keybindings.json` immediately. If a template or keybinding file contains a syntax error, `hi` reports the error and keeps your previous configuration active. Read the [status template reference](https://github.com/parlant/harness/blob/main/docs/hi/status.md) and [CLI flags](https://github.com/parlant/harness/blob/main/clients/tui/src/cli.rs) for all available fields.
+Place markdown prompt templates under `<data_dir>/prompts/<name>.md` and invoke them with `/prompt:<name> [args]`. In `--tui-mode regular`, Kitty, Ghostty, iTerm2, and WezTerm render validated inline PNG/JPEG image previews alongside the caption row. Run `/reload` inside `hi` to apply changes to `hi.json`, custom themes, prompt templates, and `hi-keybindings.json` immediately. If a template, theme, or keybinding file contains an error, `hi` reports the error and keeps your previous configuration active. Read the [status template reference](https://github.com/parlant/harness/blob/main/docs/hi/status.md) and [CLI flags](https://github.com/parlant/harness/blob/main/clients/tui/src/cli.rs) for all available fields.
 
 To add a standalone `hi-<name>` command on your `PATH`, follow [extend the hi CLI](/docs/guides/extend-hi/). To write a custom client against the HTTP and SSE API, follow [build a client](/docs/guides/build-a-client/).

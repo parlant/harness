@@ -43,11 +43,9 @@ Fork a conversation at an earlier entry to test a second approach while keeping 
 
 ## Local or remote execution environments
 
-Run file reads, edits, and shell commands in your local project directory today. H routes all tool calls through an execution environment contract that stays separate from client connections and the session store. A workspace writer lease serializes concurrent mutating tools from H against the same directory, while tools run with your OS user's permissions.
+Run file reads, edits, and shell commands in your local project directory or delegate them to a standalone `h-daemon remote-agent` process over bearer-authenticated HTTP or Unix domain sockets. H routes all tool calls through an execution environment contract that stays separate from client connections and the session store. A workspace writer lease serializes concurrent mutating tools against the same directory, while remote executions enforce `{session_id, incarnation, task_id, attempt_id}` fences, renew leases on a heartbeat, and reap the remote OS process group on disconnect or lease expiry.
 
-H also includes an in-VM remote execution adapter that tests lease fencing and expiry across a simulated boundary. Off-machine transport and a standalone remote agent service are planned on the roadmap and do not ship yet.
-
-[Review the execution boundary](/docs/architecture/#boundaries-that-arent-sandboxes) or [check the remote transport roadmap](https://github.com/parlant/harness/blob/main/docs/roadmap.md#other-remaining-work-not-shipped).
+[Review the execution boundary](/docs/architecture/#boundaries-that-arent-sandboxes) or [explore the v0.4.0 remote agent walkthrough](/releases/v0.4.0/#execute-tools-on-a-standalone-remote-agent).
 
 ## Review files and give feedback in context
 
@@ -63,11 +61,9 @@ Spawn a child session with the `subagent` tool to run a focused task such as a r
 
 ## Signal and wake sessions without polling
 
-Wait on a child subagent without holding a worker process open. H parks the parent task in the session coordinator and wakes it automatically as soon as the child commits its final outcome.
+Wait on a child subagent, an owner tool approval (`/approve` or `/deny`), or an external wake signal (`POST /api/v1/sessions/:sid/signals` and `wait_signal`) without holding a worker process open. H parks waiting tasks in `H.Session.Server` and wakes them automatically as soon as the approval, signal, or child submission commits. Set turn, cost, or elapsed-time limits with `/budget` to pause unattended runs at turn boundaries and resume them with `/continue`.
 
-External scripts and local automation can also submit queued follow-up turns through the authenticated local HTTP API while a session is busy. H holds the queued input until the current turn settles, then runs it in order.
-
-[Coordinate parent and child sessions](/docs/guides/subagents/) or [submit commands through the local API](/docs/guides/build-a-client/).
+[Coordinate parent and child sessions](/docs/guides/subagents/) or [submit commands and signals through the local API](/docs/protocol/).
 
 ## Choose your model provider
 

@@ -5,7 +5,7 @@ defmodule H.RemoteAgent.HTTP do
 
   Supervises a dedicated `H.RemoteAgent` (owning an `H.ExecutionEnv.Host`) along
   with a TCP `Bandit` listener (`:ip`, `:port`, supporting `port: 0`) and/or a
-  Unix domain socket listener (`:socket_path` via `H.HTTP.UnixListener`).
+  Unix domain socket listener (`:socket_path`).
 
   Security & execution guarantees:
     * Constant-time bearer authentication on all `/v1/*` routes: SHA-256 hashes

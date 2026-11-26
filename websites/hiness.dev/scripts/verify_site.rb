@@ -10,7 +10,7 @@ root = Pathname(ARGV.fetch(0, "_site"))
 files = root.glob("**/*.html").to_h do |file|
   ["/#{file.relative_path_from(root)}".sub(/index\.html$/, ""), file.read(encoding: "utf-8")]
 end
-required = %w[/ /features/ /demo/ /docs/ /docs/setup/ /docs/security/ /extensions/ /releases/ /legal-notice/ /privacy/ /artwork/]
+required = %w[/ /features/ /demo/ /docs/ /docs/setup/ /docs/security/ /extensions/ /extensions/editor-host/ /releases/ /releases/v0.4.0/ /legal-notice/ /privacy/ /artwork/]
 missing = required - files.keys
 abort "Missing pages: #{missing.join(', ')}" unless missing.empty?
 

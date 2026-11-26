@@ -16,10 +16,12 @@ Build a local startup extension when you want to register a custom harness profi
 
 At startup, H calls `H.Extension.configure/2` with your JSON settings, the extension ID, and the daemon data directory. Validate the settings and return contribution registrations or child specs for H to supervise:
 
-- `H.Harness` defines a profile's initial agent settings and installed tool modules.
+- `H.Harness` defines a profile's initial agent settings, installed tool modules, and optional `prepare_context/2` and `project_response/2` callbacks.
 - `H.Tool` defines a tool's name, JSON argument schema, execution callback, workspace lease requirement (`mutating?/0`), and crash replay policy (`replay/0`).
-- `H.ExecutionEnv` defines workspace binding, file operations, and command execution.
-- The Codex account-policy contract powers [MultiCodex](/extensions/multicodex/) for ranking authorized Codex aliases.
+- `H.ExecutionEnv` defines workspace binding, file operations, command execution, and optional `admit_exec/2` and `operation_finished/2` callbacks.
+- `H.Extension.Observer` receives sanitized post-commit `command_committed/1` and `work_settled/1` summaries in a bounded consumer process off `H.Session.Server`.
+- `H.Extension.StatusProjection` exposes cached scalar status maps on `GET /api/v1/sessions/:sid/conversations/:cid/extension-status`.
+- The Codex account-policy contract powers [MultiCodex](/extensions/multicodex/) for ranking authorized Codex aliases, and [EditorHost](/extensions/editor-host/) demonstrates a paired live tool-host broker.
 
 ## Author a harness profile
 

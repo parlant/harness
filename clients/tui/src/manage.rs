@@ -534,6 +534,7 @@ fn login(client: &DaemonClient, provider: &str, source: Option<String>) -> Resul
 }
 
 const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(300);
+const STOP_TEARDOWN_GRACE: Duration = Duration::from_secs(12);
 
 pub(crate) fn stop_daemon(
     dir: &std::path::Path,
@@ -548,7 +549,7 @@ pub(crate) fn stop_daemon(
     let client = DaemonClient::new(cfg.target, cfg.token);
     let started = Instant::now();
     let initial_timeout = explicit_timeout.unwrap_or(DEFAULT_STOP_TIMEOUT);
-    let mut deadline = started + initial_timeout.max(Duration::from_secs(12));
+    let mut deadline = started + initial_timeout.max(STOP_TEARDOWN_GRACE);
     let mut announced_drain = false;
     let draining_state;
 
@@ -558,7 +559,9 @@ pub(crate) fn stop_daemon(
                 draining_state = state == "draining";
                 if explicit_timeout.is_none() {
                     if let Some(ms) = server_timeout_ms {
-                        let server_deadline = Instant::now() + Duration::from_millis(ms);
+                        // The advertised drain budget excludes OTP shutdown and lock release.
+                        let server_deadline =
+                            Instant::now() + Duration::from_millis(ms) + STOP_TEARDOWN_GRACE;
                         if server_deadline > deadline {
                             deadline = server_deadline;
                         }

@@ -1,4 +1,4 @@
-current_version: "0.3.0"
+current_version: "0.4.0"
 signer_identity: "bingboombam@parlant.xyz"
 signer_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsOhoxQkZ8pxWeObg2Q10fJ/Gcg0uL4pt1Oy/3vgLuN"
 github_repo: "https://github.com/parlant/harness"
@@ -10,10 +10,20 @@ hex_hiness: "https://hex.pm/packages/hiness"
 hexdocs_hiness: "https://hiness.hexdocs.pm/"
 
 news:
+  - id: v0-4-0-gates-and-remote
+    date: "2026-11-26"
+    tag: "Release v0.4.0"
+    title: "H v0.4.0 ships parked approval gates, run budgets, and HTTP remote agents"
+    summary: "Park mutating tools for owner approval or wait on external wake signals with zero idle BEAM worker processes, run a standalone remote execution agent over HTTP or Unix sockets, and connect hiweb out-of-VM."
+    links:
+      - label: Read the v0.4.0 architectural walkthrough
+        url: "https://hiness.dev/releases/v0.4.0/"
+      - label: View hiness on Hex
+        url: "https://hex.pm/packages/hiness"
   - id: hiness-on-hex
     date: "2026-11-25"
     tag: "Hex package"
-    title: "hiness 0.3.0 is available on Hex"
+    title: "hiness is available on Hex"
     summary: "Embed the H daemon in an Elixir application and call its API in the same BEAM VM. Use hiness as the Hex package name and :harness as the OTP application name."
     links:
       - label: View hiness on Hex
@@ -37,10 +47,43 @@ news:
     summary: "First signed standalone bundles for macOS Apple Silicon (darwin-arm64) and Linux (linux-arm64, linux-x86_64), the h_setup Mix archive, and the native AppKit H.app menu-bar launcher."
 
 entries:
+  - version: "0.4.0"
+    tag: "v0.4.0"
+    date: "2026-11-26"
+    status: "Current release"
+    title: "Parked approval and signal gates, run budgets, HTTP remote agents, and hi cutover"
+    summary: "Pause mutating tools for owner approval or wait on external wake signals inside the session coordinator, enforce turn-boundary run budgets, run standalone remote execution agents over authenticated HTTP or Unix sockets, and connect hiweb out-of-VM."
+    artifacts:
+      - name: "H-v0.4.0-darwin-arm64.dmg"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "macOS Disk Image (H.app)"
+      - name: "H-v0.4.0-darwin-arm64.app.zip"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Zipped macOS Application Bundle"
+      - name: "harness-v0.4.0-darwin-arm64.tar.gz"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.4.0-linux-arm64.tar.gz"
+        platform: "Linux aarch64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.4.0-linux-x86_64.tar.gz"
+        platform: "Linux x86_64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "h_setup-v0.4.0.ez"
+        platform: "Elixir 1.18+ / Mix"
+        kind: "Signed Mix Archive Installer"
+    highlights:
+      - "Park mutating or selected tools for owner approval (/approve and /deny) and wait on external HTTP signals (wait_signal) inside H.Session.Server with zero idle worker processes."
+      - "Configure per-run turn, USD cost, and elapsed-time budgets (/budget) and cancel individual tool or subagent tasks (/abort <task_id>) while keeping sibling calls running."
+      - "Run h-daemon remote-agent over bearer-authenticated HTTP or Unix sockets with attempt fencing, lease heartbeats, and OS process-group reaping."
+      - "Connect hiweb to an external daemon process through HWeb.Backend.HTTP and its supervised catalog and conversation SSE bridges."
+      - "Discover startup harness profiles (GET /api/v1/harnesses), read cached extension status projections in hi and hiweb, and pair live editor buffers through the optional EditorHost package."
+      - "Remove stored Codex or API-key credentials (hi logout and hi key remove), load custom JSON themes and /prompt:<name> templates, and preview inline PNG or JPEG images in Kitty and iTerm2 regular terminal mode."
+
   - version: "0.3.0"
     tag: "v0.3.0"
     date: "2026-11-25"
-    status: "Current release"
+    status: "Previous release"
     title: "Web workbench updates and idle session unloading"
     summary: "Update the terminal and web clients together with the signed macOS or Linux bundle. The daemon unloads idle sessions from memory and wakes them when a request needs them."
     artifacts:

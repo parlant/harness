@@ -5,7 +5,7 @@ description: 'Triage workspaces in the Phoenix inbox, stream live turns, review 
 lang: en
 permalink: /docs/web/
 ---
-The `hiweb` Phoenix workbench calls H directly inside the same BEAM VM and shares the session store with `hi`. Open any session in your browser to follow live replies, inspect diffs, or attach files without exporting or migrating your chat.
+The `hiweb` Phoenix workbench connects to H in-VM (`HWeb.Backend.InVM` in the native bundle) or out-of-VM (`H_WEB_BACKEND=http` via `HWeb.Backend.HTTP` over `api.sock` or loopback HTTP) and shares the session store with `hi`. Open any session in your browser to follow live replies, approve or deny parked tools, configure run budgets, inspect diffs, or attach files without exporting or migrating your chat.
 
 * Contents
 {:toc}

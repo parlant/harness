@@ -23,13 +23,13 @@ The smoke test builds the Hex tarball, serves it from a disposable signed regist
 
 ## Release status
 
-`hiness` 0.3.0 is published on [Hex](https://hex.pm/packages/hiness), with its [Elixir API reference on HexDocs](https://hiness.hexdocs.pm/). The signed `v0.3.0` native bundles and the `h_setup.ez` installer archive are available on [GitLab](https://gitlab.com/parlant-co/harness/-/releases/v0.3.0) and [GitHub](https://github.com/parlant/harness/releases/tag/v0.3.0). `h_setup` has not been published to Hex.
+`hiness` 0.4.0 is prepared for [Hex](https://hex.pm/packages/hiness), with its [Elixir API reference on HexDocs](https://hiness.hexdocs.pm/). Signed `v0.4.0` native bundles and the `h_setup.ez` installer archive publish to [GitLab](https://gitlab.com/parlant-co/harness/-/releases) and [GitHub](https://github.com/parlant/harness/releases). `h_setup` is installed from the signed release assets rather than Hex.
 
 ## Publish a version interactively
 
 1. Confirm the candidate's tag pipeline passed and the tag is available on the GitHub mirror so HexDocs source links resolve. Work from a clean checkout of the tag.
 2. Run `mix hex.user auth` and `mix hex.user whoami` to confirm you are authorized to publish the package. Run `MIX_ENV=dev mix deps.get --check-locked` and `MIX_ENV=dev mix hex.publish` from the root.
-3. Verify the new version on [Hex](https://hex.pm/packages/hiness) and [HexDocs](https://hiness.hexdocs.pm/), then run `mix deps.get` for `{:harness, "~> 0.3.0", hex: :hiness}` in a clean Mix project, updating the version requirement for later releases. If only the docs upload fails, retry with `MIX_ENV=dev mix hex.publish docs` from the same tag.
+3. Verify the new version on [Hex](https://hex.pm/packages/hiness) and [HexDocs](https://hiness.hexdocs.pm/), then run `mix deps.get` for `{:harness, "~> 0.4.0", hex: :hiness}` in a clean Mix project, updating the version requirement for later releases. If only the docs upload fails, retry with `MIX_ENV=dev mix hex.publish docs` from the same tag.
 
 To publish the separate `h_setup` installer on Hex, first verify the signed native assets are available. From `installer/` at the same tag, run `MIX_ENV=docs mix deps.get --check-locked` and `MIX_ENV=docs mix hex.publish`.
 

@@ -52,7 +52,7 @@ defmodule H.Daemon.CLI do
              {:ok, _} <-
                H.serve(opts ++ [data_dir: dir, bind_addresses: addresses, shutdown_owner: self()]) do
           ref = Process.monitor(H.Daemon.Instance)
-          await_shutdown(ref, false, shutdown_timeout_ms())
+          await_shutdown(ref, false)
         else
           {:error, reason} ->
             IO.puts(
@@ -69,33 +69,15 @@ defmodule H.Daemon.CLI do
     end
   end
 
-  defp await_shutdown(ref, draining?, timeout_ms) do
+  defp await_shutdown(ref, sigterm_received?) do
     receive do
       msg when msg in [:shutdown_when_idle, :shutdown_drained] ->
         stop_cleanly()
 
-      {:os_signal, :sigterm} when not draining? ->
+      {:os_signal, :sigterm} when not sigterm_received? ->
         case initiate_drain() do
-          {:ok, %{state: "stopping"}} ->
-            await_shutdown(ref, true, timeout_ms)
-
-          {:ok, %{state: "draining"} = reply} ->
-            effective_timeout_ms =
-              case Map.get(reply, :shutdown_timeout_ms) do
-                ms when is_integer(ms) and ms > 0 -> max(timeout_ms, ms)
-                _ -> timeout_ms
-              end
-
-            timer = Process.send_after(self(), :drain_timeout, effective_timeout_ms)
-
-            try do
-              await_shutdown(ref, true, effective_timeout_ms)
-            after
-              Process.cancel_timer(timer)
-            end
-
-          _ ->
-            stop_cleanly()
+          {:ok, _} -> await_shutdown(ref, true)
+          _ -> stop_cleanly()
         end
 
       {:os_signal, :sigterm} ->
@@ -129,19 +111,6 @@ defmodule H.Daemon.CLI do
     end
 
     System.stop(0)
-  end
-
-  defp shutdown_timeout_ms do
-    case System.get_env("H_SHUTDOWN_TIMEOUT_MS") do
-      nil ->
-        300_000
-
-      raw ->
-        case Integer.parse(String.trim(raw)) do
-          {ms, ""} when ms > 0 -> ms
-          _ -> 300_000
-        end
-    end
   end
 
   # Core-only checkouts still run without Phoenix on their code path.

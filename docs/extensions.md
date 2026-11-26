@@ -6,12 +6,12 @@ This is the entry point for extending H. **Existing** sections describe code you
 
 | I want to… | Start here | Status |
 |---|---|---|
-| Install a local package and enable or hot-reload it for a daemon | [Daemon composition and core hooks](extensions/daemon.md) | Startup loading, transactional hot reload, bypass flag, and developer template exist; common hooks are proposed |
-| Change instructions, context, or tool set without replacing the session engine | [Harness profiles and tools](extensions/harness.md) | Behaviours exist; profile-specific hooks and discoverable selection are proposed |
-| Change where or under what constraints tools operate | [Execution environments](extensions/execution-env.md) | Environment behaviour and registry exist; env-specific hooks are optional design |
-| Log a daemon into Codex or use multiple credential sources | [Providers](extensions/providers.md) | Stock device login; MultiCodex path policy polls usage and ranks eligible aliases |
-| Show package status or initiate a daemon operation from `hi` | [Clients](extensions/clients.md) | Local status templates and device login exist; package status is proposed |
-| Use a live editor capability or a completely different agent runtime | [External integrations](extensions/external-integrations.md) | Deferred; not part of the Codex slice |
+| Install a local package and enable it for a daemon | [Daemon composition and core hooks](extensions/daemon.md) | Startup loading, post-commit advisory observers (`command_committed`, `work_settled`), bypass flag, and developer template exist |
+| Change instructions, context, or tool set without replacing the session engine | [Harness profiles and tools](extensions/harness.md) | Behaviours, `GET /api/v1/harnesses` discovery, and optional `prepare_context/2` / `project_response/2` callbacks exist |
+| Change where or under what constraints tools operate | [Execution environments](extensions/execution-env.md) | Environment behaviour, registry, HTTP/UDS `H.RemoteAgent.HTTP`, and optional `admit_exec/2` / `operation_finished/2` callbacks exist |
+| Log a daemon into Codex or use multiple credential sources | [Providers](extensions/providers.md) | Stock device login & logout; MultiCodex path policy polls usage, ranks eligible aliases, and projects cached `account_pool` status |
+| Show package status or initiate a daemon operation from `hi` | [Clients](extensions/clients.md) | Local status templates, opt-in `extension_status` footer polling, custom JSON themes, prompt templates, and device login/logout exist |
+| Use a live editor capability or a completely different agent runtime | [External integrations](extensions/external-integrations.md) | Optional `extensions/editor_host` live tool-host broker exists; alternate agent runtimes remain separate |
 
 ## First principles
 
@@ -29,8 +29,8 @@ A hook is a call site with one owner, purpose, and stated guarantees, not permis
 
 | Earlier idea | Refined decision |
 |---|---|
-| Load path packages from an H config file | Load explicitly selected, prebuilt local artifacts at startup, with explicit owner-triggered transactional hot reload (`POST /api/v1/extensions/reload` / `H.Daemon.reload_extensions/1`). No custom Mix project for operators, no workspace discovery, and no automatic compilation at boot. |
-| One registry of daemon, harness, and env hooks | Keep shared semantics small: common command and task milestones are candidate core observations. Profile and env owners define their own opt-in contracts. None of these observers or profile/env hooks is required for login. |
+| Load path packages from an H config file | Load explicitly selected, prebuilt local artifacts at daemon startup (`<data_dir>/extensions.json`, `H.Extension` API 1). No BEAM hot-reloading, no custom Mix project for operators, no workspace discovery, and no automatic compilation at boot; apply updates via cooperative draining restart (`hi daemon restart`). |
+| One registry of daemon, harness, and env hooks | Keep shared semantics small: `H.Extension.Observer` provides post-commit advisory observations (`command_committed`, `work_settled`), while `H.Harness` (`prepare_context/2`, `project_response/2`) and `H.ExecutionEnv` (`admit_exec/2`, `operation_finished/2`) own their respective domain callbacks. |
 | Wrap any provider stream and retry when nothing was rendered | Reuse the credential path at the actual dispatch boundary. No output is not proof of rejection. The adapter must prove both pre-acceptance rejection and account-local scope; the persisted attempt policy governs interruption. |
 | A generic owner command and UI engine for `/login` | Ship only a versioned provider-login interaction. Don't invent generic action handlers, client forms or conversation commands for it. |
 | Package code in `hi` to render status | One optional snapshot of bounded values, displayed only by local templates. No change to the transcript/SSE cursor and no provider I/O from rendering. |
@@ -50,6 +50,6 @@ A hook is a call site with one owner, purpose, and stated guarantees, not permis
 1. **Implemented: prove boot composition with a tiny path extension.** One config serves standalone HTTP/UDS, session create/attach, VM recovery and the in-VM backend. Start here for [operator configuration and the developer template](extensions/daemon.md).
 2. **Implemented: stock account context and MultiCodex path package.** Core owns device login, a private vault, and explicit manual selection. The package owns polling and ranking; it contributes two narrow callbacks.
 3. **Implemented: bounded auth fallback.** One alternate dispatch for a verified pre-output `401 invalid_token`. Quota-error retry is deferred until the provider proves account-local scope and pre-acceptance; no generic provider registration hook.
-4. **Add an opt-in status row.** Prove a plain `hi` build can display package data, then drop stale or missing data without affecting login, inference, or the client cursor. Add shared observers and harness/env hooks only when a concrete consumer needs the corresponding seam.
+4. **Implemented: opt-in status projection and narrow domain seams.** `GET /api/v1/sessions/:sid/conversations/:cid/extension-status` exposes cached scalar projections (`MultiCodex` `account_pool` and `EditorHost` `editor_host`), consumed by `hi` when `"extension_status": true` is set in `hi.json` without affecting login, inference, or the client cursor.
 
 Do not replicate Pi’s account-store adoption or unverified retry rules. No new persistence or transport dependency is assumed. Tests use fake services and disposable workspaces and stores; no real account stores or paid calls.

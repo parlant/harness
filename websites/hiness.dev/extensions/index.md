@@ -1,7 +1,7 @@
 ---
 layout: doc
 title: 'Extension browser'
-description: 'Browse the bundled MultiCodex startup package, enable a trusted local artifact, or write your own extension.'
+description: 'Browse the bundled MultiCodex and EditorHost startup packages, enable a trusted local artifact, or write your own extension.'
 lang: en
 permalink: /extensions/
 artwork: charlotte_bonaparte
@@ -11,11 +11,12 @@ H loads optional startup packages from explicit local directory paths listed in 
 * Contents
 {:toc}
 
-## Available package
+## Available packages
 
 | Package | Use it when | Activation |
 |---|---|---|
-| [MultiCodex](/extensions/multicodex/) | You have two to eight authorized Codex aliases and want H to pick the account with the most quota headroom | API 1 path artifact included in the native bundle (disabled by default) or built from source |
+| [MultiCodex](/extensions/multicodex/) | You have two to eight authorized Codex aliases and want H to pick the account with the most quota headroom and project `account_pool` status | API 1 path artifact included in the native bundle (disabled by default) or built from source |
+| [EditorHost](/extensions/editor-host/) | You want to pair a live editor process using a short-lived workspace grant and read unsaved buffer summaries via `editor_buffer_summary` | API 1 path artifact included in the native bundle (disabled by default) or built from source |
 
 Single-account Codex device login, API key management, and custom OpenAI-compatible provider catalogs ship directly in the core daemon; see [providers and credentials](/docs/providers/). The `hi import` command ships as a standalone CLI helper (`hi-import`), and the [greeting template](/docs/extensions/#build-the-greeting-template) serves as a starter project for extension authors.
 

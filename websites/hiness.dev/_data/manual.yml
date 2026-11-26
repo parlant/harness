@@ -30,3 +30,8 @@
   pages:
     - {title: 'Extension browser', url: /extensions/}
     - {title: 'MultiCodex', url: /extensions/multicodex/}
+    - {title: 'EditorHost', url: /extensions/editor-host/}
+- title: 'Releases'
+  pages:
+    - {title: 'Release ledger', url: /releases/}
+    - {title: 'H v0.4.0 walkthrough', url: /releases/v0.4.0/}

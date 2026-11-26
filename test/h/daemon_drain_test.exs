@@ -771,6 +771,44 @@ defmodule H.DaemonDrainTest do
            "expected Instance shutdown with open SSE streams in < 1000ms, took #{elapsed_ms}ms"
   end
 
+  describe "drain_and_stop/1" do
+    @tag :tmp_dir
+    test "notifies the launcher when a drain is blocked past its deadline", %{tmp_dir: dir} do
+      start_supervised!(
+        {Instance, data_dir: dir, shutdown_owner: self(), shutdown_timeout_ms: 200}
+      )
+
+      opts = Daemon.instance_options()
+      assert :ok = GenServer.call(H.Daemon.Boot, {:admit, opts[:maintenance_table]})
+
+      assert {:ok, %{state: "draining", shutdown_timeout_ms: 200}} =
+               Maintenance.drain_and_stop(opts)
+
+      assert {:ok, %{state: "draining", shutdown_timeout_ms: remaining}} =
+               Maintenance.drain_and_stop(opts)
+
+      assert remaining in 1..200
+      assert_receive :drain_timeout, 1_000
+      refute_receive :drain_timeout, 250
+      refute_received :shutdown_drained
+    end
+
+    @tag :tmp_dir
+    test "cancels the deadline when the drain finishes", %{tmp_dir: dir} do
+      start_supervised!(
+        {Instance, data_dir: dir, shutdown_owner: self(), shutdown_timeout_ms: 500}
+      )
+
+      opts = Daemon.instance_options()
+      assert :ok = GenServer.call(H.Daemon.Boot, {:admit, opts[:maintenance_table]})
+      assert {:ok, %{state: "draining"}} = Maintenance.drain_and_stop(opts)
+
+      GenServer.cast(H.Daemon.Boot, {:release, self()})
+      assert_receive :shutdown_drained, 1_000
+      refute_receive :drain_timeout, 550
+    end
+  end
+
   @tag :tmp_dir
   test "computes dynamic shutdown_timeout_ms exceeding 300s floor for long-timeout running tools",
        %{tmp_dir: dir} do

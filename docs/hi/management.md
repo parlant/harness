@@ -12,6 +12,9 @@ first word, e.g. `hi account list --data-dir /path/to/store`.
 | `hi account list` | `/account` picker, or the accounts page. |
 | `hi account add <alias>` | `/account add <alias>`, or the add-alias form. |
 | `hi account use <alias>` | `/account <alias>`, or **Use in stock mode**. |
+| `hi logout [alias]` / `hi account remove <alias>` | `/logout [alias]`, or **Remove** on the accounts page. |
+| `hi key list` / `hi key remove <provider> <alias>` | `/key remove [<provider> <alias>]`, or **Remove** on the accounts page. |
+| `hi --harness <id>` | `/harness [id]` selects a registered harness profile for a new session. |
 | `hi daemon status` | Authenticated liveness check; no session created. Exits nonzero and reports “not running” if the endpoint is missing or refuses the connection. |
 | `hi daemon start [--launcher PATH] [--no-extensions]` | Starts in the foreground. |
 | `hi daemon stop [--idle-only] [--timeout SECS]` / `hi daemon restart [...]` | Standalone only; cooperatively drains in-flight tools and open responses before stopping (pass `--idle-only` to refuse when busy; default 300s timeout automatically extends to cover longer running tool deadlines plus 30s commit grace unless `--timeout` is explicitly passed). |
@@ -86,9 +89,9 @@ so active sessions automatically resume from their persisted checkpoints. The ol
 installed. The task prints the previous release ID for explicit rollback:
 `mix h.install --activate <id>`. A readiness failure is reported, not forcibly
 rolled back; inspect the daemon log before deciding whether to switch back.
-If launchd does not confirm that the old process exited, `current` stays on
-the old bundle, which may already be stopped. The error shows the last observed
-job state and the staged release ID. Once the job is stopped, retry with
+If the daemon or launchd does not confirm that the old process exited, `current`
+stays on the old bundle, which may already be stopped. The error reports what
+failed and the staged release ID. Once the job is stopped, retry with
 `mix h.install --activate <staged-id>` without rebuilding or copying again.
 Do not roll back across incompatible storage changes without a migration plan.
 An already-open `hi` can reconnect to the new daemon and switch its own
@@ -134,8 +137,10 @@ and active token refreshes) without spawning subsequent tools or turns; pass
 `max(default_timeout_ms, max_remaining_worker_ms + 30_000)` when a running tool
 has a longer remaining deadline (for example, a 10-minute `bash` call), with
 LaunchAgent `ExitTimeOut` and systemd `TimeoutStopSec` set to `660` seconds.
-Once active workers finish, it exits through OTP shutdown (normal `SIGTERM`
-follows the same cooperative drain).
+The daemon exits through OTP shutdown once active workers finish or the drain
+deadline expires. HTTP shutdown and `SIGTERM` use the same deadline. If a worker
+is interrupted, recovery does not replay unsafe effects. `--timeout` only
+changes how long the client waits; it does not change the daemon's deadline.
 The client waits for its listener to close and its store lock to be released
 before launching the replacement with the **same** store, where active sessions
 resume automatically; it never kills a PID from a manifest. The preflight is not
@@ -172,10 +177,11 @@ The bundle's internal Erlang binaries are not put on the `PATH` seen by host
 shell commands. Commands such as `mix` still need your development toolchain
 on the daemon launcher's `PATH`.
 
-The release also ships the optional `extensions/multicodex` artifact. It is
-**not auto-enabled**; point your existing extension entry at that directory
-if you want to use the bundled copy. No accounts, credentials, session files,
-or local configuration travel with the bundle.
+The release also ships the optional `extensions/multicodex` and
+`extensions/editor_host` artifacts. Neither is **auto-enabled**; point your
+`<data_dir>/extensions.json` entries at those directories if you want to use
+the bundled copies. No accounts, credentials, session files, or local
+configuration travel with the bundle.
 
 The bundled daemon starts Phoenix in the same VM and serves the web inbox at
 <http://127.0.0.1:4200/inbox> with the same sessions as `hi`. Sign in using

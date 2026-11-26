@@ -306,13 +306,13 @@ def install(args):
             checked([release / "bin/hi", "daemon", "check-service"], env)
             # Use the new release's hi so cooperative drain mode is sent even when
             # upgrading from an older release whose hi only supported idle shutdown.
-            checked([release / "bin/hi", "daemon", "stop"], env, timeout=660)
-            # The API and store lock can disappear before the VM exits. A kickstart
-            # while launchd still tracks that process may not start a replacement.
-            print("Waiting for launchd to finish stopping the old release...")
             try:
+                checked([release / "bin/hi", "daemon", "stop"], env, timeout=660)
+                # The API and store lock can disappear before the VM exits. A kickstart
+                # while launchd still tracks that process may not start a replacement.
+                print("Waiting for launchd to finish stopping the old release...")
                 wait_until_stopped(existing_service, env)
-            except RuntimeError as err:
+            except (RuntimeError, subprocess.TimeoutExpired) as err:
                 raise RuntimeError(
                     f"{err}\nCheck launchctl and {data / 'h-daemon.log'}. "
                     f"Once the service is stopped, retry with mix h.install --activate {release.name}."

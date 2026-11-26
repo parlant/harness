@@ -18,7 +18,7 @@ Use Elixir 1.20 and Erlang/OTP 29. Add this dependency to `mix.exs` and run `mix
 ```elixir
 def deps do
   [
-    {:harness, "~> 0.3.1", hex: :hiness}
+    {:harness, "~> 0.4.0", hex: :hiness}
   ]
 end
 ```
@@ -66,5 +66,5 @@ This HexDocs site documents the Elixir modules, callbacks, and typespecs of `:ha
 | Daemon lifecycle & commands | `H`, `H.Application`, `H.Daemon`, `H.Catalog` | [Manage the daemon](https://hiness.dev/docs/daemon/) · [Local HTTP and SSE API](https://hiness.dev/docs/protocol/) |
 | Session state & recovery | `H.Session`, `H.Conversation`, `H.Entry`, `H.Task`, `H.Submission` | [Architecture and recovery](https://hiness.dev/docs/architecture/) · [Sessions and branches](https://hiness.dev/docs/sessions/) |
 | Extensions, harnesses & tools | `H.Extension`, `H.Harness`, `H.Tool`, `H.Harness.Coding` | [Write a startup extension](https://hiness.dev/docs/extensions/) · [Extension directory](https://hiness.dev/extensions/) |
-| Execution environments & leases | `H.ExecutionEnv`, `H.ExecutionEnv.Host`, `H.WorkspaceLease`, `H.EnvRegistry` | [Security boundaries](https://hiness.dev/docs/security/) · [Subagents](https://hiness.dev/docs/guides/subagents/) |
+| Execution environments & leases | `H.ExecutionEnv`, `H.ExecutionEnv.Host`, `H.ExecutionEnv.Remote`, `H.RemoteAgent.HTTP`, `H.WorkspaceLease`, `H.EnvRegistry` | [Security boundaries](https://hiness.dev/docs/security/) · [Subagents](https://hiness.dev/docs/guides/subagents/) |
 | Storage & providers | `H.Storage`, `H.Storage.File`, `H.Storage.Memory`, `H.Provider`, `H.Accounts` | [Configure providers](https://hiness.dev/docs/providers/) · [Configuration](https://hiness.dev/docs/configuration/) |

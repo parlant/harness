@@ -42,7 +42,7 @@ When a provider returns a retryable error, `H.Session.Server.Generation` commits
 Add [`hiness` from Hex](https://hex.pm/packages/hiness) to an Elixir 1.20 / Erlang/OTP 29 project. Put this entry in your `mix.exs` dependencies and run `mix deps.get`:
 
 ```elixir
-{:harness, "~> 0.3.0", hex: :hiness}
+{:harness, "~> 0.4.0", hex: :hiness}
 ```
 
 `hiness` is the package name. `:harness` is the OTP application and configuration key. Set `config :harness, data_dir: "/path/to/private/store"` in `config/runtime.exs` to start the supervised daemon without opening an HTTP port or API socket. Call `H.Daemon` in the same BEAM VM. Browse the [Elixir API reference on HexDocs](https://hiness.hexdocs.pm/), or inspect [the OTP application entry point](https://github.com/parlant/harness/blob/main/lib/h/application.ex) and [the Phoenix in-VM backend](https://github.com/parlant/harness/blob/main/clients/web/lib/h_web/backend/in_vm.ex).
@@ -51,6 +51,6 @@ Start with the built-in file store and host execution environment. To customize 
 
 ## Boundaries that aren't sandboxes
 
-A workspace writer lease serializes concurrent mutating tools from H against the same environment and canonical directory. Host tools execute with the daemon OS user's filesystem and shell permissions. The built-in remote execution adapter exercises lease fencing and expiry **inside the VM** as a prototype for future remote transport. To compare history branching with child session delegation, read [delegate to a subagent](/docs/guides/subagents/).
+A workspace writer lease serializes concurrent mutating tools from H against the same environment and canonical directory. Host tools execute with the daemon OS user's filesystem and shell permissions. `H.ExecutionEnv.Remote` plus `H.RemoteAgent.HTTP` and `h-daemon remote-agent` delegate workspace operations to a separate container or host over bearer-authenticated HTTP or Unix sockets with attempt fencing, lease heartbeats, and OS process-group cleanup. To compare history branching with child session delegation, read [delegate to a subagent](/docs/guides/subagents/).
 
 [Architecture notes](https://github.com/parlant/harness/blob/main/docs/architecture.md) · [VM restart tests](https://github.com/parlant/harness/blob/main/test/h/vm_restart_test.exs) · [Tool crash recovery tests](https://github.com/parlant/harness/blob/main/test/h/tool_crash_recovery_test.exs)

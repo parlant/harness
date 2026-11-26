@@ -14,7 +14,7 @@ H stores provider credentials in `<data_dir>/credentials/` and shares the model 
 
 In `hi`, run `/key set openai work` and paste the secret when the **masked input prompt** opens. Run `/key list` to view saved aliases. The first saved alias for a provider becomes active automatically; run `/key use openai work` to switch when you have multiple aliases. You can perform the same write-only actions in `hiweb` under **Account settings**. After saving a key, run `/model` to select a model from that provider, or run `/continue` to resume a turn that paused on a missing key.
 
-Built-in API-key support covers `openai`, `anthropic`, `google`, `deepseek`, and `openrouter`, as well as any custom endpoints you register in `openai-compatible.json`. Keys stored in the daemon vault take effect immediately and override environment variables from the daemon's launch shell.
+Built-in API-key support covers `openai`, `anthropic`, `google`, `deepseek`, and `openrouter`, as well as any custom endpoints you register in `openai-compatible.json`. Keys stored in the daemon vault take effect immediately and override environment variables from the daemon's launch shell. Run `hi key remove <provider> <alias>` (or `/key remove` in `hi` and **Remove** on **Account settings** in `hiweb`) to delete a stored key alias.
 
 ## ChatGPT account via Codex
 
@@ -27,7 +27,7 @@ hi account list
 
 Open the printed verification URL in your browser and enter the device code. Your first login creates the `default` alias. To add another account, run `hi login openai_codex work`, then run `hi account use work` to make it the active alias for subsequent turns. You can also start device login from inside an active session with `/login`. Select an `openai_codex:` model in `/model` to route turns through your ChatGPT subscription.
 
-H records alias metadata in `accounts.json` and stores tokens in `<data_dir>/credentials/` with mode `0600`. If a token refresh fails or expires, run `hi login` again for that alias. To balance turns across two to eight authorized Codex accounts automatically, enable the [MultiCodex extension](/extensions/multicodex/).
+H records alias metadata in `accounts.json` and stores tokens in `<data_dir>/credentials/` with mode `0600`. Run `hi logout [alias]` (or `/logout` in `hi` and **Remove** on **Account settings** in `hiweb`) to remove a stored Codex alias and its token file. If a token refresh fails or expires, run `hi login` again for that alias. To balance turns across two to eight authorized Codex accounts automatically, enable the [MultiCodex extension](/extensions/multicodex/).
 
 ## Gemini: Developer API or Vertex AI?
 

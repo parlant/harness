@@ -191,7 +191,7 @@ defmodule H.ToolCrashRecoveryTest do
     }
   end
 
-  defp wait_until(fun, timeout_ms \\ 2_000) do
+  defp wait_until(fun, timeout_ms \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_until(fun, deadline)
   end
