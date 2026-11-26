@@ -391,7 +391,11 @@ fn run_loop(
     };
     ui.config.status.validate(&ui.status_fields())?;
     let exiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ] {
         local(signal_hook::flag::register(signal, exiting.clone()))?;
     }
     let mut screen = local(open_screen())?;
@@ -441,6 +445,9 @@ fn run_loop(
         if repaint {
             ui.draw(&mut screen)?;
             repaint = false;
+        }
+        if terminal_disconnected() {
+            break;
         }
         if local(event::poll(Duration::from_millis(16)))? {
             match local(event::read())? {
@@ -548,6 +555,48 @@ fn run_loop(
         return Err(format!("Could not restart hi: {}", command.exec()));
     }
     Ok(())
+}
+
+/// Checks whether standard input has lost its controlling terminal / peer (hangup,
+/// error, or invalid descriptor).
+///
+/// Crossterm 0.29's default Unix `mio` event source loops on `tty_fd.read(...)`
+/// without breaking on `Ok(0)` (EOF), so calling `crossterm::event::poll` after the
+/// PTY master closes causes an infinite 100% CPU busy loop inside `read()`.
+#[cfg(unix)]
+fn terminal_disconnected() -> bool {
+    fd_disconnected(0)
+}
+
+#[cfg(unix)]
+fn fd_disconnected(fd: i32) -> bool {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    const POLLIN: i16 = 0x0001;
+    const POLLERR: i16 = 0x0008;
+    const POLLHUP: i16 = 0x0010;
+    const POLLNVAL: i16 = 0x0020;
+
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+    }
+
+    let mut pfd = PollFd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    let rc = unsafe { poll(&mut pfd, 1, 0) };
+    rc > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0
+}
+
+#[cfg(not(unix))]
+fn terminal_disconnected() -> bool {
+    false
 }
 
 impl Ui {
@@ -6070,5 +6119,28 @@ mod tests {
         drop(ui);
         let _ = handle.join();
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_disconnected_detects_peer_hangup_and_invalid_fd() {
+        use std::os::unix::io::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (a, b) = UnixStream::pair().unwrap();
+        assert!(
+            !fd_disconnected(a.as_raw_fd()),
+            "connected peer must not be reported as disconnected"
+        );
+        drop(b);
+        assert!(
+            fd_disconnected(a.as_raw_fd()),
+            "closed peer must be reported as disconnected"
+        );
+        drop(a);
+        assert!(
+            fd_disconnected(999_999),
+            "invalid fd must be reported as disconnected"
+        );
     }
 }
