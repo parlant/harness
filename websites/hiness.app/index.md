@@ -23,6 +23,8 @@ sections:
       label: Inspect bundle architecture
       url: /bundle/
 
+  - layout: hiweb
+
   - layout: install
     id: download
     kicker: Install H.app

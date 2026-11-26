@@ -1,0 +1,26 @@
+kicker: The browser workbench
+title: Your sessions, in hiweb.
+body: Open the session inbox, read a reply, and send the next message from your browser. These captures show a real H session on desktop and mobile.
+full_size: Open full-size screenshot
+figures:
+  - id: inbox
+    file: hiweb-inbox.webp
+    width: 1624
+    height: 582
+    title: Find the next session.
+    caption: The inbox groups sessions by workspace, with filters for attention, archived work, and running sessions. The workspace path is visibly redacted in this capture.
+    alt: "hiweb inbox with session filters, three idle sessions and one running session. The workspace path is redacted."
+  - id: mobile
+    file: hiweb-mobile.webp
+    width: 780
+    height: 1688
+    title: Read and reply on mobile.
+    caption: The same session adapts to a narrow browser, with its reply and message composer in one column.
+    alt: "Mobile hiweb view of a release-writing session, with the agent reply above the message composer."
+  - id: composer
+    file: hiweb-composer.webp
+    width: 1392
+    height: 254
+    title: Send the next turn.
+    caption: The desktop composer keeps attachments, model selection, slash commands, and file mentions close to your message.
+    alt: "hiweb message composer with attachment control, model selector, Send button, and hints for slash commands and file mentions."

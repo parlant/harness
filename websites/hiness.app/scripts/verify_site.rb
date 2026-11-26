@@ -5,6 +5,7 @@ require "cgi"
 require "uri"
 require "rexml/document"
 require_relative "../../shared/scripts/verify_artwork"
+require_relative "../../shared/scripts/verify_hiweb"
 
 root = Pathname(ARGV.fetch(0, "_site"))
 files = root.glob("**/*.html").to_h do |file|
@@ -18,7 +19,7 @@ llms = root.join("llms.txt").read(encoding: "utf-8")
 full = root.join("llms-full.txt").read(encoding: "utf-8")
 sitemap = REXML::Document.new(root.join("sitemap.xml").read(encoding: "utf-8"))
 locations = sitemap.root.get_elements("url/loc").map { |loc| loc.text }
-errors = artwork_errors(files)
+errors = artwork_errors(files) + hiweb_errors(files, root)
 files.each do |route, html|
   errors << "#{route}: expected one h1" unless html.scan(/<h1\b/).size == 1
   errors << "#{route}: missing page description" unless html.include?('name="description"') || route == "/404.html"

@@ -4,6 +4,7 @@
 @import "./palette.css";
 @import "./site.css";
 @import "./theatre.css";
+@import "./hiweb.css";
 @plugin "@tailwindcss/typography";
 
 /* See docs/style-guide.md. Utility CSS is built here; no styles or fonts are fetched at runtime. */

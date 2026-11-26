@@ -21,6 +21,8 @@ sections:
     secondary:
       label: Switch clients mid-run
       url: /docs/guides/resume/
+  - layout: hiweb
+
   - layout: install
     id: install
     kicker: Install H

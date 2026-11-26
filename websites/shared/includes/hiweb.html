@@ -1,0 +1,23 @@
+{% assign proof = site.data.hiweb %}
+<section id="hiweb" class="manual-section hiweb-proof" aria-labelledby="hiweb-heading">
+  <header class="hiweb-intro">
+    <p class="manual-kicker">{{ proof.kicker }}</p>
+    <h2 id="hiweb-heading" class="manual-title">{{ proof.title }}</h2>
+    <p>{{ proof.body }}</p>
+  </header>
+  <div class="hiweb-grid">
+    {% for figure in proof.figures %}
+    {% assign image_url = '/assets/screenshots/' | append: figure.file %}
+    <figure class="hiweb-figure hiweb-{{ figure.id }}">
+      <a class="hiweb-image-link" href="{{ image_url | relative_url }}" aria-label="{{ proof.full_size }}: {{ figure.title | escape }}">
+        <img src="{{ image_url | relative_url }}" width="{{ figure.width }}" height="{{ figure.height }}" alt="{{ figure.alt | escape }}" loading="lazy" decoding="async">
+      </a>
+      <figcaption>
+        <h3>{{ figure.title }}</h3>
+        <p>{{ figure.caption }}</p>
+        <a class="hiweb-full-size" href="{{ image_url | relative_url }}">{{ proof.full_size }}<span class="sr-only">: {{ figure.title }}</span> <span aria-hidden="true">↗</span></a>
+      </figcaption>
+    </figure>
+    {% endfor %}
+  </div>
+</section>
