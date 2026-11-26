@@ -1,8 +1,8 @@
 use crate::cli::generate_request_id;
 use crate::client::{ClientError, DaemonClient, LoginProvider};
 use crate::protocol::{
-    CommandEnvelope, CommandReceipt, CreateSessionRequest, CreateSessionResponse,
-    EntriesPageResponse, SessionParent, SessionSummary, SessionTreeResponse,
+    ApprovalPolicy, CommandEnvelope, CommandReceipt, CreateSessionRequest, CreateSessionResponse,
+    EntriesPageResponse, RunBudget, SessionParent, SessionSummary, SessionTreeResponse,
 };
 use crate::render::sanitize_single_line;
 use serde_json::{json, Map, Value};
@@ -78,11 +78,17 @@ pub enum Effect {
     Sessions,
     Models,
     LoginSources,
+    LogoutSources,
+    RemoveCodexAccount(String),
     KeyProfiles,
+    KeyRemoveProfiles,
     UseKey(String, String),
+    RemoveKey(String, String),
     AccountSources,
     ActivateAccount(String),
     AddAccount(String),
+    Harnesses,
+    NewWithHarness(String),
     Branches,
     Tree,
     Earlier(String),
@@ -102,7 +108,17 @@ pub enum Effect {
         at_entry_id: u64,
     },
     Configure(String, String),
-    Abort,
+    ConfigureBudget(Option<RunBudget>),
+    ConfigureApproval(ApprovalPolicy),
+    ApproveTool {
+        task_id: u64,
+        decision: String,
+        reason: Option<String>,
+    },
+    Abort {
+        task_id: Option<u64>,
+        reason: Option<String>,
+    },
     WorkspaceWait {
         action: String,
         task_id: String,
@@ -291,35 +307,64 @@ pub fn execute(
             Ok(Reply::Menu("sessions".to_string(), choices))
         }
 
-        Effect::KeyProfiles => {
+        Effect::KeyProfiles | Effect::KeyRemoveProfiles => {
+            let removing = effect == Effect::KeyRemoveProfiles;
             let profiles = client.key_profiles().map_err(|e| format_client_error(&e))?;
-            let rows = profiles
-                .into_iter()
-                .filter(|p| super::login::source_id(&p.provider))
-                .flat_map(|p| {
-                    if p.sources.is_empty() {
-                        vec![(String::new(), format!("{} · no stored key", p.provider))]
-                    } else {
+            if removing {
+                let choices: Vec<(String, String)> = profiles
+                    .into_iter()
+                    .filter(|p| super::login::source_id(&p.provider))
+                    .flat_map(|p| {
                         p.sources
-                            .iter()
-                            .take(8)
+                            .into_iter()
                             .filter(|s| super::login::source_id(s))
-                            .map(|source| {
-                                let active = if p.active.as_ref() == Some(source) {
+                            .map(move |source| {
+                                let active = if p.active.as_ref() == Some(&source) {
                                     " · active"
                                 } else {
                                     ""
                                 };
-                                (String::new(), format!("{} / {source}{active}", p.provider))
+                                (
+                                    format!("{}:{source}", p.provider),
+                                    format!("{} / {source}{active}", p.provider),
+                                )
                             })
-                            .collect()
-                    }
-                })
-                .collect();
-            Ok(Reply::Menu(
-                "Provider keys · /key set or /key use".into(),
-                rows,
-            ))
+                    })
+                    .collect();
+                if choices.is_empty() {
+                    Ok(Reply::Message("No stored provider keys to remove.".into()))
+                } else {
+                    Ok(Reply::Menu("Remove provider key".into(), choices))
+                }
+            } else {
+                let rows = profiles
+                    .into_iter()
+                    .filter(|p| super::login::source_id(&p.provider))
+                    .flat_map(|p| {
+                        if p.sources.is_empty() {
+                            vec![(String::new(), format!("{} · no stored key", p.provider))]
+                        } else {
+                            p.sources
+                                .iter()
+                                .take(8)
+                                .filter(|s| super::login::source_id(s))
+                                .map(|source| {
+                                    let active = if p.active.as_ref() == Some(source) {
+                                        " · active"
+                                    } else {
+                                        ""
+                                    };
+                                    (String::new(), format!("{} / {source}{active}", p.provider))
+                                })
+                                .collect()
+                        }
+                    })
+                    .collect();
+                Ok(Reply::Menu(
+                    "Provider keys · /key set or /key use".into(),
+                    rows,
+                ))
+            }
         }
         Effect::UseKey(provider, source) => {
             client
@@ -327,13 +372,24 @@ pub fn execute(
                 .map_err(|e| format_client_error(&e))?;
             Ok(Reply::Message(format!("Active {provider} key: {source}")))
         }
-        Effect::LoginSources | Effect::AccountSources => {
+        Effect::RemoveKey(provider, source) => {
+            client
+                .remove_api_key(&provider, &source)
+                .map_err(|e| format_client_error(&e))?;
+            Ok(Reply::Message(format!("Removed {provider} key: {source}")))
+        }
+        Effect::LoginSources | Effect::AccountSources | Effect::LogoutSources => {
             let choosing = effect == Effect::AccountSources;
+            let logging_out = effect == Effect::LogoutSources;
             let providers = client.login_providers().map_err(|_| {
                 "Provider login is unavailable on this daemon. See docs/providers.md.".to_string()
             })?;
             let choices = format_codex_login_choices(&providers);
-            if choices.is_empty() && !choosing {
+            if choices.is_empty() && logging_out {
+                Ok(Reply::Message(
+                    "No Codex accounts configured to log out.".into(),
+                ))
+            } else if choices.is_empty() && !choosing {
                 Ok(Reply::Menu(
                     "Codex sources".into(),
                     vec![("default".into(), "Set up Codex device login".into())],
@@ -343,16 +399,22 @@ pub fn execute(
                     "No accounts. Use /login or /account add <alias>.".into(),
                 ))
             } else {
-                Ok(Reply::Menu(
-                    if choosing {
-                        "Select stock Codex account"
-                    } else {
-                        "Codex sources"
-                    }
-                    .into(),
-                    choices,
-                ))
+                let title = if logging_out {
+                    "Log out Codex account"
+                } else if choosing {
+                    "Select stock Codex account"
+                } else {
+                    "Codex sources"
+                };
+                Ok(Reply::Menu(title.into(), choices))
             }
+        }
+
+        Effect::RemoveCodexAccount(source) => {
+            client
+                .remove_codex_account(&source)
+                .map_err(|e| format_client_error(&e))?;
+            Ok(Reply::Message(format!("Removed Codex account: {source}")))
         }
 
         Effect::ActivateAccount(source) => {
@@ -369,6 +431,47 @@ pub fn execute(
             Ok(Reply::Message(format!(
                 "Added {source}. Sign in with /login openai_codex {source}."
             )))
+        }
+
+        Effect::Harnesses => {
+            let harnesses = client
+                .list_harnesses()
+                .map_err(|e| format_client_error(&e))?;
+            if harnesses.is_empty() {
+                return Ok(Reply::Message("No harnesses registered on daemon.".into()));
+            }
+            let current = target.labels.harness_id.as_deref();
+            let choices = harnesses
+                .into_iter()
+                .map(|h| {
+                    let marker = if current == Some(h.id.as_str()) {
+                        "* "
+                    } else {
+                        ""
+                    };
+                    let id_clean = sanitize_single_line(&h.id);
+                    let name_part = h
+                        .name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty() && *n != h.id)
+                        .map(|n| format!(" ({})", sanitize_single_line(n)))
+                        .unwrap_or_default();
+                    let desc_part = h
+                        .description
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|d| !d.is_empty())
+                        .map(|d| format!(" · {}", sanitize_single_line(d)))
+                        .unwrap_or_default();
+                    (h.id, format!("{marker}{id_clean}{name_part}{desc_part}"))
+                })
+                .collect();
+            Ok(Reply::Menu("harnesses".into(), choices))
+        }
+
+        Effect::NewWithHarness(harness_id) => {
+            create_new_session_with_harness(client, target, Some(harness_id))
         }
 
         Effect::Models => {
@@ -531,13 +634,84 @@ pub fn execute(
             Ok(Reply::Receipt(receipt))
         }
 
-        Effect::Abort => {
+        Effect::ConfigureBudget(budget) => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot configure budget: missing session_id".to_string());
+            }
+            let cid_num = parse_cid(&target.cid)?;
+            let mut envelope = CommandEnvelope::configure(
+                generate_request_id(),
+                cid_num,
+                None,
+                None,
+                Some(budget),
+                None,
+            );
+            if let Some(expected_seq) = seq {
+                if let Some(obj) = envelope.args.as_object_mut() {
+                    obj.insert(
+                        "expected_seq".to_string(),
+                        Value::Number(expected_seq.into()),
+                    );
+                }
+            }
+            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+            Ok(Reply::Receipt(receipt))
+        }
+
+        Effect::ConfigureApproval(policy) => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot configure approval_policy: missing session_id".to_string());
+            }
+            let cid_num = parse_cid(&target.cid)?;
+            let mut envelope = CommandEnvelope::configure(
+                generate_request_id(),
+                cid_num,
+                None,
+                None,
+                None,
+                Some(policy),
+            );
+            if let Some(expected_seq) = seq {
+                if let Some(obj) = envelope.args.as_object_mut() {
+                    obj.insert(
+                        "expected_seq".to_string(),
+                        Value::Number(expected_seq.into()),
+                    );
+                }
+            }
+            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+            Ok(Reply::Receipt(receipt))
+        }
+
+        Effect::ApproveTool {
+            task_id,
+            decision,
+            reason,
+        } => {
+            if target.sid.trim().is_empty() {
+                return Err("cannot approve tool: missing session_id".to_string());
+            }
+            let cid_num = parse_cid(&target.cid)?;
+            let envelope = CommandEnvelope::approve_tool(
+                generate_request_id(),
+                cid_num,
+                task_id,
+                &decision,
+                reason.as_deref(),
+            );
+            let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
+            Ok(Reply::Receipt(receipt))
+        }
+
+        Effect::Abort { task_id, reason } => {
             if target.sid.trim().is_empty() {
                 return Err("cannot abort: missing session_id".to_string());
             }
             let cid_num = parse_cid(&target.cid)?;
+            let abort_reason = reason.as_deref().unwrap_or("user_abort");
             let envelope =
-                CommandEnvelope::abort(generate_request_id(), cid_num, None, Some("user_abort"));
+                CommandEnvelope::abort(generate_request_id(), cid_num, task_id, Some(abort_reason));
             let receipt = post_command_with_retry(client, &target.sid, &envelope)?;
             Ok(Reply::Receipt(receipt))
         }
@@ -1027,6 +1201,14 @@ fn attach_session_target(
 }
 
 fn create_new_session(client: &DaemonClient, target: &Target) -> Result<Reply, String> {
+    create_new_session_with_harness(client, target, None)
+}
+
+fn create_new_session_with_harness(
+    client: &DaemonClient,
+    target: &Target,
+    harness_id: Option<String>,
+) -> Result<Reply, String> {
     if target.cwd.trim().is_empty() {
         return Err("cannot create session: missing cwd".to_string());
     }
@@ -1040,7 +1222,7 @@ fn create_new_session(client: &DaemonClient, target: &Target) -> Result<Reply, S
         version: 1,
         request_id: generate_request_id(),
         env_id: expected_env_id.clone(),
-        harness_id: None,
+        harness_id,
         cwd: target.cwd.clone(),
         session_id: Some(stable_sid.clone()),
         title: None,
@@ -1945,7 +2127,16 @@ mod tests {
             })
         );
 
-        let aborted = execute(&client, &target, None, Effect::Abort).unwrap();
+        let aborted = execute(
+            &client,
+            &target,
+            None,
+            Effect::Abort {
+                task_id: None,
+                reason: None,
+            },
+        )
+        .unwrap();
         assert!(matches!(aborted, Reply::Receipt(r) if r.seq == Some(10)));
 
         let continued = execute(&client, &target, None, Effect::Continue).unwrap();
@@ -2648,5 +2839,208 @@ mod tests {
                 ("backup".to_string(), "backup  [not signed in]".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn r6b1_effects_cover_logout_key_remove_harnesses_approval_budget_and_task_abort() {
+        let (sock_path, listener, client) = bind_test_socket("r6b1-actions");
+        let posted = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let posted_srv = Arc::clone(&posted);
+
+        let handle = thread::spawn(move || {
+            // 1. GET /api/v1/provider-logins -> LogoutSources
+            let (mut s1, _) = listener.accept().unwrap();
+            let (h1, _) = read_http_request(&mut s1);
+            assert!(h1.starts_with("GET /api/v1/provider-logins HTTP/1.1"));
+            write_json_response(
+                &mut s1,
+                "200 OK",
+                r#"{"providers":[{"id":"openai_codex","interaction":"device_code_v1","sources":[{"id":"work","state":"available","active":true}]}]}"#,
+            );
+
+            // 2. POST /api/v1/provider-accounts/remove -> RemoveCodexAccount
+            let (mut s2, _) = listener.accept().unwrap();
+            let (h2, b2) = read_http_request(&mut s2);
+            assert!(h2.starts_with("POST /api/v1/provider-accounts/remove HTTP/1.1"));
+            assert_eq!(
+                serde_json::from_str::<Value>(&b2).unwrap(),
+                json!({"source": "work"})
+            );
+            write_json_response(&mut s2, "200 OK", r#"{"removed":"work"}"#);
+
+            // 3. GET /api/v1/provider-keys -> KeyRemoveProfiles
+            let (mut s3, _) = listener.accept().unwrap();
+            let (h3, _) = read_http_request(&mut s3);
+            assert!(h3.starts_with("GET /api/v1/provider-keys HTTP/1.1"));
+            write_json_response(
+                &mut s3,
+                "200 OK",
+                r#"{"providers":[{"provider":"openai","active":"work","sources":["work","personal"]}]}"#,
+            );
+
+            // 4. POST /api/v1/provider-keys/remove -> RemoveKey
+            let (mut s4, _) = listener.accept().unwrap();
+            let (h4, b4) = read_http_request(&mut s4);
+            assert!(h4.starts_with("POST /api/v1/provider-keys/remove HTTP/1.1"));
+            assert_eq!(
+                serde_json::from_str::<Value>(&b4).unwrap(),
+                json!({"provider": "openai", "source": "work"})
+            );
+            write_json_response(&mut s4, "200 OK", r#"{"removed":true}"#);
+
+            // 5. GET /api/v1/harnesses -> Harnesses
+            let (mut s5, _) = listener.accept().unwrap();
+            let (h5, _) = read_http_request(&mut s5);
+            assert!(h5.starts_with("GET /api/v1/harnesses HTTP/1.1"));
+            write_json_response(
+                &mut s5,
+                "200 OK",
+                r#"{"harnesses":[{"id":"coding","name":"Coding","description":"Default"}]}"#,
+            );
+
+            // 6. POST /api/v1/sessions -> NewWithHarness("coding")
+            let (mut s6, _) = listener.accept().unwrap();
+            let (h6, b6) = read_http_request(&mut s6);
+            assert!(h6.starts_with("POST /api/v1/sessions HTTP/1.1"));
+            let v6: Value = serde_json::from_str(&b6).unwrap();
+            assert_eq!(v6["harness_id"], "coding");
+            let sid = v6["session_id"].as_str().unwrap().to_string();
+            write_json_response(
+                &mut s6,
+                "200 OK",
+                &json!({
+                    "seq": 1,
+                    "session": {
+                        "session_id": sid,
+                        "env_id": "host",
+                        "harness_id": "coding",
+                        "cwd": "/tmp/proj",
+                        "root_conversation_id": "1"
+                    }
+                })
+                .to_string(),
+            );
+
+            // 7..10: ConfigureBudget, ConfigureApproval, ApproveTool, Abort(task_id)
+            for seq in 10..=13 {
+                let (mut s, _) = listener.accept().unwrap();
+                let (_h, b) = read_http_request(&mut s);
+                let val: Value = serde_json::from_str(&b).unwrap();
+                let req_id = val["request_id"].as_str().unwrap().to_string();
+                posted_srv.lock().unwrap().push(val);
+                write_json_response(
+                    &mut s,
+                    "200 OK",
+                    &json!({"version":1,"request_id":req_id,"seq":seq,"status":"ok"}).to_string(),
+                );
+            }
+        });
+
+        let mut target = Target {
+            sid: "sess-1".into(),
+            cid: "1".into(),
+            cwd: "/tmp/proj".into(),
+            env_id: "host".into(),
+            labels: SessionLabels::default(),
+        };
+        target.labels.harness_id = Some("coding".into());
+
+        match execute(&client, &target, Some(9), Effect::LogoutSources).unwrap() {
+            Reply::Menu(title, items) => {
+                assert_eq!(title, "Log out Codex account");
+                assert_eq!(items[0].0, "work");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(
+            execute(&client, &target, Some(9), Effect::RemoveCodexAccount("work".into())).unwrap(),
+            Reply::Message(m) if m.contains("Removed Codex account: work")
+        ));
+        match execute(&client, &target, Some(9), Effect::KeyRemoveProfiles).unwrap() {
+            Reply::Menu(title, items) => {
+                assert_eq!(title, "Remove provider key");
+                assert_eq!(items[0].0, "openai:work");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(
+            execute(&client, &target, Some(9), Effect::RemoveKey("openai".into(), "work".into())).unwrap(),
+            Reply::Message(m) if m.contains("Removed openai key: work")
+        ));
+        match execute(&client, &target, Some(9), Effect::Harnesses).unwrap() {
+            Reply::Menu(title, items) => {
+                assert_eq!(title, "harnesses");
+                assert!(items[0].1.starts_with("* coding"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match execute(
+            &client,
+            &target,
+            Some(9),
+            Effect::NewWithHarness("coding".into()),
+        )
+        .unwrap()
+        {
+            Reply::Target(t) => assert_eq!(t.labels.harness_id.as_deref(), Some("coding")),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        execute(
+            &client,
+            &target,
+            Some(9),
+            Effect::ConfigureBudget(Some(RunBudget {
+                max_turns: Some(5),
+                max_cost_usd: Some(0.5),
+                max_elapsed_ms: Some(30_000),
+            })),
+        )
+        .unwrap();
+        execute(
+            &client,
+            &target,
+            Some(10),
+            Effect::ConfigureApproval(ApprovalPolicy::Tools(vec!["bash".into()])),
+        )
+        .unwrap();
+        execute(
+            &client,
+            &target,
+            Some(11),
+            Effect::ApproveTool {
+                task_id: 77,
+                decision: "deny".into(),
+                reason: Some("unsafe".into()),
+            },
+        )
+        .unwrap();
+        execute(
+            &client,
+            &target,
+            Some(12),
+            Effect::Abort {
+                task_id: Some(77),
+                reason: Some("stop tool".into()),
+            },
+        )
+        .unwrap();
+
+        let cmds = posted.lock().unwrap();
+        assert_eq!(cmds[0]["command"], "configure");
+        assert_eq!(cmds[0]["args"]["budget"]["max_turns"], 5);
+        assert_eq!(cmds[0]["args"]["budget"]["max_elapsed_ms"], 30_000);
+        assert_eq!(cmds[1]["command"], "configure");
+        assert_eq!(cmds[1]["args"]["approval_policy"], json!(["bash"]));
+        assert_eq!(cmds[2]["command"], "approve_tool");
+        assert_eq!(cmds[2]["args"]["task_id"], 77);
+        assert_eq!(cmds[2]["args"]["decision"], "deny");
+        assert_eq!(cmds[2]["args"]["reason"], "unsafe");
+        assert_eq!(cmds[3]["command"], "abort");
+        assert_eq!(cmds[3]["args"]["task_id"], 77);
+        assert_eq!(cmds[3]["args"]["reason"], "stop tool");
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
     }
 }

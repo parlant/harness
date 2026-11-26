@@ -11,6 +11,7 @@ pub(crate) mod login;
 pub mod markdown;
 pub mod picker;
 pub mod preferences;
+pub mod prompts;
 pub mod screen;
 mod status;
 pub mod stream;

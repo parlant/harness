@@ -1064,6 +1064,40 @@ fn render_live(
             theme.tool_running,
         ));
     }
+    if let Some(approvals) = live.get("approvals").and_then(Value::as_object) {
+        let mut items: Vec<(&str, &Value)> =
+            approvals.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        items.sort_by(
+            |(a, _), (b, _)| match (a.parse::<u64>(), b.parse::<u64>()) {
+                (Ok(na), Ok(nb)) => na.cmp(&nb),
+                _ => a.cmp(b),
+            },
+        );
+        for (key_tid, rec) in items {
+            let tid = str_at(rec, "task_id").unwrap_or(key_tid);
+            let tool_name = str_at(rec, "tool_name").unwrap_or("tool");
+            let args = rec.get("arguments").unwrap_or(&Value::Null);
+            let summary = tool_summary(tool_name, args, tools_expanded);
+            separate(out);
+            out.push(StyledRow::from_spans(vec![
+                StyledSpan::new(
+                    sanitize_single_line(&format!("[approval required · #{tid}] ")),
+                    theme.tool_running,
+                ),
+                StyledSpan::new(sanitize_single_line(&summary), theme.tool_header),
+            ]));
+            if let Some(cwd) = str_at(rec, "cwd").filter(|c| !c.is_empty()) {
+                out.push(StyledRow::plain(
+                    format!("  cwd: {}", sanitize_single_line(cwd)),
+                    theme.tool_meta,
+                ));
+            }
+            out.push(StyledRow::plain(
+                sanitize_single_line(&format!("  Use /approve {tid} or /deny {tid} [reason]")),
+                theme.tool_meta,
+            ));
+        }
+    }
     let turn_tag = live
         .get("run")
         .and_then(|r| u64_at(r, "turns"))
@@ -1307,6 +1341,8 @@ fn render_failure(out: &mut Vec<StyledRow>, state: &TranscriptState, theme: &The
     out.push(StyledRow::plain(
         if fail.is_compaction && !fail.automatic {
             "  History preserved. Use /compact to retry."
+        } else if fail.reason == "budget_exceeded" {
+            "  Budget limit reached. Use /budget off or /budget turns=N, then /continue to resume."
         } else {
             "  Use /continue to resume."
         },
@@ -2202,6 +2238,54 @@ mod tests {
         );
         assert!(
             text.contains("! Empty assistant response (no text or tool calls)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn live_approvals_and_budget_exceeded_hint_render_cleanly() {
+        let mut state = TranscriptState::default();
+        state.apply_snapshot(SnapshotFrame {
+            version: Some(1),
+            session_id: Some("s-app".to_string()),
+            conversation_id: Some("1".to_string()),
+            seq: 4,
+            before_entry_id: None,
+            has_more: Some(false),
+            entries: vec![],
+            docs: Some(json!({
+                "live": {
+                    "approvals": {
+                        "42": {
+                            "task_id": "42",
+                            "call_id": "call_42",
+                            "tool_name": "bash",
+                            "arguments": {"command": "rm -rf /tmp/x\x1b[31m"},
+                            "cwd": "/tmp/proj\nline"
+                        }
+                    },
+                    "run_failure": {
+                        "reason": "budget_exceeded",
+                        "message": "Run paused: turn budget (2/2) reached."
+                    }
+                }
+            })),
+        });
+
+        let rendered = rows(&state, false, false);
+        assert_clean_rows(&rendered);
+        let text = rendered.join("\n");
+        assert!(
+            text.contains(r"[approval required · #42] $ rm -rf /tmp/x\x1b[31m"),
+            "{text}"
+        );
+        assert!(text.contains(r"cwd: /tmp/proj\nline"), "{text}");
+        assert!(
+            text.contains("Use /approve 42 or /deny 42 [reason]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Use /budget off or /budget turns=N, then /continue to resume."),
             "{text}"
         );
     }

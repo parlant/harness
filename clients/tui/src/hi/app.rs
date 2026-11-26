@@ -11,6 +11,7 @@ use super::{
     markdown::StyledRow,
     picker::{Choice, Picker},
     preferences::UserConfig,
+    prompts::{self, PromptTemplate},
     screen::{EditorOverlay, Screen},
     status::{StatusFields, StatusMetadata},
     stream::{Subscription, Update},
@@ -19,7 +20,7 @@ use super::{
 use crate::{
     cli::generate_request_id,
     client::{ClientError, DaemonClient},
-    protocol::{CommandEnvelope, ServerFrame, WhenBusy, WhenIdle},
+    protocol::{ApprovalPolicy, CommandEnvelope, RunBudget, ServerFrame, WhenBusy, WhenIdle},
     render::{extract_entry_text, sanitize_single_line},
     transcript::{CommitOutcome, TranscriptState, WorkspaceWaitInfo},
 };
@@ -57,6 +58,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "Stop active work across all conversations in this session",
     ),
     ("/new", "New session"),
+    (
+        "/harness",
+        "List harnesses or start a session with a specific harness",
+    ),
     ("/name", "Show or rename session title"),
     ("/tree", "Browse turn-step tree across branches"),
     ("/fork", "Edit an earlier prompt on a new branch"),
@@ -65,15 +70,25 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/latest", "Return to live transcript"),
     ("/model", "Choose a model"),
     ("/login", "Sign in to a daemon provider account"),
+    ("/logout", "Remove a configured Codex account"),
     ("/key", "Manage named provider API keys"),
     ("/account", "Select the stock Codex account"),
     ("/thinking", "Choose thinking level"),
+    ("/theme", "List or switch UI themes live"),
+    ("/prompts", "Browse prompt templates"),
     ("/file", "Read a session workspace file"),
     ("/attach", "Attach a client-local file"),
     ("/steer", "Steer the active run"),
     ("/follow-up", "Queue follow-up"),
     ("/dequeue", "Withdraw queued prompts"),
-    ("/abort", "Interrupt this conversation"),
+    ("/approve", "Approve a pending tool call"),
+    ("/deny", "Deny a pending tool call"),
+    (
+        "/approval",
+        "Set tool approval policy (never, mutating, or tools)",
+    ),
+    ("/budget", "Show, set, or clear run budget"),
+    ("/abort", "Interrupt this conversation or a specific task"),
     ("/workspace", "Workspace wait actions"),
     ("/continue", "Continue conversation"),
     ("/compact", "Compact conversation history"),
@@ -109,9 +124,14 @@ const COMMANDS: &[(&str, &str)] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PickerKind {
     Models,
+    Harnesses,
     LoginSources,
+    LogoutSources,
+    KeyRemove,
     AccountSources,
     Thinking,
+    Themes,
+    Prompts,
     Sessions,
     Branches,
     Fork,
@@ -121,6 +141,7 @@ enum PickerKind {
     ClientFiles,
     WorkspaceFiles,
     WorkspaceWait,
+    Approval,
     Search,
     TreeAction,
     Info,
@@ -212,6 +233,7 @@ struct Ui {
     pending_tree_fork_edit: Option<PendingTreeForkEdit>,
     config: UserConfig,
     config_gen: u64,
+    prompts: Vec<PromptTemplate>,
     status_metadata: StatusMetadata,
     data_dir: PathBuf,
     job: Option<Job>,
@@ -243,6 +265,7 @@ pub fn run(
     origin: RestartOrigin,
 ) -> Result<(), String> {
     let config = UserConfig::load(data_dir)?;
+    let prompts = prompts::discover_prompts(data_dir);
     let sub = Subscription::start(client.clone(), target.sid.clone(), target.cid.clone(), None);
     let catalog_sub = CatalogSubscription::start(client.clone());
     let state = TranscriptState::new(Some(target.sid.clone()), Some(target.cid.clone()));
@@ -273,6 +296,7 @@ pub fn run(
         pending_tree_fork_edit: None,
         config,
         config_gen: 0,
+        prompts,
         status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
         job: None,
@@ -298,6 +322,7 @@ pub fn run_inbox(
     origin: RestartOrigin,
 ) -> Result<(), String> {
     let config = UserConfig::load(data_dir)?;
+    let prompts = prompts::discover_prompts(data_dir);
     let catalog_sub = CatalogSubscription::start(client.clone());
     let mut inbox_state = InboxState::new(env_id.clone(), cwd.clone(), None);
     inbox_state.set_show_subsessions(show_subsessions);
@@ -336,6 +361,7 @@ pub fn run_inbox(
         pending_tree_fork_edit: None,
         config,
         config_gen: 0,
+        prompts,
         status_metadata: StatusMetadata::default(),
         data_dir: data_dir.to_owned(),
         job: None,
@@ -896,6 +922,7 @@ impl Ui {
             }
             Update::Frame(f) => {
                 let previous_wait = self.state.workspace_wait();
+                let previous_approvals = pending_approval_ids(&self.state);
                 match f {
                     ServerFrame::Snapshot(s) => {
                         self.state.apply_snapshot(s);
@@ -970,6 +997,30 @@ impl Ui {
                         }
                     }
                 }
+                let approvals = pending_approvals(&self.state);
+                let current_approval_ids: Vec<u64> = approvals.iter().map(|a| a.task_id).collect();
+                if current_approval_ids != previous_approvals {
+                    let has_new = current_approval_ids
+                        .iter()
+                        .any(|tid| !previous_approvals.contains(tid));
+                    if has_new
+                        && self.picker.is_none()
+                        && self.tree.is_none()
+                        && self.login.is_none()
+                        && self.secret.is_none()
+                    {
+                        self.approval_menu();
+                    } else if self
+                        .picker
+                        .as_ref()
+                        .is_some_and(|p| p.kind == PickerKind::Approval)
+                    {
+                        self.picker = None;
+                        if !approvals.is_empty() {
+                            self.approval_menu();
+                        }
+                    }
+                }
                 self.rows_dirty |= self.historical.is_none();
             }
         }
@@ -990,6 +1041,105 @@ impl Ui {
             self.picker.as_mut().unwrap().workspace_wait = Some(wait);
         } else {
             self.note = "Not waiting for a workspace".into();
+        }
+    }
+    fn approval_menu(&mut self) {
+        let approvals = pending_approvals(&self.state);
+        if approvals.is_empty() {
+            self.note = "No pending tool approvals".into();
+            return;
+        }
+        let mut choices = Vec::with_capacity(approvals.len() * 2);
+        for app in &approvals {
+            let tool = sanitize_single_line(&app.tool_name);
+            let tid = app.task_id;
+            choices.push((format!("allow:{tid}"), format!("Approve {tool} (#{tid})")));
+            choices.push((format!("deny:{tid}"), format!("Deny {tool} (#{tid})")));
+        }
+        let title = if approvals.len() == 1 {
+            format!(
+                "Tool approval · {} (#{})",
+                sanitize_single_line(&approvals[0].tool_name),
+                approvals[0].task_id
+            )
+        } else {
+            format!("Tool approvals ({} pending)", approvals.len())
+        };
+        self.scoped_menu(PickerKind::Approval, &title, choices);
+    }
+    fn apply_theme_live(&mut self, name: &str) {
+        match super::theme::Theme::from_name_in_dir(name, Some(&self.data_dir)) {
+            Ok(theme) => {
+                let applied = theme.name.clone();
+                self.config.theme = theme;
+                self.config_gen = self.config_gen.wrapping_add(1);
+                self.rows_dirty = true;
+                self.note = format!("Theme: {applied}");
+            }
+            Err(err) => {
+                self.note = sanitize_single_line(&err);
+            }
+        }
+    }
+    fn handle_approval_command(&mut self, decision: &str, arg: &str) {
+        let approvals = pending_approvals(&self.state);
+        if arg.is_empty() {
+            match approvals.as_slice() {
+                [] => {
+                    self.note = "No pending tool approvals".into();
+                }
+                [only] => {
+                    self.start(
+                        Effect::ApproveTool {
+                            task_id: only.task_id,
+                            decision: decision.to_string(),
+                            reason: None,
+                        },
+                        None,
+                    );
+                }
+                _ => {
+                    self.approval_menu();
+                }
+            }
+            return;
+        }
+        let mut parts = arg.splitn(2, char::is_whitespace);
+        let first = parts.next().unwrap_or("");
+        let rest = parts.next().map(str::trim).filter(|s| !s.is_empty());
+        let clean_first = first.strip_prefix('#').unwrap_or(first);
+        if let Some(tid) = clean_first.parse::<u64>().ok().filter(|&n| n > 0) {
+            self.start(
+                Effect::ApproveTool {
+                    task_id: tid,
+                    decision: decision.to_string(),
+                    reason: rest.map(str::to_owned),
+                },
+                None,
+            );
+        } else if decision == "deny" {
+            match approvals.as_slice() {
+                [only] => {
+                    self.start(
+                        Effect::ApproveTool {
+                            task_id: only.task_id,
+                            decision: decision.to_string(),
+                            reason: Some(arg.to_owned()),
+                        },
+                        None,
+                    );
+                }
+                [] => {
+                    self.note = "No pending tool approvals".into();
+                }
+                _ => {
+                    self.note =
+                        "Multiple pending approvals · specify task_id: /deny <task_id> [reason]"
+                            .into();
+                }
+            }
+        } else {
+            self.note = "Usage: /approve [task_id]".into();
         }
     }
     fn menu(&mut self, kind: PickerKind, title: &str, choices: Vec<(String, String)>) {
@@ -1100,7 +1250,10 @@ impl Ui {
             Ok(Reply::Menu(title, items)) => {
                 let kind = match title.as_str() {
                     "models" => PickerKind::Models,
+                    "harnesses" => PickerKind::Harnesses,
                     "Codex sources" => PickerKind::LoginSources,
+                    "Log out Codex account" => PickerKind::LogoutSources,
+                    "Remove provider key" => PickerKind::KeyRemove,
                     "Select stock Codex account" => PickerKind::AccountSources,
                     "thinking" => PickerKind::Thinking,
                     "branches" => PickerKind::Branches,
@@ -1112,6 +1265,7 @@ impl Ui {
                 let is_scoped = matches!(
                     kind,
                     PickerKind::Models
+                        | PickerKind::Harnesses
                         | PickerKind::Thinking
                         | PickerKind::Branches
                         | PickerKind::WorkspaceFiles
@@ -1720,7 +1874,13 @@ impl Ui {
                 } else if self.draft.fork_edit.is_some() {
                     self.note = "Wait for pending fork-edit command".into();
                 } else if self.state.is_run_active() {
-                    self.start(Effect::Abort, None);
+                    self.start(
+                        Effect::Abort {
+                            task_id: None,
+                            reason: None,
+                        },
+                        None,
+                    );
                 }
             }
             Some("clear") => {
@@ -1823,11 +1983,19 @@ impl Ui {
         } else if let Some(token) = Token::at_cursor(editor) {
             if token.is_command(editor) {
                 let prefix = token.prefix(editor);
-                let choices = COMMANDS
+                let mut choices: Vec<(String, String)> = COMMANDS
                     .iter()
                     .filter(|(name, _)| name.starts_with(prefix))
                     .map(|(name, desc)| (name.to_string(), format!("{name}  {desc}")))
                     .collect();
+                for prompt in &self.prompts {
+                    let slash = format!("/prompt:{}", prompt.name);
+                    if slash.starts_with(prefix) {
+                        let label =
+                            format!("{slash}  {}", sanitize_single_line(&prompt.description));
+                        choices.push((slash, label));
+                    }
+                }
                 self.completion =
                     Completion::start(&mut self.draft.editor, token, "Commands", choices);
             } else {
@@ -2001,9 +2169,20 @@ impl Ui {
                     ["use", provider, source] if login::source_id(provider) && login::source_id(source) => {
                         self.start(Effect::UseKey((*provider).into(), (*source).into()), None);
                     }
-                    _ => self.note = "Usage: /key list | /key set <provider> <alias> | /key use <provider> <alias> (never include the key here)".into(),
+                    ["remove"] => self.start(Effect::KeyRemoveProfiles, None),
+                    ["remove", provider, source]
+                        if login::source_id(provider) && login::source_id(source) =>
+                    {
+                        self.start(Effect::RemoveKey((*provider).into(), (*source).into()), None);
+                    }
+                    _ => self.note = "Usage: /key list | /key set <provider> <alias> | /key use <provider> <alias> | /key remove [<provider> <alias>] (never include the key here)".into(),
                 }
             }
+            "/logout" if arg.is_empty() => self.start(Effect::LogoutSources, None),
+            "/logout" if login::source_id(arg) => {
+                self.start(Effect::RemoveCodexAccount(arg.into()), None)
+            }
+            "/logout" => self.note = "Usage: /logout [source]".into(),
             "/login" => {
                 let parts: Vec<_> = arg.split_whitespace().take(3).collect();
                 match parts.as_slice() {
@@ -2017,6 +2196,7 @@ impl Ui {
                 }
             }
             "/reload" => {
+                self.prompts = prompts::discover_prompts(&self.data_dir);
                 let candidate = UserConfig::load(&self.data_dir).and_then(|config| {
                     config.status.validate(&self.status_fields())?;
                     Ok(config)
@@ -2037,6 +2217,58 @@ impl Ui {
                             vec![(String::new(), err)],
                         );
                     }
+                }
+            }
+            "/theme" => {
+                if arg.is_empty() {
+                    let current = self.config.theme.name.as_str();
+                    let choices = super::theme::Theme::available_themes(&self.data_dir)
+                        .into_iter()
+                        .map(|name| {
+                            let label = if name == current {
+                                format!("* {name}")
+                            } else {
+                                name.clone()
+                            };
+                            (name, label)
+                        })
+                        .collect();
+                    self.menu(PickerKind::Themes, "themes", choices);
+                } else {
+                    self.apply_theme_live(arg);
+                }
+            }
+            "/prompts" => {
+                self.prompts = prompts::discover_prompts(&self.data_dir);
+                if self.prompts.is_empty() {
+                    self.note = format!(
+                        "No prompt templates in {}/prompts/*.md",
+                        self.data_dir.display()
+                    );
+                } else {
+                    let choices = self
+                        .prompts
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.name.clone(),
+                                format!(
+                                    "/prompt:{}  {}",
+                                    p.name,
+                                    sanitize_single_line(&p.description)
+                                ),
+                            )
+                        })
+                        .collect();
+                    self.menu(PickerKind::Prompts, "prompts", choices);
+                }
+            }
+            "/harness" if arg.is_empty() => self.start(Effect::Harnesses, None),
+            "/harness" => {
+                if arg.split_whitespace().count() > 1 {
+                    self.note = "Usage: /harness [id]".into();
+                } else {
+                    self.start(Effect::NewWithHarness(arg.to_owned()), None);
                 }
             }
             "/session" | "/status" => {
@@ -2268,7 +2500,64 @@ impl Ui {
                 }
             }
             "/envs" => self.start(Effect::Environments, None),
-            "/abort" => self.start(Effect::Abort, None),
+            "/abort" => {
+                if arg.is_empty() {
+                    self.start(
+                        Effect::Abort {
+                            task_id: None,
+                            reason: None,
+                        },
+                        None,
+                    );
+                } else {
+                    let mut parts = arg.splitn(2, char::is_whitespace);
+                    let first = parts.next().unwrap_or("");
+                    let rest = parts.next().map(str::trim).filter(|s| !s.is_empty());
+                    let clean_first = first.strip_prefix('#').unwrap_or(first);
+                    if let Some(tid) = clean_first.parse::<u64>().ok().filter(|&n| n > 0) {
+                        self.start(
+                            Effect::Abort {
+                                task_id: Some(tid),
+                                reason: rest.map(str::to_owned),
+                            },
+                            None,
+                        );
+                    } else {
+                        self.start(
+                            Effect::Abort {
+                                task_id: None,
+                                reason: Some(arg.to_owned()),
+                            },
+                            None,
+                        );
+                    }
+                }
+            }
+            "/approve" => self.handle_approval_command("allow", arg),
+            "/deny" => self.handle_approval_command("deny", arg),
+            "/approval" => {
+                if arg.is_empty() {
+                    let current = format_approval_policy(&self.state);
+                    self.note = format!(
+                        "Approval policy: {current} · Usage: /approval [never|mutating|<tool1,tool2>]"
+                    );
+                } else {
+                    match parse_approval_policy(arg) {
+                        Ok(policy) => self.start(Effect::ConfigureApproval(policy), None),
+                        Err(msg) => self.note = msg,
+                    }
+                }
+            }
+            "/budget" => {
+                if arg.is_empty() {
+                    self.note = format_run_budget(&self.state);
+                } else {
+                    match parse_run_budget(arg) {
+                        Ok(budget) => self.start(Effect::ConfigureBudget(budget), None),
+                        Err(msg) => self.note = msg,
+                    }
+                }
+            }
             "/workspace" => self.workspace_wait_menu(),
             "/continue" => {
                 if self.check_writable_workspace(false) {
@@ -2326,8 +2615,23 @@ impl Ui {
                 self.note = "Forgot retry envelope; check transcript before resubmitting".into();
             }
             _ => {
-                self.note = format!("Unknown command {cmd} · /help");
-                self.draft.editor.set(text);
+                if let Some(prompt_name) = cmd.strip_prefix("/prompt:") {
+                    if let Some(tpl) = self.prompts.iter().find(|p| p.name == prompt_name).cloned()
+                    {
+                        let expanded = prompts::expand_prompt(&tpl.body, arg);
+                        self.draft.editor.set(&expanded);
+                        self.send(false);
+                    } else {
+                        self.note = format!(
+                            "Unknown prompt template /prompt:{} · /prompts",
+                            sanitize_single_line(prompt_name)
+                        );
+                        self.draft.editor.set(text);
+                    }
+                } else {
+                    self.note = format!("Unknown command {cmd} · /help");
+                    self.draft.editor.set(text);
+                }
             }
         }
     }
@@ -2725,7 +3029,27 @@ impl Ui {
                             );
                         }
                     }
+                    PickerKind::Approval => {
+                        if let Some((decision, tid_str)) = id.split_once(':') {
+                            if let Ok(task_id) = tid_str.parse::<u64>() {
+                                self.start(
+                                    Effect::ApproveTool {
+                                        task_id,
+                                        decision: decision.to_string(),
+                                        reason: None,
+                                    },
+                                    None,
+                                );
+                            }
+                        }
+                    }
                     PickerKind::Models => self.start(Effect::Configure("model".into(), id), None),
+                    PickerKind::Harnesses => self.start(Effect::NewWithHarness(id), None),
+                    PickerKind::Themes => self.apply_theme_live(&id),
+                    PickerKind::Prompts => {
+                        self.draft.editor.set(&format!("/prompt:{id} "));
+                        self.note = format!("Enter args or press Enter to run /prompt:{id}");
+                    }
                     PickerKind::Thinking => {
                         self.start(Effect::Configure("thinking".into(), id), None)
                     }
@@ -2805,6 +3129,17 @@ impl Ui {
                         }
                     }
                     PickerKind::AccountSources => self.start(Effect::ActivateAccount(id), None),
+                    PickerKind::LogoutSources => {
+                        self.start(Effect::RemoveCodexAccount(id), None);
+                    }
+                    PickerKind::KeyRemove => {
+                        if let Some((provider, source)) = id.split_once(':') {
+                            self.start(
+                                Effect::RemoveKey(provider.to_string(), source.to_string()),
+                                None,
+                            );
+                        }
+                    }
                     PickerKind::LoginSources => {
                         self.login = Some(Login::start(self.client.clone(), id));
                     }
@@ -2833,6 +3168,201 @@ impl Ui {
                 }
             }
         }
+    }
+}
+
+struct PendingApproval {
+    task_id: u64,
+    tool_name: String,
+}
+
+fn pending_approvals(state: &TranscriptState) -> Vec<PendingApproval> {
+    let Some(approvals) = state
+        .live_doc()
+        .and_then(|live| live.get("approvals"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (key_tid, rec) in approvals {
+        let tid_str = rec
+            .get("task_id")
+            .and_then(Value::as_str)
+            .unwrap_or(key_tid);
+        let Some(task_id) = tid_str.parse::<u64>().ok().filter(|&n| n > 0) else {
+            continue;
+        };
+        let tool_name = rec
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_string();
+        out.push(PendingApproval { task_id, tool_name });
+    }
+    out.sort_by_key(|a| a.task_id);
+    out
+}
+
+fn pending_approval_ids(state: &TranscriptState) -> Vec<u64> {
+    pending_approvals(state)
+        .into_iter()
+        .map(|a| a.task_id)
+        .collect()
+}
+
+fn parse_approval_policy(raw: &str) -> Result<ApprovalPolicy, String> {
+    let trimmed = raw.trim();
+    match trimmed {
+        "never" => Ok(ApprovalPolicy::never()),
+        "mutating" => Ok(ApprovalPolicy::mutating()),
+        _ => {
+            let tools: Vec<String> = trimmed
+                .split([',', ' '])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if tools.is_empty() {
+                Err("Usage: /approval [never|mutating|<tool1,tool2>]".into())
+            } else {
+                Ok(ApprovalPolicy::Tools(tools))
+            }
+        }
+    }
+}
+
+fn format_approval_policy(state: &TranscriptState) -> String {
+    match state
+        .docs
+        .get("agent")
+        .and_then(Value::as_object)
+        .and_then(|a| a.get("approval_policy"))
+    {
+        Some(Value::String(s)) => sanitize_single_line(s),
+        Some(Value::Array(arr)) => {
+            let list: Vec<String> = arr
+                .iter()
+                .filter_map(Value::as_str)
+                .map(sanitize_single_line)
+                .collect();
+            if list.is_empty() {
+                "never".to_string()
+            } else {
+                list.join(",")
+            }
+        }
+        _ => "never".to_string(),
+    }
+}
+
+fn parse_elapsed_ms(raw: &str) -> Result<u64, String> {
+    let trimmed = raw.trim();
+    let ms = if let Some(s) = trimmed.strip_suffix("ms") {
+        s.parse::<u64>().map_err(|_| {
+            format!(
+                "Invalid elapsed budget '{}'; expected e.g. 60000 or 60s",
+                sanitize_single_line(raw)
+            )
+        })?
+    } else if let Some(s) = trimmed.strip_suffix('s') {
+        let secs = s.parse::<u64>().map_err(|_| {
+            format!(
+                "Invalid elapsed budget '{}'; expected e.g. 60000 or 60s",
+                sanitize_single_line(raw)
+            )
+        })?;
+        secs.saturating_mul(1000)
+    } else {
+        trimmed.parse::<u64>().map_err(|_| {
+            format!(
+                "Invalid elapsed budget '{}'; expected milliseconds or <N>s",
+                sanitize_single_line(raw)
+            )
+        })?
+    };
+    if ms == 0 {
+        return Err("elapsed budget must be > 0".into());
+    }
+    Ok(ms)
+}
+
+fn parse_run_budget(raw: &str) -> Result<Option<RunBudget>, String> {
+    let trimmed = raw.trim();
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "off" | "clear" | "none"
+    ) {
+        return Ok(None);
+    }
+    let mut budget = RunBudget::default();
+    let mut any = false;
+    for token in trimmed.split_whitespace() {
+        let Some((k, v)) = token.split_once('=') else {
+            return Err("Usage: /budget [off|clear|turns=N cost=X elapsed=MS_OR_SECS]".into());
+        };
+        match k {
+            "turns" | "max_turns" => {
+                let n = v.parse::<u64>().ok().filter(|&n| n > 0).ok_or_else(|| {
+                    format!("Invalid turns '{}': must be > 0", sanitize_single_line(v))
+                })?;
+                budget.max_turns = Some(n);
+                any = true;
+            }
+            "cost" | "max_cost_usd" => {
+                let c = v
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|&c| c.is_finite() && c > 0.0)
+                    .ok_or_else(|| {
+                        format!("Invalid cost '{}': must be > 0", sanitize_single_line(v))
+                    })?;
+                budget.max_cost_usd = Some(c);
+                any = true;
+            }
+            "elapsed" | "max_elapsed_ms" => {
+                budget.max_elapsed_ms = Some(parse_elapsed_ms(v)?);
+                any = true;
+            }
+            other => {
+                return Err(format!(
+                    "Unknown budget field '{}'; expected turns=, cost=, or elapsed=",
+                    sanitize_single_line(other)
+                ));
+            }
+        }
+    }
+    if !any {
+        return Err("Usage: /budget [off|clear|turns=N cost=X elapsed=MS_OR_SECS]".into());
+    }
+    Ok(Some(budget))
+}
+
+fn format_run_budget(state: &TranscriptState) -> String {
+    let Some(budget) = state
+        .docs
+        .get("agent")
+        .and_then(Value::as_object)
+        .and_then(|a| a.get("budget"))
+        .and_then(Value::as_object)
+    else {
+        return "Budget: off · Usage: /budget [off|clear|turns=N cost=X elapsed=MS_OR_SECS]"
+            .to_string();
+    };
+    let mut parts = Vec::new();
+    if let Some(t) = budget.get("max_turns").and_then(Value::as_u64) {
+        parts.push(format!("turns={t}"));
+    }
+    if let Some(c) = budget.get("max_cost_usd").and_then(Value::as_f64) {
+        parts.push(format!("cost=${c:.4}"));
+    }
+    if let Some(ms) = budget.get("max_elapsed_ms").and_then(Value::as_u64) {
+        parts.push(format!("elapsed={ms}ms"));
+    }
+    if parts.is_empty() {
+        "Budget: off".to_string()
+    } else {
+        format!("Budget: {}", parts.join(" "))
     }
 }
 
@@ -3113,6 +3643,7 @@ mod tests {
             pending_tree_fork_edit: None,
             config: UserConfig::default(),
             config_gen: 0,
+            prompts: Vec::new(),
             status_metadata: StatusMetadata::default(),
             data_dir: std::env::temp_dir().join("hi-app-nonexistent-config"),
             job: None,
@@ -4010,15 +4541,15 @@ mod tests {
         for _ in 0.."x argument".len() {
             ui.draft.editor.key(KeyEvent::new(KeyCode::Left, Mod::NONE));
         }
-        for cmd in ["/help", "/hotkeys", "/help"] {
+        for cmd in ["/harness", "/help", "/hotkeys", "/harness"] {
             ui.key(tab, &mut screen);
             assert_eq!(ui.draft.editor.text(), format!("{cmd} argument"));
             assert_eq!(ui.draft.editor.cursor(), cmd.len());
-            assert_eq!(ui.completion.as_ref().unwrap().lines().len(), 3);
+            assert_eq!(ui.completion.as_ref().unwrap().lines().len(), 4);
         }
         ui.key(KeyEvent::new(KeyCode::Char(' '), Mod::NONE), &mut screen);
         assert!(ui.completion.is_none());
-        assert_eq!(ui.draft.editor.text(), "/help  argument");
+        assert_eq!(ui.draft.editor.text(), "/harness  argument");
         assert!(ui.draft.editor.undo());
         assert!(ui.draft.editor.undo());
         assert_eq!(ui.draft.editor.text(), "/hx argument");
@@ -5375,5 +5906,168 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         drop(ui);
         let _ = handle.join();
+    }
+
+    #[test]
+    fn r6b1_ui_commands_prompts_theme_approval_overlay_budget_and_abort() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("hi_app_r6b1_{}_{}", std::process::id(), nanos));
+        std::fs::create_dir_all(data_dir.join("prompts")).unwrap();
+        std::fs::create_dir_all(data_dir.join("themes")).unwrap();
+        std::fs::write(
+            data_dir.join("prompts/review.md"),
+            "# Review\nInspect {{args}} now.",
+        )
+        .unwrap();
+        std::fs::write(data_dir.join("themes/mint.json"), r#"{"base":"dark"}"#).unwrap();
+
+        let (srv, client) = TestServer::bind("r6b1-ui");
+        let posted = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let posted_srv = Arc::clone(&posted);
+        let listener = srv.listener.try_clone().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            while !stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let (head, body) = read_http_request(&mut stream);
+                        if head.starts_with("POST /api/v1/sessions/sess-1/commands ") {
+                            let val: Value = serde_json::from_str(&body).unwrap();
+                            let req_id = val["request_id"].as_str().unwrap().to_string();
+                            posted_srv.lock().unwrap().push(val);
+                            let resp = json!({
+                                "version": 1,
+                                "request_id": req_id,
+                                "seq": 30,
+                                "status": "ok"
+                            })
+                            .to_string();
+                            write_json_response(&mut stream, "200 OK", &resp);
+                        } else {
+                            write_json_response(&mut stream, "404 Not Found", "{}");
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let (mut ui, mut screen) = make_ui(client, "sess-1", "1");
+        ui.data_dir = data_dir.clone();
+        load_snapshot(&mut ui, 20, vec![], false);
+
+        // /reload discovers prompt templates and /theme lists custom JSON themes + applies live
+        ui.command("/reload");
+        assert_eq!(ui.prompts.len(), 1);
+        ui.command("/theme");
+        let picker = ui.picker.as_ref().expect("theme picker");
+        assert_eq!(picker.kind, PickerKind::Themes);
+        assert!(picker.picker.lines().join("\n").contains("mint"));
+        ui.command("/theme mint");
+        assert_eq!(ui.config.theme.name, "mint");
+
+        // Tab completion lists /prompt:review and executing it submits expanded prompt
+        ui.draft.editor.set("/prompt:");
+        ui.key(KeyEvent::new(KeyCode::Tab, Mod::NONE), &mut screen);
+        assert_eq!(ui.draft.editor.text(), "/prompt:review");
+        press_esc(&mut ui, &mut screen);
+
+        ui.command("/prompt:review src/lib.rs");
+        wait_job_complete(&mut ui, &mut screen);
+
+        // /prompts picker pre-fills /prompt:review
+        ui.command("/prompts");
+        assert_eq!(
+            ui.picker.as_ref().map(|p| p.kind),
+            Some(PickerKind::Prompts)
+        );
+        ui.pick_key(KeyEvent::new(KeyCode::Enter, Mod::NONE), &mut screen);
+        assert_eq!(ui.draft.editor.text(), "/prompt:review ");
+        ui.draft.editor.set("");
+
+        // Auto-open approval overlay on new live.approvals entry; Esc dismisses without denying
+        ui.update(Update::Frame(ServerFrame::Commit(
+            crate::protocol::CommitFrame {
+                version: Some(1),
+                session_id: None,
+                conversation_id: None,
+                prev_seq: Some(20),
+                seq: 21,
+                appended_entries: vec![],
+                doc_ops: serde_json::from_value(json!({
+                    "live": [["replace", {
+                        "approvals": {
+                            "99": {
+                                "task_id": "99",
+                                "call_id": "call_99",
+                                "tool_name": "bash",
+                                "arguments": {"command": "ls"}
+                            }
+                        }
+                    }]]
+                }))
+                .unwrap(),
+            },
+        )));
+        assert_eq!(
+            ui.picker.as_ref().map(|p| p.kind),
+            Some(PickerKind::Approval)
+        );
+        ui.pick_key(KeyEvent::new(KeyCode::Esc, Mod::NONE), &mut screen);
+        assert!(ui.picker.is_none());
+        assert!(posted.lock().unwrap().len() == 1);
+
+        // /approve without args approves sole pending task 99
+        ui.command("/approve");
+        wait_job_complete(&mut ui, &mut screen);
+
+        // /approval, /budget, and task-scoped /abort
+        ui.command("/approval mutating");
+        wait_job_complete(&mut ui, &mut screen);
+        ui.command("/budget turns=4 cost=1.25 elapsed=15s");
+        wait_job_complete(&mut ui, &mut screen);
+        ui.command("/budget off");
+        wait_job_complete(&mut ui, &mut screen);
+        ui.command("/abort 99 cancel tool");
+        wait_job_complete(&mut ui, &mut screen);
+
+        let cmds = posted.lock().unwrap();
+        assert_eq!(cmds.len(), 6);
+        assert_eq!(cmds[0]["command"], "submit");
+        assert_eq!(
+            cmds[0]["args"]["content"][0]["text"],
+            "# Review\nInspect src/lib.rs now."
+        );
+        assert_eq!(cmds[1]["command"], "approve_tool");
+        assert_eq!(cmds[1]["args"]["task_id"], 99);
+        assert_eq!(cmds[1]["args"]["decision"], "allow");
+        assert_eq!(cmds[2]["command"], "configure");
+        assert_eq!(cmds[2]["args"]["approval_policy"], "mutating");
+        assert_eq!(cmds[3]["command"], "configure");
+        assert_eq!(cmds[3]["args"]["budget"]["max_turns"], 4);
+        assert_eq!(cmds[3]["args"]["budget"]["max_cost_usd"], 1.25);
+        assert_eq!(cmds[3]["args"]["budget"]["max_elapsed_ms"], 15_000);
+        assert_eq!(cmds[4]["command"], "configure");
+        assert_eq!(cmds[4]["args"]["budget"], Value::Null);
+        assert_eq!(cmds[5]["command"], "abort");
+        assert_eq!(cmds[5]["args"]["task_id"], 99);
+        assert_eq!(cmds[5]["args"]["reason"], "cancel tool");
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(ui);
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
