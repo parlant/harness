@@ -60,7 +60,7 @@ To upgrade `H.app` to a newer release:
 2. Replace `/Applications/H.app` from the new `.dmg` or `.app.zip`.
 3. Reopen `/Applications/H.app`. Existing `hi` and `hi-import` symlinks into `/Applications/H.app/Contents/Resources/harness/bin/` resolve to the upgraded binaries automatically, and `~/.local/share/h` retains all sessions and credentials.
 
-If you prefer the Mix archive bootstrap on an Elixir 1.20 / OTP 29 workstation, install `h_setup` from Hex (`mix archive.install hex h_setup` followed by `mix h.setup --service`); `H.app` and `mix h.setup` share `~/.local/share/h` cooperatively.
+If you prefer the Mix archive bootstrap on an Elixir 1.20 / OTP 29 workstation, install [`h_setup.ez` from the release](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez) with `mix archive.install`, then run `mix h.setup --service`; `H.app` and `mix h.setup` share `~/.local/share/h` cooperatively.
 
 ## What H.app runs on launch
 

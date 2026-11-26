@@ -90,15 +90,15 @@ sections:
             url: /bundle/#code-signing-and-checksum-verification
       - id: cli
         label: CLI + LaunchAgent
-        meta: install.sh or Hex
+        meta: install.sh or Mix archive
         heading: Install the LaunchAgent bundle from your terminal
         platform: harness-v0.5.0-darwin-arm64.tar.gz · h_setup 0.5.0
         command: |
           curl -fsSL https://hiness.dev/install.sh | sh -s -- --service
           hi daemon status
-        alt_label: Or install via Hex (Elixir 1.20 / OTP 29) and open a session
+        alt_label: Or use the Mix archive (Elixir 1.20 / OTP 29) and open a session
         alt_command: |
-          mix archive.install hex h_setup
+          mix archive.install https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
           mix h.setup --service
           hi login && hi
         body: Installs ~/.local/opt/harness/current after verifying the OpenSSH Ed25519 signature, symlinks hi and hi-import into the first writable directory on PATH, and registers ~/Library/LaunchAgents/co.parlant.h.daemon.plist. If you also open H.app later, it detects the running LaunchAgent via ~/.local/share/h/daemon.json and attaches without starting a second daemon.
@@ -106,8 +106,8 @@ sections:
         links:
           - label: Open daemon service guide on hiness.dev
             url: https://hiness.dev/docs/daemon/
-          - label: View h_setup on Hex.pm
-            url: https://hex.pm/packages/h_setup
+          - label: Download the h_setup Mix archive
+            url: https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/h_setup.ez
           - label: Configure API keys & Codex login
             url: https://hiness.dev/docs/providers/
       - id: build-app
