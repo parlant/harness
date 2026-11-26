@@ -1,4 +1,4 @@
-current_version: "0.4.0"
+current_version: "0.5.0"
 signer_identity: "bingboombam@parlant.xyz"
 signer_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsOhoxQkZ8pxWeObg2Q10fJ/Gcg0uL4pt1Oy/3vgLuN"
 github_repo: "https://github.com/parlant/harness"
@@ -10,6 +10,14 @@ hex_hiness: "https://hex.pm/packages/hiness"
 hexdocs_hiness: "https://hiness.hexdocs.pm/"
 
 news:
+  - id: v0-5-0-session-visibility
+    date: "2026-11-26"
+    tag: "Release v0.5.0"
+    title: "H v0.5.0 fixes repeated catalog snapshots and makes subagent waits visible"
+    summary: "See which subagent a session awaits and why it is blocked. Idle catalog streams no longer rebuild snapshots in a loop."
+    links:
+      - label: Download H v0.5.0
+        url: "https://gitlab.com/parlant-co/harness/-/releases/v0.5.0"
   - id: v0-4-0-gates-and-remote
     date: "2026-11-26"
     tag: "Release v0.4.0"
@@ -47,10 +55,40 @@ news:
     summary: "First signed standalone bundles for macOS Apple Silicon (darwin-arm64) and Linux (linux-arm64, linux-x86_64), the h_setup Mix archive, and the native AppKit H.app menu-bar launcher."
 
 entries:
+  - version: "0.5.0"
+    tag: "v0.5.0"
+    date: "2026-11-26"
+    status: "Current release"
+    title: "Subagent wait visibility and quieter catalog streams"
+    summary: "The terminal and web clients identify awaited subagents and surface their provider blockers. The daemon avoids repeated idle catalog snapshots and redundant workspace checks."
+    artifacts:
+      - name: "H-v0.5.0-darwin-arm64.dmg"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "macOS Disk Image (H.app)"
+      - name: "H-v0.5.0-darwin-arm64.app.zip"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Zipped macOS Application Bundle"
+      - name: "harness-v0.5.0-darwin-arm64.tar.gz"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.5.0-linux-arm64.tar.gz"
+        platform: "Linux aarch64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.5.0-linux-x86_64.tar.gz"
+        platform: "Linux x86_64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "h_setup-v0.5.0.ez"
+        platform: "Elixir 1.18+ / Mix"
+        kind: "Signed Mix Archive Installer"
+    highlights:
+      - "Show provider retries through active wait and await dependencies without marking detached subagents or unrelated conversations as blockers."
+      - "Recover slow SSE clients based on actual queued frames, not connection process memory."
+      - "Ship a native macOS helper for daemon launch and isolate host directory enumeration from the OTP file server."
+
   - version: "0.4.0"
     tag: "v0.4.0"
     date: "2026-11-26"
-    status: "Current release"
+    status: "Previous release"
     title: "Parked approval and signal gates, run budgets, HTTP remote agents, and hi cutover"
     summary: "Pause mutating tools for owner approval or wait on external wake signals inside the session coordinator, enforce turn-boundary run budgets, run standalone remote execution agents over authenticated HTTP or Unix sockets, and connect hiweb out-of-VM."
     artifacts:

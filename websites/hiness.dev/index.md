@@ -64,8 +64,8 @@ sections:
         label: macOS app
         meta: hiness.app · Apple Silicon
         heading: Install H.app from the disk image
-        platform: H-v0.4.0-darwin-arm64.dmg
-        body: Visit hiness.app or download H-v0.4.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, drag H.app to /Applications, and open it. H.app starts the bundled daemon on ~/.local/share/h, opens hiweb at http://127.0.0.1:4200/inbox, and adds the H menu-bar item to copy your sign-in token, link hi onto PATH, or drain and restart the daemon.
+        platform: H-v0.5.0-darwin-arm64.dmg
+        body: Visit hiness.app or download H-v0.5.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, drag H.app to /Applications, and open it. H.app starts the bundled daemon on ~/.local/share/h, opens hiweb at http://127.0.0.1:4200/inbox, and adds the H menu-bar item to copy your sign-in token, link hi onto PATH, or drain and restart the daemon.
         links:
           - label: Explore hiness.app for macOS
             url: https://hiness.app

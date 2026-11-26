@@ -40,13 +40,13 @@ sections:
         label: Disk Image (.dmg)
         meta: Recommended · Apple Silicon
         heading: Install H.app from the disk image
-        platform: H-v0.4.0-darwin-arm64.dmg · macOS 14.0+
+        platform: H-v0.5.0-darwin-arm64.dmg · macOS 14.0+
         primary:
-          label: Download H-v0.4.0-darwin-arm64.dmg
-          url: https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.4.0-darwin-arm64.dmg
+          label: Download H-v0.5.0-darwin-arm64.dmg
+          url: https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.5.0-darwin-arm64.dmg
         steps:
           - title: Mount the disk image and copy H.app to /Applications
-            body: Open H-v0.4.0-darwin-arm64.dmg in Finder and drag H.app onto the Applications folder shortcut.
+            body: Open H-v0.5.0-darwin-arm64.dmg in Finder and drag H.app onto the Applications folder shortcut.
           - title: Open H.app and sign into the web workbench
             body: Launch /Applications/H.app (if macOS Gatekeeper asks about an unnotarized download, Control-click H.app and choose Open once, or clear com.apple.quarantine below). H.app creates ~/.local/share/h, places H in your menu bar, and opens http://127.0.0.1:4200/inbox. Click H -> Copy Owner Sign-In Token (Command-C) and paste it on the login page.
           - title: Link hi onto PATH and connect a model provider
@@ -54,8 +54,8 @@ sections:
             code: hi login && hi
         alt_label: Optional Terminal install, quarantine clear & signature check
         alt_command: |
-          curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.4.0-darwin-arm64.dmg
-          hdiutil attach H-v0.4.0-darwin-arm64.dmg -nobrowse -mountpoint /Volumes/H
+          curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.5.0-darwin-arm64.dmg
+          hdiutil attach H-v0.5.0-darwin-arm64.dmg -nobrowse -mountpoint /Volumes/H
           ditto /Volumes/H/H.app /Applications/H.app
           hdiutil detach /Volumes/H
           xattr -dr com.apple.quarantine /Applications/H.app
@@ -70,10 +70,10 @@ sections:
         label: App Archive (.app.zip)
         meta: Dotfiles & Automation
         heading: Unpack H.app with ditto and link hi
-        platform: H-v0.4.0-darwin-arm64.app.zip · Apple Silicon
+        platform: H-v0.5.0-darwin-arm64.app.zip · Apple Silicon
         command: |
-          curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.4.0-darwin-arm64.app.zip
-          ditto -x -k H-v0.4.0-darwin-arm64.app.zip /Applications
+          curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.5.0-darwin-arm64.app.zip
+          ditto -x -k H-v0.5.0-darwin-arm64.app.zip /Applications
           xattr -dr com.apple.quarantine /Applications/H.app
           open /Applications/H.app
         alt_label: Link hi and hi-import into ~/.local/bin from a script
@@ -92,7 +92,7 @@ sections:
         label: CLI + LaunchAgent
         meta: install.sh or Hex
         heading: Install the LaunchAgent bundle from your terminal
-        platform: harness-v0.4.0-darwin-arm64.tar.gz · h_setup 0.4.0
+        platform: harness-v0.5.0-darwin-arm64.tar.gz · h_setup 0.5.0
         command: |
           curl -fsSL https://hiness.dev/install.sh | sh -s -- --service
           hi daemon status

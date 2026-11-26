@@ -28,10 +28,10 @@ specs:
 
 ## Install and verify H.app on macOS
 
-Download `H-v0.4.0-darwin-arm64.dmg` (or `H-v0.4.0-darwin-arm64.app.zip`), `SHA256SUMS`, `SHA256SUMS.sig`, and [`release-signers`](https://github.com/parlant/harness/blob/main/packaging/keys/release-signers) from [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest) or [GitHub Releases](https://github.com/parlant/harness/releases):
+Download `H-v0.5.0-darwin-arm64.dmg` (or `H-v0.5.0-darwin-arm64.app.zip`), `SHA256SUMS`, `SHA256SUMS.sig`, and [`release-signers`](https://github.com/parlant/harness/blob/main/packaging/keys/release-signers) from [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest) or [GitHub Releases](https://github.com/parlant/harness/releases):
 
 ```sh
-curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.4.0-darwin-arm64.dmg
+curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.5.0-darwin-arm64.dmg
 curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/SHA256SUMS
 curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/SHA256SUMS.sig
 curl -fLO https://raw.githubusercontent.com/parlant/harness/main/packaging/keys/release-signers
@@ -45,7 +45,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 Mount the disk image, copy `H.app` into `/Applications`, clear the browser quarantine attribute if present, and launch the menu-bar supervisor:
 
 ```sh
-hdiutil attach H-v0.4.0-darwin-arm64.dmg -nobrowse -mountpoint /Volumes/H
+hdiutil attach H-v0.5.0-darwin-arm64.dmg -nobrowse -mountpoint /Volumes/H
 ditto /Volumes/H/H.app /Applications/H.app
 hdiutil detach /Volumes/H
 xattr -dr com.apple.quarantine /Applications/H.app
