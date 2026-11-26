@@ -38,6 +38,26 @@
           <h3>{{ tab.heading | escape }}</h3>
           <span class="install-panel-meta">{{ tab.platform | escape }}</span>
         </div>
+        {% if tab.primary %}
+        <div class="install-panel-cta">
+          <a class="manual-primary" href="{{ tab.primary.url }}">
+            {% include forge-icons.html forge="apple" size=15 %}
+            <span>{{ tab.primary.label | escape }}</span>
+            <span aria-hidden="true">→</span>
+          </a>
+        </div>
+        {% endif %}
+        {% if tab.steps %}
+        <ol class="install-steps">
+          {% for step in tab.steps %}
+          <li>
+            <strong>{{ step.title | escape }}</strong>
+            <span>{{ step.body | escape }}</span>
+            {% if step.code %}<code>{{ step.code | escape }}</code>{% endif %}
+          </li>
+          {% endfor %}
+        </ol>
+        {% endif %}
         {% if tab.command %}
         <pre class="install-code"><code>{{ tab.command | strip | escape }}</code></pre>
         {% endif %}
@@ -45,7 +65,9 @@
         <p class="install-alt-label">{{ tab.alt_label }}</p>
         <pre class="install-code"><code>{{ tab.alt_command | strip | escape }}</code></pre>
         {% endif %}
+        {% if tab.body %}
         <p class="install-summary">{{ tab.body }}</p>
+        {% endif %}
         {% if tab.verify %}
         <p class="install-verify"><strong>Verify:</strong> <code>{{ tab.verify | escape }}</code></p>
         {% endif %}

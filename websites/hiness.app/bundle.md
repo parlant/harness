@@ -26,6 +26,42 @@ specs:
 * On this page
 {:toc}
 
+## Install and verify H.app on macOS
+
+Download `H-v0.4.0-darwin-arm64.dmg` (or `H-v0.4.0-darwin-arm64.app.zip`), `SHA256SUMS`, `SHA256SUMS.sig`, and [`release-signers`](https://github.com/parlant/harness/blob/main/packaging/keys/release-signers) from [GitLab Releases](https://gitlab.com/parlant-co/harness/-/releases/permalink/latest) or [GitHub Releases](https://github.com/parlant/harness/releases):
+
+```sh
+curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.4.0-darwin-arm64.dmg
+curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/SHA256SUMS
+curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/SHA256SUMS.sig
+curl -fLO https://raw.githubusercontent.com/parlant/harness/main/packaging/keys/release-signers
+
+ssh-keygen -Y verify -f release-signers \
+  -I bingboombam@parlant.xyz -n file \
+  -s SHA256SUMS.sig < SHA256SUMS
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+Mount the disk image, copy `H.app` into `/Applications`, clear the browser quarantine attribute if present, and launch the menu-bar supervisor:
+
+```sh
+hdiutil attach H-v0.4.0-darwin-arm64.dmg -nobrowse -mountpoint /Volumes/H
+ditto /Volumes/H/H.app /Applications/H.app
+hdiutil detach /Volumes/H
+xattr -dr com.apple.quarantine /Applications/H.app
+open /Applications/H.app
+```
+
+After launch, click **H -> Copy Owner Sign-In Token** (`⌘C`) to authenticate `http://127.0.0.1:4200/inbox`, and click **H -> Install 'hi' Command Line Tool...** to symlink `hi` and `hi-import` onto your `PATH`.
+
+To upgrade `H.app` to a newer release:
+
+1. Choose **Stop Daemon & Quit H** (`⌘Q`) from the menu bar so active turns drain cleanly.
+2. Replace `/Applications/H.app` from the new `.dmg` or `.app.zip`.
+3. Reopen `/Applications/H.app`. Existing `hi` and `hi-import` symlinks into `/Applications/H.app/Contents/Resources/harness/bin/` resolve to the upgraded binaries automatically, and `~/.local/share/h` retains all sessions and credentials.
+
+If you prefer the Mix archive bootstrap on an Elixir 1.20 / OTP 29 workstation, install `h_setup` from Hex (`mix archive.install hex h_setup` followed by `mix h.setup --service`); `H.app` and `mix h.setup` share `~/.local/share/h` cooperatively.
+
 ## What H.app runs on launch
 
 When you open `/Applications/H.app`, macOS launches the compiled Swift executable at `H.app/Contents/MacOS/HApp` as an accessory status-bar application (`NSApplication.ActivationPolicy.accessory`).
@@ -38,7 +74,7 @@ Inspect the full launcher implementation in [`packaging/macos/HApp.swift`](https
 
 ## Safe CLI installation onto PATH
 
-Selecting **Install `hi` Command Line Tool...** from the `H` status menu links both `hi` and `hi-import` from `H.app/Contents/Resources/harness/bin/` into your shell environment without touching system-protected paths.
+Selecting **Install 'hi' Command Line Tool...** from the `H` status menu links both `hi` and `hi-import` from `H.app/Contents/Resources/harness/bin/` into your shell environment without touching system-protected paths.
 
 `H.app` inspects your `PATH` and selects the first writable directory in this priority order:
 
@@ -73,5 +109,7 @@ ssh-keygen -Y verify -f release-signers \
 shasum -a 256 -c SHA256SUMS --ignore-missing
 codesign --verify --deep --strict --verbose=2 /Applications/H.app
 ```
+
+To uninstall `H.app`, choose **Stop Daemon & Quit H** (`⌘Q`) in the menu bar, move `/Applications/H.app` to the Trash, and remove the `hi` and `hi-import` symlinks from your `PATH` bin directory. Your session history and credentials remain in `~/.local/share/h` until you delete that directory explicitly.
 
 For full daemon administration, provider setup, and workspace session commands, continue to the [operator manual on hiness.dev](https://hiness.dev/docs/).

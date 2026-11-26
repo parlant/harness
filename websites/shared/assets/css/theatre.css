@@ -24,7 +24,7 @@
   pointer-events: none;
   background:
     linear-gradient(to bottom, var(--paper), transparent 19%, transparent 79%, var(--paper)),
-    radial-gradient(ellipse at 50% 46%, transparent 40%, #1014228c 100%);
+    radial-gradient(ellipse at 50% 46%, transparent 40%, var(--stage-vignette, #1014228c) 100%);
 }
 .ballroom-cast { z-index: 2; }
 .ballroom[data-dance="running"] .ballroom-puppet { will-change: transform; }
@@ -44,7 +44,7 @@
   display: block;
   height: 100%;
   width: 100%;
-  filter: drop-shadow(3px 5px 4px #090e20bb);
+  filter: drop-shadow(3px 5px 4px var(--stage-shadow, #090e20bb));
 }
 .puppet-rod {
   position: absolute;
@@ -54,7 +54,7 @@
   height: 44rem;
   transform: translateX(-50%);
   background: linear-gradient(to right, #513421, #ac7a4f 36%, #895c38 56%, #583921);
-  box-shadow: 1px 0 2px #090e20a6;
+  box-shadow: 1px 0 2px var(--rod-shadow, #090e20a6);
 }
 /* Resting positions also serve as the starting marks for the dance. */
 .ballroom-puppet-1 { --x: 13%; --y: 23%; --size: 40%; --angle: -4deg; }
@@ -95,7 +95,7 @@
   min-height: 0;
   object-fit: contain;
   object-position: center bottom;
-  filter: drop-shadow(4px 5px 4px #090e2073);
+  filter: drop-shadow(4px 5px 4px var(--cutout-shadow, #090e2073));
 }
 
 /* The source gallery is the only place original artwork and credits appear. */

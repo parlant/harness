@@ -27,7 +27,8 @@ sections:
     id: download
     kicker: Install H.app
     title: Choose how to install H on your Mac.
-    body: Download the signed disk image for drag-and-drop installation into /Applications, unpack the .app.zip archive in automation scripts, or pair H.app with the standalone CLI installer from hiness.dev.
+    body: Download the signed disk image for drag-and-drop setup into /Applications, unpack the .app.zip archive in dotfiles scripts, run the POSIX LaunchAgent installer, or build H.app locally.
+    note: Requires macOS 14.0 (Sonoma) or newer on Apple Silicon (arm64). H.app bundles its own Erlang/OTP 29 runtime and Rust CLI tools inside Contents/Resources/harness.
     tablist_label: macOS installation options
     links:
       - label: Inspect the H.app bundle layout
@@ -38,25 +39,50 @@ sections:
       - id: dmg
         label: Disk Image (.dmg)
         meta: Recommended · Apple Silicon
-        heading: Drag H.app to /Applications
+        heading: Install H.app from the disk image
         platform: H-v0.4.0-darwin-arm64.dmg · macOS 14.0+
-        body: Download H-v0.4.0-darwin-arm64.dmg from GitHub Releases or GitLab Releases, open the disk image, and drag H.app into /Applications. On first launch, H.app prepares ~/.local/share/h (mode 0700), starts the embedded OTP daemon, places the bold H item in your macOS menu bar, and opens http://127.0.0.1:4200/inbox in your default browser.
-        verify: codesign --verify --deep --strict --verbose=2 /Applications/H.app
+        primary:
+          label: Download H-v0.4.0-darwin-arm64.dmg
+          url: https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.4.0-darwin-arm64.dmg
+        steps:
+          - title: Mount the disk image and copy H.app to /Applications
+            body: Open H-v0.4.0-darwin-arm64.dmg in Finder and drag H.app onto the Applications folder shortcut.
+          - title: Open H.app and sign into the web workbench
+            body: Launch /Applications/H.app (if macOS Gatekeeper asks about an unnotarized download, Control-click H.app and choose Open once, or clear com.apple.quarantine below). H.app creates ~/.local/share/h, places H in your menu bar, and opens http://127.0.0.1:4200/inbox. Click H -> Copy Owner Sign-In Token (Command-C) and paste it on the login page.
+          - title: Link hi onto PATH and connect a model provider
+            body: "Click H -> Install 'hi' Command Line Tool... in the menu bar, then open any terminal in a project directory to sign in and start a session."
+            code: hi login && hi
+        alt_label: Optional Terminal install, quarantine clear & signature check
+        alt_command: |
+          curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.4.0-darwin-arm64.dmg
+          hdiutil attach H-v0.4.0-darwin-arm64.dmg -nobrowse -mountpoint /Volumes/H
+          ditto /Volumes/H/H.app /Applications/H.app
+          hdiutil detach /Volumes/H
+          xattr -dr com.apple.quarantine /Applications/H.app
+          open /Applications/H.app
+        verify: codesign --verify --deep --strict --verbose=2 /Applications/H.app && hi daemon status
         links:
-          - label: Download from GitHub Releases
+          - label: Mirror on GitHub Releases
             url: https://github.com/parlant/harness/releases
-          - label: Download from GitLab Releases
-            url: https://gitlab.com/parlant-co/harness/-/releases/permalink/latest
+          - label: Verify Ed25519 release signatures
+            url: /bundle/#code-signing-and-checksum-verification
       - id: zip
         label: App Archive (.app.zip)
         meta: Dotfiles & Automation
-        heading: Unpack H.app with ditto on macOS
-        platform: H-v0.4.0-darwin-arm64.app.zip
+        heading: Unpack H.app with ditto and link hi
+        platform: H-v0.4.0-darwin-arm64.app.zip · Apple Silicon
         command: |
           curl -fLO https://gitlab.com/parlant-co/harness/-/releases/permalink/latest/downloads/H-v0.4.0-darwin-arm64.app.zip
           ditto -x -k H-v0.4.0-darwin-arm64.app.zip /Applications
+          xattr -dr com.apple.quarantine /Applications/H.app
           open /Applications/H.app
-        body: Use Apple's ditto utility so Mach-O code signatures, symbolic links, and extended attributes inside Contents/Resources/harness stay intact when extracting from the terminal.
+        alt_label: Link hi and hi-import into ~/.local/bin from a script
+        alt_command: |
+          mkdir -p "$HOME/.local/bin"
+          ln -sfn /Applications/H.app/Contents/Resources/harness/bin/hi "$HOME/.local/bin/hi"
+          ln -sfn /Applications/H.app/Contents/Resources/harness/bin/hi-import "$HOME/.local/bin/hi-import"
+        body: Extract with Apple's ditto command so Mach-O code signatures, symbolic links, and extended attributes inside Contents/Resources/harness remain intact, then clear the browser quarantine attribute before first launch.
+        verify: /Applications/H.app/Contents/Resources/harness/bin/hi daemon status
         links:
           - label: View release checksums & changelog
             url: /releases/
@@ -64,30 +90,45 @@ sections:
             url: /bundle/#code-signing-and-checksum-verification
       - id: cli
         label: CLI + LaunchAgent
-        meta: Headless Mac / Terminal-first
-        heading: Install standalone CLI via hiness.dev
-        platform: darwin-arm64 tarball
+        meta: install.sh or Hex
+        heading: Install the LaunchAgent bundle from your terminal
+        platform: harness-v0.4.0-darwin-arm64.tar.gz · h_setup 0.4.0
         command: |
           curl -fsSL https://hiness.dev/install.sh | sh -s -- --service
           hi daemon status
-        body: Prefer a pure background LaunchAgent without a menu-bar item? Run the POSIX installer from hiness.dev. H.app detects an external daemon automatically via ~/.local/share/h/daemon.json and attaches without starting a duplicate server.
+        alt_label: Or install via Hex (Elixir 1.20 / OTP 29) and open a session
+        alt_command: |
+          mix archive.install hex h_setup
+          mix h.setup --service
+          hi login && hi
+        body: Installs ~/.local/opt/harness/current after verifying the OpenSSH Ed25519 signature, symlinks hi and hi-import into the first writable directory on PATH, and registers ~/Library/LaunchAgents/co.parlant.h.daemon.plist. If you also open H.app later, it detects the running LaunchAgent via ~/.local/share/h/daemon.json and attaches without starting a second daemon.
+        verify: launchctl print "gui/$(id -u)/co.parlant.h.daemon"
         links:
-          - label: Open hiness.dev documentation
+          - label: Open daemon service guide on hiness.dev
             url: https://hiness.dev/docs/daemon/
+          - label: View h_setup on Hex.pm
+            url: https://hex.pm/packages/h_setup
+          - label: Configure API keys & Codex login
+            url: https://hiness.dev/docs/providers/
       - id: build-app
-        label: Build H.app locally
+        label: Build from Source
         meta: Xcode CLT + Elixir + Rust
-        heading: Compile H.app from source on your Mac
-        platform: scripts/build-macos-app.sh
+        heading: Compile and package H.app from source
+        platform: scripts/build-macos-app.sh · Elixir 1.20 / OTP 29
         command: |
           git clone https://github.com/parlant/harness.git
           cd harness
           scripts/build-bundle.sh dist/bundle-darwin-arm64
-          scripts/build-macos-app.sh dist/bundle-darwin-arm64 dist/release
-        body: Compiles the BEAM release, hiweb assets, Rust hi binaries, and Swift AppKit launcher (packaging/macos/HApp.swift), performs inside-out Mach-O code signing across every dylib, NIF, and executable, and outputs both .dmg and .app.zip.
+          H_KEEP_APP=1 scripts/build-macos-app.sh dist/bundle-darwin-arm64 dist/release
+          ditto dist/release/H.app /Applications/H.app
+          open /Applications/H.app
+        body: Compiles the OTP 29 release, hiweb assets, Rust hi and hi-import binaries, and Swift AppKit launcher (packaging/macos/HApp.swift), signs every embedded dylib, NIF, and executable inside-out, and writes H.app, .dmg, and .app.zip into dist/release/.
+        verify: codesign --verify --deep --strict --verbose=2 /Applications/H.app
         links:
           - label: Inspect packaging/macos/HApp.swift on GitHub
             url: https://github.com/parlant/harness/blob/main/packaging/macos/HApp.swift
+          - label: Read bundle architecture details
+            url: /bundle/
 
   - layout: menubar
     id: menubar

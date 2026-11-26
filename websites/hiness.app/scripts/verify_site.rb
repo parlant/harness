@@ -46,6 +46,22 @@ end
 errors << "Internal planning was published" if root.glob("**/{brief.md,discovery.md,writing-guide.md,Gemfile,package-lock.json}").any?
 errors << "Template text in machine context" if [llms, full].any? { |s| s.match?(/example\.com\/about|Site title|{%/) }
 
+css = root.join("assets/css/main.css").read(encoding: "utf-8")
+errors << "Expected light color-scheme in hiness.app CSS" unless css.include?("color-scheme:light") || css.include?("color-scheme: light")
+home_html = files.fetch("/")
+panel_ids = home_html.scan(/class="install-panel"\s+data-panel="([^"]+)"/).flatten
+if panel_ids.empty?
+  errors << "/: missing install panels"
+else
+  panel_ids.each do |id|
+    has_checked = css.include?(%(#install-tab-#{id}:checked))
+    has_panel = css.include?(%(data-panel="#{id}"]) ) || css.include?(%(data-panel=#{id}]))
+    unless has_checked && has_panel
+      errors << "/: CSS lacks checked rule for install tab #{id}"
+    end
+  end
+end
+
 slop_terms = %w[
   additionally crucial delve enduring enhance fostering garner interplay intricate landscape
   leverage pivotal showcase tapestry testament underscore vibrant substrate wedge vector

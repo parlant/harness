@@ -1,1 +1,19 @@
-../../../shared/assets/css/palette.css
+:root {
+  color-scheme: light;
+  --paper: #f7f8fc;
+  --surface-inset: #eef1f8;
+  --surface: #ffffff;
+  --surface-raised: #f0f4fc;
+  --ink: #121829;
+  --muted: #4b556e;
+  --accent: #2b45a2;
+  --accent-strong: #1d3178;
+  --on-accent: #ffffff;
+  --rule: #d8dfee;
+  --rule-strong: #8d9cc0;
+  --status-running: #17795b;
+  --stage-vignette: rgba(18, 24, 41, .18);
+  --stage-shadow: rgba(18, 24, 41, .28);
+  --rod-shadow: rgba(18, 24, 41, .24);
+  --cutout-shadow: rgba(18, 24, 41, .2);
+}

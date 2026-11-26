@@ -285,13 +285,21 @@ a.hero-domain-pill:hover {
 #install-tab-shell:checked ~ .install-panels .install-panel[data-panel="shell"],
 #install-tab-hex:checked ~ .install-panels .install-panel[data-panel="hex"],
 #install-tab-macos-app:checked ~ .install-panels .install-panel[data-panel="macos-app"],
-#install-tab-source:checked ~ .install-panels .install-panel[data-panel="source"] {
+#install-tab-source:checked ~ .install-panels .install-panel[data-panel="source"],
+#install-tab-dmg:checked ~ .install-panels .install-panel[data-panel="dmg"],
+#install-tab-zip:checked ~ .install-panels .install-panel[data-panel="zip"],
+#install-tab-cli:checked ~ .install-panels .install-panel[data-panel="cli"],
+#install-tab-build-app:checked ~ .install-panels .install-panel[data-panel="build-app"] {
   display: block;
 }
 #install-tab-shell:checked ~ .install-tablist label[for="install-tab-shell"],
 #install-tab-hex:checked ~ .install-tablist label[for="install-tab-hex"],
 #install-tab-macos-app:checked ~ .install-tablist label[for="install-tab-macos-app"],
-#install-tab-source:checked ~ .install-tablist label[for="install-tab-source"] {
+#install-tab-source:checked ~ .install-tablist label[for="install-tab-source"],
+#install-tab-dmg:checked ~ .install-tablist label[for="install-tab-dmg"],
+#install-tab-zip:checked ~ .install-tablist label[for="install-tab-zip"],
+#install-tab-cli:checked ~ .install-tablist label[for="install-tab-cli"],
+#install-tab-build-app:checked ~ .install-tablist label[for="install-tab-build-app"] {
   background: var(--surface-raised);
   color: var(--accent);
   border-bottom-color: var(--accent);
@@ -299,13 +307,21 @@ a.hero-domain-pill:hover {
 #install-tab-shell:checked ~ .install-tablist label[for="install-tab-shell"] .install-tab-meta,
 #install-tab-hex:checked ~ .install-tablist label[for="install-tab-hex"] .install-tab-meta,
 #install-tab-macos-app:checked ~ .install-tablist label[for="install-tab-macos-app"] .install-tab-meta,
-#install-tab-source:checked ~ .install-tablist label[for="install-tab-source"] .install-tab-meta {
+#install-tab-source:checked ~ .install-tablist label[for="install-tab-source"] .install-tab-meta,
+#install-tab-dmg:checked ~ .install-tablist label[for="install-tab-dmg"] .install-tab-meta,
+#install-tab-zip:checked ~ .install-tablist label[for="install-tab-zip"] .install-tab-meta,
+#install-tab-cli:checked ~ .install-tablist label[for="install-tab-cli"] .install-tab-meta,
+#install-tab-build-app:checked ~ .install-tablist label[for="install-tab-build-app"] .install-tab-meta {
   color: var(--accent);
 }
 #install-tab-shell:focus-visible ~ .install-tablist label[for="install-tab-shell"],
 #install-tab-hex:focus-visible ~ .install-tablist label[for="install-tab-hex"],
 #install-tab-macos-app:focus-visible ~ .install-tablist label[for="install-tab-macos-app"],
-#install-tab-source:focus-visible ~ .install-tablist label[for="install-tab-source"] {
+#install-tab-source:focus-visible ~ .install-tablist label[for="install-tab-source"],
+#install-tab-dmg:focus-visible ~ .install-tablist label[for="install-tab-dmg"],
+#install-tab-zip:focus-visible ~ .install-tablist label[for="install-tab-zip"],
+#install-tab-cli:focus-visible ~ .install-tablist label[for="install-tab-cli"],
+#install-tab-build-app:focus-visible ~ .install-tablist label[for="install-tab-build-app"] {
   outline: 2.5px solid var(--accent);
   outline-offset: -3px;
 }
@@ -367,6 +383,60 @@ a.hero-domain-pill:hover {
   border: 1px solid var(--rule);
   background: var(--paper);
   font: .85rem/1.4 var(--manual-mono);
+  color: var(--accent-strong);
+}
+.install-panel-cta { margin-top: 1rem; }
+.install-steps {
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: install-step;
+  display: grid;
+  gap: .7rem;
+}
+.install-steps li {
+  counter-increment: install-step;
+  position: relative;
+  padding: .75rem .9rem .75rem 2.55rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--accent);
+  display: grid;
+  gap: .22rem;
+}
+.install-steps li::before {
+  content: counter(install-step);
+  position: absolute;
+  left: .8rem;
+  top: .78rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+  border: 1px solid var(--rule-strong);
+  color: var(--accent-strong);
+  font: 650 .72rem/1 var(--manual-mono);
+}
+.install-steps li strong {
+  font: 630 .94rem/1.32 var(--royal-sans);
+  color: var(--ink);
+}
+.install-steps li span {
+  font-size: .9rem;
+  line-height: 1.54;
+  color: var(--muted);
+}
+.install-steps li code {
+  margin-top: .18rem;
+  width: fit-content;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: .15rem .45rem;
+  background: var(--surface-inset);
+  border: 1px solid var(--rule);
+  font: 500 .78rem/1.4 var(--manual-mono);
   color: var(--accent-strong);
 }
 .install-panel-links {
@@ -504,7 +574,7 @@ a.hero-domain-pill:hover {
   max-width: 26.5rem;
   background: var(--surface);
   border: 1px solid var(--rule-strong);
-  box-shadow: 0 24px 56px rgba(0, 0, 0, .55);
+  box-shadow: 0 20px 44px rgba(18, 24, 41, .12);
   overflow: hidden;
 }
 .macos-bar {
@@ -537,7 +607,7 @@ a.hero-domain-pill:hover {
   border-radius: .42rem;
   background: var(--surface);
   border: 1px solid var(--rule);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, .45);
+  box-shadow: 0 10px 24px rgba(18, 24, 41, .1);
 }
 .macos-menu-row {
   display: flex;
@@ -561,7 +631,7 @@ a.hero-domain-pill:hover {
   box-shadow: 0 0 8px color-mix(in srgb, var(--status-running) 35%, transparent);
 }
 .macos-menu-highlight {
-  background: color-mix(in srgb, var(--accent) 22%, var(--surface-raised));
+  background: color-mix(in srgb, var(--accent) 13%, var(--surface-raised));
   color: var(--accent-strong);
   font-weight: 600;
 }

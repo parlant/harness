@@ -26,7 +26,7 @@ specs:
 
 ## Use hiweb on iPhone and iPad today
 
-`H.app` runs your coding-agent daemon and workspace tools on your Mac, where your Git checkouts, compilers, and test suites live. Because `hiweb` is a responsive Phoenix LiveView workbench with zero client-side state lock-in, you can already triage workspaces, read streaming turns, comment on diffs, and steer or abort active runs from Safari on iPhone or iPad.
+`H.app` runs your coding-agent daemon and workspace tools on your Mac, where your Git checkouts, compilers, and test suites live. Because `hiweb` is a responsive Plug and Server-Sent Events web workbench with zero client-side state lock-in, you can already triage workspaces, read streaming turns, approve or deny parked tool gates, comment on diffs, and steer or abort active runs from Safari on iPhone or iPad.
 
 To reach your Mac safely from another device:
 
@@ -38,7 +38,7 @@ Read [security boundaries on hiness.dev](https://hiness.dev/docs/security/) and 
 
 ## Why hiness.app is built for a future native iOS client
 
-`H` keeps history ancestry, work ownership, and client navigation strictly separate in the daemon (`H.Session.Server`). Neither `hi` (Rust TUI) nor `hiweb` (Phoenix LiveView) owns session truth; both subscribe to ordered commits and streaming deltas over the documented `/api/v1` HTTP and Server-Sent Events (SSE) protocol.
+`H` keeps history ancestry, work ownership, and client navigation strictly separate in the daemon (`H.Session.Server`). Both `hi` (Rust TUI) and `hiweb` (browser workbench) act as stateless clients that subscribe to ordered commits and streaming deltas over the documented `/api/v1` HTTP and Server-Sent Events (SSE) protocol.
 
 **Planned work (not shipped yet):** a native SwiftUI iOS and iPadOS companion under the `hiness.app` umbrella will connect to your Mac's `H` daemon as another stateless view cursor:
 
