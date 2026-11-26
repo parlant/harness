@@ -3564,8 +3564,7 @@ mod tests {
     fn read_http_request(stream: &mut UnixStream) -> (String, String) {
         let mut buf = Vec::new();
         let mut tmp = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut tmp).unwrap();
+        while let Ok(n) = stream.read(&mut tmp) {
             if n == 0 {
                 break;
             }
@@ -3585,14 +3584,16 @@ mod tests {
                     })
                     .unwrap_or(0);
                 while buf.len() < head_end + content_len {
-                    let m = stream.read(&mut tmp).unwrap();
+                    let Ok(m) = stream.read(&mut tmp) else {
+                        break;
+                    };
                     if m == 0 {
                         break;
                     }
                     buf.extend_from_slice(&tmp[..m]);
                 }
-                let body =
-                    String::from_utf8_lossy(&buf[head_end..head_end + content_len]).to_string();
+                let end = (head_end + content_len).min(buf.len());
+                let body = String::from_utf8_lossy(&buf[head_end..end]).to_string();
                 return (head_str, body);
             }
         }
@@ -3600,13 +3601,12 @@ mod tests {
     }
 
     fn write_json_response(stream: &mut UnixStream, status: &str, body: &str) {
-        write!(
+        let _ = write!(
             stream,
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
-        )
-        .unwrap();
-        stream.flush().unwrap();
+        );
+        let _ = stream.flush();
     }
 
     fn make_ui(client: DaemonClient, sid: &str, cid: &str) -> (Ui, Screen) {
