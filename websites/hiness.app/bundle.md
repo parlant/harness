@@ -54,6 +54,22 @@ open /Applications/H.app
 
 After launch, click **H -> Copy Owner Sign-In Token** (`⌘C`) to authenticate `http://127.0.0.1:4200/inbox`, and click **H -> Install 'hi' Command Line Tool...** to symlink `hi` and `hi-import` onto your `PATH`.
 
+## Set up workspace access
+
+Keep `H.app` in `/Applications` before granting folder access. Open **H -> Permissions & Setup** for the native setup guide, links to macOS privacy settings, and **Reveal hi-exec in Finder**. H starts its bundled daemon through this helper.
+
+Open the project folder you intend to use and respond to any macOS folder prompt. Review those decisions under **System Settings -> Privacy & Security -> Files & Folders**. Projects in `~/Projects` avoid many prompts associated with Desktop, Documents, and Downloads.
+
+Full Disk Access is optional and gives H and its tools broad access to sensitive user data. Grant it only when your work requires that access. The setup guide can reveal the exact helper path for the settings file picker. After changing permissions, choose **H -> Drain & Restart Daemon**.
+
+If the menu reports an external daemon, permissions granted to `H.app` may not apply to that process. Follow the setup guide to check and drain the existing service before reopening H. H leaves an existing service under its current owner.
+
+Ordinary coding and folder access require neither Accessibility nor Screen Recording permission. The setup guide links to those settings for future computer-control work; H does not currently request or use them.
+
+Read the [native setup guide implementation](https://github.com/parlant/harness/blob/main/packaging/macos/HApp.swift) for the permission and daemon-ownership checks.
+
+## Upgrade H.app
+
 To upgrade `H.app` to a newer release:
 
 1. Choose **Stop Daemon & Quit H** (`⌘Q`) from the menu bar so active turns drain cleanly.
