@@ -1,7 +1,7 @@
 defmodule HSetup.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.5.0"
   @source_url "https://github.com/parlant/harness"
   @gitlab_url "https://gitlab.com/parlant-co/harness"
   @homepage_url "https://hiness.dev"
