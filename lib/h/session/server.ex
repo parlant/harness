@@ -65,18 +65,23 @@ defmodule H.Session.Server do
     GenServer.call(server, {:scan_entries, cid, query})
   end
 
-  @spec snapshot_or_replay(GenServer.server(), pos_integer(), nil | non_neg_integer()) ::
+  @spec snapshot_or_replay(
+          GenServer.server(),
+          pos_integer(),
+          nil | non_neg_integer(),
+          pid() | nil
+        ) ::
           {:ok,
            {:snapshot, non_neg_integer(), binary()} | {:replay, [{non_neg_integer(), binary()}]}}
           | {:error, term()}
-  def snapshot_or_replay(server, cid, last_event_id) when is_integer(cid) do
-    GenServer.call(server, {:snapshot_or_replay, cid, last_event_id})
+  def snapshot_or_replay(server, cid, last_event_id, subscriber \\ nil) when is_integer(cid) do
+    GenServer.call(server, {:snapshot_or_replay, cid, last_event_id, subscriber})
   end
 
-  @spec get_submission_outcome(GenServer.server(), String.t()) ::
+  @spec get_submission_outcome(GenServer.server(), String.t(), pid() | nil) ::
           {:ok, map()} | {:error, :not_found}
-  def get_submission_outcome(server, request_id) when is_binary(request_id) do
-    GenServer.call(server, {:get_submission_outcome, request_id})
+  def get_submission_outcome(server, request_id, watcher \\ nil) when is_binary(request_id) do
+    GenServer.call(server, {:get_submission_outcome, request_id, watcher})
   end
 
   @spec verify_visible_entry(GenServer.server(), pos_integer(), pos_integer()) ::
@@ -143,8 +148,14 @@ defmodule H.Session.Server do
                 idle_exit: opts[:idle_exit],
                 idle_timeout_ms: idle_timeout(opts, storage_mod)
               })
-              |> then(&apply_effects_list(effects, &1))
 
+            # A parked wait may need to start its child under the same runtime
+            # supervisor. Do not call it synchronously from the child's init.
+            {subagent_effects, local_effects} =
+              Enum.split_with(effects, &match?({:resume_subagent, _, _}, &1))
+
+            if subagent_effects != [], do: send(self(), {:resume_subagents, subagent_effects})
+            state = apply_effects_list(local_effects, state)
             State.report_catalog_active(state)
             {:ok, update_idle_timer(state)}
 
@@ -251,24 +262,37 @@ defmodule H.Session.Server do
     end
   end
 
-  defp dispatch_call({:snapshot_or_replay, cid, last_event_id}, _from, state) do
+  defp dispatch_call({:snapshot_or_replay, cid, last_event_id, subscriber}, _from, state) do
     if Map.has_key?(state.conversations, cid) do
       case Stream.snapshot_or_replay(state, cid, last_event_id) do
-        {:ok, payload, next_state} -> {:reply, {:ok, payload}, next_state}
-        {:error, reason} -> {:reply, {:error, reason}, state}
+        {:ok, {:replay, _} = payload, next_state} when is_pid(subscriber) ->
+          Stream.broadcast_subagent_waits(next_state, cid, subscriber)
+          {:reply, {:ok, payload}, next_state}
+
+        {:ok, payload, next_state} ->
+          {:reply, {:ok, payload}, next_state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
       end
     else
       {:reply, {:error, :not_found}, state}
     end
   end
 
-  defp dispatch_call({:get_submission_outcome, request_id}, _from, state) do
+  defp dispatch_call({:get_submission_outcome, request_id, watcher}, _from, state) do
     case Submissions.lookup(state, request_id) do
       {:not_found, next_state} ->
         {:reply, {:error, :not_found}, next_state}
 
       {:ok, sub, next_state} ->
         {outcome, final_state} = Stream.build_submission_outcome(next_state, sub)
+        # The initial runtime is sent by the same coordinator as later updates,
+        # so the watcher sees them in order even when the child changes during attach.
+        if is_pid(watcher) and outcome.status in ["queued", "placed"] do
+          send(watcher, {:submission_runtime, state.session_id, State.submission_runtime(state)})
+        end
+
         {:reply, {:ok, outcome}, final_state}
     end
   end
@@ -371,12 +395,14 @@ defmodule H.Session.Server do
     process_with_drain({:subagent_failed, tid, reason}, state)
   end
 
-  def handle_info({:child_catalog_updated, child_sid, child_summary}, state)
-      when is_binary(child_sid) do
-    {:noreply,
-     child_sid
-     |> Subagents.handle_child_catalog_updated(child_summary, state)
-     |> update_idle_timer()}
+  def handle_info({:resume_subagents, effects}, state) do
+    next = apply_effects_list(effects, state)
+    State.maybe_report_catalog_runtime(state, next)
+    {:noreply, update_idle_timer(next)}
+  end
+
+  def handle_info({:submission_runtime, child_sid, runtime}, state) do
+    {:noreply, Subagents.handle_submission_runtime(child_sid, runtime, state)}
   end
 
   def handle_info({:workspace_lease_granted, token}, state) do
@@ -560,6 +586,7 @@ defmodule H.Session.Server do
     if batches == [] do
       Enum.each(immediate_replies, fn {from, reply} -> GenServer.reply(from, reply) end)
       final_state = apply_effects_list(post_effects, working_state)
+      State.maybe_report_catalog_runtime(state, final_state)
       {:noreply, final_state}
     else
       case Storage.commit(working_state.store, batches) do

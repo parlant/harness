@@ -145,6 +145,7 @@ defmodule HWeb.Backend.HTTP.SSEBridge do
           snapshot_seq: nil,
           last_seq: nil,
           ring: [],
+          subagent_wait_frame: nil,
           waiting_initial: nil
         }
 
@@ -173,6 +174,7 @@ defmodule HWeb.Backend.HTTP.SSEBridge do
 
     case initial_payload(state, last_event_id) do
       {:ready, payload} ->
+        send_current_subagent_waits(state, subscriber_pid, payload, last_event_id)
         {:reply, {:ok, payload}, state}
 
       :wait ->
@@ -334,7 +336,8 @@ defmodule HWeb.Backend.HTTP.SSEBridge do
           | snapshot: bin,
             snapshot_seq: seq,
             last_seq: seq,
-            ring: []
+            ring: [],
+            subagent_wait_frame: nil
         }
 
         maybe_reply_waiting_initial(state)
@@ -349,11 +352,26 @@ defmodule HWeb.Backend.HTTP.SSEBridge do
         seq = parse_int(id_str) || (state.last_seq || 0) + 1
         ring = Enum.take(state.ring ++ [{seq, bin}], -64)
         broadcast(state, {:commit_frame, seq, bin})
-        %{state | last_seq: seq, ring: ring}
+        %{state | last_seq: seq, ring: ring, subagent_wait_frame: nil}
 
       %{event: "ephemeral", data: bin} when is_binary(bin) and bin != "" ->
         broadcast(state, {:ephemeral_frame, bin})
-        state
+
+        # Unlike text deltas, this is a complete replacement of a runtime
+        # view. A second subscriber at the same cursor needs the latest one.
+        if String.contains?(bin, ~s("subagent_waits")) do
+          case JSON.decode(bin) do
+            {:ok,
+             %{"base_seq" => seq, "doc_ops" => %{"live" => [["set", ["subagent_waits"], waits]]}}}
+            when seq == state.last_seq and is_map(waits) ->
+              %{state | subagent_wait_frame: {seq, bin}}
+
+            _ ->
+              state
+          end
+        else
+          state
+        end
 
       _ ->
         state
@@ -362,9 +380,10 @@ defmodule HWeb.Backend.HTTP.SSEBridge do
 
   defp maybe_reply_waiting_initial(%{waiting_initial: nil} = state), do: state
 
-  defp maybe_reply_waiting_initial(%{waiting_initial: {from, _pid, last_event_id}} = state) do
+  defp maybe_reply_waiting_initial(%{waiting_initial: {from, pid, last_event_id}} = state) do
     case initial_payload(state, last_event_id) do
       {:ready, payload} ->
+        send_current_subagent_waits(state, pid, payload, last_event_id)
         GenServer.reply(from, {:ok, payload})
         %{state | waiting_initial: nil}
 
@@ -372,6 +391,24 @@ defmodule HWeb.Backend.HTTP.SSEBridge do
         state
     end
   end
+
+  defp send_current_subagent_waits(%{subagent_wait_frame: {seq, bin}}, pid, initial, cursor) do
+    base_seq =
+      case initial do
+        {:snapshot, base, _} ->
+          base
+
+        {:replay, frames} ->
+          case List.last(frames) do
+            {base, _} -> base
+            nil -> parse_int(cursor)
+          end
+      end
+
+    if seq == base_seq, do: send(pid, {:ephemeral_frame, bin})
+  end
+
+  defp send_current_subagent_waits(_, _pid, _initial, _cursor), do: :ok
 
   defp initial_payload(%{snapshot: nil}, _last_event_id), do: :wait
 

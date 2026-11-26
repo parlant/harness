@@ -1011,14 +1011,12 @@ defmodule H.Catalog do
 
   defp broadcast_upsert(pubsub, registry, seq, entry) do
     if not is_nil(pubsub) and Process.whereis(pubsub) != nil do
-      wired = wire_session(entry, registry: registry)
-
       payload =
         %{
           "version" => 1,
           "seq" => seq,
           "type" => "upsert",
-          "session" => wired
+          "session" => wire_session(entry, registry: registry)
         }
         |> JSON.encode_to_iodata!()
         |> IO.iodata_to_binary()
@@ -1026,12 +1024,6 @@ defmodule H.Catalog do
       Registry.dispatch(pubsub, :catalog, fn entries ->
         for {pid, _} <- entries do
           send(pid, {:catalog_frame, seq, payload})
-        end
-      end)
-
-      Registry.dispatch(pubsub, {:catalog_session, entry.session_id}, fn entries ->
-        for {pid, _} <- entries do
-          send(pid, {:child_catalog_updated, entry.session_id, wired})
         end
       end)
     end
@@ -1052,12 +1044,6 @@ defmodule H.Catalog do
       Registry.dispatch(pubsub, :catalog, fn entries ->
         for {pid, _} <- entries do
           send(pid, {:catalog_frame, seq, payload})
-        end
-      end)
-
-      Registry.dispatch(pubsub, {:catalog_session, session_id}, fn entries ->
-        for {pid, _} <- entries do
-          send(pid, {:child_catalog_updated, session_id, nil})
         end
       end)
     end

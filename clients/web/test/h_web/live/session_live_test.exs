@@ -623,7 +623,12 @@ defmodule HWeb.SessionLiveTest do
 
     send_commit(view, 3, [], %{
       "tools" => %{
-        call_id => %{name: "subagent", status: "waiting", child_session_id: child.session_id}
+        call_id => %{
+          name: "subagent",
+          status: "waiting",
+          task_id: "12",
+          child_session_id: child.session_id
+        }
       }
     })
 
@@ -647,6 +652,35 @@ defmodule HWeb.SessionLiveTest do
            )
 
     refute has_element?(view, "#live-subagents, #live-activity")
+    wait_banner = "#subagent-wait-#{call_id}"
+    assert has_element?(view, wait_banner, "Waiting on subagent")
+    assert has_element?(view, "#abort-task-12[phx-value-task-id=\"12\"]")
+
+    send(
+      view.pid,
+      {:ephemeral_frame,
+       JSON.encode!(%{
+         "base_seq" => 3,
+         "doc_ops" => %{
+           "live" => [
+             [
+               "set",
+               ["subagent_waits"],
+               %{
+                 call_id => %{"conversation_id" => "2", "detail" => "Retry 1/3 · quota · waiting"}
+               }
+             ]
+           ]
+         }
+       })}
+    )
+
+    assert has_element?(view, wait_banner, "Retry 1/3 · quota · waiting")
+
+    assert has_element?(
+             view,
+             wait_banner <> ~s( a[href="/sessions/#{child.session_id}/conversations/2"])
+           )
 
     send_commit(
       view,
@@ -671,6 +705,7 @@ defmodule HWeb.SessionLiveTest do
              Catalog.report_runtime(catalog, child.session_id, %{active: false, attention: "idle"})
 
     wait_until(fn -> has_element?(view, bubble <> " .subagent-status-pill", "idle") end)
+    refute has_element?(view, wait_banner)
     assert has_element?(view, bubble <> ~s( footer [data-copy-text="#{prompt}"]))
     assert has_element?(view, bubble <> ~s( footer .fork-btn[phx-value-entry_id="4"]))
 

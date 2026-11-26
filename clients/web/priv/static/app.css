@@ -2239,12 +2239,6 @@ html.inspect-picking * { cursor: crosshair !important; }
   font-size: 13px;
 }
 
-.subagent-card-wait {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.4;
-}
-
 .subagent-card-preview {
   margin: 0;
   font-size: 12px;

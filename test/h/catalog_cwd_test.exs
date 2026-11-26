@@ -14,6 +14,39 @@ defmodule H.CatalogCwdTest do
     {:ok, data_dir: tmp_dir, table: table, server: name}
   end
 
+  describe "wire_sessions/2" do
+    test "matches individual wire maps for loaded, missing, shared, and remote directories",
+         ctx do
+      start_supervised!({Catalog, data_dir: ctx.data_dir, name: ctx.server, table: ctx.table})
+      registry = :"#{ctx.server}.Registry"
+      start_supervised!({Registry, keys: :unique, name: registry})
+      {:ok, _} = Registry.register(registry, {:session, "loaded"}, nil)
+      {:ok, _} = Registry.register(registry, {:session_tasks, "remote"}, nil)
+
+      missing = Path.join(ctx.data_dir, "missing")
+
+      entries =
+        for {sid, cwd, env} <- [
+              {"loaded", ctx.data_dir, "host"},
+              {"cold", ctx.data_dir, "host"},
+              {"missing", missing, "host"},
+              {"remote", missing, "remote"}
+            ] do
+          {:ok, entry} =
+            Catalog.put_session(ctx.server, %{session_id: sid, cwd: cwd, env_id: env})
+
+          entry
+        end
+
+      opts = [registry: registry]
+      wired = Catalog.wire_sessions(entries, opts)
+      assert wired == Enum.map(entries, &Catalog.wire_session(&1, opts))
+
+      assert Enum.map(wired, &{&1.loaded, &1.cwd_exists}) ==
+               [{true, true}, {false, true}, {false, false}, {false, true}]
+    end
+  end
+
   describe "env_id and harness_id persistence and legacy migration" do
     test "defaults env_id to \"host\" and harness_id to \"coding\" when loading legacy sessions.json",
          %{

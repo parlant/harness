@@ -234,7 +234,7 @@ defmodule H.HTTP.SSE do
       {:commit_frame, seq, _} when is_nil(max_seq) or seq <= max_seq ->
         drain_frames(max_seq)
 
-      {:ephemeral_frame, _} ->
+      {:ephemeral_frame, _} when is_nil(max_seq) ->
         drain_frames(max_seq)
     after
       0 -> :ok
@@ -312,9 +312,11 @@ defmodule H.HTTP.SSE do
         true
 
       {:message_queue_len, _qlen} ->
-        case Process.info(self(), :messages) do
-          {:messages, messages} -> queued_bytes(messages, 0) > max_bytes
-          _ -> false
+        # Use a second length check in case a producer filled the mailbox
+        # between samples. Only sum frame payload sizes, never term sizes.
+        case Process.info(self(), [:message_queue_len, :messages]) do
+          [message_queue_len: len, messages: messages] ->
+            len > max_len or bytes_overflow?(messages, max_bytes)
         end
 
       _ ->
@@ -322,18 +324,21 @@ defmodule H.HTTP.SSE do
     end
   end
 
-  defp queued_bytes([], acc), do: acc
+  # Binary payloads can live off heap; process memory is neither a byte count
+  # of this backlog nor evidence that there is a backlog at all.
+  defp bytes_overflow?(_, remaining) when remaining < 0, do: true
+  defp bytes_overflow?([], _remaining), do: false
 
-  defp queued_bytes([msg | rest], acc) do
-    bytes =
-      case msg do
-        {:commit_frame, _seq, bin} when is_binary(bin) -> byte_size(bin)
-        {:ephemeral_frame, bin} when is_binary(bin) -> byte_size(bin)
-        {:catalog_frame, _seq, bin} when is_binary(bin) -> byte_size(bin)
-        other -> :erts_debug.flat_size(other) * :erlang.system_info(:wordsize)
+  defp bytes_overflow?([message | rest], remaining) do
+    size =
+      case message do
+        {:commit_frame, _, bin} -> byte_size(bin)
+        {:catalog_frame, _, bin} -> byte_size(bin)
+        {:ephemeral_frame, bin} -> byte_size(bin)
+        _ -> 0
       end
 
-    queued_bytes(rest, acc + bytes)
+    bytes_overflow?(rest, remaining - size)
   end
 
   defp snapshot_frame(seq, bin) do

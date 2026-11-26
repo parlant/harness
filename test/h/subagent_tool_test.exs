@@ -214,11 +214,16 @@ defmodule H.SubagentToolTest do
       assert Task.Supervisor.children(task_sup_pid) == []
 
       # Verify parent catalog reports running tool: subagent
-      {:ok, parent_cat} = Catalog.get_session(parent_sid, env.catalog_table)
+      parent_cat =
+        wait_until(fn ->
+          {:ok, summary} = Catalog.get_session(parent_sid, env.catalog_table)
+          if summary.activity_label == "waiting on subagent", do: summary
+        end)
+
       assert parent_cat.active == true
       assert parent_cat.attention == "running"
       assert parent_cat.activity_kind == "tool"
-      assert parent_cat.activity_label == "subagent"
+      assert parent_cat.activity_label == "waiting on subagent"
 
       # Verify parent assistant entry and child lineage in Catalog
       {:ok, %{items: parent_items}} =
@@ -275,6 +280,242 @@ defmodule H.SubagentToolTest do
                %{"type" => "text", "text" => "Parent done with child answer"}
              ]
     end
+  end
+
+  describe "wait visibility" do
+    test "bubbles through wait and await, survives reconnect and coordinator recovery, then clears" do
+      owner = self()
+      attempts = :ets.new(:subagent_test_attempts, [:set, :public])
+
+      handler = fn req, _emit ->
+        case {first_user_text(req), tool_messages(req)} do
+          {"root", []} ->
+            delegate("root-call", %{"prompt" => "middle", "mode" => "start"})
+
+          {"root", [result]} ->
+            [%{text: "Started subagent " <> started}] = result.content
+            [sid | _] = String.split(started, " ", parts: 2)
+            send(owner, {:detached, self(), sid})
+            receive do: (:await_child -> :ok)
+            delegate("await-call", %{"mode" => "await", "session_id" => sid})
+
+          {"root", _} ->
+            {:ok, %{content: [%{type: "text", text: "root done"}]}}
+
+          {"middle", []} ->
+            delegate("middle-call", %{"prompt" => "leaf"})
+
+          {"middle", [_]} ->
+            {:ok, %{content: [%{type: "text", text: "middle done"}]}}
+
+          {"leaf", []} ->
+            if :ets.insert_new(attempts, {:attempt, true}) do
+              {:error, %{code: "fake_quota", message: "No included quota", retryable: true}}
+            else
+              {:ok, %{content: [%{type: "text", text: "leaf done"}]}}
+            end
+        end
+      end
+
+      env = start_env(handler, max_subagent_depth: 2, retry_backoff_ms: 60_000)
+      root = "visibility-root"
+      assert {:ok, _} = Daemon.create_session(%{"session_id" => root, "cwd" => env.cwd}, env.opts)
+      assert {:ok, _} = submit(env, root, "run-root", "1", "root")
+
+      assert_receive {:detached, root_worker, middle}, 2_000
+
+      %{next_wake_at: deadline} =
+        wait_until(fn ->
+          {:ok, summary} = Catalog.get_session(middle, env.catalog_table)
+          if summary.attention == "retrying", do: summary
+        end)
+
+      leaf =
+        env.catalog_table
+        |> Catalog.list_sessions()
+        |> Enum.find(&(get_in(&1, [:parent, :session_id]) == middle))
+
+      assert {:ok, %{attention: "running", activity_label: nil, next_wake_at: nil}} =
+               Catalog.get_session(root, env.catalog_table)
+
+      assert Registry.lookup(env.pubsub, {:submission_runtime, middle}) == []
+
+      send(root_worker, :await_child)
+
+      assert %{next_wake_at: ^deadline, needs_attention: false} =
+               wait_until(fn ->
+                 {:ok, summary} = Catalog.get_session(root, env.catalog_table)
+
+                 if summary.attention == "retrying" and
+                      summary.activity_label =~ "waiting on subagent · Retry 1/3 · fake_quota",
+                    do: summary
+               end)
+
+      assert {:ok, {:snapshot, cursor, bin}} =
+               Daemon.subscribe_conversation(root, "1", self(), nil, env.opts)
+
+      assert %{
+               "session_id" => ^middle,
+               "conversation_id" => "1",
+               "attention" => "retrying",
+               "detail" => detail
+             } =
+               get_in(JSON.decode!(bin), ["docs", "live", "subagent_waits", "await-call"])
+
+      assert detail =~ "fake_quota"
+      assert :ok = Registry.unregister(env.pubsub, {:conversation, root, 1})
+
+      assert {:ok, {:replay, []}} =
+               Daemon.subscribe_conversation(root, "1", self(), cursor, env.opts)
+
+      assert_receive {:ephemeral_frame, update}
+
+      assert %{
+               "base_seq" => ^cursor,
+               "doc_ops" => %{
+                 "live" => [
+                   ["set", ["subagent_waits"], %{"await-call" => %{"detail" => ^detail}}]
+                 ]
+               }
+             } = JSON.decode!(update)
+
+      # Restart just the parent coordinator tree, not the child or its timer.
+      assert :ok = H.Session.Supervisor.stop_session(env.registry, env.opts[:runtime_sup], root)
+      assert :ok = Daemon.recover_active_sessions(env.opts)
+
+      wait_until(fn ->
+        {:ok, {:snapshot, _, bin}} =
+          Daemon.subscribe_conversation(root, "1", self(), nil, env.opts)
+
+        get_in(JSON.decode!(bin), ["docs", "live", "subagent_waits", "await-call", "detail"]) ==
+          detail
+      end)
+
+      # Advance the test's sleeping task without waiting a minute in real time.
+      assert {:ok, %{tasks: tasks}} = Daemon.get_session_detail(leaf.session_id, env.opts)
+      assert %{id: tid} = Enum.find(tasks, &(&1.status == "sleeping"))
+      [{leaf_server, _}] = Registry.lookup(env.registry, {:session, leaf.session_id})
+      send(leaf_server, {:wake_task, String.to_integer(tid)})
+
+      wait_until(fn ->
+        {:ok, sub} = Daemon.get_submission(root, "run-root", env.opts)
+        sub.status == "done"
+      end)
+
+      wait_until(fn ->
+        match?(
+          {:ok, %{attention: "idle", activity_label: nil, next_wake_at: nil}},
+          Catalog.get_session(root, env.catalog_table)
+        )
+      end)
+
+      assert {:ok, {:snapshot, _, bin}} =
+               Daemon.subscribe_conversation(root, "1", self(), nil, env.opts)
+
+      refute get_in(JSON.decode!(bin), ["docs", "live", "subagent_waits"])
+      assert Registry.lookup(env.pubsub, {:submission_runtime, middle}) == []
+      assert Registry.lookup(env.pubsub, {:submission_runtime, leaf.session_id}) == []
+    end
+
+    test "does not report an unrelated conversation's retry on an awaited submission" do
+      owner = self()
+
+      handler = fn req, _emit ->
+        prompt = first_user_text(%{req | messages: Enum.reverse(req.messages)})
+
+        case {prompt, tool_messages(req)} do
+          {"watch", []} ->
+            delegate("await-specific", %{
+              "mode" => "await",
+              "session_id" => "scoped-child",
+              "request_id" => "watched"
+            })
+
+          {"watch", [_]} ->
+            {:ok, %{content: [%{type: "text", text: "done"}]}}
+
+          {"watched", []} ->
+            send(owner, {:working, self()})
+            receive do: (:finish -> :ok)
+            {:ok, %{content: [%{type: "text", text: "done"}]}}
+
+          {"unrelated", []} ->
+            {:error, %{code: "unrelated_quota", message: "No quota", retryable: true}}
+        end
+      end
+
+      env = start_env(handler, retry_backoff_ms: 60_000)
+
+      assert {:ok, _} =
+               Daemon.create_session(%{"session_id" => "scoped-root", "cwd" => env.cwd}, env.opts)
+
+      assert {:ok, _} =
+               Daemon.create_session(
+                 %{
+                   "session_id" => "scoped-child",
+                   "cwd" => env.cwd,
+                   "parent" => %{"session_id" => "scoped-root"}
+                 },
+                 env.opts
+               )
+
+      assert {:ok, _} = submit(env, "scoped-child", "unrelated", "1", "unrelated")
+
+      wait_until(fn ->
+        {:ok, child} = Catalog.get_session("scoped-child", env.catalog_table)
+        child.attention == "retrying"
+      end)
+
+      assert {:ok, %{items: [entry]}} =
+               Daemon.scan_entries("scoped-child", "1", %{"order" => "asc"}, env.opts)
+
+      assert {:ok, %{conversation_id: cid}} =
+               Daemon.execute_command(
+                 "scoped-child",
+                 cmd("fork-watched", "fork", "1", %{"at_entry_id" => entry.id}),
+                 env.opts
+               )
+
+      assert {:ok, _} = submit(env, "scoped-child", "watched", cid, "watched")
+      assert_receive {:working, child_worker}, 2_000
+      assert {:ok, _} = submit(env, "scoped-root", "root-await", "1", "watch")
+
+      wait_until(fn ->
+        {:ok, {:snapshot, _, bin}} =
+          Daemon.subscribe_conversation("scoped-root", "1", self(), nil, env.opts)
+
+        get_in(JSON.decode!(bin), [
+          "docs",
+          "live",
+          "subagent_waits",
+          "await-specific",
+          "attention"
+        ]) == "running"
+      end)
+
+      assert {:ok,
+              %{attention: "running", activity_label: "waiting on subagent", next_wake_at: nil}} =
+               Catalog.get_session("scoped-root", env.catalog_table)
+
+      send(child_worker, :finish)
+    end
+  end
+
+  defp delegate(id, args) do
+    {:ok,
+     %{
+       content: [],
+       tool_calls: [%{id: id, name: "subagent", arguments: args}],
+       finish_reason: "tool_calls"
+     }}
+  end
+
+  defp submit(env, sid, request_id, cid, content) do
+    Daemon.execute_command(
+      sid,
+      cmd(request_id, "submit", cid, %{"type" => "input", "content" => content}),
+      env.opts
+    )
   end
 
   describe "concurrent fan-out" do

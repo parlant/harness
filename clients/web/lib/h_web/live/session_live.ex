@@ -1008,15 +1008,7 @@ defmodule HWeb.SessionLive do
       old = previous[child_id]
       new = catalog.by_id[child_id]
 
-      old_sig =
-        old &&
-          {old.title, old.attention, old.activity_kind, old.activity_label, old.needs_attention}
-
-      new_sig =
-        new &&
-          {new.title, new.attention, new.activity_kind, new.activity_label, new.needs_attention}
-
-      if old_sig != new_sig do
+      if (old && {old.title, old.attention}) != (new && {new.title, new.attention}) do
         stream_insert(acc, :entries, row, update_only: true)
       else
         acc
@@ -1467,9 +1459,6 @@ defmodule HWeb.SessionLive do
           |> Map.put(:needs_attention, from_cat.needs_attention)
           |> Map.put(:archived, from_cat.archived)
           |> Map.put(:attention, from_cat.attention)
-          |> Map.put(:activity_kind, from_cat.activity_kind)
-          |> Map.put(:activity_label, from_cat.activity_label)
-          |> Map.put(:next_wake_at, from_cat.next_wake_at)
           |> Map.put(:cwd_exists, from_cat.cwd_exists)
           |> Map.put(:loaded, from_cat.loaded)
 

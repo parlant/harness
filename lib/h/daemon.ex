@@ -1325,7 +1325,9 @@ defmodule H.Daemon do
 
     if newly_registered?, do: Registry.register(pubsub, topic, nil)
 
-    case call_session(entry, opts, &Server.snapshot_or_replay(&1, cid, last_event_id),
+    subscriber = if subscriber_pid == self(), do: subscriber_pid
+
+    case call_session(entry, opts, &Server.snapshot_or_replay(&1, cid, last_event_id, subscriber),
            preserve_archive: true
          ) do
       {:ok, result} ->
@@ -1391,7 +1393,9 @@ defmodule H.Daemon do
         Registry.register(pubsub, topic, nil)
       end
 
-      case call_session(entry, opts, &Server.get_submission_outcome(&1, request_id)) do
+      watcher = Keyword.get(opts, :submission_runtime_watcher)
+
+      case call_session(entry, opts, &Server.get_submission_outcome(&1, request_id, watcher)) do
         {:ok, %{status: status} = outcome} when status in @terminal_submission_statuses ->
           if newly_registered?, do: Registry.unregister(pubsub, topic)
           {:ok, {:settled, outcome}}

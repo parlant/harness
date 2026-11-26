@@ -165,23 +165,17 @@ defmodule H.Session.Server.State do
     tasks = Map.get(state, :tasks, %{}) |> Map.values()
     docs = Map.get(state, :docs, %{})
 
-    active_tasks = Enum.filter(tasks, &(&1.status in ["pending", "running", "waiting"]))
-    sleeping_tasks = Enum.filter(tasks, &(&1.status == "sleeping"))
+    nonterminal = Enum.reject(tasks, &(&1.status == "terminal"))
+    {runtime, _blocker} = summarize_work(nonterminal, state)
 
-    {attention, activity_kind, activity_label} =
-      cond do
-        active_tasks != [] ->
-          derive_active_activity(active_tasks, state)
-
-        sleeping_tasks != [] ->
-          task = Enum.min_by(sleeping_tasks, & &1.id)
-          {"retrying", "retry", retry_label(task, true)}
-
-        true ->
-          case find_conversation_failure(docs) do
-            {:ok, label} -> {"error", nil, label}
-            :none -> {"idle", nil, nil}
-          end
+    runtime =
+      if nonterminal == [] do
+        case find_conversation_failure(docs) do
+          {:ok, label} -> %{runtime | attention: "error", activity_label: label}
+          :none -> runtime
+        end
+      else
+        runtime
       end
 
     queued_count =
@@ -192,52 +186,35 @@ defmodule H.Session.Server.State do
         end
       end)
 
-    needs_attention =
-      cond do
-        Enum.any?(active_tasks, &awaiting_approval_task?/1) ->
-          true
-
-        awaited_child_needs_attention?(active_tasks, state) ->
-          true
-
-        true ->
-          nil
-      end
-
-    next_wake_at =
-      sleeping_tasks
-      |> Enum.map(&get_in(&1, [Access.key(:wake, %{}), "until"]))
-      |> Kernel.++(awaited_child_wake_times(active_tasks, state))
-      |> Enum.reject(&is_nil/1)
-      |> Enum.min(fn -> nil end)
-
-    %{
-      title: Map.get(state, :session_meta, %{})[:title],
-      active: active_tasks != [] or sleeping_tasks != [],
-      attention: attention,
-      activity_kind: activity_kind,
-      activity_label: Catalog.sanitize_activity_label(activity_label),
-      queued_count: queued_count,
-      needs_attention: needs_attention,
-      next_wake_at: next_wake_at
-    }
-    |> Enum.reject(fn {k, v} -> k == :needs_attention and is_nil(v) end)
-    |> Map.new()
+    runtime
+    |> Map.put(:title, Map.get(state, :session_meta, %{})[:title])
+    |> Map.put(:active, nonterminal != [])
+    |> Map.put(:queued_count, queued_count)
+    |> Map.update!(
+      :activity_label,
+      &(&1 |> H.Credentials.sanitize() |> Catalog.sanitize_activity_label())
+    )
   end
 
   def maybe_report_catalog_runtime(prev_state, next_state) do
-    if derive_catalog_runtime(prev_state) != derive_catalog_runtime(next_state) do
-      report_catalog_active(next_state)
+    if prev_state.tasks != next_state.tasks or prev_state.docs != next_state.docs or
+         prev_state.subagent_watches != next_state.subagent_watches or
+         prev_state.session_meta != next_state.session_meta do
+      runtime = derive_catalog_runtime(next_state)
+      if derive_catalog_runtime(prev_state) != runtime, do: report_catalog(next_state, runtime)
+      publish_submission_runtime(prev_state, next_state)
     end
   end
 
   def report_catalog_active(state) do
+    report_catalog(state, derive_catalog_runtime(state))
+    publish_submission_runtime(nil, state)
+  end
+
+  defp report_catalog(state, runtime) do
     if not is_nil(state.catalog) and GenServer.whereis(state.catalog) != nil do
       try do
-        fields =
-          state
-          |> derive_catalog_runtime()
-          |> Map.put(:updated_at, System.system_time(:millisecond))
+        fields = Map.put(runtime, :updated_at, System.system_time(:millisecond))
 
         Catalog.report_runtime(state.catalog, state.session_id, fields)
       catch
@@ -246,166 +223,152 @@ defmodule H.Session.Server.State do
     end
   end
 
-  defp derive_active_activity(active_tasks, state) do
-    sorted = Enum.sort_by(active_tasks, &{status_priority(&1.status), &1.id})
+  @doc "Projects active work onto the submissions it actually belongs to, for live waiters."
+  def submission_runtime(state) do
+    tasks = Map.values(state.tasks)
 
-    approval_task = Enum.find(sorted, &awaiting_approval_task?/1)
+    tools_by_owner =
+      tasks
+      |> Enum.filter(&(&1.kind == "tool_call" and &1.status != "terminal"))
+      |> Enum.group_by(& &1.owner)
 
-    running_or_pending_tool =
-      Enum.find(sorted, fn t ->
-        t.kind == "tool_call" and t.status in ["running", "pending"]
-      end)
+    for task <- tasks,
+        task.kind in ["generation", "compaction"],
+        task.status != "terminal",
+        reduce: %{} do
+      acc ->
+        work = [task | Map.get(tools_by_owner, {:task, task.id}, [])]
+        {runtime, blocker} = summarize_work(work, state)
 
-    waiting_non_subagent_tool =
-      Enum.find(sorted, fn t ->
-        t.kind == "tool_call" and t.status == "waiting" and t.checkpoint["name"] != "subagent"
-      end)
+        projection = %{
+          attention: runtime.attention,
+          blocker: blocker,
+          next_wake_at: runtime.next_wake_at,
+          needs_attention: runtime[:needs_attention] == true
+        }
 
-    waiting_subagent_tasks =
-      Enum.filter(sorted, fn t ->
-        t.kind == "tool_call" and t.status == "waiting" and t.checkpoint["name"] == "subagent"
-      end)
-
-    user_shell_task = Enum.find(sorted, &(&1.kind == "user_shell"))
-
-    compaction_task =
-      Enum.find(sorted, fn t ->
-        t.kind == "compaction" and t.status in ["running", "pending"]
-      end)
-
-    retry_task =
-      Enum.find(sorted, fn task ->
-        task.kind in ["generation", "compaction"] and task.status in ["pending", "running"] and
-          ((task.checkpoint["retry_count"] || 0) > 0 or
-             is_map(task.checkpoint["wait"]))
-      end)
-
-    cond do
-      approval_task != nil ->
-        name =
-          case get_in(approval_task, [:checkpoint, "name"]) do
-            n when is_binary(n) and n != "" -> n
-            _ -> "tool"
-          end
-
-        {"running", "tool", "approval · #{name}"}
-
-      running_or_pending_tool != nil ->
-        {"running", "tool", tool_label(running_or_pending_tool)}
-
-      user_shell_task != nil ->
-        {"running", "user_shell", "shell"}
-
-      retry_task != nil ->
-        {"retrying", "retry", retry_label(retry_task, false)}
-
-      compaction_task != nil ->
-        {"running", "compaction", "compact"}
-
-      waiting_non_subagent_tool != nil ->
-        {"running", "tool", tool_label(waiting_non_subagent_tool)}
-
-      waiting_subagent_tasks != [] ->
-        derive_waiting_subagents_activity(waiting_subagent_tasks, state)
-
-      true ->
-        {"running", "generation", nil}
+        # A queued submission cannot start until the current run in its own
+        # conversation makes progress. Other conversations are not dependencies.
+        cid = task.checkpoint["conversation_id"]
+        queued = for %{"submission_id" => id} <- state.docs[cid]["inbox"] || [], do: id
+        placed = Enum.map(task.checkpoint["submission_ids"] || [], &to_string/1)
+        Enum.reduce(placed ++ queued, acc, &Map.put(&2, &1, projection))
     end
   end
 
-  defp tool_label(task) do
-    case get_in(task, [:checkpoint, "name"]) do
-      name when is_binary(name) and name != "" -> name
-      _ -> "tool"
-    end
-  end
+  defp publish_submission_runtime(previous, state) do
+    if state.pubsub && Process.whereis(state.pubsub) do
+      Registry.dispatch(state.pubsub, {:submission_runtime, state.session_id}, fn entries ->
+        runtime = submission_runtime(state)
 
-  defp derive_waiting_subagents_activity(waiting_subagent_tasks, state) do
-    children =
-      waiting_subagent_tasks
-      |> Enum.map(&awaited_child_entry(&1, state))
-      |> Enum.reject(&is_nil/1)
-
-    retrying_children =
-      Enum.filter(children, &(&1.attention in ["retrying", "sleeping"]))
-
-    cond do
-      children != [] and length(retrying_children) == length(children) ->
-        child = hd(retrying_children)
-        detail = child.activity_label || "retrying"
-        {"retrying", "retry", format_bubbled_label(detail)}
-
-      approval_child =
-          Enum.find(children, fn c ->
-            c.needs_attention == true and is_binary(c.activity_label) and
-                c.activity_label != ""
-          end) ->
-        {"running", "tool", format_bubbled_label(approval_child.activity_label)}
-
-      retrying_child = List.first(retrying_children) ->
-        detail = retrying_child.activity_label || "retrying"
-        {"running", "tool", format_bubbled_label(detail)}
-
-      wait_child =
-          Enum.find(children, fn c ->
-            c.attention == "running" and is_binary(c.activity_label) and
-                (c.activity_label == "wait_signal" or
-                   String.starts_with?(c.activity_label, "subagent · "))
-          end) ->
-        {"running", "tool", format_bubbled_label(wait_child.activity_label)}
-
-      true ->
-        {"running", "tool", "subagent"}
-    end
-  end
-
-  defp format_bubbled_label("subagent · " <> _ = already_prefixed), do: already_prefixed
-  defp format_bubbled_label(detail), do: "subagent · #{detail}"
-
-  defp awaited_child_needs_attention?(active_tasks, state) do
-    Enum.any?(active_tasks, fn task ->
-      if task.kind == "tool_call" and task.status == "waiting" and
-           task.checkpoint["name"] == "subagent" do
-        case awaited_child_entry(task, state) do
-          %{attention: "running", needs_attention: true} -> true
-          _ -> false
+        if previous == nil or runtime != submission_runtime(previous) do
+          for {pid, _} <- entries, do: send(pid, {:submission_runtime, state.session_id, runtime})
         end
-      else
-        false
-      end
-    end)
-  end
-
-  defp awaited_child_wake_times(active_tasks, state) do
-    active_tasks
-    |> Enum.filter(fn t ->
-      t.kind == "tool_call" and t.status == "waiting" and t.checkpoint["name"] == "subagent"
-    end)
-    |> Enum.map(fn t ->
-      case awaited_child_entry(t, state) do
-        %{next_wake_at: until} when is_integer(until) -> until
-        _ -> nil
-      end
-    end)
-  end
-
-  defp awaited_child_entry(task, state) do
-    child_sid =
-      get_in(task.memos || %{}, ["child_session_id"]) ||
-        get_in(task.wake || %{}, ["session_id"])
-
-    table = Map.get(state, :catalog_table)
-
-    if is_binary(child_sid) and is_atom(table) and not is_nil(table) and
-         :ets.whereis(table) != :undefined do
-      case Catalog.get_session(child_sid, table) do
-        {:ok, entry} -> entry
-        _ -> nil
-      end
-    else
-      nil
+      end)
     end
   end
+
+  defp summarize_work(tasks, state) do
+    sorted = Enum.sort_by(tasks, &{activity_priority(&1), &1.id})
+    {awaiting, other} = Enum.split_with(sorted, &awaited_submission?/1)
+
+    children =
+      Enum.map(awaiting, fn %{wake: %{"session_id" => sid, "request_id" => rid}} ->
+        get_in(state, [:subagent_watches, {sid, rid}, :runtime])
+      end)
+
+    # A generation parked on its tool round is not independent local work.
+    owners = MapSet.new(awaiting, & &1.owner)
+
+    local =
+      Enum.reject(other, fn t ->
+        t.kind == "generation" and t.status == "waiting" and
+          MapSet.member?(owners, {:task, t.id})
+      end)
+
+    local_activity = Enum.find(local, &(&1.status != "sleeping"))
+    local_retry = Enum.find(local, &(&1.status == "sleeping"))
+    local_approval = Enum.find(local, &awaiting_approval_task?/1)
+    child_blocker = Enum.find_value(children, &(&1 && &1.blocker))
+    approval = if local_approval, do: "approval · #{tool_label(local_approval)}"
+    child_attention? = Enum.any?(children, &(&1 && &1.needs_attention))
+
+    all_children_retrying? =
+      children != [] and Enum.all?(children, &match?(%{attention: "retrying"}, &1))
+
+    {attention, kind, label, blocker} =
+      cond do
+        awaiting != [] ->
+          detail = child_blocker || approval
+          blocker = detail || (local_retry && retry_label(local_retry, true))
+          blocked? = local_activity == nil and all_children_retrying?
+
+          label = if detail, do: "waiting on subagent · #{detail}", else: "waiting on subagent"
+
+          {if(blocked?, do: "retrying", else: "running"), if(blocked?, do: "retry", else: "tool"),
+           label, blocker}
+
+        local_approval != nil ->
+          {"running", "tool", approval, approval}
+
+        checking_provider?(local_activity) and length(local) == 1 ->
+          detail = retry_label(local_activity, false)
+          {"retrying", "retry", detail, detail}
+
+        local_activity ->
+          {kind, label} = local_activity_label(local_activity)
+          {"running", kind, label, local_retry && retry_label(local_retry, true)}
+
+        local_retry ->
+          detail = retry_label(local_retry, true)
+          {"retrying", "retry", detail, detail}
+
+        true ->
+          {"idle", nil, nil, nil}
+      end
+
+    next_wake_at =
+      for(%{status: "sleeping", wake: %{"until" => at}} <- tasks, do: at) ++
+        for %{next_wake_at: at} <- children, do: at
+
+    runtime = %{
+      attention: attention,
+      activity_kind: kind,
+      activity_label: label,
+      next_wake_at: next_wake_at |> Enum.filter(&is_integer/1) |> Enum.min(fn -> nil end)
+    }
+
+    runtime =
+      if local_approval || child_attention?,
+        do: Map.put(runtime, :needs_attention, true),
+        else: runtime
+
+    {runtime, blocker |> H.Credentials.sanitize() |> Catalog.sanitize_activity_label()}
+  end
+
+  defp awaited_submission?(%{
+         kind: "tool_call",
+         status: "waiting",
+         checkpoint: %{"name" => "subagent"},
+         wake: %{"on" => "submission_settled", "session_id" => sid, "request_id" => rid}
+       }),
+       do: is_binary(sid) and is_binary(rid)
+
+  defp awaited_submission?(_), do: false
+
+  defp checking_provider?(%{kind: kind, status: status, checkpoint: cp}) do
+    kind in ["generation", "compaction"] and status in ["pending", "running"] and
+      ((cp["retry_count"] || 0) > 0 or is_map(cp["wait"]))
+  end
+
+  defp checking_provider?(nil), do: false
+
+  defp local_activity_label(%{kind: "tool_call"} = task), do: {"tool", tool_label(task)}
+  defp local_activity_label(%{kind: "user_shell"}), do: {"user_shell", "shell"}
+  defp local_activity_label(%{kind: "compaction"}), do: {"compaction", "compact"}
+  defp local_activity_label(_), do: {"generation", nil}
+
+  defp tool_label(task), do: task.checkpoint["name"] || "tool"
 
   defp awaiting_approval_task?(%{
          kind: "tool_call",
@@ -436,10 +399,12 @@ defmodule H.Session.Server.State do
     end
   end
 
-  defp status_priority("running"), do: 0
-  defp status_priority("pending"), do: 1
-  defp status_priority("waiting"), do: 2
-  defp status_priority(_), do: 3
+  defp activity_priority(%{kind: "tool_call", status: s}) when s in ["running", "pending"], do: 0
+  defp activity_priority(%{kind: "user_shell"}), do: 1
+  defp activity_priority(%{status: "sleeping"}), do: 5
+  defp activity_priority(%{status: "waiting", kind: "generation"}), do: 4
+  defp activity_priority(%{status: "waiting"}), do: 3
+  defp activity_priority(_), do: 2
 
   defp find_conversation_failure(docs) do
     docs

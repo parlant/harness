@@ -427,7 +427,7 @@ defmodule H.SubagentRecoveryTest do
         child = Enum.find(sessions, &(get_in(&1, [:parent, :session_id]) == "vm-parent"))
         {:ok, parent} = H.Catalog.get_session("vm-parent", :h_catalog)
 
-        if child != nil and child.active and parent.active and parent.activity_label == "subagent" do
+        if child != nil and child.active and parent.active and parent.activity_label == "waiting on subagent" do
           :ok
         else
           Process.sleep(15)

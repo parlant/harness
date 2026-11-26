@@ -119,6 +119,8 @@ Conversation snapshots and commits carry `live.generation.retry` or `live.compac
 
 HTTP 429 messages explain rate limits versus quota or spending-cap restrictions and retain the provider's explanation. Waiting cannot lift a spending cap: raise the applicable limit, wait for its reset, or change provider/project. Once the retry budget is exhausted, the run becomes an error with the explanation and retry count intact. Resolve the restriction before using Continue, or retry `/compact` for a failed manual compaction. Managed-account dispatch/no-resume policies still take precedence; this does not authorize replay of tools or unsafe external effects.
 
+An active `subagent` `wait` or `await` has a `waiting` tool slot with a `child_session_id`. The parent conversation also exposes `live.subagent_waits`, keyed by the waiting tool's call ID. Each value contains the child `session_id` and `conversation_id`, plus `attention`, a sanitized `detail`, and `next_wake_at` (Unix milliseconds); runtime fields may be `null`. The projection is refreshed in snapshots and by ephemeral updates. It is not a persisted checkpoint. Catalog summaries show `waiting on subagent` and, if present, a blocker from the awaited work. A retry propagates through nested awaits, but detached starts and work in unrelated conversations do not. With concurrent progress, the parent remains `running` and still shows the blocker.
+
 ## SessionSummary lineage, attention, and lifecycle fields
 
 Each `SessionSummary` returned by `GET /sessions`, `GET /sessions/events`, `POST /sessions`, `GET /sessions/:sid`, `POST /sessions/:sid/{triage,stop,archive,fork}`, and `GET /fs` (`sessions` and `directories[*].latest_session`) includes immutable spawn lineage, attention, and lifecycle metadata:
@@ -147,7 +149,7 @@ Each JSON frame identifies the session and conversation. Sequence numbers are se
 | `commit` | `seq` | Ignore stale frames. For a newer frame require `prev_seq` to equal the conversation cursor, append `appended_entries`, apply `doc_ops` and advance the cursor. On mismatch, request a fresh snapshot. |
 | `ephemeral` | None | Apply progress `doc_ops` only for a matching `base_seq`. Do not advance the cursor; unflushed progress can be lost on restart. |
 
-`doc_ops` maps document names to ordered operations such as `["replace", value]` or `["set", path, value]`. Reconnect with `Last-Event-ID` (or `last_event_id` query parameter) for replay from the recent commit ring; otherwise expect a snapshot if replay is unavailable. A slow connection can receive a replacement snapshot instead of queued deltas. Disconnecting does not abort a run.
+`doc_ops` maps document names to ordered operations such as `["replace", value]` or `["set", path, value]`. Reconnect with `Last-Event-ID` (or `last_event_id` query parameter) for replay from the recent commit ring; otherwise expect a snapshot if replay is unavailable. A slow connection can receive a replacement snapshot instead of queued deltas when its backlog exceeds the mailbox count or queued SSE payload byte limit. An idle large snapshot does not count as backlog. Disconnecting does not abort a run.
 
 Live tool and user-shell output previews stop after the first 50 KiB per attempt and include `[Live output capped]` if more was produced. This also bounds the partial shell output saved in live checkpoints for recovery. The final result and any full-output spill file use the execution environment's normal output policy.
 

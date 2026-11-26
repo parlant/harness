@@ -1266,8 +1266,11 @@ fn render_live(
                     theme.tool_meta,
                 ));
             }
-            if let Some(child_act) = slot
-                .get("child_activity")
+            if let Some(child_act) = (status == "waiting")
+                .then(|| live.get("subagent_waits"))
+                .flatten()
+                .and_then(|waits| waits.get(call_id.as_str()))
+                .and_then(|wait| wait.get("detail"))
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             {
@@ -1794,6 +1797,35 @@ mod tests {
                 .join("\n")
                 .contains("Retry request in progress"));
         }
+    }
+
+    #[test]
+    fn awaited_subagent_rows_show_blocker_but_mixed_work_is_not_retrying() {
+        let mut state = TranscriptState::default();
+        let mut live = json!({
+            "tools": {
+                "wait": {"name": "subagent", "status": "waiting", "child_session_id": "child"}
+            },
+            "subagent_waits": {
+                "wait": {"attention": "retrying", "detail": "Retry 1/3 · quota · waiting"}
+            }
+        });
+        let frame = |live: &Value| {
+            serde_json::from_value(json!({"seq": 1, "docs": {"live": live}})).unwrap()
+        };
+        state.apply_snapshot(frame(&live));
+        assert!(state.subagent_retrying());
+        let rendered = rows(&state, false, false).join("\n");
+        assert!(rendered.contains("waiting · session child · Retry 1/3 · quota"));
+
+        live["tools"]["other"] = json!({"name": "subagent", "status": "pending"});
+        state.apply_snapshot(frame(&live));
+        assert!(!state.subagent_retrying());
+
+        live["tools"]["wait"]["status"] = json!("done");
+        state.apply_snapshot(frame(&live));
+        assert!(!state.subagent_retrying());
+        assert!(!rows(&state, false, false).join("\n").contains("quota"));
     }
 
     #[test]

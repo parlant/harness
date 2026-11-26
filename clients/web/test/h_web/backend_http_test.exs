@@ -456,6 +456,39 @@ defmodule HWeb.BackendHTTPTest do
              )
   end
 
+  test "a second HTTP subscriber gets the latest subagent blocker at the same cursor", ctx do
+    assert {:ok, %{session: session}} =
+             HTTP.create_session(%{"cwd" => ctx.projects_dir}, ctx.http_opts)
+
+    sid = session.session_id
+
+    assert {:ok, {:snapshot, seq, _}} =
+             HTTP.subscribe_conversation(sid, "1", self(), nil, ctx.http_opts)
+
+    wait_frame =
+      JSON.encode!(%{
+        "base_seq" => seq,
+        "doc_ops" => %{
+          "live" => [["set", ["subagent_waits"], %{"call" => %{"detail" => "quota"}}]]
+        }
+      })
+
+    Registry.dispatch(ctx.daemon_opts[:pubsub], {:conversation, sid, 1}, fn entries ->
+      for {pid, _} <- entries, do: send(pid, {:ephemeral_frame, wait_frame})
+    end)
+
+    assert_receive {:ephemeral_frame, ^wait_frame}, 2_000
+
+    second =
+      Task.async(fn ->
+        initial = HTTP.subscribe_conversation(sid, "1", self(), nil, ctx.http_opts)
+        frame = receive do: ({:ephemeral_frame, bin} -> bin)
+        {initial, frame}
+      end)
+
+    assert {{:ok, {:snapshot, ^seq, _}}, ^wait_frame} = Task.await(second)
+  end
+
   test "SSE bridge streams catalog frames, conversation commits, and ephemeral deltas", ctx do
     assert {:ok, {:snapshot, cat_seq, cat_bin}} = HTTP.subscribe_sessions(self(), ctx.http_opts)
     assert is_integer(cat_seq)

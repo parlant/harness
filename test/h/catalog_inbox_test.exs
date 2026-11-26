@@ -264,6 +264,73 @@ defmodule H.CatalogInboxTest do
   end
 
   describe "H.Session.Server.State.derive_catalog_runtime/1" do
+    test "keeps mixed work running while reporting the awaited retry and wake deadline" do
+      awaited = fn tid, sid ->
+        %{
+          id: tid,
+          kind: "tool_call",
+          status: "waiting",
+          owner: {:task, 1},
+          checkpoint: %{"name" => "subagent"},
+          wake: %{"on" => "submission_settled", "session_id" => sid, "request_id" => "req"}
+        }
+      end
+
+      state = %{
+        tasks: %{
+          1 => %{id: 1, kind: "generation", status: "waiting", checkpoint: %{}},
+          2 => awaited.(2, "first"),
+          3 => awaited.(3, "second"),
+          4 => %{id: 4, kind: "generation", status: "running", checkpoint: %{}}
+        },
+        subagent_watches: %{
+          {"first", "req"} => %{
+            runtime: %{
+              attention: "retrying",
+              blocker: "quota",
+              needs_attention: false,
+              next_wake_at: 20
+            }
+          }
+        }
+      }
+
+      assert %{
+               attention: "running",
+               activity_label: "waiting on subagent · quota",
+               next_wake_at: 20
+             } = State.derive_catalog_runtime(state)
+
+      without_local = update_in(state.tasks, &Map.delete(&1, 4))
+      assert %{attention: "running"} = State.derive_catalog_runtime(without_local)
+
+      all_retrying =
+        put_in(without_local.subagent_watches[{"second", "req"}], %{
+          runtime: %{
+            attention: "retrying",
+            blocker: "rate limit",
+            needs_attention: false,
+            next_wake_at: 10
+          }
+        })
+
+      assert %{
+               attention: "retrying",
+               activity_label: "waiting on subagent · quota",
+               next_wake_at: 10
+             } = State.derive_catalog_runtime(all_retrying)
+
+      assert %{
+               attention: "running",
+               activity_label: "waiting on subagent · quota",
+               next_wake_at: 10
+             } =
+               State.derive_catalog_runtime(%{
+                 all_retrying
+                 | tasks: Map.put(all_retrying.tasks, 4, state.tasks[4])
+               })
+    end
+
     test "classifies running tool, user_shell, compaction, generation, sleeping, error, idle, and queued_count" do
       base = %{
         session_meta: %{title: "T"},

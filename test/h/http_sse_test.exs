@@ -21,8 +21,8 @@ defmodule H.HTTP.SSETest do
       GenServer.call(server, {:subscribe_sessions, pid})
     end
 
-    def emit_catalog_burst(server, count) do
-      GenServer.call(server, {:emit_catalog_burst, count})
+    def emit_catalog_burst(server, count, padding \\ "") do
+      GenServer.call(server, {:emit_catalog_burst, count, padding})
     end
 
     def emit_catalog_upsert(server, sid, attrs) do
@@ -53,7 +53,8 @@ defmodule H.HTTP.SSETest do
          ring: [],
          subscribers: %{},
          monitors: %{},
-         notify_pid: Keyword.get(opts, :notify_pid)
+         notify_pid: Keyword.get(opts, :notify_pid),
+         catalog_padding: Keyword.get(opts, :catalog_padding)
        }}
     end
 
@@ -132,17 +133,14 @@ defmodule H.HTTP.SSETest do
           monitors: monitors
       }
 
-      snap =
-        JSON.encode!(%{
-          "version" => 1,
-          "seq" => state.seq,
-          "sessions" => []
-        })
+      if state.notify_pid, do: send(state.notify_pid, {:catalog_subscribed, pid})
+      sessions = if state.catalog_padding, do: [%{"title" => state.catalog_padding}], else: []
+      snap = JSON.encode!(%{"version" => 1, "seq" => state.seq, "sessions" => sessions})
 
       {:reply, {:ok, {:snapshot, state.seq, snap}}, state}
     end
 
-    def handle_call({:emit_catalog_burst, count}, _from, state) do
+    def handle_call({:emit_catalog_burst, count, padding}, _from, state) do
       subs = Map.get(state.subscribers, :catalog, MapSet.new())
 
       seq =
@@ -154,7 +152,11 @@ defmodule H.HTTP.SSETest do
               "version" => 1,
               "seq" => next_seq,
               "type" => "upsert",
-              "session" => %{"session_id" => "s-#{i}", "attention" => "running"}
+              "session" => %{
+                "session_id" => "s-#{i}",
+                "attention" => "running",
+                "title" => padding
+              }
             })
 
           for pid <- subs do
@@ -307,7 +309,7 @@ defmodule H.HTTP.SSETest do
     :ok
   end
 
-  defp start_bandit_daemon(router_overrides \\ []) do
+  defp start_bandit_daemon(router_overrides \\ [], daemon_opts \\ []) do
     id = System.unique_integer([:positive])
     tmp_dir = Path.join(System.tmp_dir!(), "h-http-sse-test-#{id}")
     table = :"h_http_sse_auth_#{id}"
@@ -316,7 +318,7 @@ defmodule H.HTTP.SSETest do
     on_exit(fn -> File.rm_rf(tmp_dir) end)
 
     start_supervised!({Auth, data_dir: tmp_dir, name: auth_server, table: table})
-    daemon = start_supervised!({FakeDaemon, notify_pid: self()})
+    daemon = start_supervised!({FakeDaemon, [notify_pid: self()] ++ daemon_opts})
     token = Auth.owner_token(table)
 
     router_opts =
@@ -671,6 +673,56 @@ defmodule H.HTTP.SSETest do
       assert c42.data["type"] == "upsert"
       assert c42.data["session"]["session_id"] == "after"
 
+      Req.cancel_async_response(resp)
+    end
+
+    test "a large idle snapshot only subscribes once and then emits keepalives" do
+      ctx =
+        start_bandit_daemon([sse_keepalive_ms: 30],
+          catalog_padding: String.duplicate("x", 3_000_000)
+        )
+
+      resp =
+        Req.get!("#{ctx.base_url}/api/v1/sessions/events",
+          headers: [{"authorization", "Bearer #{ctx.token}"}],
+          into: :self,
+          retry: false
+        )
+
+      assert_receive {:catalog_subscribed, _pid}
+      assert {:ok, %{event: "snapshot", id: "1"}, buf} = next_sse_event(resp)
+      assert {:ok, %{comment: true, raw: ": keepalive"}, _buf} = next_sse_event(resp, buf)
+      refute_receive {:catalog_subscribed, _}, 0
+      Req.cancel_async_response(resp)
+    end
+
+    test "resnapshots and resumes when queued frame bytes exceed the limit below the count limit" do
+      ctx = start_bandit_daemon(sse_max_queue_len: 128, sse_max_queue_bytes: 32_768)
+
+      resp =
+        Req.get!("#{ctx.base_url}/api/v1/sessions/events",
+          headers: [{"authorization", "Bearer #{ctx.token}"}],
+          into: :self,
+          retry: false
+        )
+
+      assert {:ok, %{event: "snapshot", id: "1"}, buf} = next_sse_event(resp)
+      assert_receive {:catalog_subscribed, connection}
+
+      # Accumulate a deterministic backlog of ref-counted binaries without relying
+      # on socket buffers or the relative speed of the sender and consumer.
+      true = :erlang.suspend_process(connection)
+
+      try do
+        assert {:ok, 5} =
+                 FakeDaemon.emit_catalog_burst(ctx.daemon, 4, String.duplicate("x", 64_000))
+      after
+        true = :erlang.resume_process(connection)
+      end
+
+      assert {:ok, %{event: "snapshot", id: "5"}, buf} = next_sse_event(resp, buf)
+      assert {:ok, 6} = FakeDaemon.emit_catalog_upsert(ctx.daemon, "after", %{})
+      assert {:ok, %{event: "catalog", id: "6"}, _buf} = next_sse_event(resp, buf)
       Req.cancel_async_response(resp)
     end
   end

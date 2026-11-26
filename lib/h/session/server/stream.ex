@@ -177,6 +177,47 @@ defmodule H.Session.Server.Stream do
     end
   end
 
+  # Runtime-only view. Updates do not commit or advance the conversation cursor.
+  def broadcast_subagent_waits(state, cid, subscriber \\ nil) do
+    waits = subagent_waits(state, cid)
+
+    if map_size(waits) > 0 do
+      bin =
+        JSON.encode!(%{
+          "version" => 1,
+          "session_id" => state.session_id,
+          "conversation_id" => to_string(cid),
+          "base_seq" => Map.get(state.conv_last_seq, cid, 0),
+          "doc_ops" => %{"live" => [["set", ["subagent_waits"], waits]]}
+        })
+
+      message = {:ephemeral_frame, bin}
+
+      if subscriber,
+        do: send(subscriber, message),
+        else: dispatch_pubsub(state.pubsub, state.session_id, cid, message)
+    end
+  end
+
+  defp subagent_waits(state, cid) do
+    for {{sid, _}, watch} <- Map.get(state, :subagent_watches, %{}),
+        tid <- watch.tasks,
+        %{status: "waiting", checkpoint: %{"conversation_id" => ^cid, "call_id" => call_id}} <-
+          [state.tasks[tid]],
+        into: %{} do
+      child = watch.runtime
+
+      {call_id,
+       %{
+         "session_id" => sid,
+         "conversation_id" => to_string(watch.conversation_id),
+         "attention" => child && child.attention,
+         "detail" => child && child.blocker,
+         "next_wake_at" => child && child.next_wake_at
+       }}
+    end
+  end
+
   def clear_ephemeral_for_conv(state, cid) do
     case Map.pop(state.ephemeral, cid) do
       {nil, _} ->
@@ -350,6 +391,18 @@ defmodule H.Session.Server.Stream do
   def broadcast_commit_frame(state, cid, batch_seq, wire_entries, doc_ops) do
     prev_conv_seq = Map.get(state.conv_last_seq, cid, 0)
 
+    # Refresh the overlay with every commit while a wait is active, including
+    # commits that only touch the inbox. No derived child state enters storage.
+    waits = subagent_waits(state, cid)
+
+    doc_ops =
+      if map_size(waits) > 0 do
+        op = ["set", ["subagent_waits"], waits]
+        Map.update(doc_ops, "live", [op], &(&1 ++ [op]))
+      else
+        doc_ops
+      end
+
     frame = %{
       "version" => 1,
       "session_id" => state.session_id,
@@ -421,6 +474,12 @@ defmodule H.Session.Server.Stream do
           |> Enum.map(&State.wire_entry(&1, &1.seq))
 
         conv_docs = state.docs[cid]
+        waits = subagent_waits(state, cid)
+
+        live =
+          if map_size(waits) == 0,
+            do: conv_docs["live"],
+            else: Map.put(conv_docs["live"], "subagent_waits", waits)
 
         payload = %{
           "version" => 1,
@@ -430,7 +489,7 @@ defmodule H.Session.Server.Stream do
           "before_entry_id" => if(next_cursor, do: to_string(next_cursor), else: nil),
           "entries" => entries_oldest_first,
           "docs" => %{
-            "live" => conv_docs["live"],
+            "live" => live,
             "inbox" => conv_docs["inbox"],
             "agent" => conv_docs["agent"],
             "usage" => conv_docs["usage"]

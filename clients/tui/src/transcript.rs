@@ -233,28 +233,34 @@ impl TranscriptState {
         let Some(live) = self.live_doc() else {
             return false;
         };
-        let Some(tools) = live.get("tools").and_then(Value::as_object) else {
+        let (Some(tools), Some(waits)) = (
+            live.get("tools").and_then(Value::as_object),
+            live.get("subagent_waits").and_then(Value::as_object),
+        ) else {
             return false;
         };
-        let mut has_waiting_subagent = false;
-        for slot in tools.values() {
-            let status = slot.get("status").and_then(Value::as_str).unwrap_or("");
-            let name = slot.get("name").and_then(Value::as_str).unwrap_or("");
-            if matches!(status, "running" | "pending") && name != "subagent" {
-                return false;
-            }
-            if status == "waiting" && name == "subagent" {
-                has_waiting_subagent = true;
-                let child_att = slot
-                    .get("child_attention")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if !matches!(child_att, "retrying" | "sleeping") {
-                    return false;
+        if live.get("user_shell").is_some_and(Value::is_object) {
+            return false;
+        }
+        let mut waiting = false;
+        for (id, slot) in tools {
+            match slot.get("status").and_then(Value::as_str) {
+                Some("waiting") if slot.get("name").and_then(Value::as_str) == Some("subagent") => {
+                    if waits
+                        .get(id)
+                        .and_then(|w| w.get("attention"))
+                        .and_then(Value::as_str)
+                        != Some("retrying")
+                    {
+                        return false;
+                    }
+                    waiting = true;
                 }
+                Some("pending" | "running" | "waiting" | "retrying") => return false,
+                _ => {}
             }
         }
-        has_waiting_subagent
+        waiting
     }
 
     pub fn is_run_active(&self) -> bool {
