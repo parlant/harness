@@ -12,7 +12,7 @@ defmodule H.HTTP.Router do
     * `:unix_socket` - treat connections as Unix domain socket requests (default `false`; also auto-detected via `conn.remote_ip`)
     * `:sse_keepalive_ms` - SSE `: keepalive` interval in ms (default `15_000`)
     * `:sse_max_queue_len` - max mailbox messages before SSE snapshot reset (default `128`)
-    * `:sse_max_queue_bytes` - max process memory bytes before SSE snapshot reset (default `2_097_152`)
+    * `:sse_max_queue_bytes` - max mailbox message bytes before SSE snapshot reset (default `2_097_152`)
   """
 
   use Plug.Router, copy_opts_to_assign: :h_opts
@@ -692,6 +692,19 @@ defmodule H.HTTP.Router do
   catch
     :exit, _ -> nil
   end
+
+  defp send_fs_error(conn, :timeout),
+    do:
+      send_json(conn, 503, %{
+        "error" =>
+          "Folder access timed out. Check for a macOS permission prompt or an unavailable drive. On macOS, open H → Permissions & Setup before retrying."
+      })
+
+  defp send_fs_error(conn, reason) when reason in [:eacces, :eperm],
+    do:
+      send_json(conn, 403, %{
+        "error" => "Folder access denied. On macOS, open H → Permissions & Setup."
+      })
 
   defp send_fs_error(conn, :not_found),
     do: send_json(conn, 404, %{"error" => "path not found"})

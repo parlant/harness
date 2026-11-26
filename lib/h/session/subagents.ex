@@ -301,19 +301,50 @@ defmodule H.Session.Subagents do
   end
 
   @doc """
-  Unregisters `self()` from PubSub submission settlement for `{child_sid, child_req_id}`.
+  Unregisters `self()` from PubSub submission settlement and child catalog
+  updates for `{child_sid, child_req_id}` once no waiting tasks remain.
   """
   def unwatch(child_sid, child_req_id, state) do
-    if is_binary(child_sid) and is_binary(child_req_id) do
-      key = {child_sid, child_req_id}
-      remaining = get_in(state, [:subagent_watches, key])
+    state =
+      if is_binary(child_sid) and is_binary(child_req_id) do
+        key = {child_sid, child_req_id}
+        remaining = get_in(state, [:subagent_watches, key])
 
-      if is_nil(remaining) or MapSet.size(remaining) == 0 do
-        Daemon.unwatch_submission(child_sid, child_req_id, child_daemon_opts(state))
+        if is_nil(remaining) or MapSet.size(remaining) == 0 do
+          Daemon.unwatch_submission(child_sid, child_req_id, child_daemon_opts(state))
+        end
+
+        maybe_unwatch_child_catalog(child_sid, state)
+      else
+        state
       end
-    end
 
     state
+  end
+
+  @doc """
+  Handles `:catalog` updates for an awaited `child_sid`, refreshing live tool
+  slot summaries via ephemeral frames and cascading catalog runtime changes up
+  to this coordinator (and any further ancestors).
+  """
+  def handle_child_catalog_updated(child_sid, child_summary, state)
+      when is_binary(child_sid) do
+    waiting_tasks =
+      state.tasks
+      |> Map.values()
+      |> Enum.filter(fn t ->
+        t.kind == "tool_call" and t.status == "waiting" and
+          t.checkpoint["name"] == "subagent" and
+          t.memos["child_session_id"] == child_sid
+      end)
+
+    if waiting_tasks == [] do
+      state
+    else
+      state = sync_child_live_slots(waiting_tasks, child_summary, state)
+      State.report_catalog_active(state)
+      state
+    end
   end
 
   @doc """
@@ -786,7 +817,12 @@ defmodule H.Session.Subagents do
         watches = Map.get(state, :subagent_watches, %{})
         key = {child_sid, child_req_id}
         updated = Map.update(watches, key, MapSet.new([task_id]), &MapSet.put(&1, task_id))
-        %{state | subagent_watches: updated}
+
+        state =
+          %{state | subagent_watches: updated}
+          |> ensure_child_catalog_watch(child_sid)
+
+        sync_initial_child_state(child_sid, task_id, state)
 
       {:error, reason} ->
         send(self(), {:subagent_failed, task_id, reason})
@@ -863,7 +899,15 @@ defmodule H.Session.Subagents do
 
   defp commit_waiting_tool(cid, waiting_task, child_sid, mode, state) do
     call_id = waiting_task.checkpoint["call_id"]
-    live = put_subagent_live(state.docs[cid]["live"], call_id, "waiting", child_sid, mode)
+    live =
+      put_subagent_live(
+        state.docs[cid]["live"],
+        call_id,
+        "waiting",
+        child_sid,
+        mode,
+        waiting_task.id
+      )
 
     state =
       state
@@ -911,7 +955,8 @@ defmodule H.Session.Subagents do
         call_id,
         "running",
         memos["child_session_id"],
-        memos["mode"]
+        memos["mode"],
+        tool_task.id
       )
 
     state =
@@ -1124,7 +1169,7 @@ defmodule H.Session.Subagents do
     end
   end
 
-  defp put_subagent_live(live, call_id, status, child_sid, mode) do
+  defp put_subagent_live(live, call_id, status, child_sid, mode, task_id) do
     existing =
       get_in(live, ["tools", call_id]) ||
         %{"id" => call_id, "name" => "subagent", "output" => ""}
@@ -1132,12 +1177,133 @@ defmodule H.Session.Subagents do
     updated_slot =
       existing
       |> Map.put("status", status)
+      |> maybe_put("task_id", if(task_id, do: to_string(task_id)))
       |> maybe_put("child_session_id", child_sid)
       |> maybe_put("mode", mode)
 
     tools = Map.get(live || %{}, "tools") || %{}
     Map.put(live || %{}, "tools", Map.put(tools, call_id, updated_slot))
   end
+
+  defp ensure_child_catalog_watch(state, child_sid) do
+    watched = Map.get(state, :child_catalog_watches, MapSet.new())
+
+    if MapSet.member?(watched, child_sid) do
+      state
+    else
+      if state.pubsub && Process.whereis(state.pubsub) do
+        Registry.register(state.pubsub, {:catalog_session, child_sid}, nil)
+      end
+
+      %{state | child_catalog_watches: MapSet.put(watched, child_sid)}
+    end
+  end
+
+  defp maybe_unwatch_child_catalog(child_sid, state) do
+    still_watching? =
+      state
+      |> Map.get(:subagent_watches, %{})
+      |> Enum.any?(fn {{sid, _req_id}, set} ->
+        sid == child_sid and MapSet.size(set) > 0
+      end)
+
+    watched = Map.get(state, :child_catalog_watches, MapSet.new())
+
+    if not still_watching? and MapSet.member?(watched, child_sid) do
+      if state.pubsub && Process.whereis(state.pubsub) do
+        Registry.unregister(state.pubsub, {:catalog_session, child_sid})
+      end
+
+      %{state | child_catalog_watches: MapSet.delete(watched, child_sid)}
+    else
+      state
+    end
+  end
+
+  defp sync_initial_child_state(child_sid, task_id, state) do
+    table = Map.get(state, :catalog_table)
+
+    child_summary =
+      if is_atom(table) and not is_nil(table) and :ets.whereis(table) != :undefined do
+        case Catalog.get_session(child_sid, table) do
+          {:ok, entry} -> Catalog.wire_session(entry, registry: state.registry)
+          _ -> nil
+        end
+      else
+        nil
+      end
+
+    case Map.get(state.tasks, task_id) do
+      nil ->
+        state
+
+      task ->
+        state = sync_child_live_slots([task], child_summary, state)
+        State.report_catalog_active(state)
+        state
+    end
+  end
+
+  defp sync_child_live_slots(waiting_tasks, child_summary, state) do
+    child_attention = child_field(child_summary, :attention)
+    child_activity = child_activity_text(child_summary)
+
+    Enum.reduce(waiting_tasks, state, fn task, acc_state ->
+      cid = task.checkpoint["conversation_id"]
+      call_id = task.checkpoint["call_id"]
+      live = acc_state.docs[cid]["live"] || %{}
+
+      case get_in(live, ["tools", call_id]) do
+        slot when is_map(slot) ->
+          updated_slot =
+            slot
+            |> put_or_drop("child_attention", child_attention)
+            |> put_or_drop("child_activity", child_activity)
+
+          if updated_slot == slot do
+            acc_state
+          else
+            next_live = put_in(live, ["tools", call_id], updated_slot)
+
+            acc_state = State.put_doc(acc_state, cid, "live", next_live)
+
+            eph = Stream.get_or_init_ephemeral(acc_state, cid)
+            op = ["set", ["tools", call_id], updated_slot]
+            eph = %{eph | pending_ops: eph.pending_ops ++ [op]}
+
+            acc_state = %{acc_state | ephemeral: Map.put(acc_state.ephemeral, cid, eph)}
+            Stream.flush_ephemeral_broadcast(acc_state, cid)
+          end
+
+        _ ->
+          acc_state
+      end
+    end)
+  end
+
+  defp child_field(nil, _key), do: nil
+
+  defp child_field(summary, key) when is_map(summary) and is_atom(key) do
+    Map.get(summary, key) || Map.get(summary, Atom.to_string(key))
+  end
+
+  defp child_activity_text(nil), do: nil
+
+  defp child_activity_text(summary) when is_map(summary) do
+    label = child_field(summary, :activity_label)
+    kind = child_field(summary, :activity_kind)
+    attention = child_field(summary, :attention)
+
+    cond do
+      is_binary(label) and label != "" -> label
+      is_binary(kind) and kind != "" -> kind
+      attention in ["retrying", "sleeping"] -> "retrying"
+      true -> nil
+    end
+  end
+
+  defp put_or_drop(map, key, val) when is_binary(val) and val != "", do: Map.put(map, key, val)
+  defp put_or_drop(map, key, _), do: Map.delete(map, key)
 
   defp mint_child_session_id(parent_sid, task_id) do
     suffix = "-sub-#{task_id}"

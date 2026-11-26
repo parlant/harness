@@ -75,6 +75,17 @@ Mutating tools and user-shell commands queue at `H.WorkspaceLease` when another 
 
 `H.ExecutionEnv.Remote` delegates to `H.RemoteAgent` in-VM, across connected Erlang nodes (`connect_node/3`, `env_spec_for_node/3`), or over authenticated HTTP/Unix-socket RPC (`H.RemoteAgent.HTTP`, `H.RemoteAgent.Client`, `connect_http/3`, `env_spec_for_http/3`, and standalone `h-daemon remote-agent`), allowing a local daemon ("brains": model + session) to coordinate sandboxed tool execution on separate hosts or containers ("hands") with constant-time bearer authentication, `{session_id, incarnation, task_id, attempt_id}` stale-attempt fencing, streaming output, lease heartbeats, expiry/disconnect OS process-group reaping, and zero `:unsafe` replay across restarts. It is not an internet-facing mTLS/SSH transport across untrusted public networks.
 
+## macOS permission boundary
+
+The app ships our native Rust `hi-exec` at a stable app-relative path, with an
+explicit signing identifier. It parents the bundled daemon and isolates directory
+enumeration from OTP's shared file server. Raw host filesystem operations keep
+blocked folder access from monopolizing that server. The app's setup guide
+explains user-managed folder grants and external-daemon migration; it does not
+claim that renaming a launcher controls macOS TCC attribution. Accessibility and
+Screen Recording remain separate, future capabilities, not implicit folder
+permissions. See [macOS permission ownership, limits, and release verification](architecture/macos-permissions.md).
+
 ## Client boundary
 
 - **Phoenix** (`clients/web/`): `:harness_web` supports both `HWeb.Backend.InVM` (calling the daemon in the same VM in bundled mode) and `HWeb.Backend.HTTP` (`H_WEB_BACKEND=http`, connecting out-of-VM over `api.sock` or loopback HTTP with supervised `:catalog` and `:conversation` SSE bridges). `WorkspaceLive` browses folders and selects harness profiles, `InboxLive` (`/inbox`) provides a live workspace-grouped attention overview across sessions via `:catalog` PubSub without waking unloaded sessions, and `SessionLive` streams entry rows, renders owner tool-approval gates, run-budget and extension-status controls, and retains document and cursor state rather than every rendered entry body. The session file review view browses expandable directory pages and reads the working tree or pinned Git snapshots through the session's `H.ExecutionEnv`; only working-tree edits use a revision check and workspace writer lease. Review comments use normal session submissions. The session composer uses bounded LiveView uploads to turn local screenshots or UTF-8 files into existing image or text blocks; it sends them through the normal submit command and does not copy files into the workspace. File selections, expanded folders, selected commits, and edit drafts are client state, not new engine records.

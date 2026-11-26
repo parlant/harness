@@ -32,6 +32,16 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>H accesses Desktop only when you open a workspace or ask a tool to use files there.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>H accesses Documents only when you open a workspace or ask a tool to use files there.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>H accesses Downloads only when you open a workspace or ask a tool to use files there.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>H accesses network volumes for workspaces and files you choose to use.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>H accesses removable volumes for workspaces and files you choose to use.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

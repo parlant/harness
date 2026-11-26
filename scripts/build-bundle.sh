@@ -39,8 +39,9 @@ mix compile --warnings-as-errors
   mix compile --warnings-as-errors
   mix release harness --path "$stage/otp"
 )
-cargo build --locked --release --manifest-path clients/tui/Cargo.toml --bin hi
+cargo build --locked --release --manifest-path clients/tui/Cargo.toml --bin hi --bin hi-exec
 install -m 755 "$CARGO_TARGET_DIR/release/hi" "$stage/otp/bin/hi"
+install -m 755 "$CARGO_TARGET_DIR/release/hi-exec" "$stage/otp/bin/hi-exec"
 cargo build --locked --release --manifest-path clients/import/Cargo.toml
 install -m 755 "$CARGO_TARGET_DIR/release/hi-import" "$stage/otp/bin/hi-import"
 install -m 755 rel/h-daemon "$stage/otp/bin/h-daemon"

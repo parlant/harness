@@ -149,40 +149,36 @@ defmodule H.HTTP.SSE do
   end
 
   defp loop(conn, state) do
-    if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
-      resnapshot(conn, state)
-    else
-      receive do
-        {:commit_frame, seq, bin} ->
-          if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
-            resnapshot(conn, state)
-          else
-            send_commit(conn, seq, bin, state)
-          end
+    receive do
+      {:commit_frame, seq, bin} ->
+        if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
+          resnapshot(conn, state)
+        else
+          send_commit(conn, seq, bin, state)
+        end
 
-        {:ephemeral_frame, bin} ->
-          if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
-            resnapshot(conn, state)
-          else
-            send_ephemeral(conn, bin, state)
-          end
+      {:ephemeral_frame, bin} ->
+        if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
+          resnapshot(conn, state)
+        else
+          send_ephemeral(conn, bin, state)
+        end
 
-        {:close_sse, _reason} ->
-          conn
+      {:close_sse, _reason} ->
+        conn
 
-        {:EXIT, from, reason}
-        when reason == :shutdown or (is_tuple(reason) and elem(reason, 0) == :shutdown) ->
-          # Re-send EXIT with the original supervisor pid so ThousandIsland's
-          # GenServer loop handles the shutdown signal as soon as conn returns.
-          send(self(), {:EXIT, from, reason})
-          conn
-      after
-        state.keepalive_ms ->
-          case chunk(conn, ": keepalive\n\n") do
-            {:ok, conn} -> loop(conn, state)
-            {:error, _reason} -> conn
-          end
-      end
+      {:EXIT, from, reason}
+      when reason == :shutdown or (is_tuple(reason) and elem(reason, 0) == :shutdown) ->
+        # Re-send EXIT with the original supervisor pid so ThousandIsland's
+        # GenServer loop handles the shutdown signal as soon as conn returns.
+        send(self(), {:EXIT, from, reason})
+        conn
+    after
+      state.keepalive_ms ->
+        case chunk(conn, ": keepalive\n\n") do
+          {:ok, conn} -> loop(conn, state)
+          {:error, _reason} -> conn
+        end
     end
   end
 
@@ -246,31 +242,27 @@ defmodule H.HTTP.SSE do
   end
 
   defp sessions_loop(conn, state) do
-    if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
-      resnapshot_sessions(conn, state)
-    else
-      receive do
-        {:catalog_frame, seq, bin} ->
-          if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
-            resnapshot_sessions(conn, state)
-          else
-            send_catalog(conn, seq, bin, state)
-          end
+    receive do
+      {:catalog_frame, seq, bin} ->
+        if queue_overflow?(state.max_queue_len, state.max_queue_bytes) do
+          resnapshot_sessions(conn, state)
+        else
+          send_catalog(conn, seq, bin, state)
+        end
 
-        {:close_sse, _reason} ->
-          conn
+      {:close_sse, _reason} ->
+        conn
 
-        {:EXIT, from, reason}
-        when reason == :shutdown or (is_tuple(reason) and elem(reason, 0) == :shutdown) ->
-          send(self(), {:EXIT, from, reason})
-          conn
-      after
-        state.keepalive_ms ->
-          case chunk(conn, ": keepalive\n\n") do
-            {:ok, conn} -> sessions_loop(conn, state)
-            {:error, _reason} -> conn
-          end
-      end
+      {:EXIT, from, reason}
+      when reason == :shutdown or (is_tuple(reason) and elem(reason, 0) == :shutdown) ->
+        send(self(), {:EXIT, from, reason})
+        conn
+    after
+      state.keepalive_ms ->
+        case chunk(conn, ": keepalive\n\n") do
+          {:ok, conn} -> sessions_loop(conn, state)
+          {:error, _reason} -> conn
+        end
     end
   end
 
@@ -312,10 +304,36 @@ defmodule H.HTTP.SSE do
   end
 
   defp queue_overflow?(max_len, max_bytes) do
-    case Process.info(self(), [:message_queue_len, :memory]) do
-      [message_queue_len: qlen, memory: mem] -> qlen > max_len or mem > max_bytes
-      _ -> false
+    case Process.info(self(), :message_queue_len) do
+      {:message_queue_len, 0} ->
+        false
+
+      {:message_queue_len, qlen} when qlen > max_len ->
+        true
+
+      {:message_queue_len, _qlen} ->
+        case Process.info(self(), :messages) do
+          {:messages, messages} -> queued_bytes(messages, 0) > max_bytes
+          _ -> false
+        end
+
+      _ ->
+        false
     end
+  end
+
+  defp queued_bytes([], acc), do: acc
+
+  defp queued_bytes([msg | rest], acc) do
+    bytes =
+      case msg do
+        {:commit_frame, _seq, bin} when is_binary(bin) -> byte_size(bin)
+        {:ephemeral_frame, bin} when is_binary(bin) -> byte_size(bin)
+        {:catalog_frame, _seq, bin} when is_binary(bin) -> byte_size(bin)
+        other -> :erts_debug.flat_size(other) * :erlang.system_info(:wordsize)
+      end
+
+    queued_bytes(rest, acc + bytes)
   end
 
   defp snapshot_frame(seq, bin) do

@@ -128,6 +128,8 @@ impl<'a> StatusFields<'a> {
                 }
             } else if state.inference_retry().is_some() {
                 "retrying"
+            } else if state.subagent_retrying() {
+                "retrying"
             } else if state.is_run_active() {
                 "busy"
             } else if failure.is_some() {

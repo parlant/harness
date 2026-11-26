@@ -2,7 +2,12 @@
 
 Keep this directory together. `bin/hi` starts the daemon via its sibling
 `bin/h-daemon`, using the runtime included here. No Mix or Elixir installation
-is needed to run the bundle.
+is needed to run the bundle. Keep `bin/hi-exec` alongside them: it provides
+bounded native directory enumeration without using OTP's shared file server.
+On macOS, H.app places this helper at `Contents/MacOS/hi-exec` and includes a
+**Permissions & Setup…** menu guide. Prefer `/Applications/H.app` with a stable
+Developer ID signature for app-managed permissions; standalone versioned
+releases do not acquire that identity through a symlink.
 
 ```sh
 ./bin/hi daemon start       # foreground, Ctrl+C to stop

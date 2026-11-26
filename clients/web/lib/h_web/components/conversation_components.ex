@@ -322,6 +322,7 @@ defmodule HWeb.ConversationComponents do
   attr(:inbox, :list, required: true)
   attr(:tail_activity, :any, default: nil)
   attr(:tasks, :list, default: [])
+  attr(:catalog_by_id, :map, default: %{})
 
   def live_region(assigns) do
     live = assigns.live || %{}
@@ -356,6 +357,11 @@ defmodule HWeb.ConversationComponents do
         slot["name"] == "wait_signal" and slot["status"] == "waiting"
       end)
 
+    non_subagent_active_tools =
+      Enum.reject(active_tools, fn slot -> slot["name"] == "subagent" end)
+
+    subagent_waits = awaited_subagent_waits(active_tools, assigns.tasks, assigns.catalog_by_id)
+
     assigns =
       assign(assigns,
         activity: activity,
@@ -367,15 +373,16 @@ defmodule HWeb.ConversationComponents do
         retry: retry,
         wait: wait,
         approvals: approvals,
-        active_tools: active_tools,
-        waiting_signals: waiting_signals
+        active_tools: non_subagent_active_tools,
+        waiting_signals: waiting_signals,
+        subagent_waits: subagent_waits
       )
 
     ~H"""
     <section
       :if={
         @streaming_text? || @activity || @inbox != [] || @failure || @retry || @wait ||
-          @approvals != [] || @active_tools != []
+          @approvals != [] || @active_tools != [] || @subagent_waits != []
       }
       id="live-region"
       class="live-region"
@@ -494,6 +501,20 @@ defmodule HWeb.ConversationComponents do
         </p>
         <p :if={@retry["status"] != "waiting"}>Retry request in progress.</p>
       </div>
+      <div
+        :for={sub_wait <- @subagent_waits}
+        id={"subagent-wait-#{sub_wait.child_sid}"}
+        class="retry-banner subagent-wait-banner"
+        role="status"
+      >
+        <strong>Waiting on subagent <span class="mono">{sub_wait.child_sid}</span></strong>
+        <p>{sub_wait.detail}</p>
+        <p>
+          <.link navigate={~p"/sessions/#{sub_wait.child_sid}"} class="subagent-open-link">
+            Open subsession
+          </.link>
+        </p>
+      </div>
       <article
         :if={@streaming_text?}
         id="live-generation"
@@ -573,13 +594,16 @@ defmodule HWeb.ConversationComponents do
         do: assigns.active_task_id || child_parent_task_id(child),
         else: nil
 
+    wait_note = subagent_wait_note(status, child)
+
     assigns =
       assign(assigns,
         title: card.title || (child && child.title),
         prompt_preview: preview_text(card.prompt),
         status: status,
         status_class: status_class,
-        abortable_task_id: abortable_task_id
+        abortable_task_id: abortable_task_id,
+        wait_note: wait_note
       )
 
     ~H"""
@@ -604,6 +628,7 @@ defmodule HWeb.ConversationComponents do
           </button>
         </div>
         <div :if={@title} class="subagent-card-title">{@title}</div>
+        <p :if={@wait_note} class="subagent-card-wait mono muted">{@wait_note}</p>
         <p :if={@prompt_preview} class="subagent-card-preview muted">{@prompt_preview}</p>
       </div>
       <.entry_toolbar
@@ -765,4 +790,62 @@ defmodule HWeb.ConversationComponents do
   end
 
   defp slot_task_id(_, _), do: nil
+
+  defp subagent_wait_note(status, child) when is_map(child) do
+    label = Map.get(child, :activity_label) || Map.get(child, "activity_label")
+    needs_att = Map.get(child, :needs_attention) == true or Map.get(child, "needs_attention") == true
+
+    cond do
+      status in ["retrying", "sleeping"] and is_binary(label) and label != "" ->
+        label
+
+      status == "running" and needs_att and is_binary(label) and label != "" ->
+        label
+
+      true ->
+        nil
+    end
+  end
+
+  defp subagent_wait_note(_, _), do: nil
+
+  defp awaited_subagent_waits(active_tools, tasks, catalog_by_id) do
+    from_slots =
+      for slot <- active_tools,
+          slot["name"] == "subagent",
+          slot["status"] in ["waiting", "running", "pending"],
+          sid = non_empty_string(slot["child_session_id"]),
+          do: {sid, slot}
+
+    from_tasks =
+      for t <- List.wrap(tasks),
+          is_map(t),
+          (t[:kind] || t["kind"]) == "tool_call",
+          (t[:status] || t["status"]) == "waiting",
+          wake = t[:wake] || t["wake"],
+          is_map(wake),
+          (wake[:on] || wake["on"]) == "submission_settled",
+          sid = non_empty_string(wake[:session_id] || wake["session_id"]),
+          do: {sid, %{}}
+
+    (from_slots ++ from_tasks)
+    |> Enum.uniq_by(&elem(&1, 0))
+    |> Enum.flat_map(fn {child_sid, slot} ->
+      child = Map.get(catalog_by_id || %{}, child_sid)
+      att = (child && child.attention) || slot["child_attention"]
+      label = (child && child.activity_label) || slot["child_activity"]
+      needs_att = child != nil and child.needs_attention == true
+
+      cond do
+        att in ["retrying", "sleeping"] ->
+          [%{child_sid: child_sid, detail: non_empty_string(label) || "Retrying provider request…"}]
+
+        att == "running" and needs_att and is_binary(label) and label != "" ->
+          [%{child_sid: child_sid, detail: label}]
+
+        true ->
+          []
+      end
+    end)
+  end
 end

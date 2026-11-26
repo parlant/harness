@@ -233,7 +233,14 @@ Prebuilt signed releases target `darwin-arm64`, `linux-arm64`, and `linux-x86_64
 - **macOS application bundle (`H.app`, packaged as `.dmg` and `.app.zip`)**:
   built by `scripts/build-macos-app.sh` from a tested `darwin-arm64` bundle,
   embedding `Contents/Resources/harness` with a menu-bar controller for web UI
-  launch, owner token copy, CLI linking, and cooperative daemon restart.
+  launch, owner token copy, CLI linking, cooperative daemon restart, and a
+  **Permissions & Setup…** guide. Install at `/Applications/H.app` and upgrade
+  in place. Its Rust helper lives at `Contents/MacOS/hi-exec`, with an explicit
+  signing identifier; it does not replace OTP's `erlexec`. The guide links to
+  macOS privacy settings, reveals the helper, and explains how to drain/remove
+  an external service before switching to the app-owned daemon. Full Disk Access
+  is optional and broad. Accessibility and Screen Recording are separate future
+  capabilities, not coding prerequisites. See [permission ownership and limits](../architecture/macos-permissions.md).
 - **Multi-arch Linux builds (`Dockerfile.release`, `scripts/build-linux-bundles.sh`)**:
   uses `docker buildx` on a Debian Bookworm (glibc 2.36) baseline, vendors `libcrypto.so.3` and
   `libtinfo.so.6` into `native/` with relative `$ORIGIN` `RUNPATH` (leaving host

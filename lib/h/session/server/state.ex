@@ -110,10 +110,10 @@ defmodule H.Session.Server.State do
         false
 
       is_nil(env) ->
-        File.dir?(cwd)
+        H.ExecutionEnv.Host.FileSystem.dir?(cwd)
 
       ExecutionEnv.kind(env) == "host" ->
-        File.dir?(cwd)
+        H.ExecutionEnv.Host.FileSystem.dir?(cwd)
 
       true ->
         match?({:ok, _}, ExecutionEnv.bind_cwd(env, cwd))
@@ -171,7 +171,7 @@ defmodule H.Session.Server.State do
     {attention, activity_kind, activity_label} =
       cond do
         active_tasks != [] ->
-          derive_active_activity(active_tasks)
+          derive_active_activity(active_tasks, state)
 
         sleeping_tasks != [] ->
           task = Enum.min_by(sleeping_tasks, & &1.id)
@@ -192,6 +192,25 @@ defmodule H.Session.Server.State do
         end
       end)
 
+    needs_attention =
+      cond do
+        Enum.any?(active_tasks, &awaiting_approval_task?/1) ->
+          true
+
+        awaited_child_needs_attention?(active_tasks, state) ->
+          true
+
+        true ->
+          nil
+      end
+
+    next_wake_at =
+      sleeping_tasks
+      |> Enum.map(&get_in(&1, [Access.key(:wake, %{}), "until"]))
+      |> Kernel.++(awaited_child_wake_times(active_tasks, state))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.min(fn -> nil end)
+
     %{
       title: Map.get(state, :session_meta, %{})[:title],
       active: active_tasks != [] or sleeping_tasks != [],
@@ -199,13 +218,8 @@ defmodule H.Session.Server.State do
       activity_kind: activity_kind,
       activity_label: Catalog.sanitize_activity_label(activity_label),
       queued_count: queued_count,
-      needs_attention:
-        if(Enum.any?(active_tasks, &awaiting_approval_task?/1), do: true, else: nil),
-      next_wake_at:
-        sleeping_tasks
-        |> Enum.map(&get_in(&1, [Access.key(:wake, %{}), "until"]))
-        |> Enum.reject(&is_nil/1)
-        |> Enum.min(fn -> nil end)
+      needs_attention: needs_attention,
+      next_wake_at: next_wake_at
     }
     |> Enum.reject(fn {k, v} -> k == :needs_attention and is_nil(v) end)
     |> Map.new()
@@ -232,14 +246,24 @@ defmodule H.Session.Server.State do
     end
   end
 
-  defp derive_active_activity(active_tasks) do
+  defp derive_active_activity(active_tasks, state) do
     sorted = Enum.sort_by(active_tasks, &{status_priority(&1.status), &1.id})
 
     approval_task = Enum.find(sorted, &awaiting_approval_task?/1)
 
-    tool_task =
+    running_or_pending_tool =
       Enum.find(sorted, fn t ->
-        t.kind == "tool_call" and t.status in ["running", "pending", "waiting"]
+        t.kind == "tool_call" and t.status in ["running", "pending"]
+      end)
+
+    waiting_non_subagent_tool =
+      Enum.find(sorted, fn t ->
+        t.kind == "tool_call" and t.status == "waiting" and t.checkpoint["name"] != "subagent"
+      end)
+
+    waiting_subagent_tasks =
+      Enum.filter(sorted, fn t ->
+        t.kind == "tool_call" and t.status == "waiting" and t.checkpoint["name"] == "subagent"
       end)
 
     user_shell_task = Enum.find(sorted, &(&1.kind == "user_shell"))
@@ -266,14 +290,8 @@ defmodule H.Session.Server.State do
 
         {"running", "tool", "approval · #{name}"}
 
-      tool_task != nil ->
-        label =
-          case get_in(tool_task, [:checkpoint, "name"]) do
-            name when is_binary(name) and name != "" -> name
-            _ -> "tool"
-          end
-
-        {"running", "tool", label}
+      running_or_pending_tool != nil ->
+        {"running", "tool", tool_label(running_or_pending_tool)}
 
       user_shell_task != nil ->
         {"running", "user_shell", "shell"}
@@ -284,8 +302,108 @@ defmodule H.Session.Server.State do
       compaction_task != nil ->
         {"running", "compaction", "compact"}
 
+      waiting_non_subagent_tool != nil ->
+        {"running", "tool", tool_label(waiting_non_subagent_tool)}
+
+      waiting_subagent_tasks != [] ->
+        derive_waiting_subagents_activity(waiting_subagent_tasks, state)
+
       true ->
         {"running", "generation", nil}
+    end
+  end
+
+  defp tool_label(task) do
+    case get_in(task, [:checkpoint, "name"]) do
+      name when is_binary(name) and name != "" -> name
+      _ -> "tool"
+    end
+  end
+
+  defp derive_waiting_subagents_activity(waiting_subagent_tasks, state) do
+    children =
+      waiting_subagent_tasks
+      |> Enum.map(&awaited_child_entry(&1, state))
+      |> Enum.reject(&is_nil/1)
+
+    retrying_children =
+      Enum.filter(children, &(&1.attention in ["retrying", "sleeping"]))
+
+    cond do
+      children != [] and length(retrying_children) == length(children) ->
+        child = hd(retrying_children)
+        detail = child.activity_label || "retrying"
+        {"retrying", "retry", format_bubbled_label(detail)}
+
+      approval_child =
+          Enum.find(children, fn c ->
+            c.needs_attention == true and is_binary(c.activity_label) and
+                c.activity_label != ""
+          end) ->
+        {"running", "tool", format_bubbled_label(approval_child.activity_label)}
+
+      retrying_child = List.first(retrying_children) ->
+        detail = retrying_child.activity_label || "retrying"
+        {"running", "tool", format_bubbled_label(detail)}
+
+      wait_child =
+          Enum.find(children, fn c ->
+            c.attention == "running" and is_binary(c.activity_label) and
+                (c.activity_label == "wait_signal" or
+                   String.starts_with?(c.activity_label, "subagent · "))
+          end) ->
+        {"running", "tool", format_bubbled_label(wait_child.activity_label)}
+
+      true ->
+        {"running", "tool", "subagent"}
+    end
+  end
+
+  defp format_bubbled_label("subagent · " <> _ = already_prefixed), do: already_prefixed
+  defp format_bubbled_label(detail), do: "subagent · #{detail}"
+
+  defp awaited_child_needs_attention?(active_tasks, state) do
+    Enum.any?(active_tasks, fn task ->
+      if task.kind == "tool_call" and task.status == "waiting" and
+           task.checkpoint["name"] == "subagent" do
+        case awaited_child_entry(task, state) do
+          %{attention: "running", needs_attention: true} -> true
+          _ -> false
+        end
+      else
+        false
+      end
+    end)
+  end
+
+  defp awaited_child_wake_times(active_tasks, state) do
+    active_tasks
+    |> Enum.filter(fn t ->
+      t.kind == "tool_call" and t.status == "waiting" and t.checkpoint["name"] == "subagent"
+    end)
+    |> Enum.map(fn t ->
+      case awaited_child_entry(t, state) do
+        %{next_wake_at: until} when is_integer(until) -> until
+        _ -> nil
+      end
+    end)
+  end
+
+  defp awaited_child_entry(task, state) do
+    child_sid =
+      get_in(task.memos || %{}, ["child_session_id"]) ||
+        get_in(task.wake || %{}, ["session_id"])
+
+    table = Map.get(state, :catalog_table)
+
+    if is_binary(child_sid) and is_atom(table) and not is_nil(table) and
+         :ets.whereis(table) != :undefined do
+      case Catalog.get_session(child_sid, table) do
+        {:ok, entry} -> entry
+        _ -> nil
+      end
+    else
+      nil
     end
   end
 

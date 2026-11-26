@@ -38,6 +38,11 @@ read_manifest() {
   python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$manifest" "$1"
 }
 
+if [ ! -x "$bundle_dir/bin/hi-exec" ]; then
+  echo 'Bundle is missing bin/hi-exec; rebuild the standalone bundle before packaging H.app.' >&2
+  exit 1
+fi
+
 version=$(read_manifest version)
 target=$(read_manifest target)
 
@@ -77,6 +82,10 @@ chmod 755 "$macos_dir/HApp"
 
 # 4. Embed the complete relocatable standalone bundle
 cp -a "$bundle_dir" "$resources_dir/harness"
+# One real native helper at a version-independent app-relative path. The CLI
+# bundle link resolves to this same signed executable, not a second identity.
+mv "$resources_dir/harness/bin/hi-exec" "$macos_dir/hi-exec"
+ln -s ../../../MacOS/hi-exec "$resources_dir/harness/bin/hi-exec"
 
 # 5. Inside-out code signing (Mach-O binaries, NIFs, dylibs, then H.app)
 identity="${APPLE_CODESIGN_IDENTITY:--}"
@@ -84,11 +93,12 @@ entitlements="$root/packaging/macos/entitlements.plist"
 
 sign_macho() {
   path="$1"
+  identifier="co.parlant.harness.$(basename "$path")"
   if [ "$identity" = "-" ]; then
-    /usr/bin/codesign --force --sign - "$path"
+    /usr/bin/codesign --force --identifier "$identifier" --sign - "$path"
   else
     /usr/bin/codesign --force --timestamp --options runtime \
-      --entitlements "$entitlements" --sign "$identity" "$path"
+      --identifier "$identifier" --entitlements "$entitlements" --sign "$identity" "$path"
   fi
 }
 
@@ -115,6 +125,7 @@ for p in matches:
 PY
   sign_macho "$bin_path"
 done
+sign_macho "$macos_dir/hi-exec"
 
 if [ "$identity" = "-" ]; then
   /usr/bin/codesign --force --sign - "$app"
@@ -126,7 +137,10 @@ fi
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app"
 
 # 6. Headless smoke check of the embedded launcher (zero touch on ~/.local/share/h)
-env -i PATH=/usr/bin:/bin HOME="$work" "$resources_dir/harness/bin/h-daemon" --help >/dev/null
+env -i PATH=/usr/bin:/bin HOME="$work" "$macos_dir/hi-exec" daemon --help >/dev/null
+# Exercise the signed native filesystem worker without a real account/store.
+env -i PATH=/usr/bin:/bin HOME="$work" "$macos_dir/hi-exec" fs ls "$work" \
+  | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin)["ok"], list)'
 
 # 7. Package .app.zip (optional, default on) and .dmg
 zip_path="$out_dir/H-v${version}-${target}.app.zip"

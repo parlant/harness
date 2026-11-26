@@ -199,6 +199,7 @@ defmodule H.Session.Server.Recovery do
         recent_submissions: recent_subs,
         workers: %{},
         subagent_watches: %{},
+        child_catalog_watches: MapSet.new(),
         wait_watches: MapSet.new(),
         wake_timers: %{},
         ephemeral: %{},

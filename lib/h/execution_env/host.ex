@@ -5,7 +5,7 @@ defmodule H.ExecutionEnv.Host do
 
   @behaviour H.ExecutionEnv
 
-  alias H.ExecutionEnv.Host.{Exec, Fs}
+  alias H.ExecutionEnv.Host.{Exec, FileSystem, Fs}
 
   @spec new(String.t(), keyword()) :: H.ExecutionEnv.t()
   def new(cwd \\ System.user_home!(), opts \\ []) when is_binary(cwd) and is_list(opts) do
@@ -44,7 +44,7 @@ defmodule H.ExecutionEnv.Host do
   @impl true
   def bind_cwd(state, path) when is_binary(path) do
     with {:ok, resolved} <- resolve_path(state, path) do
-      case File.stat(resolved) do
+      case FileSystem.stat(resolved) do
         {:ok, %File.Stat{type: :directory}} -> {:ok, %{state | cwd: resolved}}
         {:ok, _other} -> {:error, :enotdir}
         {:error, reason} -> {:error, reason}

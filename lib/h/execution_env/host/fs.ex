@@ -5,6 +5,8 @@ defmodule H.ExecutionEnv.Host.Fs do
   directory listing, and bounded BFS file discovery.
   """
 
+  alias H.ExecutionEnv.Host.FileSystem
+
   @default_read_lines 2_000
   @default_read_bytes 51_200
   @default_byte_read_limit 5_242_880
@@ -89,7 +91,7 @@ defmodule H.ExecutionEnv.Host.Fs do
   def write_file(cwd, path, content) when is_binary(path) do
     with {:ok, resolved} <- resolve_path(cwd, path),
          {:ok, existing_mode} <- existing_file_mode(resolved),
-         :ok <- File.mkdir_p(Path.dirname(resolved)) do
+         :ok <- FileSystem.mkdir_p(Path.dirname(resolved)) do
       write_atomic(resolved, content, existing_mode)
     end
   end
@@ -119,7 +121,7 @@ defmodule H.ExecutionEnv.Host.Fs do
 
       true ->
         with {:ok, resolved} <- resolve_path(cwd, path),
-             {:ok, names} <- File.ls(resolved) do
+             {:ok, names} <- FileSystem.ls(resolved) do
           candidates =
             names
             |> Enum.sort()
@@ -230,7 +232,7 @@ defmodule H.ExecutionEnv.Host.Fs do
   defp inspect_entry(dir_path, name) do
     full = Path.join(dir_path, name)
 
-    case File.lstat(full) do
+    case FileSystem.lstat(full) do
       {:ok, %File.Stat{type: :regular, size: size}} ->
         %{name: name, path: full, type: "file", size: size}
 
@@ -239,7 +241,7 @@ defmodule H.ExecutionEnv.Host.Fs do
 
       {:ok, %File.Stat{type: :symlink, size: size}} ->
         target_type =
-          case File.stat(full) do
+          case FileSystem.stat(full) do
             {:ok, %File.Stat{type: :directory}} -> "dir"
             {:ok, %File.Stat{type: :regular}} -> "file"
             _ -> "other"
@@ -265,8 +267,8 @@ defmodule H.ExecutionEnv.Host.Fs do
     valid_markers = Enum.filter(markers, &is_binary/1)
 
     Enum.map(entries, fn entry ->
-      if dir_entry?(entry) do
-        matched = Enum.filter(valid_markers, &File.exists?(Path.join(entry.path, &1)))
+      if dir_entry?(entry) and FileSystem.automatic_probe?(entry.path) do
+        matched = Enum.filter(valid_markers, &FileSystem.exists?(Path.join(entry.path, &1)))
         Map.put(entry, :markers, matched)
       else
         entry
@@ -288,10 +290,8 @@ defmodule H.ExecutionEnv.Host.Fs do
   defp resolve_realpath_segments([seg | tail], current, hops) do
     candidate = if current == "/", do: "/" <> seg, else: current <> "/" <> seg
 
-    case :file.read_link(candidate) do
-      {:ok, target_charlist} when hops > 0 ->
-        target = List.to_string(target_charlist)
-
+    case FileSystem.read_link(candidate) do
+      {:ok, target} when hops > 0 ->
         if Path.type(target) == :absolute do
           ["/" | target_segs] = Path.split(target)
           resolve_realpath_segments(target_segs ++ tail, "/", hops - 1)
@@ -304,7 +304,7 @@ defmodule H.ExecutionEnv.Host.Fs do
         {:error, :eloop}
 
       {:error, :einval} ->
-        case File.lstat(candidate) do
+        case FileSystem.lstat(candidate) do
           {:ok, _stat} -> resolve_realpath_segments(tail, candidate, hops)
           {:error, reason} -> {:error, reason}
         end
@@ -315,7 +315,7 @@ defmodule H.ExecutionEnv.Host.Fs do
   end
 
   defp check_dir_for_list_files(resolved, true) do
-    case File.lstat(resolved) do
+    case FileSystem.lstat(resolved) do
       {:ok, %File.Stat{type: :directory}} -> :ok
       {:ok, %File.Stat{type: :symlink}} -> {:error, :symlink_not_followed}
       {:ok, _other} -> {:error, :enotdir}
@@ -324,7 +324,7 @@ defmodule H.ExecutionEnv.Host.Fs do
   end
 
   defp check_dir_for_list_files(resolved, false) do
-    case File.stat(resolved) do
+    case FileSystem.stat(resolved) do
       {:ok, %File.Stat{type: :directory}} -> :ok
       {:ok, _other} -> {:error, :enotdir}
       {:error, reason} -> {:error, reason}
@@ -343,7 +343,7 @@ defmodule H.ExecutionEnv.Host.Fs do
           if System.monotonic_time(:millisecond) >= ctx.deadline do
             {:ok, %{entries: Enum.reverse(ctx.entries_rev), truncated: true}}
           else
-            case File.ls(dir_abs) do
+            case FileSystem.ls(dir_abs) do
               {:ok, names} ->
                 filtered =
                   names
@@ -387,7 +387,7 @@ defmodule H.ExecutionEnv.Host.Fs do
         full = Path.join(dir_abs, name)
         rel = if rel_prefix == "", do: name, else: rel_prefix <> "/" <> name
 
-        case File.lstat(full) do
+        case FileSystem.lstat(full) do
           {:ok, %File.Stat{type: :regular, size: size}} ->
             next_ctx = maybe_collect_entry(ctx, rel, "file", size)
             process_dir_names(rest, dir_abs, rel_prefix, depth, queue, next_ctx)
@@ -451,7 +451,7 @@ defmodule H.ExecutionEnv.Host.Fs do
   # --- Line scanning ---
 
   defp check_stat_for_read(resolved, true) do
-    case File.lstat(resolved) do
+    case FileSystem.lstat(resolved) do
       {:ok, %File.Stat{type: :regular}} -> :ok
       {:ok, %File.Stat{type: :symlink}} -> {:error, :symlink_not_followed}
       {:ok, %File.Stat{type: :directory}} -> {:error, :eisdir}
@@ -461,7 +461,7 @@ defmodule H.ExecutionEnv.Host.Fs do
   end
 
   defp check_stat_for_read(resolved, false) do
-    case File.stat(resolved) do
+    case FileSystem.stat(resolved) do
       {:ok, %File.Stat{type: :regular}} -> :ok
       {:ok, %File.Stat{type: :directory}} -> {:error, :eisdir}
       {:ok, _other} -> {:error, :not_regular_file}
@@ -673,7 +673,7 @@ defmodule H.ExecutionEnv.Host.Fs do
   # --- Atomic write ---
 
   defp existing_file_mode(resolved) do
-    case File.stat(resolved) do
+    case FileSystem.stat(resolved) do
       {:ok, %File.Stat{type: :directory}} -> {:error, :eisdir}
       {:ok, %File.Stat{mode: mode}} -> {:ok, mode}
       {:error, :enoent} -> {:ok, nil}
@@ -699,16 +699,16 @@ defmodule H.ExecutionEnv.Host.Fs do
 
       with :ok <- write_res,
            :ok <- maybe_chmod(tmp_path, existing_mode),
-           :ok <- File.rename(tmp_path, resolved) do
+           :ok <- FileSystem.rename(tmp_path, resolved) do
         :ok
       else
         {:error, reason} ->
-          File.rm(tmp_path)
+          FileSystem.rm(tmp_path)
           {:error, reason}
       end
     end
   end
 
   defp maybe_chmod(_path, nil), do: :ok
-  defp maybe_chmod(path, mode), do: File.chmod(path, Bitwise.band(mode, 0o777))
+  defp maybe_chmod(path, mode), do: FileSystem.chmod(path, Bitwise.band(mode, 0o777))
 end

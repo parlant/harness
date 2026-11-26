@@ -211,6 +211,7 @@
           inbox={@inbox}
           tail_activity={@tail_activity}
           tasks={@tasks}
+          catalog_by_id={@catalog.by_id}
         />
         <div :if={@session && @session.status == "archived"} class="session-recovery">
           <div class="archive-readonly-bar">

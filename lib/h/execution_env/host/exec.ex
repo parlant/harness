@@ -4,6 +4,8 @@ defmodule H.ExecutionEnv.Host.Exec do
   reaping, and rolling tail/spill-file output buffering for `H.ExecutionEnv.Host`.
   """
 
+  alias H.ExecutionEnv.Host.FileSystem
+
   @default_read_lines 2_000
   @default_read_bytes 51_200
   @default_timeout_ms 120_000
@@ -56,7 +58,7 @@ defmodule H.ExecutionEnv.Host.Exec do
     if Enum.all?(args, &is_binary/1) do
       exe_path =
         if String.contains?(exe, "/") do
-          if File.regular?(exe), do: exe, else: nil
+          if FileSystem.regular?(exe), do: exe, else: nil
         else
           System.find_executable(exe)
         end
@@ -74,7 +76,7 @@ defmodule H.ExecutionEnv.Host.Exec do
   defp resolve_command(_), do: {:error, :invalid_command}
 
   defp ensure_cwd_dir(cwd) do
-    if File.dir?(cwd), do: :ok, else: {:error, :enoent}
+    if FileSystem.dir?(cwd), do: :ok, else: {:error, :enoent}
   end
 
   defp build_sanitized_env(state_overrides, opt_overrides) do
@@ -243,7 +245,7 @@ defmodule H.ExecutionEnv.Host.Exec do
     cond do
       exe =
           System.find_executable("kill") ||
-            Enum.find(["/bin/kill", "/usr/bin/kill"], &File.regular?/1) ->
+            Enum.find(["/bin/kill", "/usr/bin/kill"], &FileSystem.regular?/1) ->
         System.cmd(exe, ["-#{sig}", "--", "-#{os_pid}"], stderr_to_stdout: true)
 
       true ->
@@ -392,7 +394,7 @@ defmodule H.ExecutionEnv.Host.Exec do
 
     case :file.open(spill_path, [:write, :binary, :raw, :exclusive]) do
       {:ok, fd} ->
-        File.chmod(spill_path, 0o600)
+        FileSystem.chmod(spill_path, 0o600)
 
         buf.chunks
         |> :queue.to_list()

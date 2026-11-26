@@ -115,11 +115,50 @@ defmodule H.Catalog do
       queued_count: normalize_queued_count(Map.get(entry, :queued_count)),
       needs_attention: needs_attention,
       archived: archived,
-      loaded: session_loaded?(registry, entry.session_id),
-      cwd_exists: cwd_exists?(env_id, entry.cwd),
+      loaded:
+        case Keyword.fetch(opts, :loaded_ids) do
+          {:ok, loaded_ids} -> MapSet.member?(loaded_ids, entry.session_id)
+          :error -> session_loaded?(registry, entry.session_id)
+        end,
+      cwd_exists:
+        case Keyword.fetch(opts, :cwd_cache) do
+          {:ok, cwd_cache} -> Map.get(cwd_cache, {env_id, entry.cwd}, true)
+          :error -> cwd_exists?(env_id, entry.cwd)
+        end,
       next_wake_at: Map.get(entry, :next_wake_at),
       status: status
     }
+  end
+
+  @doc """
+  Formats a list of catalog entries into `SessionSummary` wire maps, deduplicating
+  per-directory `cwd_exists` checks and live session registry lookups across the batch.
+  """
+  @spec wire_sessions([map()], keyword()) :: [map()]
+  def wire_sessions([], _opts), do: []
+
+  def wire_sessions(entries, opts) when is_list(entries) and is_list(opts) do
+    registry = Keyword.get(opts, :registry, @default_registry)
+    loaded_ids = loaded_session_ids(registry)
+
+    cwd_cache =
+      Enum.reduce(entries, %{}, fn entry, acc ->
+        key = {Map.get(entry, :env_id) || "host", entry.cwd}
+
+        if Map.has_key?(acc, key) do
+          acc
+        else
+          {env_id, cwd} = key
+          Map.put(acc, key, cwd_exists?(env_id, cwd))
+        end
+      end)
+
+    wire_opts =
+      opts
+      |> Keyword.put(:loaded_ids, loaded_ids)
+      |> Keyword.put(:cwd_cache, cwd_cache)
+
+    Enum.map(entries, &wire_session(&1, wire_opts))
   end
 
   @doc """
@@ -904,6 +943,28 @@ defmodule H.Catalog do
     end
   end
 
+  defp loaded_session_ids(registry) when is_atom(registry) and not is_nil(registry) do
+    if Process.whereis(registry) != nil do
+      try do
+        registry
+        |> Registry.select([{{{:session, :"$1"}, :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+        |> Enum.reduce(MapSet.new(), fn
+          {sid, pid}, acc when is_binary(sid) and is_pid(pid) ->
+            if Process.alive?(pid), do: MapSet.put(acc, sid), else: acc
+
+          _, acc ->
+            acc
+        end)
+      catch
+        _, _ -> MapSet.new()
+      end
+    else
+      MapSet.new()
+    end
+  end
+
+  defp loaded_session_ids(_registry), do: MapSet.new()
+
   defp session_loaded?(registry, session_id)
        when is_atom(registry) and not is_nil(registry) and is_binary(session_id) do
     if Process.whereis(registry) != nil do
@@ -922,7 +983,9 @@ defmodule H.Catalog do
 
   defp session_loaded?(_registry, _session_id), do: false
 
-  defp cwd_exists?("host", cwd) when is_binary(cwd), do: File.dir?(cwd)
+  defp cwd_exists?("host", cwd) when is_binary(cwd),
+    do: H.ExecutionEnv.Host.FileSystem.dir?(cwd)
+
   defp cwd_exists?(_env_id, _cwd), do: true
 
   defp enforce_status_attention(%{status: "quarantined"} = entry),
@@ -948,12 +1011,14 @@ defmodule H.Catalog do
 
   defp broadcast_upsert(pubsub, registry, seq, entry) do
     if not is_nil(pubsub) and Process.whereis(pubsub) != nil do
+      wired = wire_session(entry, registry: registry)
+
       payload =
         %{
           "version" => 1,
           "seq" => seq,
           "type" => "upsert",
-          "session" => wire_session(entry, registry: registry)
+          "session" => wired
         }
         |> JSON.encode_to_iodata!()
         |> IO.iodata_to_binary()
@@ -961,6 +1026,12 @@ defmodule H.Catalog do
       Registry.dispatch(pubsub, :catalog, fn entries ->
         for {pid, _} <- entries do
           send(pid, {:catalog_frame, seq, payload})
+        end
+      end)
+
+      Registry.dispatch(pubsub, {:catalog_session, entry.session_id}, fn entries ->
+        for {pid, _} <- entries do
+          send(pid, {:child_catalog_updated, entry.session_id, wired})
         end
       end)
     end
@@ -981,6 +1052,12 @@ defmodule H.Catalog do
       Registry.dispatch(pubsub, :catalog, fn entries ->
         for {pid, _} <- entries do
           send(pid, {:catalog_frame, seq, payload})
+        end
+      end)
+
+      Registry.dispatch(pubsub, {:catalog_session, session_id}, fn entries ->
+        for {pid, _} <- entries do
+          send(pid, {:child_catalog_updated, session_id, nil})
         end
       end)
     end

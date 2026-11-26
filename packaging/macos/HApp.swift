@@ -10,6 +10,7 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
     private var restartItem: NSMenuItem!
     private var quitItem: NSMenuItem!
 
+    private var permissionWindow: NSWindow?
     private var daemonProcess: Process?
     private var ownedDaemon = false
     private var pollTimer: Timer?
@@ -28,7 +29,7 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var daemonLauncherPath: String {
-        harnessRoot.appendingPathComponent("bin/h-daemon").path
+        Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/hi-exec").path
     }
 
     private var hiImportPath: String {
@@ -96,6 +97,14 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
         )
         installCliItem.target = self
         menu.addItem(installCliItem)
+
+        let permissionsItem = NSMenuItem(
+            title: "Permissions & Setup…",
+            action: #selector(showPermissionGuide),
+            keyEquivalent: ""
+        )
+        permissionsItem.target = self
+        menu.addItem(permissionsItem)
 
         restartItem = NSMenuItem(
             title: "Drain & Restart Daemon",
@@ -188,7 +197,7 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: daemonLauncherPath)
-        process.arguments = ["--data-dir", dataDir.path]
+        process.arguments = ["daemon", "--data-dir", dataDir.path]
         process.environment = daemonEnvironment()
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
 
@@ -249,6 +258,99 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openWebUI() {
         ensureDaemonAndOpenBrowser()
+    }
+
+    @objc private func showPermissionGuide() {
+        permissionWindow?.close()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 660, height: 650),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.title = "H — Permissions & Setup"
+        window.isReleasedWhenClosed = false
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView!.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24)
+        ])
+
+        let external = isDaemonRunning() && !ownedDaemon
+        let locationWarning = Bundle.main.bundleURL.path == "/Applications/H.app"
+            ? "Keep H in /Applications and replace it there when upgrading."
+            : "Move H.app to /Applications, then quit and reopen it. Running from Downloads, a disk image, or a versioned release can change its permission identity."
+        let daemonNote = external
+            ? "An external daemon is running. Permissions granted to H.app may not apply to it. In a terminal, run hi daemon check-service; if registered, run hi daemon uninstall-service, otherwise hi daemon stop. These commands drain active work. Then quit and reopen H. H will not take over the service automatically."
+            : "H starts its bundled daemon through hi-exec. After changing permissions, use Drain & Restart Daemon from the H menu."
+        let text = """
+        1. Install at a stable location
+        \(locationWarning)
+        Native helper: \(daemonLauncherPath)
+
+        2. Allow only the folder access you need
+        Desktop, Documents, Downloads, and some external/network locations are protected by macOS. Open a folder intentionally and respond to its prompt. Review existing decisions in Files & Folders. Keeping projects in ~/Projects avoids many folder prompts.
+
+        Full Disk Access is optional and broad: it can expose sensitive user data to H and its tools. Use it only if you intend that access. Add H.app, or the exact hi-exec/runtime executable named by macOS. Reveal hi-exec below; use Shift-Command-G in the settings file picker to enter a path.
+
+        3. Check which daemon is running
+        \(daemonNote)
+
+        Accessibility and Screen Recording are separate permissions for future computer-control features. H does not currently request or use them. Do not enable them for ordinary coding or folder access.
+
+        macOS chooses the responsible process and may still name erlexec or beam.smp. Signed releases with the same developer and identifiers are intended to preserve identity; ad-hoc builds and signing changes may require new approval. A stable path alone is not a guarantee. H cannot grant permissions or reliably infer all privacy decisions.
+        """
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let body = NSTextView(frame: NSRect(x: 0, y: 0, width: 590, height: 490))
+        body.isEditable = false
+        body.isSelectable = true
+        body.isRichText = false
+        body.font = NSFont.systemFont(ofSize: 13)
+        body.string = text
+        body.isVerticallyResizable = true
+        body.autoresizingMask = [.width]
+        body.textContainer?.widthTracksTextView = true
+        body.textContainer?.containerSize = NSSize(width: 590, height: CGFloat.greatestFiniteMagnitude)
+        scroll.documentView = body
+        stack.addArrangedSubview(scroll)
+        scroll.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 490).isActive = true
+
+        let settings = NSStackView()
+        settings.spacing = 8
+        for (title, pane) in [("Files & Folders", "Privacy_FilesAndFolders"),
+                              ("Full Disk Access", "Privacy_AllFiles"),
+                              ("Accessibility", "Privacy_Accessibility"),
+                              ("Screen Recording", "Privacy_ScreenCapture")] {
+            let button = NSButton(title: title, target: self, action: #selector(openPrivacySettings(_:)))
+            button.identifier = NSUserInterfaceItemIdentifier(pane)
+            settings.addArrangedSubview(button)
+        }
+        stack.addArrangedSubview(settings)
+        let reveal = NSButton(title: "Reveal hi-exec in Finder", target: self, action: #selector(revealPermissionHelper))
+        stack.addArrangedSubview(reveal)
+        permissionWindow = window
+        window.center()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func openPrivacySettings(_ sender: NSButton) {
+        guard let pane = sender.identifier?.rawValue,
+              let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") else { return }
+        if !NSWorkspace.shared.open(url) {
+            presentAlert(title: "Open Privacy & Security", message: "Open System Settings → Privacy & Security manually. Settings links vary between macOS versions.")
+        }
+    }
+
+    @objc private func revealPermissionHelper() {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: daemonLauncherPath)])
     }
 
     @objc private func copyAuthToken() {

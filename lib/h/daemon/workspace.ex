@@ -180,6 +180,7 @@ defmodule H.Daemon.Workspace do
       {:error, {:agent_down, _}} -> {:error, :workspace_unavailable}
       {:error, :enoent} -> {:error, :not_found}
       {:error, :enotdir} -> {:error, {:bad_request, "path is not a directory"}}
+      {:error, reason} when reason in [:eacces, :eperm] -> {:error, reason}
       {:error, reason} -> {:error, {:bad_request, "invalid path: #{inspect(reason)}"}}
     end
   end
@@ -191,6 +192,7 @@ defmodule H.Daemon.Workspace do
       {:error, :enoent} -> {:error, :not_found}
       {:error, :enotdir} -> {:error, {:bad_request, "cwd is not a directory"}}
       {:error, :einval} -> {:error, {:bad_request, "invalid cwd"}}
+      {:error, reason} when reason in [:eacces, :eperm] -> {:error, reason}
       {:error, reason} -> {:error, {:bad_request, "invalid cwd: #{inspect(reason)}"}}
     end
   end

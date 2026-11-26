@@ -1266,6 +1266,16 @@ fn render_live(
                     theme.tool_meta,
                 ));
             }
+            if let Some(child_act) = slot
+                .get("child_activity")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                live_spans.push(StyledSpan::new(
+                    sanitize_single_line(&format!(" · {child_act}")),
+                    theme.tool_meta,
+                ));
+            }
         }
         live_spans.push(StyledSpan::new(")] ", theme.tool_header));
         live_spans.push(StyledSpan::new(

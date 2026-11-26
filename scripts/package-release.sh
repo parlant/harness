@@ -21,7 +21,7 @@ if [ ! -f "$manifest" ]; then
   exit 1
 fi
 
-for req in bin/hi bin/h-daemon bin/hi-import bin/harness releases/start_erl.data README.md LICENSE; do
+for req in bin/hi bin/hi-exec bin/h-daemon bin/hi-import bin/harness releases/start_erl.data README.md LICENSE; do
   if [ ! -e "$bundle_dir/$req" ]; then
     echo "Incomplete bundle ($bundle_dir): missing $req" >&2
     exit 1

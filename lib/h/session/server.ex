@@ -371,6 +371,14 @@ defmodule H.Session.Server do
     process_with_drain({:subagent_failed, tid, reason}, state)
   end
 
+  def handle_info({:child_catalog_updated, child_sid, child_summary}, state)
+      when is_binary(child_sid) do
+    {:noreply,
+     child_sid
+     |> Subagents.handle_child_catalog_updated(child_summary, state)
+     |> update_idle_timer()}
+  end
+
   def handle_info({:workspace_lease_granted, token}, state) do
     {effects, state} = WorkspaceWait.granted(token, state)
     {:noreply, effects |> apply_effects_list(state) |> update_idle_timer()}

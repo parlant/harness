@@ -2,6 +2,9 @@
 # Use the adjacent OTP release, not `elixir` or `mix` from the operator's PATH.
 set -eu
 bin=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+# The app supplies its stable Contents/MacOS/hi-exec path; standalone bundles
+# use their adjacent helper. Source-checkout launchers do not set this variable.
+export H_FS_EXECUTABLE="${H_FS_EXECUTABLE:-$bin/hi-exec}"
 # ERTS prepends its own bin directories to PATH. Pass the operator PATH as
 # an argv item (not a service secret or an Erlang flag) and restore it in H.
 exec "$bin/harness" eval '

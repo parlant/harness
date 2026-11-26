@@ -57,6 +57,7 @@ def smoke(source):
         def run(*args, check=True):
             return subprocess.run(args, check=check, env=env, cwd=root, capture_output=True, text=True, timeout=30)
 
+        assert json.loads(run(bundle / "bin/hi-exec", "fs", "ls", home).stdout) == {"ok": []}
         assert "Usage:" in run(launcher, "--help").stdout
         assert run(launcher, "--invalid", check=False).returncode == 2
         assert "not running" in run(hi, "daemon", "status", check=False).stderr

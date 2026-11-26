@@ -477,6 +477,43 @@ defmodule H.WorkspaceFilesTest do
   end
 
   describe "HTTP auth, Host guard, Unix socket, and policy status mapping" do
+    test "reports native folder timeouts and denials without blocking catalog storage", ctx do
+      helper = Path.join(ctx.host_ws, "native-helper")
+      previous = System.get_env("H_FS_EXECUTABLE")
+      System.put_env("H_FS_EXECUTABLE", helper)
+
+      on_exit(fn ->
+        if previous,
+          do: System.put_env("H_FS_EXECUTABLE", previous),
+          else: System.delete_env("H_FS_EXECUTABLE")
+      end)
+
+      for {error, status, message} <- [
+            {"timeout", 503, "Folder access timed out"},
+            {"eperm", 403, "Folder access denied"}
+          ] do
+        File.write!(helper, "#!/bin/sh\nprintf '%s' '{\"error\":\"#{error}\"}'\n")
+        File.chmod!(helper, 0o700)
+
+        response =
+          Req.get!("#{ctx.base_url}/api/v1/fs/files",
+            headers: [{"authorization", "Bearer #{ctx.token}"}],
+            params: [env_id: "host", cwd: ctx.host_ws],
+            retry: false
+          )
+
+        assert response.status == status
+        assert response.body["error"] =~ message
+        assert response.body["error"] =~ "Permissions & Setup"
+
+        assert {:ok, _} =
+                 Catalog.put_session(ctx.catalog, %{
+                   session_id: "after-#{error}",
+                   cwd: ctx.host_ws
+                 })
+      end
+    end
+
     test "enforces Host header, Bearer/Cookie auth, read-only methods, and status codes over TCP and UDS",
          ctx do
       {:ok, _} =

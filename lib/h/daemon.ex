@@ -299,7 +299,7 @@ defmodule H.Daemon do
 
     table
     |> Catalog.list_sessions()
-    |> Enum.map(&wire_session(&1, opts))
+    |> Catalog.wire_sessions(opts)
   end
 
   @doc "Lists sessions filtered by `env_id`, `cwd`, optional `subtree`, `archived`, and `include_subsessions`."
@@ -350,7 +350,7 @@ defmodule H.Daemon do
               include_subsessions: include_subsessions?
             )
             |> filter_archived(archived_filter)
-            |> Enum.map(&wire_session(&1, opts))
+            |> Catalog.wire_sessions(opts)
 
           {:ok, sessions}
 
@@ -363,7 +363,7 @@ defmodule H.Daemon do
                 (include_subsessions? or Catalog.root_session?(entry))
             end)
             |> filter_archived(archived_filter)
-            |> Enum.map(&wire_session(&1, opts))
+            |> Catalog.wire_sessions(opts)
 
           {:ok, sessions}
 
@@ -373,7 +373,7 @@ defmodule H.Daemon do
             |> Catalog.list_sessions()
             |> Enum.filter(&(include_subsessions? or Catalog.root_session?(&1)))
             |> filter_archived(archived_filter)
-            |> Enum.map(&wire_session(&1, opts))
+            |> Catalog.wire_sessions(opts)
 
           {:ok, sessions}
       end
@@ -1230,7 +1230,7 @@ defmodule H.Daemon do
         %{
           "version" => 1,
           "seq" => seq,
-          "sessions" => Enum.map(entries, &wire_session(&1, opts))
+          "sessions" => Catalog.wire_sessions(entries, opts)
         }
         |> JSON.encode_to_iodata!()
         |> IO.iodata_to_binary()
