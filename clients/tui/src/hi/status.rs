@@ -52,6 +52,7 @@ pub(super) struct StatusFields<'a> {
     session_title: Option<&'a str>,
     session_status: Option<&'a str>,
     harness_id: Option<&'a str>,
+    pub theme: &'a str,
     cwd_exists: bool,
     needs_attention: bool,
     seq: Option<u64>,

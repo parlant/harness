@@ -17,12 +17,14 @@ import time
 from typing import Iterable
 
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_APC_RE = re.compile(r"\x1b_[^\x1b]*\x1b\\")
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ANSI_ESC_RE = re.compile(r"\x1b[@-Z\\-_]")
 
 
 def strip_ansi(text: str) -> str:
     cleaned = _ANSI_OSC_RE.sub("", text)
+    cleaned = _ANSI_APC_RE.sub("", cleaned)
     cleaned = _ANSI_CSI_RE.sub("", cleaned)
     cleaned = _ANSI_ESC_RE.sub("", cleaned)
     return cleaned
@@ -73,6 +75,13 @@ class VirtualScreen:
                     i = end + 1
                     continue
                 if nxt == "]":
+                    end = self._find_osc_end(data, i + 2)
+                    if end is None:
+                        self._buf = data[i:]
+                        break
+                    i = end
+                    continue
+                if nxt == "_":
                     end = self._find_osc_end(data, i + 2)
                     if end is None:
                         self._buf = data[i:]

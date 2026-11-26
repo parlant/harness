@@ -906,6 +906,7 @@ impl Ui {
         fields.retry_pending = self.draft.retry.is_some();
         fields.historical = self.historical.is_some();
         fields.show_tools = self.tools;
+        fields.theme = &self.config.theme.name;
         self.status_metadata.apply(&mut fields, &self.state);
         fields.show_thinking = self.thinking;
         fields
