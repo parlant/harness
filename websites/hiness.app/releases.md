@@ -8,4 +8,4 @@ lead: Official announcements, signed H.app disk images, CLI bundles, and version
 description: Synchronized news, signed H.app macOS disk images, multi-platform bundles, and changelog shared across hiness.app and hiness.dev.
 ---
 
-Download `H-v0.5.0-darwin-arm64.dmg` from [hiness.app/#download](/#download), install the CLI and background service via [hiness.dev](https://hiness.dev/#install), or browse the mirrored source history on [GitHub](https://github.com/parlant/harness) and [GitLab](https://gitlab.com/parlant-co/harness).
+Download `H-v0.5.1-darwin-arm64.dmg` from [hiness.app/#download](/#download), install the CLI and background service via [hiness.dev](https://hiness.dev/#install), or browse the mirrored source history on [GitHub](https://github.com/parlant/harness) and [GitLab](https://gitlab.com/parlant-co/harness).

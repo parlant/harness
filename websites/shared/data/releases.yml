@@ -1,4 +1,4 @@
-current_version: "0.5.0"
+current_version: "0.5.1"
 signer_identity: "bingboombam@parlant.xyz"
 signer_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsOhoxQkZ8pxWeObg2Q10fJ/Gcg0uL4pt1Oy/3vgLuN"
 github_repo: "https://github.com/parlant/harness"
@@ -10,6 +10,14 @@ hex_hiness: "https://hex.pm/packages/hiness"
 hexdocs_hiness: "https://hiness.hexdocs.pm/"
 
 news:
+  - id: v0-5-1-hi-pty-disconnect
+    date: "2026-11-26"
+    tag: "Release v0.5.1"
+    title: "H v0.5.1 fixes hi CPU spin after terminal disconnect"
+    summary: "Closing a terminal window or tmux pane no longer leaves orphaned hi processes spinning at 100% CPU."
+    links:
+      - label: Download H v0.5.1
+        url: "https://gitlab.com/parlant-co/harness/-/releases/v0.5.1"
   - id: v0-5-0-session-visibility
     date: "2026-11-26"
     tag: "Release v0.5.0"
@@ -55,10 +63,39 @@ news:
     summary: "First signed standalone bundles for macOS Apple Silicon (darwin-arm64) and Linux (linux-arm64, linux-x86_64), the h_setup Mix archive, and the native AppKit H.app menu-bar launcher."
 
 entries:
+  - version: "0.5.1"
+    tag: "v0.5.1"
+    date: "2026-11-26"
+    status: "Current release"
+    title: "Prevent hi CPU spin on terminal disconnect"
+    summary: "Fix an infinite read loop in the terminal client when its PTY closes, and exit cleanly on SIGHUP or terminal hangup."
+    artifacts:
+      - name: "H-v0.5.1-darwin-arm64.dmg"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "macOS Disk Image (H.app)"
+      - name: "H-v0.5.1-darwin-arm64.app.zip"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Zipped macOS Application Bundle"
+      - name: "harness-v0.5.1-darwin-arm64.tar.gz"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.5.1-linux-arm64.tar.gz"
+        platform: "Linux aarch64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.5.1-linux-x86_64.tar.gz"
+        platform: "Linux x86_64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "h_setup-v0.5.1.ez"
+        platform: "Elixir 1.18+ / Mix"
+        kind: "Signed Mix Archive Installer"
+    highlights:
+      - "Enable crossterm's `use-dev-tty` backend so PTY EOF breaks out of event polling instead of spinning in `read()`."
+      - "Handle `SIGHUP` and check stdin for `POLLHUP`/`POLLERR`/`POLLNVAL` in `hi`'s event loop so disconnected terminals exit cleanly."
+
   - version: "0.5.0"
     tag: "v0.5.0"
     date: "2026-11-26"
-    status: "Current release"
+    status: "Previous release"
     title: "Subagent wait visibility and quieter catalog streams"
     summary: "The terminal and web clients identify awaited subagents and surface their provider blockers. The daemon avoids repeated idle catalog snapshots and redundant workspace checks."
     artifacts:
