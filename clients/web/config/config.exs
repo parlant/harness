@@ -17,7 +17,14 @@ config :harness_web, HWeb.Endpoint,
 
 # API keys and named-provider edits use CSRF-protected POSTs, not LiveView events.
 # Do not include submitted keys or provider edit payloads in request diagnostics.
-config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key", "provider"]
+config :phoenix, :filter_parameters, [
+  "password",
+  "token",
+  "code",
+  "secret",
+  "api_key",
+  "provider"
+]
 
 config :phoenix, :json_library, Jason
 

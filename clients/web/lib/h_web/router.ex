@@ -25,6 +25,7 @@ defmodule HWeb.Router do
     pipe_through(:browser)
 
     get("/login", AuthController, :new)
+    get("/login/link", AuthController, :link)
     post("/login", AuthController, :create)
     post("/logout", AuthController, :delete)
     delete("/logout", AuthController, :delete)

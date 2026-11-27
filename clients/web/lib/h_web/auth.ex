@@ -77,6 +77,28 @@ defmodule HWeb.Auth do
 
   def create_browser_session(_), do: {:error, :unauthorized}
 
+  @doc "Redeems a single-use sign-in code for a browser session token via `H.Auth` or the HTTP backend."
+  @spec redeem_sign_in_code(term()) ::
+          {:ok, String.t()} | {:error, :unauthorized | :auth_unavailable}
+  def redeem_sign_in_code(code) when is_binary(code) and byte_size(code) > 0 do
+    backend = HWeb.Backend.impl()
+
+    if Code.ensure_loaded?(backend) and function_exported?(backend, :redeem_sign_in_code, 2) do
+      backend.redeem_sign_in_code(code, [])
+    else
+      server = auth_server()
+      table = auth_table()
+
+      if :ets.whereis(table) != :undefined and GenServer.whereis(server) != nil do
+        H.Auth.redeem_sign_in_code(code, server, table)
+      else
+        {:error, :auth_unavailable}
+      end
+    end
+  end
+
+  def redeem_sign_in_code(_), do: {:error, :unauthorized}
+
   defp auth_server do
     daemon_opts = HWeb.Backend.InVM.daemon_opts()
     Keyword.get(daemon_opts, :auth_server, H.Auth)

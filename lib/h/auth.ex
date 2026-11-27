@@ -11,6 +11,8 @@ defmodule H.Auth do
 
   @default_table :h_auth
   @max_cookies 64
+  @max_sign_in_codes 32
+  @default_sign_in_code_ttl_ms 60_000
 
   @doc """
   Starts the auth manager.
@@ -60,6 +62,41 @@ defmodule H.Auth do
       {:error, :unauthorized}
     end
   end
+
+  @doc """
+  Verifies `owner_token_candidate` in constant time and, if valid, mints a fresh
+  short-lived single-use browser sign-in code stored in ETS.
+  """
+  @spec create_sign_in_code(term(), GenServer.server(), atom(), pos_integer()) ::
+          {:ok, String.t()} | {:error, :unauthorized}
+  def create_sign_in_code(
+        owner_token_candidate,
+        server \\ __MODULE__,
+        table \\ @default_table,
+        ttl_ms \\ @default_sign_in_code_ttl_ms
+      )
+      when is_integer(ttl_ms) and ttl_ms > 0 do
+    if verify_bearer(owner_token_candidate, table) do
+      GenServer.call(server, {:create_sign_in_code, ttl_ms})
+    else
+      {:error, :unauthorized}
+    end
+  end
+
+  @doc """
+  Redeems a short-lived single-use sign-in code and, if valid and unexpired,
+  deletes the code and mints a fresh 32-byte browser session cookie.
+  """
+  @spec redeem_sign_in_code(term(), GenServer.server(), atom()) ::
+          {:ok, String.t()} | {:error, :unauthorized}
+  def redeem_sign_in_code(code_candidate, server \\ __MODULE__, _table \\ @default_table)
+
+  def redeem_sign_in_code(code_candidate, server, _table)
+      when is_binary(code_candidate) and byte_size(code_candidate) > 0 do
+    GenServer.call(server, {:redeem_sign_in_code, code_candidate})
+  end
+
+  def redeem_sign_in_code(_code_candidate, _server, _table), do: {:error, :unauthorized}
 
   @doc """
   Constant-time comparison of `cookie_candidate` against active browser session cookies.
@@ -123,11 +160,70 @@ defmodule H.Auth do
     table = :ets.new(table_name, [:set, :protected, :named_table, read_concurrency: true])
     :ets.insert(table, {:owner_token, token})
 
-    {:ok, %{table: table, token_path: token_path, cookie_order: :queue.new()}}
+    {:ok,
+     %{
+       table: table,
+       token_path: token_path,
+       cookie_order: :queue.new(),
+       code_order: :queue.new()
+     }}
   end
 
   @impl true
   def handle_call(:create_browser_session, _from, state) do
+    {cookie, state} = mint_browser_session(state)
+    {:reply, {:ok, cookie}, state}
+  end
+
+  def handle_call({:create_sign_in_code, ttl_ms}, _from, state) do
+    now = System.monotonic_time(:millisecond)
+    state = prune_expired_sign_in_codes(state, now)
+
+    code = generate_secret()
+    expires_at = now + ttl_ms
+    :ets.insert(state.table, {{:sign_in_code, code}, expires_at})
+
+    code_order = :queue.in(code, state.code_order)
+
+    code_order =
+      if :queue.len(code_order) > @max_sign_in_codes do
+        {{:value, oldest}, rest} = :queue.out(code_order)
+        :ets.delete(state.table, {:sign_in_code, oldest})
+        rest
+      else
+        code_order
+      end
+
+    {:reply, {:ok, code}, %{state | code_order: code_order}}
+  end
+
+  def handle_call({:redeem_sign_in_code, candidate}, _from, state) do
+    now = System.monotonic_time(:millisecond)
+    state = prune_expired_sign_in_codes(state, now)
+
+    matched_code =
+      state.table
+      |> :ets.match({{:sign_in_code, :"$1"}, :"$2"})
+      |> Enum.reduce(nil, fn [stored, expires_at], acc ->
+        if Plug.Crypto.secure_compare(candidate, stored) and expires_at > now do
+          stored
+        else
+          acc
+        end
+      end)
+
+    case matched_code do
+      nil ->
+        {:reply, {:error, :unauthorized}, state}
+
+      code ->
+        :ets.delete(state.table, {:sign_in_code, code})
+        {cookie, state} = mint_browser_session(state)
+        {:reply, {:ok, cookie}, state}
+    end
+  end
+
+  defp mint_browser_session(state) do
     cookie = generate_secret()
     :ets.insert(state.table, {{:cookie, cookie}, true})
 
@@ -142,7 +238,28 @@ defmodule H.Auth do
         cookie_order
       end
 
-    {:reply, {:ok, cookie}, %{state | cookie_order: cookie_order}}
+    {cookie, %{state | cookie_order: cookie_order}}
+  end
+
+  defp prune_expired_sign_in_codes(state, now) do
+    kept =
+      state.code_order
+      |> :queue.to_list()
+      |> Enum.filter(fn code ->
+        case :ets.lookup(state.table, {:sign_in_code, code}) do
+          [{_, expires_at}] when expires_at > now ->
+            true
+
+          [{_, _expired}] ->
+            :ets.delete(state.table, {:sign_in_code, code})
+            false
+
+          [] ->
+            false
+        end
+      end)
+
+    %{state | code_order: :queue.from_list(kept)}
   end
 
   defp load_or_create_token!(token_path) do

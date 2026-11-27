@@ -10,6 +10,9 @@
 #   APPLE_ID                 Apple ID (alternative to APPLE_NOTARY_PROFILE)
 #   APPLE_TEAM_ID            Apple Team ID (with APPLE_ID)
 #   APPLE_APP_PASSWORD       App-specific password (with APPLE_ID)
+#   APPLE_NOTARY_KEY         Path to App Store Connect API .p8 key (alternative to APPLE_NOTARY_PROFILE)
+#   APPLE_NOTARY_KEY_ID      App Store Connect API Key ID (with APPLE_NOTARY_KEY)
+#   APPLE_NOTARY_ISSUER      App Store Connect API Issuer UUID (with APPLE_NOTARY_KEY)
 #   H_SKIP_APP_ZIP           Set to 1 to skip producing the .app.zip alongside .dmg
 set -eu
 
@@ -142,7 +145,52 @@ env -i PATH=/usr/bin:/bin HOME="$work" "$macos_dir/hi-exec" daemon --help >/dev/
 env -i PATH=/usr/bin:/bin HOME="$work" "$macos_dir/hi-exec" fs ls "$work" \
   | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin)["ok"], list)'
 
-# 7. Package .app.zip (optional, default on) and .dmg
+# 7. Optional Apple notarization + stapling of H.app BEFORE packaging .app.zip and .dmg,
+#    then package .app.zip and .dmg and notarize + staple the .dmg as well.
+notarize_artifact() {
+  artifact_path="$1"
+  if [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
+    xcrun notarytool submit "$artifact_path" --keychain-profile "$APPLE_NOTARY_PROFILE" --wait
+    return 0
+  elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
+    xcrun notarytool submit "$artifact_path" \
+      --apple-id "$APPLE_ID" \
+      --team-id "$APPLE_TEAM_ID" \
+      --password "$APPLE_APP_PASSWORD" \
+      --wait
+    return 0
+  elif [ -n "${APPLE_NOTARY_KEY:-}" ] && [ -n "${APPLE_NOTARY_KEY_ID:-}" ] && [ -n "${APPLE_NOTARY_ISSUER:-}" ]; then
+    xcrun notarytool submit "$artifact_path" \
+      --key "$APPLE_NOTARY_KEY" \
+      --key-id "$APPLE_NOTARY_KEY_ID" \
+      --issuer "$APPLE_NOTARY_ISSUER" \
+      --wait
+    return 0
+  fi
+  return 1
+}
+
+notary_configured=0
+if [ -n "${APPLE_NOTARY_PROFILE:-}" ] || \
+   { [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; } || \
+   { [ -n "${APPLE_NOTARY_KEY:-}" ] && [ -n "${APPLE_NOTARY_KEY_ID:-}" ] && [ -n "${APPLE_NOTARY_ISSUER:-}" ]; }; then
+  notary_configured=1
+fi
+
+if [ "$notary_configured" = "1" ]; then
+  if [ "$identity" = "-" ]; then
+    echo 'Apple notarization requires a Developer ID Application APPLE_CODESIGN_IDENTITY (not ad-hoc `-`).' >&2
+    exit 1
+  fi
+  notary_zip="$work/H-notary.zip"
+  /usr/bin/ditto -c -k --keepParent "$app" "$notary_zip"
+  notarize_artifact "$notary_zip"
+  xcrun stapler staple "$app"
+  xcrun stapler validate "$app"
+  spctl --assess --type execute --verbose=4 "$app"
+fi
+
+# 8. Package .app.zip (optional, default on) and .dmg
 zip_path="$out_dir/H-v${version}-${target}.app.zip"
 dmg_path="$out_dir/H-v${version}-${target}.dmg"
 
@@ -170,17 +218,11 @@ if [ "$identity" != "-" ]; then
   /usr/bin/codesign --force --timestamp --sign "$identity" "$dmg_path"
 fi
 
-# 8. Optional Apple notarization + stapling
-if [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
-  xcrun notarytool submit "$dmg_path" --keychain-profile "$APPLE_NOTARY_PROFILE" --wait
+if [ "$notary_configured" = "1" ]; then
+  notarize_artifact "$dmg_path"
   xcrun stapler staple "$dmg_path"
-elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
-  xcrun notarytool submit "$dmg_path" \
-    --apple-id "$APPLE_ID" \
-    --team-id "$APPLE_TEAM_ID" \
-    --password "$APPLE_APP_PASSWORD" \
-    --wait
-  xcrun stapler staple "$dmg_path"
+  xcrun stapler validate "$dmg_path"
+  spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
 fi
 
 # Copy H.app into output directory if requested via H_KEEP_APP=1

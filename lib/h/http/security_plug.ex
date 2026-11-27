@@ -4,6 +4,8 @@ defmodule H.HTTP.SecurityPlug do
 
     * Rejects DNS rebinding via strict `Host` allowlist (`421`).
     * Handles `POST /api/v1/auth/session` owner-token to `HttpOnly; SameSite=Strict` cookie exchange.
+    * Handles `POST /api/v1/auth/sign-in-link` bearer-authenticated single-use sign-in code minting
+      and `POST /api/v1/auth/sign-in-link/redeem` single-use code to cookie exchange.
     * Enforces `Bearer` token or cookie + `Origin` + `application/json` auth on `/api/v1/*`.
     * Parses bounded JSON bodies (`4_000_000` bytes) via `Plug.Parsers`.
   """
@@ -116,6 +118,59 @@ defmodule H.HTTP.SecurityPlug do
   end
 
   defp enforce_route_security(
+         %Plug.Conn{method: "POST", path_info: ["api", "v1", "auth", "sign-in-link"]} = conn,
+         opts,
+         _port
+       ) do
+    auth_server = Keyword.get(opts, :auth_server, H.Auth)
+    auth_table = Keyword.get(opts, :auth_table, :h_auth)
+
+    case extract_bearer_token(conn) do
+      {:ok, token} ->
+        case H.Auth.create_sign_in_code(token, auth_server, auth_table) do
+          {:ok, code} ->
+            send_json_halt(conn, 200, %{"code" => code})
+
+          {:error, :unauthorized} ->
+            send_json_halt(conn, 401, %{"error" => "unauthorized"})
+        end
+
+      :error ->
+        send_json_halt(conn, 401, %{"error" => "unauthorized"})
+    end
+  end
+
+  defp enforce_route_security(
+         %Plug.Conn{method: "POST", path_info: ["api", "v1", "auth", "sign-in-link", "redeem"]} =
+           conn,
+         opts,
+         port
+       ) do
+    auth_server = Keyword.get(opts, :auth_server, H.Auth)
+    auth_table = Keyword.get(opts, :auth_table, :h_auth)
+
+    with :ok <- check_optional_origin(conn, port, opts),
+         :ok <- require_json_content_type(conn),
+         {:ok, conn} <- parse_json_body(conn) do
+      case H.Auth.redeem_sign_in_code(conn.body_params["code"], auth_server, auth_table) do
+        {:ok, cookie} ->
+          conn
+          |> put_resp_cookie("h_owner", cookie,
+            http_only: true,
+            same_site: "Strict",
+            path: "/api"
+          )
+          |> send_json_halt(200, %{"ok" => true})
+
+        {:error, :unauthorized} ->
+          send_json_halt(conn, 401, %{"error" => "invalid or expired sign-in code"})
+      end
+    else
+      {:error, status, msg} -> send_json_halt(conn, status, %{"error" => msg})
+    end
+  end
+
+  defp enforce_route_security(
          %Plug.Conn{method: "POST", path_info: ["api", "v1", "archives"]} = conn,
          opts,
          _port
@@ -212,18 +267,25 @@ defmodule H.HTTP.SecurityPlug do
   end
 
   defp bearer_authorized?(conn, auth_table) do
+    case extract_bearer_token(conn) do
+      {:ok, token} -> H.Auth.verify_bearer(token, auth_table)
+      :error -> false
+    end
+  end
+
+  defp extract_bearer_token(conn) do
     case get_req_header(conn, "authorization") do
       [header] ->
         case String.split(header, " ", parts: 2) do
           [scheme, token] when byte_size(token) > 0 ->
-            String.downcase(scheme) == "bearer" and H.Auth.verify_bearer(token, auth_table)
+            if String.downcase(scheme) == "bearer", do: {:ok, token}, else: :error
 
           _ ->
-            false
+            :error
         end
 
       _ ->
-        false
+        :error
     end
   end
 

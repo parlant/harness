@@ -44,9 +44,17 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
             .appendingPathComponent(".local/share/h", isDirectory: true)
     }
 
-    private var webInboxURL: URL {
+    private var webBaseURL: URL {
         let port = ProcessInfo.processInfo.environment["H_WEB_PORT"] ?? "4200"
-        return URL(string: "http://127.0.0.1:\(port)/inbox")!
+        return URL(string: "http://127.0.0.1:\(port)")!
+    }
+
+    private var webLandingPath: String {
+        "/workspaces"
+    }
+
+    private var webFallbackURL: URL {
+        webBaseURL.appendingPathComponent("workspaces")
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -144,10 +152,93 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
         return env
     }
 
-    private func isDaemonRunning() -> Bool {
+    private func readDaemonManifest() -> [String: Any]? {
         let manifestURL = dataDir.appendingPathComponent("daemon.json")
         guard let data = try? Data(contentsOf: manifestURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    private func readOwnerToken() -> String? {
+        let tokenURL = dataDir.appendingPathComponent("auth.token")
+        guard let token = try? String(contentsOf: tokenURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return nil
+        }
+        return token
+    }
+
+    private func daemonHTTPBaseURL() -> URL? {
+        guard let manifest = readDaemonManifest() else { return nil }
+        if let raw = manifest["http_url"] as? String, let url = URL(string: raw) {
+            return url
+        }
+        if let urls = manifest["http_urls"] as? [String],
+           let raw = urls.first,
+           let url = URL(string: raw) {
+            return url
+        }
+        return nil
+    }
+
+    private func mintSignInLinkURL() -> URL {
+        guard let token = readOwnerToken(),
+              let apiBase = daemonHTTPBaseURL(),
+              let endpoint = URL(string: "/api/v1/auth/sign-in-link", relativeTo: apiBase) else {
+            return webFallbackURL
+        }
+
+        let deadline = Date().addingTimeInterval(5.0)
+        var mintedCode: String?
+
+        while mintedCode == nil && Date() < deadline {
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 2.0
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+            let semaphore = DispatchSemaphore(value: 0)
+            var gotHTTPResponse = false
+
+            let task = URLSession.shared.dataTask(with: request) { data, response, _ in
+                defer { semaphore.signal() }
+                guard let http = response as? HTTPURLResponse else { return }
+                gotHTTPResponse = true
+                guard http.statusCode == 200,
+                      let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let code = json["code"] as? String,
+                      !code.isEmpty else {
+                    return
+                }
+                mintedCode = code
+            }
+            task.resume()
+            _ = semaphore.wait(timeout: .now() + 2.5)
+
+            if mintedCode != nil || gotHTTPResponse {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+
+        guard let code = mintedCode,
+              var components = URLComponents(url: webBaseURL, resolvingAgainstBaseURL: false) else {
+            return webFallbackURL
+        }
+        components.path = "/login/link"
+        components.queryItems = [
+            URLQueryItem(name: "code", value: code),
+            URLQueryItem(name: "next", value: webLandingPath)
+        ]
+        return components.url ?? webFallbackURL
+    }
+
+    private func isDaemonRunning() -> Bool {
+        guard let json = readDaemonManifest(),
               let pid = json["pid"] as? Int32,
               pid > 0 else {
             return false
@@ -241,11 +332,12 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
             self.busy = true
             self.refreshStatus()
             let ready = self.startDaemonIfNeeded()
+            let targetURL = ready ? self.mintSignInLinkURL() : self.webFallbackURL
             self.busy = false
             self.refreshStatus()
             DispatchQueue.main.async {
                 if ready {
-                    NSWorkspace.shared.open(self.webInboxURL)
+                    NSWorkspace.shared.open(targetURL)
                 } else {
                     self.presentAlert(
                         title: "H daemon did not become ready",

@@ -150,6 +150,36 @@ defmodule HWeb.Backend.HTTP do
   end
 
   @impl HWeb.Backend
+  def redeem_sign_in_code(code, opts \\ []) when is_binary(code) do
+    with {:ok, cfg} <- config(Keyword.put(opts, :allow_missing_token, true)) do
+      req_opts =
+        build_req_opts(cfg, "/api/v1/auth/sign-in-link/redeem",
+          json: %{"code" => code},
+          bearer?: false
+        )
+
+      case Req.post(req_opts) do
+        {:ok, %Req.Response{status: 200} = resp} ->
+          case extract_owner_cookie(resp) do
+            {:ok, cookie} -> {:ok, cookie}
+            :error -> {:error, :auth_unavailable}
+          end
+
+        {:ok, %Req.Response{status: 401}} ->
+          {:error, :unauthorized}
+
+        {:ok, %Req.Response{status: _}} ->
+          {:error, :auth_unavailable}
+
+        {:error, _} ->
+          {:error, :auth_unavailable}
+      end
+    else
+      _ -> {:error, :auth_unavailable}
+    end
+  end
+
+  @impl HWeb.Backend
   def verify_browser_session(cookie, opts \\ [])
 
   def verify_browser_session(cookie, opts) when is_binary(cookie) and byte_size(cookie) > 0 do

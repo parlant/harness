@@ -88,6 +88,52 @@ defmodule H.AuthTest do
     end
   end
 
+  describe "create_sign_in_code/4 and redeem_sign_in_code/3" do
+    test "mints a single-use code that redeems into a valid browser session cookie", %{
+      data_dir: data_dir,
+      table: table,
+      server: server
+    } do
+      start_supervised!({Auth, data_dir: data_dir, name: server, table: table})
+      token = Auth.owner_token(table)
+
+      assert {:error, :unauthorized} = Auth.create_sign_in_code("bad-token", server, table)
+      assert {:error, :unauthorized} = Auth.create_sign_in_code(nil, server, table)
+
+      assert {:ok, code} = Auth.create_sign_in_code(token, server, table)
+      assert is_binary(code)
+      assert code != token
+      assert {:ok, raw} = Base.url_decode64(code, padding: false)
+      assert byte_size(raw) == 32
+
+      refute Auth.verify_cookie(code, table)
+
+      assert {:ok, cookie} = Auth.redeem_sign_in_code(code, server, table)
+      assert cookie != code
+      assert cookie != token
+      assert Auth.verify_cookie(cookie, table)
+
+      # Single-use: a second redemption of the same code must fail.
+      assert {:error, :unauthorized} = Auth.redeem_sign_in_code(code, server, table)
+      assert {:error, :unauthorized} = Auth.redeem_sign_in_code("bogus-code", server, table)
+      assert {:error, :unauthorized} = Auth.redeem_sign_in_code("", server, table)
+      assert {:error, :unauthorized} = Auth.redeem_sign_in_code(nil, server, table)
+    end
+
+    test "expires unredeemed sign-in codes after their TTL", %{
+      data_dir: data_dir,
+      table: table,
+      server: server
+    } do
+      start_supervised!({Auth, data_dir: data_dir, name: server, table: table})
+      token = Auth.owner_token(table)
+
+      assert {:ok, code} = Auth.create_sign_in_code(token, server, table, 20)
+      Process.sleep(40)
+      assert {:error, :unauthorized} = Auth.redeem_sign_in_code(code, server, table)
+    end
+  end
+
   describe "allowed_host?/3" do
     test "accepts strict loopback IP literals and gates localhost behind allow_localhost" do
       assert Auth.allowed_host?("127.0.0.1:4000", 4000)

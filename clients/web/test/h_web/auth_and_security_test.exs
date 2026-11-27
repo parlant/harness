@@ -64,6 +64,60 @@ defmodule HWeb.AuthAndSecurityTest do
       assert html_response(authed_conn, 200) =~ "Workspace Browser"
     end
 
+    test "GET /login/link redeems a single-use sign-in code, sets session cookie, and redirects",
+         %{
+           conn: conn,
+           owner_token: owner_token
+         } do
+      daemon_opts = HWeb.Backend.InVM.daemon_opts()
+      server = Keyword.get(daemon_opts, :auth_server, H.Auth)
+      table = Keyword.get(daemon_opts, :auth_table, :h_auth)
+
+      assert {:ok, code} = H.Auth.create_sign_in_code(owner_token, server, table)
+
+      link_conn = get(conn, "/login/link?code=#{URI.encode_www_form(code)}&next=%2Fworkspaces")
+      assert redirected_to(link_conn) == "/workspaces"
+      assert Plug.Conn.get_resp_header(link_conn, "cache-control") == ["no-store"]
+
+      cookie_opts = link_conn.resp_cookies["_harness_web_key"]
+      assert cookie_opts.http_only == true
+      assert cookie_opts.same_site == "Strict"
+
+      authed_conn = get(recycle(link_conn), "/workspaces")
+      assert html_response(authed_conn, 200) =~ "Workspace Browser"
+
+      # Replaying the consumed code without a session fails closed with 401.
+      replay_conn = get(build_conn(), "/login/link?code=#{URI.encode_www_form(code)}")
+      assert html_response(replay_conn, 401) =~ "Sign-in link is invalid or expired"
+
+      # Re-opening a consumed link in an already signed-in browser still redirects cleanly.
+      reopen_conn =
+        get(recycle(link_conn), "/login/link?code=#{URI.encode_www_form(code)}&next=%2Finbox")
+
+      assert redirected_to(reopen_conn) == "/inbox"
+    end
+
+    test "GET /login/link rejects external or protocol-relative redirect targets", %{
+      conn: conn,
+      owner_token: owner_token
+    } do
+      daemon_opts = HWeb.Backend.InVM.daemon_opts()
+      server = Keyword.get(daemon_opts, :auth_server, H.Auth)
+      table = Keyword.get(daemon_opts, :auth_table, :h_auth)
+
+      for bad_next <- ["https://evil.example", "//evil.example/path", "/\\evil.example"] do
+        assert {:ok, code} = H.Auth.create_sign_in_code(owner_token, server, table)
+
+        resp_conn =
+          get(
+            conn,
+            "/login/link?code=#{URI.encode_www_form(code)}&next=#{URI.encode_www_form(bad_next)}"
+          )
+
+        assert redirected_to(resp_conn) == "/"
+      end
+    end
+
     test "endpoint binds loopback only and check_origin rejects non-loopback websocket upgrades" do
       http_conf = HWeb.Endpoint.config(:http)
       assert Keyword.get(http_conf, :ip) == {127, 0, 0, 1}

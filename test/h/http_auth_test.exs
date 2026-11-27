@@ -202,6 +202,66 @@ defmodule H.HTTP.AuthTest do
     end
   end
 
+  describe "POST /api/v1/auth/sign-in-link and /redeem" do
+    test "mints a single-use code with bearer auth and redeems it once into an HttpOnly cookie",
+         %{
+           req: req,
+           token: token
+         } do
+      assert Req.post!(req, url: "/api/v1/auth/sign-in-link").status == 401
+
+      assert Req.post!(req,
+               url: "/api/v1/auth/sign-in-link",
+               headers: [{"authorization", "Bearer wrong"}]
+             ).status == 401
+
+      minted =
+        Req.post!(req,
+          url: "/api/v1/auth/sign-in-link",
+          headers: [{"authorization", "Bearer #{token}"}]
+        )
+
+      assert minted.status == 200
+      assert %{"code" => code} = minted.body
+      assert is_binary(code) and byte_size(code) > 20
+
+      bad_origin =
+        Req.post!(req,
+          url: "/api/v1/auth/sign-in-link/redeem",
+          headers: [{"origin", "http://evil.example:4000"}],
+          json: %{"code" => code}
+        )
+
+      assert bad_origin.status == 403
+
+      redeemed =
+        Req.post!(req,
+          url: "/api/v1/auth/sign-in-link/redeem",
+          json: %{"code" => code}
+        )
+
+      assert redeemed.status == 200
+      assert redeemed.body == %{"ok" => true}
+      [set_cookie] = Req.Response.get_header(redeemed, "set-cookie")
+      assert set_cookie =~ "h_owner="
+      assert set_cookie =~ "HttpOnly"
+      assert set_cookie =~ "SameSite=Strict"
+
+      cookie_pair = set_cookie |> String.split(";", parts: 2) |> hd()
+
+      assert Req.get!(req, url: "/api/v1/sessions", headers: [{"cookie", cookie_pair}]).status ==
+               200
+
+      replayed =
+        Req.post!(req,
+          url: "/api/v1/auth/sign-in-link/redeem",
+          json: %{"code" => code}
+        )
+
+      assert replayed.status == 401
+    end
+  end
+
   describe "Bearer and cookie + Origin CSRF guards on /api/v1/*" do
     test "rejects unauthenticated requests and invalid bearer tokens with 401", %{req: req} do
       assert Req.get!(req, url: "/api/v1/sessions").status == 401

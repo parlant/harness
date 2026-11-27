@@ -58,9 +58,15 @@ defmodule HWeb.Backend do
   @callback unsubscribe_conversation(String.t(), term(), keyword()) :: :ok
   @callback create_browser_session(String.t(), keyword()) ::
               {:ok, String.t()} | {:error, :unauthorized | :auth_unavailable}
+  @callback redeem_sign_in_code(String.t(), keyword()) ::
+              {:ok, String.t()} | {:error, :unauthorized | :auth_unavailable}
   @callback verify_browser_session(String.t(), keyword()) :: boolean()
 
-  @optional_callbacks [create_browser_session: 2, verify_browser_session: 2]
+  @optional_callbacks [
+    create_browser_session: 2,
+    redeem_sign_in_code: 2,
+    verify_browser_session: 2
+  ]
 
   @doc "Returns the configured backend adapter module."
   @spec impl() :: module()
