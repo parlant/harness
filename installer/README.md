@@ -1,8 +1,19 @@
-# `h_setup` Mix Archive Installer
+<p align="center">
+  <strong><code>h_setup</code></strong> is a zero-dependency Mix archive that downloads, verifies, and installs signed release bundles for <strong>H</strong> (<code>hi</code>, <code>h-daemon</code>, <code>hi-import</code>) on macOS (<code>darwin-arm64</code>) and Linux (<code>linux-arm64</code>, <code>linux-x86_64</code>).
+</p>
 
-`h_setup` is a zero-dependency Mix archive that downloads, verifies, and installs signed release bundles for **H** (`hi`, `h-daemon`, `hi-import`) on macOS (`darwin-arm64`) and Linux (`linux-arm64`, `linux-x86_64`).
+<p align="center">
+  <img src="https://hiness.dev/assets/screenshots/hiweb-inbox.webp" alt="H multi-session inbox in hiweb showing ready and running sessions across workspaces" width="84%" />
+</p>
 
-Read the H operator manual, client walkthroughs, and alternative installation methods on **[hiness.dev](https://hiness.dev)** (and macOS `H.app` details on **[hiness.app](https://hiness.app)**).
+<p align="center">
+  <a href="https://hiness.dev">Website &amp; Manual (hiness.dev)</a> ·
+  <a href="https://hiness.app">macOS App (hiness.app)</a> ·
+  <a href="https://hex.pm/packages/hiness">Core Library (hiness)</a> ·
+  <a href="https://hiness.hexdocs.pm/">HexDocs</a>
+</p>
+
+---
 
 ## Install H with `mix h.setup`
 

@@ -1,8 +1,12 @@
 # H (`hiness`) Elixir API Reference
 
+<p align="center">
+  <img src="https://hiness.dev/assets/screenshots/hiweb-inbox.webp" alt="H multi-session inbox in hiweb showing ready and running sessions across workspaces" width="84%" />
+</p>
+
 `hiness` packages the `:harness` OTP application (`H.*`): a local coding-agent daemon built on Elixir/OTP with durable branched conversations, file-backed WAL commits, multi-client streaming, and behaviour contracts for extensions, tools, storage backends, providers, and execution environments.
 
-For binary installation (`hi`, `h-daemon`, `hiweb`, `H.app`), interactive walkthroughs, and the full operator manual, visit **[hiness.dev](https://hiness.dev)** and **[hiness.app](https://hiness.app)**. Find published versions and dependency metadata on **[Hex](https://hex.pm/packages/hiness)**.
+For binary installation (`hi`, `h-daemon`, `hiweb`, `H.app`), interactive walkthroughs, and the full operator manual, visit **[hiness.dev](https://hiness.dev)** and **[hiness.app](https://hiness.app)**. Find published versions and dependency metadata on **[Hex](https://hex.pm/packages/hiness)**, and browse source on **[GitHub](https://github.com/parlant/harness)** or **[GitLab](https://gitlab.com/parlant-co/harness)**.
 
 ## Why `:harness`
 
@@ -18,7 +22,7 @@ Use Elixir 1.20 and Erlang/OTP 29. Add this dependency to `mix.exs` and run `mix
 ```elixir
 def deps do
   [
-    {:harness, "~> 0.4.0", hex: :hiness}
+    {:harness, "~> 0.5.1", hex: :hiness}
   ]
 end
 ```
