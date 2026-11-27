@@ -4,7 +4,7 @@ defmodule EditorHostExtension.MixProject do
   def project do
     [
       app: :editor_host_extension,
-      version: "0.5.1",
+      version: "0.5.2",
       elixir: "~> 1.20",
       aliases: [
         check: ["format --check-formatted", "compile --warnings-as-errors"],
