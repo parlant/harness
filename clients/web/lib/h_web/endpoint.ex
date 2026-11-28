@@ -46,6 +46,8 @@ defmodule HWeb.Endpoint do
     only: ~w(phoenix_live_view.min.js)
   )
 
+  plug(HWeb.Plugs.ExtensionAssets)
+
   if code_reloading? do
     socket("/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket)
     plug(Phoenix.LiveReloader)

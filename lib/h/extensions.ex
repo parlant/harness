@@ -17,6 +17,7 @@ defmodule H.Extensions do
           codex_account_policy: nil | map(),
           observers: [module()],
           status_projections: [map()],
+          web_extensions: [map()],
           children: [Supervisor.child_spec()]
         }
 
@@ -38,10 +39,11 @@ defmodule H.Extensions do
       {:ok, opts, ext_state}
     else
       data_dir = Keyword.fetch!(opts, :data_dir)
+      bundle_override = Keyword.get(opts, :bundle_override)
       config = Path.join(data_dir, "extensions.json")
 
       with {:ok, entries} <- entries(config),
-           {:ok, packages} <- map_ok(entries, &manifest(&1, data_dir)),
+           {:ok, packages} <- map_ok(entries, &manifest(&1, data_dir, bundle_override)),
            :ok <- unique(Enum.map(packages, & &1.id), :extension_id),
            {:ok, packages} <- map_ok(packages, &read_package/1),
            :ok <- unique(Enum.flat_map(packages, &Map.keys(&1.beams)), :module),
@@ -86,6 +88,7 @@ defmodule H.Extensions do
       codex_account_policy: nil,
       observers: [],
       status_projections: [],
+      web_extensions: [],
       children: []
     }
   end
@@ -120,8 +123,11 @@ defmodule H.Extensions do
 
   defp entry(_), do: {:error, :invalid_extension_entry}
 
-  defp manifest(entry, data_dir) do
-    path = Path.expand(entry.path, data_dir)
+  defp manifest(entry, data_dir, bundle_override) do
+    path =
+      entry.path
+      |> Path.expand(data_dir)
+      |> apply_bundle_override(bundle_override)
 
     case read_json(Path.join(path, "extension.json")) do
       {:ok, %{"api_version" => version}} when version != @api_version ->
@@ -143,6 +149,16 @@ defmodule H.Extensions do
         {:error, {path, {:manifest, reason}}}
     end
   end
+
+  defp apply_bundle_override(path, {from, to}) do
+    cond do
+      path == from -> to
+      String.starts_with?(path, from <> "/") -> to <> String.replace_prefix(path, from, "")
+      true -> path
+    end
+  end
+
+  defp apply_bundle_override(path, _), do: path
 
   defp read_package(package) do
     ebin = Path.join(package.path, "ebin")
@@ -205,13 +221,17 @@ defmodule H.Extensions do
 
     base_observers = List.wrap(opts[:observers])
     base_projections = List.wrap(opts[:status_projections])
+    base_web_extensions = List.wrap(opts[:web_extensions])
 
     with :ok <- load_beams(beams),
-         {:ok, {harnesses, environments, children, policy, observers, projections, pkg_summaries}} <-
+         {:ok,
+          {harnesses, environments, children, policy, observers, projections, web_extensions,
+           pkg_summaries}} <-
            merge_packages(
              packages,
              opts,
-             {base_harnesses, base_environments, [], nil, base_observers, base_projections, []}
+             {base_harnesses, base_environments, [], nil, base_observers, base_projections,
+              base_web_extensions, []}
            ) do
       opts =
         opts
@@ -219,7 +239,8 @@ defmodule H.Extensions do
           harnesses: harnesses,
           environments: environments,
           observers: Enum.uniq(observers),
-          status_projections: projections
+          status_projections: projections,
+          web_extensions: web_extensions
         )
         |> then(fn o ->
           if policy, do: Keyword.put(o, :codex_account_policy, policy), else: o
@@ -233,6 +254,7 @@ defmodule H.Extensions do
         codex_account_policy: policy,
         observers: Enum.uniq(observers),
         status_projections: projections,
+        web_extensions: web_extensions,
         children: children
       }
 
@@ -259,7 +281,7 @@ defmodule H.Extensions do
     Enum.reduce_while(packages, {:ok, base}, fn package,
                                                 {:ok,
                                                  {harnesses, envs, children, policy, observers,
-                                                  projections, pkgs}} ->
+                                                  projections, web_extensions, pkgs}} ->
       {mod, _, _} = Map.fetch!(package.beams, package.root)
 
       context = %{
@@ -269,8 +291,8 @@ defmodule H.Extensions do
       }
 
       with {:ok, package_harnesses, package_envs, specs, package_policy, package_observers,
-            package_projections} <-
-             validate_configure(mod, package.settings, context, opts),
+            package_projections, package_web} <-
+             validate_configure(mod, package, context, opts),
            :ok <-
              if(policy && package_policy,
                do: {:error, :duplicate_codex_account_policy},
@@ -291,7 +313,10 @@ defmodule H.Extensions do
              unique(
                Enum.map(projections ++ package_projections, & &1.namespace),
                :status_projection_namespace
-             ) do
+             ),
+           next_web_extensions =
+             if(package_web, do: web_extensions ++ [package_web], else: web_extensions),
+           :ok <- validate_web_uniqueness(next_web_extensions) do
         pkg_summary =
           Map.merge(package, %{
             harness_ids: Enum.map(package_harnesses, &elem(&1, 0)),
@@ -307,25 +332,27 @@ defmodule H.Extensions do
           {Map.merge(harnesses, Map.new(package_harnesses)),
            Map.merge(envs, Map.new(package_envs)), children ++ specs, policy || package_policy,
            observers ++ package_observers, projections ++ package_projections,
-           pkgs ++ [pkg_summary]}}}
+           next_web_extensions, pkgs ++ [pkg_summary]}}}
       else
         {:error, reason} -> {:halt, {:error, {package.id, reason}}}
       end
     end)
   end
 
-  defp validate_configure(mod, settings, context, opts) do
+  defp validate_configure(mod, package, context, opts) do
     allowed_keys = [
       :harnesses,
       :environments,
       :children,
       :codex_account_policy,
       :observers,
-      :status_projections
+      :status_projections,
+      :web
     ]
 
     with true <- function_exported?(mod, :configure, 2),
-         {:ok, contributions} when is_map(contributions) <- mod.configure(settings, context),
+         {:ok, contributions} when is_map(contributions) <-
+           mod.configure(package.settings, context),
          [] <- Map.keys(contributions) -- allowed_keys,
          {:ok, harnesses} <- registrations(contributions, :harnesses, &harness(&1, opts)),
          {:ok, envs} <- registrations(contributions, :environments, &environment/1),
@@ -334,8 +361,9 @@ defmodule H.Extensions do
          {:ok, policy} <- account_policy(contributions[:codex_account_policy]),
          {:ok, observers} <- registrations(contributions, :observers, &observer/1),
          {:ok, projections} <-
-           registrations(contributions, :status_projections, &status_projection/1) do
-      {:ok, harnesses, envs, specs, policy, observers, projections}
+           registrations(contributions, :status_projections, &status_projection/1),
+         {:ok, web} <- H.Extensions.Web.validate(contributions[:web], package) do
+      {:ok, harnesses, envs, specs, policy, observers, projections, web}
     else
       {:error, reason} when is_atom(reason) -> {:error, reason}
       _ -> {:error, :invalid_contributions}
@@ -344,6 +372,30 @@ defmodule H.Extensions do
     _ -> {:error, :configuration_failed}
   catch
     _, _ -> {:error, :configuration_failed}
+  end
+
+  defp validate_web_uniqueness(web_extensions) do
+    with :ok <-
+           unique(
+             Enum.flat_map(web_extensions, fn web ->
+               web |> Map.get(:pages, []) |> Enum.map(& &1.slug)
+             end),
+             :web_page_slug
+           ),
+         :ok <-
+           unique(
+             Enum.flat_map(web_extensions, fn web ->
+               web |> Map.get(:nav_items, []) |> Enum.map(& &1.id)
+             end),
+             :web_nav_id
+           ) do
+      unique(
+        Enum.flat_map(web_extensions, fn web ->
+          web |> Map.get(:session_sidebar, []) |> Enum.map(& &1.id)
+        end),
+        :web_sidebar_id
+      )
+    end
   end
 
   defp account_policy(nil), do: {:ok, nil}

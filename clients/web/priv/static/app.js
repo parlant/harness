@@ -381,16 +381,58 @@ import {Completer, DirectoryComplete} from "./completion.js";
     }
   };
 
-  if (window.Phoenix && window.LiveView) {
-    const liveSocket = new window.LiveView.LiveSocket(
-      "/live",
-      window.Phoenix.Socket,
-      {
-        params: { _csrf_token: csrfToken },
-        hooks: Hooks
-      }
-    );
-    liveSocket.connect();
-    window.liveSocket = liveSocket;
+  window.HWebExtensionHooks = window.HWebExtensionHooks || {};
+  window.registerHWebHooks = (hooks) => Object.assign(window.HWebExtensionHooks, hooks);
+
+  function connectLiveSocket(hooks) {
+    if (window.Phoenix && window.LiveView) {
+      const liveSocket = new window.LiveView.LiveSocket(
+        "/live",
+        window.Phoenix.Socket,
+        {
+          params: { _csrf_token: csrfToken },
+          hooks
+        }
+      );
+      liveSocket.connect();
+      window.liveSocket = liveSocket;
+    }
   }
+
+  async function bootLiveSocket() {
+    const extMeta = document.querySelector("meta[name='h-ext-scripts']");
+    let srcs = [];
+    if (extMeta) {
+      try {
+        const parsed = JSON.parse(extMeta.getAttribute("content") || "[]");
+        if (Array.isArray(parsed)) srcs = parsed;
+      } catch (err) {
+        console.error("Failed to parse extension scripts metadata", err);
+      }
+    }
+
+    if (srcs.length === 0) {
+      connectLiveSocket({ ...window.HWebExtensionHooks, ...Hooks });
+      return;
+    }
+
+    const extHooks = {};
+    await Promise.all(
+      srcs.map(async src => {
+        if (typeof src === "string" && src.startsWith("/ext-assets/")) {
+          try {
+            const mod = await import(src);
+            if (mod?.hooks) Object.assign(extHooks, mod.hooks);
+            if (mod?.default?.hooks) Object.assign(extHooks, mod.default.hooks);
+          } catch (err) {
+            console.error("Failed to load extension script", src, err);
+          }
+        }
+      })
+    );
+
+    connectLiveSocket({ ...window.HWebExtensionHooks, ...extHooks, ...Hooks });
+  }
+
+  bootLiveSocket();
 })();

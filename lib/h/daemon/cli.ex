@@ -31,9 +31,14 @@ defmodule H.Daemon.CLI do
       {:ok, [{:check_config, true} | opts]} ->
         dir = Path.expand(opts[:data_dir] || System.get_env("H_DATA_DIR") || "~/.local/share/h")
 
+        ext_opts =
+          opts
+          |> Keyword.put(:data_dir, dir)
+          |> maybe_put_bundle_override()
+
         with {:ok, addresses} <- H.Daemon.Network.load(dir),
              result when result in [:ok, :disabled] <- web(:configure, addresses),
-             {:ok, opts, _} <- H.Extensions.load(Keyword.put(opts, :data_dir, dir)),
+             {:ok, opts, _} <- H.Extensions.load(ext_opts),
              {:ok, opts} <- H.Provider.Compatible.load(opts),
              {:ok, _, _} <- H.Accounts.boot(opts) do
           IO.puts("H startup configuration OK (no services started)")
@@ -118,6 +123,22 @@ defmodule H.Daemon.CLI do
     if Code.ensure_loaded?(HWeb.Standalone),
       do: apply(HWeb.Standalone, action, [addresses]),
       else: :ok
+  end
+
+  defp maybe_put_bundle_override(opts) do
+    case System.get_env("H_CURRENT_BUNDLE_OVERRIDE") do
+      raw when is_binary(raw) ->
+        case String.split(raw, "=", parts: 2) do
+          [from, to] when from != "" and to != "" ->
+            Keyword.put(opts, :bundle_override, {Path.expand(from), Path.expand(to)})
+
+          _ ->
+            opts
+        end
+
+      _ ->
+        opts
+    end
   end
 
   def parse(args) when args in [["-h"], ["--help"]], do: :help

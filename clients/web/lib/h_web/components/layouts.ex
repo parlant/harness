@@ -7,7 +7,7 @@ defmodule HWeb.Layouts do
   embed_templates("layouts/*")
 
   attr :title, :string, required: true
-  attr :section, :atom, required: true
+  attr :section, :any, required: true
   attr :inbox_path, :string, default: nil
   slot :leading
   slot :before_title
@@ -41,6 +41,11 @@ defmodule HWeb.Layouts do
         <.link navigate={~p"/workspaces"} aria-current={if @section == :workspaces, do: "page"}>Workspaces</.link>
         <.link navigate={~p"/settings/providers"} aria-current={if @section == :providers, do: "page"}>Providers</.link>
         <.link navigate={~p"/settings/accounts"} aria-current={if @section == :accounts, do: "page"}>Keys &amp; accounts</.link>
+        <.link
+          :for={item <- HWeb.Extensions.nav_items()}
+          navigate={item.path}
+          aria-current={if @section == item.section, do: "page"}
+        >{item.label}</.link>
         <div :if={@menu_actions != []} class="app-menu-group">{render_slot(@menu_actions)}</div>
         <div class="app-menu-group">
           <button

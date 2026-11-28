@@ -645,172 +645,194 @@
     <p :if={@error_banner} class="flash-banner flash-error session-sidebar-error" role="alert">
       {@error_banner}
     </p>
-    <div class="sidebar-section">
-      <div
-        :if={@session && Map.get(@session, :archived, false)}
-        class="session-detail-badges"
-      >
-        <span id="hdr-archived-badge" class="badge badge-warn">archived</span>
-      </div>
-      <div class="session-meta-lines mono muted">
-        <div class="session-id-label">id: {@session_id}</div>
-        <div :if={@session} id="hdr-harness" class="session-harness">
-          harness: {Map.get(@session, :harness_id) || "coding"}
-        </div>
-        <div :if={@session} class="session-cwd">{@session.env_id}: {@session.cwd}</div>
-        <div :if={usage_summary(@usage)} id="hdr-usage">{usage_summary(@usage)}</div>
-        <div
-          :if={format_extension_status_summary(@extension_status) != ""}
-          id="hdr-extension-status"
-        >
-          extensions: {format_extension_status_summary(@extension_status)}
-        </div>
-        <div>
-          <span id="hdr-conv">conv: #{@conversation_id}</span>
-          <span :if={!is_nil(@cursor_seq)} id="hdr-seq"> · seq: {@cursor_seq}</span>
-        </div>
-      </div>
-      <div
-        :if={@session_parent}
-        id="sidebar-parent-lineage"
-        class="session-parent-meta muted mono"
-      >
-        <span>Spawned from</span>
-        <.link
-          id="header-parent-session-link"
-          navigate={
-            ~p"/sessions/#{@session_parent.session_id}/conversations/#{@session_parent.conversation_id}"
-          }
-          class="session-parent-link"
-        >
-          {@session_parent.session_id} conv #{@session_parent.conversation_id}
-          <span :if={@session_parent.at_entry_id}> @ entry #{@session_parent.at_entry_id}</span>
-        </.link>
-      </div>
-      <.tag_input
-        :if={@session}
-        id="session-tags"
-        tags={session_tags(assigns)}
-        error={@tag_error}
-      />
-      <% chart = build_metrics_chart(@turn_metrics) %>
-      <div :if={chart} id="session-metrics-chart" class="session-metrics-chart">
-        <div class="session-metrics-head mono muted">
-          <span class="session-metrics-legend">
-            <span class="session-metrics-swatch is-tps"></span>tok/s <span class="session-metrics-swatch is-in"></span>in <span class="session-metrics-swatch is-out"></span>out
-          </span>
-          <span>{chart.latest_tps_label}</span>
-        </div>
-        <svg
-          class="session-metrics-svg"
-          viewBox="0 0 256 78"
-          role="img"
-          aria-label="Response speed in tokens per second and tokens in and out per turn"
-        >
-          <line x1="32" y1="8" x2="224" y2="8" class="metrics-grid" />
-          <line x1="32" y1="37" x2="224" y2="37" class="metrics-grid" />
-          <line x1="32" y1="66" x2="224" y2="66" class="metrics-axis" />
-          <text x="29" y="11" text-anchor="end" class="metrics-label is-tps">
-            {chart.max_tps_label}
-          </text>
-          <text x="29" y="68" text-anchor="end" class="metrics-label is-tps">0</text>
-          <text x="227" y="11" text-anchor="start" class="metrics-label">
-            {chart.max_tokens_label}
-          </text>
-          <text x="227" y="68" text-anchor="start" class="metrics-label">0</text>
-          <g :for={p <- chart.points}>
-            <rect
-              :if={p.in_h > 0}
-              x={p.x}
-              y={p.in_y}
-              width={p.bar_w}
-              height={p.in_h}
-              rx="1"
-              class="metrics-bar-in"
+    <% sidebar_ctx = sidebar_context(assigns) %>
+    <%= for sidebar_item <- ordered_sidebar_items() do %>
+      <%= case sidebar_item do %>
+        <% %{kind: :builtin, id: "session-meta"} -> %>
+          <div class="sidebar-section">
+            <div
+              :if={@session && Map.get(@session, :archived, false)}
+              class="session-detail-badges"
             >
-              <title>
-                Entry #{p.entry_id}: {p.input_tokens} in / {p.output_tokens} out{if p.tps,
-                  do: " · #{p.tps} tok/s",
-                  else: ""}
-              </title>
-            </rect>
-            <rect
-              :if={p.out_h > 0}
-              x={p.x}
-              y={p.out_y}
-              width={p.bar_w}
-              height={p.out_h}
-              rx="1"
-              class="metrics-bar-out"
+              <span id="hdr-archived-badge" class="badge badge-warn">archived</span>
+            </div>
+            <div class="session-meta-lines mono muted">
+              <div class="session-id-label">id: {@session_id}</div>
+              <div :if={@session} id="hdr-harness" class="session-harness">
+                harness: {Map.get(@session, :harness_id) || "coding"}
+              </div>
+              <div :if={@session} class="session-cwd">{@session.env_id}: {@session.cwd}</div>
+              <div :if={usage_summary(@usage)} id="hdr-usage">{usage_summary(@usage)}</div>
+              <div
+                :if={format_extension_status_summary(@extension_status) != ""}
+                id="hdr-extension-status"
+              >
+                extensions: {format_extension_status_summary(@extension_status)}
+              </div>
+              <div>
+                <span id="hdr-conv">conv: #{@conversation_id}</span>
+                <span :if={!is_nil(@cursor_seq)} id="hdr-seq"> · seq: {@cursor_seq}</span>
+              </div>
+            </div>
+          </div>
+        <% %{kind: :builtin, id: "session-lineage"} -> %>
+          <div
+            :if={@session_parent}
+            id="sidebar-parent-lineage"
+            class="session-parent-meta muted mono sidebar-section"
+          >
+            <span>Spawned from</span>
+            <.link
+              id="header-parent-session-link"
+              navigate={
+                ~p"/sessions/#{@session_parent.session_id}/conversations/#{@session_parent.conversation_id}"
+              }
+              class="session-parent-link"
             >
-              <title>
-                Entry #{p.entry_id}: {p.input_tokens} in / {p.output_tokens} out{if p.tps,
-                  do: " · #{p.tps} tok/s",
-                  else: ""}
-              </title>
-            </rect>
-          </g>
-          <polyline
-            :if={chart.has_tps? && chart.line_points != ""}
-            points={chart.line_points}
-            class="metrics-tps-line"
-          />
-          <circle
-            :for={p <- chart.points}
-            :if={is_number(p.tps_y)}
-            cx={p.cx}
-            cy={p.tps_y}
-            r="2"
-            class="metrics-tps-dot"
+              {@session_parent.session_id} conv #{@session_parent.conversation_id}
+              <span :if={@session_parent.at_entry_id}> @ entry #{@session_parent.at_entry_id}</span>
+            </.link>
+          </div>
+        <% %{kind: :builtin, id: "session-tags"} -> %>
+          <div :if={@session} class="sidebar-section">
+            <.tag_input
+              id="session-tags"
+              tags={session_tags(assigns)}
+              error={@tag_error}
+            />
+          </div>
+        <% %{kind: :builtin, id: "session-agent"} -> %>
+          <% chart = build_metrics_chart(@turn_metrics) %>
+          <div
+            :if={chart}
+            id="session-metrics-chart"
+            class="session-metrics-chart sidebar-section"
           >
-            <title>Entry #{p.entry_id}: {p.tps} tok/s ({p.output_tokens} out)</title>
-          </circle>
-        </svg>
-      </div>
-    </div>
-
-    <div class="sidebar-section sidebar-divider">
-      <h3 class="section-title">Conversations</h3>
-      <ul id="branches-list" class="branch-list">
-        <li :for={conv <- @conversations}>
-          <.link
-            patch={InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, conv.id)}
-            class={[
-              "branch-link mono",
-              if(to_string(conv.id) == @conversation_id, do: "is-active")
-            ]}
-          >
-            <span>#{conv.id}</span>
-            <span :if={conv.parent} class="muted">
-              from #{conv.parent.conversation_id}@#{conv.parent.at}
-            </span>
-          </.link>
-        </li>
-      </ul>
-    </div>
-
-    <div id="session-inbox-switcher" class="sidebar-section sidebar-divider">
-      <div class="sidebar-section-head">
-        <h3 class="section-title">Sessions in this folder</h3>
-        <button
-          :if={@folder_subsessions_count > 0}
-          id="session-sidebar-subsessions-toggle"
-          type="button"
-          aria-pressed={to_string(@show_folder_subsessions?)}
-          class={["inbox-pill inbox-pill-xs", @show_folder_subsessions? && "is-active"]}
-          phx-click="toggle_folder_subsessions"
-        >Subsessions <span class="inbox-pill-count mono">{@folder_subsessions_count}</span></button>
-      </div>
-      <InboxComponents.workspace_tree
-        id="session-sidebar-inbox-tree"
-        groups={@folder_groups}
-        current_session_id={@session_id}
-        inbox_filter={@folder_filter}
-        compact={true}
-        show_workspace_header={false}
-        empty_message="No sessions in this folder."
-      />
-    </div>
+            <div class="session-metrics-head mono muted">
+              <span class="session-metrics-legend">
+                <span class="session-metrics-swatch is-tps"></span>tok/s <span class="session-metrics-swatch is-in"></span>in <span class="session-metrics-swatch is-out"></span>out
+              </span>
+              <span>{chart.latest_tps_label}</span>
+            </div>
+            <svg
+              class="session-metrics-svg"
+              viewBox="0 0 256 78"
+              role="img"
+              aria-label="Response speed in tokens per second and tokens in and out per turn"
+            >
+              <line x1="32" y1="8" x2="224" y2="8" class="metrics-grid" />
+              <line x1="32" y1="37" x2="224" y2="37" class="metrics-grid" />
+              <line x1="32" y1="66" x2="224" y2="66" class="metrics-axis" />
+              <text x="29" y="11" text-anchor="end" class="metrics-label is-tps">
+                {chart.max_tps_label}
+              </text>
+              <text x="29" y="68" text-anchor="end" class="metrics-label is-tps">0</text>
+              <text x="227" y="11" text-anchor="start" class="metrics-label">
+                {chart.max_tokens_label}
+              </text>
+              <text x="227" y="68" text-anchor="start" class="metrics-label">0</text>
+              <g :for={p <- chart.points}>
+                <rect
+                  :if={p.in_h > 0}
+                  x={p.x}
+                  y={p.in_y}
+                  width={p.bar_w}
+                  height={p.in_h}
+                  rx="1"
+                  class="metrics-bar-in"
+                >
+                  <title>
+                    Entry #{p.entry_id}: {p.input_tokens} in / {p.output_tokens} out{if p.tps,
+                      do: " · #{p.tps} tok/s",
+                      else: ""}
+                  </title>
+                </rect>
+                <rect
+                  :if={p.out_h > 0}
+                  x={p.x}
+                  y={p.out_y}
+                  width={p.bar_w}
+                  height={p.out_h}
+                  rx="1"
+                  class="metrics-bar-out"
+                >
+                  <title>
+                    Entry #{p.entry_id}: {p.input_tokens} in / {p.output_tokens} out{if p.tps,
+                      do: " · #{p.tps} tok/s",
+                      else: ""}
+                  </title>
+                </rect>
+              </g>
+              <polyline
+                :if={chart.has_tps? && chart.line_points != ""}
+                points={chart.line_points}
+                class="metrics-tps-line"
+              />
+              <circle
+                :for={p <- chart.points}
+                :if={is_number(p.tps_y)}
+                cx={p.cx}
+                cy={p.tps_y}
+                r="2"
+                class="metrics-tps-dot"
+              >
+                <title>Entry #{p.entry_id}: {p.tps} tok/s ({p.output_tokens} out)</title>
+              </circle>
+            </svg>
+          </div>
+        <% %{kind: :builtin, id: "session-conversations"} -> %>
+          <div class="sidebar-section sidebar-divider">
+            <h3 class="section-title">Conversations</h3>
+            <ul id="branches-list" class="branch-list">
+              <li :for={conv <- @conversations}>
+                <.link
+                  patch={
+                    InboxFilter.session_path(@session_id, @inbox_filter, @from_inbox?, conv.id)
+                  }
+                  class={[
+                    "branch-link mono",
+                    if(to_string(conv.id) == @conversation_id, do: "is-active")
+                  ]}
+                >
+                  <span>#{conv.id}</span>
+                  <span :if={conv.parent} class="muted">
+                    from #{conv.parent.conversation_id}@#{conv.parent.at}
+                  </span>
+                </.link>
+              </li>
+            </ul>
+          </div>
+        <% %{kind: :builtin, id: "session-inbox-switcher"} -> %>
+          <div id="session-inbox-switcher" class="sidebar-section sidebar-divider">
+            <div class="sidebar-section-head">
+              <h3 class="section-title">Sessions in this folder</h3>
+              <button
+                :if={@folder_subsessions_count > 0}
+                id="session-sidebar-subsessions-toggle"
+                type="button"
+                aria-pressed={to_string(@show_folder_subsessions?)}
+                class={["inbox-pill inbox-pill-xs", @show_folder_subsessions? && "is-active"]}
+                phx-click="toggle_folder_subsessions"
+              >Subsessions <span class="inbox-pill-count mono">{@folder_subsessions_count}</span></button>
+            </div>
+            <InboxComponents.workspace_tree
+              id="session-sidebar-inbox-tree"
+              groups={@folder_groups}
+              current_session_id={@session_id}
+              inbox_filter={@folder_filter}
+              compact={true}
+              show_workspace_header={false}
+              empty_message="No sessions in this folder."
+            />
+          </div>
+        <% ext_item -> %>
+          <div id={"ext-sidebar-" <> ext_item.id} class="ext-sidebar-slot">
+            {apply(ext_item.module, ext_item.function, [
+              %{id: ext_item.id, ext_id: ext_item.ext_id, sidebar: sidebar_ctx}
+            ])}
+          </div>
+      <% end %>
+    <% end %>
   </aside>
 
   <Layouts.panel

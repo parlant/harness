@@ -14,6 +14,7 @@ defmodule HWeb.SessionLive do
     CatalogState,
     ComposerAttachment,
     ConversationComponents,
+    Extensions,
     InboxComponents,
     InboxFilter,
     Layouts,
@@ -974,6 +975,36 @@ defmodule HWeb.SessionLive do
 
   defp session_tags(%{catalog: catalog, session: session, session_id: sid}) do
     Map.get(catalog.by_id[sid] || session || %{}, :tags, [])
+  end
+
+  defp ordered_sidebar_items do
+    builtins = [
+      %{id: "session-meta", kind: :builtin},
+      %{id: "session-lineage", kind: :builtin},
+      %{id: "session-tags", kind: :builtin},
+      %{id: "session-agent", kind: :builtin},
+      %{id: "session-conversations", kind: :builtin},
+      %{id: "session-inbox-switcher", kind: :builtin}
+    ]
+
+    Extensions.order_sidebar_items(builtins, Extensions.sidebar_items())
+  end
+
+  defp sidebar_context(assigns) do
+    %{
+      session_id: assigns.session_id,
+      conversation_id: assigns.conversation_id,
+      session: assigns.session,
+      session_parent: assigns.session_parent,
+      cursor_seq: assigns.cursor_seq,
+      agent: assigns.agent,
+      usage: assigns.usage,
+      turn_metrics: assigns.turn_metrics,
+      extension_status: assigns.extension_status,
+      run_active?: assigns.run_active?,
+      conversations: assigns.conversations,
+      tasks: assigns.tasks
+    }
   end
 
   # Streams don't retain rendered rows. Reinsert only changed cards, and drop

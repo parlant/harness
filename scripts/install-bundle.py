@@ -292,7 +292,8 @@ def install(args):
         if has_import and os.path.lexists(import_link) and not owned_import_link:
             raise RuntimeError(f"Refusing to replace the existing {import_link}")
 
-        checked([release / "bin/h-daemon", "--data-dir", data, "--check-config"], env)
+        check_env = {**env, "H_CURRENT_BUNDLE_OVERRIDE": f"{current}={release}"}
+        checked([release / "bin/h-daemon", "--data-dir", data, "--check-config"], check_env)
         status = run([release / "bin/hi", "daemon", "status"], env)
         if status.returncode != 0 and "Daemon is not running" not in status.stderr:
             raise RuntimeError(f"Cannot establish daemon status; activation refused: {status.stderr.strip()}")

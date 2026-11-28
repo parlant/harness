@@ -22,12 +22,20 @@ defmodule H.Extension do
           required(:namespace) => String.t(),
           required(:module) => module()
         }
+  @type web_contribution :: %{
+          optional(:pages) => [map()],
+          optional(:nav_items) => [map()],
+          optional(:session_sidebar) => [map()],
+          optional(:stylesheets) => [String.t()],
+          optional(:scripts) => [String.t()]
+        }
   @type contributions :: %{
           optional(:harnesses) => [module()],
           optional(:environments) => [map()],
           optional(:codex_account_policy) => %{module: module(), sources: [String.t()]},
           optional(:observers) => [module()],
           optional(:status_projections) => [status_projection_spec()],
+          optional(:web) => web_contribution(),
           optional(:children) => [Supervisor.child_spec() | {module(), term()} | module()]
         }
 

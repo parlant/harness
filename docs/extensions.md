@@ -10,7 +10,7 @@ This is the entry point for extending H. **Existing** sections describe code you
 | Change instructions, context, or tool set without replacing the session engine | [Harness profiles and tools](extensions/harness.md) | Behaviours, `GET /api/v1/harnesses` discovery, and optional `prepare_context/2` / `project_response/2` callbacks exist |
 | Change where or under what constraints tools operate | [Execution environments](extensions/execution-env.md) | Environment behaviour, registry, HTTP/UDS `H.RemoteAgent.HTTP`, and optional `admit_exec/2` / `operation_finished/2` callbacks exist |
 | Log a daemon into Codex or use multiple credential sources | [Providers](extensions/providers.md) | Stock device login & logout; MultiCodex path policy polls usage, ranks eligible aliases, and projects cached `account_pool` status |
-| Show package status or initiate a daemon operation from `hi` | [Clients](extensions/clients.md) | Local status templates, opt-in `extension_status` footer polling, custom JSON themes, prompt templates, and device login/logout exist |
+| Show package status or initiate a daemon operation from `hi`, or extend `hiweb` | [Clients](extensions/clients.md) | Local status templates, opt-in `extension_status` footer polling, custom JSON themes, prompt templates, device login/logout, and `:web` extensions in `hiweb` exist |
 | Use a live editor capability or a completely different agent runtime | [External integrations](extensions/external-integrations.md) | Optional `extensions/editor_host` live tool-host broker exists; alternate agent runtimes remain separate |
 
 ## First principles

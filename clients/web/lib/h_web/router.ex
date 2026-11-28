@@ -48,6 +48,8 @@ defmodule HWeb.Router do
       live("/sessions/:session_id/review", ReviewLive, :show)
       live("/sessions/:session_id", SessionLive, :show)
       live("/sessions/:session_id/conversations/:conversation_id", SessionLive, :show)
+      live("/ext/:slug", ExtensionLive, :index)
+      live("/ext/:slug/*subpath", ExtensionLive, :show)
     end
   end
 end
