@@ -58,6 +58,12 @@ export H_SOURCE="$root"
   mix deps.get --only prod --check-locked
   mix extension.build "$stage/otp/extensions/turn_metrics"
 )
+(cd extensions/analytics
+  export MIX_BUILD_PATH="$work/ext-analytics" MIX_DEPS_PATH="$root/clients/web/deps"
+  mix deps.get --only prod --check-locked
+  (cd assets; npm ci --ignore-scripts --no-audit --no-fund; node build.mjs)
+  mix extension.build "$stage/otp/extensions/analytics"
+)
 case $(uname -s) in
   Darwin) python3 scripts/bundle-macos-libs.py "$stage/otp" ;;
   Linux)  python3 scripts/bundle-linux-libs.py "$stage/otp" ;;

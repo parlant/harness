@@ -1,0 +1,11 @@
+{
+  "name": "analytics-extension-assets",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "vega": "6.4.0",
+    "vega-lite": "6.5.0",
+    "vega-interpreter": "2.3.2"
+  }
+}

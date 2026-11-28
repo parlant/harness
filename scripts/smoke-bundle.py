@@ -72,7 +72,7 @@ def smoke(source):
             else:
                 raise AssertionError(f"Expected HTTP {status} from {url}")
 
-        def check_web(ip):
+        def check_web(ip, expect_extensions=False):
             boot = (root / "boot.log").read_text()
             web = re.findall(rf"H web listening at (http://{re.escape(ip)}:\d+)/inbox", boot)[-1]
             reject(web + "/login", 421, {"Host": "unconfigured.invalid:4200"})
@@ -85,9 +85,19 @@ def smoke(source):
             with browser.open(web + "/login", form, timeout=20) as response:
                 assert "/login" not in response.url
             with browser.open(web + "/inbox", timeout=20) as response:
-                assert 'data-session-id="upgrade-smoke"' in response.read().decode()
+                inbox_html = response.read().decode()
+                assert 'data-session-id="upgrade-smoke"' in inbox_html
+                if expect_extensions:
+                    assert 'href="/ext/analytics"' in inbox_html
             with browser.open(web + "/assets/app.js", timeout=20) as response:
                 assert response.status == 200
+            if expect_extensions:
+                with browser.open(web + "/ext/analytics", timeout=20) as response:
+                    assert response.status == 200
+                    assert "Analytics" in response.read().decode()
+                for asset in ("/ext-assets/turn_metrics/turn_metrics.css", "/ext-assets/analytics/analytics.js"):
+                    with browser.open(web + asset, timeout=20) as response:
+                        assert response.status == 200
 
         children = []
         with (root / "boot.log").open("w+") as log:
@@ -151,6 +161,8 @@ def smoke(source):
                     "extensions": [
                         {"path": str(bundle / "extensions/multicodex"), "settings": {"sources": ["personal", "work"]}},
                         {"path": str(bundle / "extensions/editor_host"), "settings": {}},
+                        {"path": str(bundle / "extensions/turn_metrics"), "settings": {}},
+                        {"path": str(bundle / "extensions/analytics"), "settings": {}},
                     ],
                 })
                 extensions.write_text("malformed")
@@ -189,7 +201,7 @@ def smoke(source):
                     reject(url + "/api/v1/environments", 401)
                     reject(url + "/api/v1/environments", 421, {"Host": "unconfigured.invalid:4100"})
                     reject(url + "/api/v1/auth/session", 403, {"Origin": "http://unconfigured.invalid:4100"}, b"{}")
-                    check_web(ip)
+                    check_web(ip, expect_extensions=True)
                 assert not accounts.exists()
                 codex_models = {
                     model["id"]: model for model in api("models")["models"]
