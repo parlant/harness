@@ -22,7 +22,7 @@ Use Elixir 1.20 and Erlang/OTP 29. Add this dependency to `mix.exs` and run `mix
 ```elixir
 def deps do
   [
-    {:harness, "~> 0.5.1", hex: :hiness}
+    {:harness, "~> 0.6.0", hex: :hiness}
   ]
 end
 ```

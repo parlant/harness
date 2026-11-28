@@ -6,7 +6,7 @@ defmodule AnalyticsExtension.MixProject do
 
     [
       app: :analytics_extension,
-      version: "0.5.2",
+      version: "0.6.0",
       elixir: "~> 1.20",
       aliases: [
         check: ["format --check-formatted", "compile --warnings-as-errors"],
