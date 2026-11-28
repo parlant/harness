@@ -37,14 +37,14 @@ else
   exit 1
 fi
 
-# Collect all publishable release files (artifacts + provenance/signatures)
+# Collect all publishable release files (artifacts + provenance/signatures + Sparkle appcast)
 files=$(python3 - "$rel_dir" <<'PY'
 from pathlib import Path
 import sys
 
 rel_dir = Path(sys.argv[1])
 SUFFIXES = (".tar.gz", ".dmg", ".zip", ".ez", ".sig")
-EXACT = {"SHA256SUMS", "release-manifest.json"}
+EXACT = {"SHA256SUMS", "release-manifest.json", "appcast.xml"}
 for p in sorted(rel_dir.iterdir(), key=lambda x: x.name):
     if p.is_file() and (p.name in EXACT or any(p.name.endswith(s) for s in SUFFIXES)):
         print(p.name)
@@ -80,7 +80,7 @@ commit = manifest.get("git_commit", "")
 version = manifest.get("version", tag.lstrip("v"))
 
 SUFFIXES = (".tar.gz", ".dmg", ".zip", ".ez", ".sig")
-EXACT = {"SHA256SUMS", "release-manifest.json"}
+EXACT = {"SHA256SUMS", "release-manifest.json", "appcast.xml"}
 files = [
     p.name for p in sorted(rel_dir.iterdir(), key=lambda x: x.name)
     if p.is_file() and (p.name in EXACT or any(p.name.endswith(s) for s in SUFFIXES))
@@ -257,11 +257,16 @@ PY
         "https://api.github.com/repos/${gh_repo}/releases/assets/${existing_asset_id}" >/dev/null
     fi
     echo "  mirroring $fname to GitHub"
+    content_type="application/octet-stream"
+    case "$fname" in
+      *.xml) content_type="application/xml" ;;
+      *.json) content_type="application/json" ;;
+    esac
     curl --fail --silent --show-error \
       --request POST \
       --header "Authorization: Bearer ${GITHUB_RELEASE_TOKEN}" \
       --header "Accept: application/vnd.github+json" \
-      --header "Content-Type: application/octet-stream" \
+      --header "Content-Type: ${content_type}" \
       --data-binary "@$rel_dir/$fname" \
       "${upload_url}?name=${fname}" >/dev/null
   done

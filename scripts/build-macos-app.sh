@@ -13,6 +13,11 @@
 #   APPLE_NOTARY_KEY         Path to App Store Connect API .p8 key (alternative to APPLE_NOTARY_PROFILE)
 #   APPLE_NOTARY_KEY_ID      App Store Connect API Key ID (with APPLE_NOTARY_KEY)
 #   APPLE_NOTARY_ISSUER      App Store Connect API Issuer UUID (with APPLE_NOTARY_KEY)
+#   H_SPARKLE_FEED_URL       Override SUFeedURL embedded in Info.plist
+#                            (defaults to GitHub Releases latest appcast.xml)
+#   H_SPARKLE_PUBLIC_ED_KEY  Override SUPublicEDKey embedded in Info.plist
+#                            (defaults to Ed25519 key derived from packaging/keys/release-signers)
+#   H_SPARKLE_FRAMEWORK      Path to an existing Sparkle.framework (skips fetch)
 #   H_SKIP_APP_ZIP           Set to 1 to skip producing the .app.zip alongside .dmg
 set -eu
 
@@ -63,22 +68,72 @@ trap 'exit 143' TERM
 app="$work/H.app"
 contents="$app/Contents"
 macos_dir="$contents/MacOS"
+frameworks_dir="$contents/Frameworks"
 resources_dir="$contents/Resources"
-mkdir -p "$macos_dir" "$resources_dir"
+mkdir -p "$macos_dir" "$frameworks_dir" "$resources_dir"
+
+# 0. Fetch & embed Sparkle 2 framework
+sparkle_fw=$("$root/scripts/fetch-sparkle.sh" "$frameworks_dir")
+
+# Derive default Sparkle EdDSA public key (raw 32-byte Ed25519 key in base64)
+# directly from packaging/keys/release-signers so Sparkle verifies updates with
+# the same official release Ed25519 keypair used for SHA256SUMS.sig.
+sparkle_feed_url="${H_SPARKLE_FEED_URL:-https://github.com/parlant/harness/releases/latest/download/appcast.xml}"
+if [ -n "${H_SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+  sparkle_public_ed_key="$H_SPARKLE_PUBLIC_ED_KEY"
+else
+  sparkle_public_ed_key=$(python3 - "$root/packaging/keys/release-signers" <<'PY'
+import base64, struct, sys
+
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split()
+    for i, tok in enumerate(parts):
+        if tok == "ssh-ed25519" and i + 1 < len(parts):
+            blob = base64.b64decode(parts[i + 1])
+            n = struct.unpack(">I", blob[:4])[0]
+            p = 4 + n
+            n2 = struct.unpack(">I", blob[p:p + 4])[0]
+            pk = blob[p + 4:p + 4 + n2]
+            if len(pk) == 32:
+                print(base64.b64encode(pk).decode("ascii"))
+                sys.exit(0)
+raise SystemExit("No ssh-ed25519 public key found in release-signers")
+PY
+  )
+fi
 
 # 1. Info.plist & PkgInfo
-sed "s/@VERSION@/$version/g" "$root/packaging/macos/Info.plist.in" > "$contents/Info.plist"
+python3 - "$root/packaging/macos/Info.plist.in" "$contents/Info.plist" \
+  "$version" "$sparkle_feed_url" "$sparkle_public_ed_key" <<'PY'
+import sys
+from xml.sax.saxutils import escape
+
+src, dst, version, feed_url, pub_key = sys.argv[1:6]
+text = open(src, encoding="utf-8").read()
+text = (
+    text.replace("@VERSION@", escape(version))
+    .replace("@SPARKLE_FEED_URL@", escape(feed_url))
+    .replace("@SPARKLE_PUBLIC_ED_KEY@", escape(pub_key))
+)
+open(dst, "w", encoding="utf-8").write(text)
+PY
 printf 'APPL????' > "$contents/PkgInfo"
 
 # 2. AppIcon.icns
 python3 "$root/packaging/macos/render-icon.py" "$resources_dir/AppIcon.icns"
 
-# 3. Compile native Swift menu-bar launcher binary
+# 3. Compile native Swift menu-bar launcher binary linked against embedded Sparkle.framework
 swiftc \
   -O \
   -target "${swift_arch}-apple-macosx14.0" \
+  -F "$frameworks_dir" \
   -framework AppKit \
   -framework Foundation \
+  -framework Sparkle \
+  -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   "$root/packaging/macos/HApp.swift" \
   -o "$macos_dir/HApp"
 chmod 755 "$macos_dir/HApp"
@@ -130,6 +185,30 @@ PY
 done
 sign_macho "$macos_dir/hi-exec"
 
+# Sign Sparkle.framework components inside-out (without H's JIT entitlements),
+# preserving Sparkle's original bundle identifiers and hardened runtime.
+sign_sparkle_item() {
+  target_path="$1"
+  if [ "$identity" = "-" ]; then
+    /usr/bin/codesign --force --sign - "$target_path"
+  else
+    /usr/bin/codesign --force --timestamp --options runtime --sign "$identity" "$target_path"
+  fi
+}
+
+sparkle_ver="$sparkle_fw/Versions/B"
+for xpc in "$sparkle_ver"/XPCServices/*.xpc; do
+  [ -e "$xpc" ] || continue
+  sign_sparkle_item "$xpc"
+done
+if [ -e "$sparkle_ver/Autoupdate" ]; then
+  sign_sparkle_item "$sparkle_ver/Autoupdate"
+fi
+if [ -d "$sparkle_ver/Updater.app" ]; then
+  sign_sparkle_item "$sparkle_ver/Updater.app"
+fi
+sign_sparkle_item "$sparkle_fw"
+
 if [ "$identity" = "-" ]; then
   /usr/bin/codesign --force --sign - "$app"
 else
@@ -160,8 +239,14 @@ notarize_artifact() {
       --wait
     return 0
   elif [ -n "${APPLE_NOTARY_KEY:-}" ] && [ -n "${APPLE_NOTARY_KEY_ID:-}" ] && [ -n "${APPLE_NOTARY_ISSUER:-}" ]; then
+    notary_key_path="$APPLE_NOTARY_KEY"
+    if [ ! -f "$notary_key_path" ]; then
+      notary_key_path="$work/notary-key.p8"
+      printf '%s\n' "$APPLE_NOTARY_KEY" > "$notary_key_path"
+      chmod 600 "$notary_key_path"
+    fi
     xcrun notarytool submit "$artifact_path" \
-      --key "$APPLE_NOTARY_KEY" \
+      --key "$notary_key_path" \
       --key-id "$APPLE_NOTARY_KEY_ID" \
       --issuer "$APPLE_NOTARY_ISSUER" \
       --wait

@@ -1,14 +1,22 @@
 import AppKit
 import Darwin
 import Foundation
+import Sparkle
 
-final class HAppDelegate: NSObject, NSApplicationDelegate {
+final class HAppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate, SPUStandardUserDriverDelegate {
     private var statusItem: NSStatusItem!
     private var statusHeaderItem: NSMenuItem!
+    private var updateAvailableItem: NSMenuItem!
     private var openWebItem: NSMenuItem!
     private var copyTokenItem: NSMenuItem!
+    private var checkForUpdatesItem: NSMenuItem!
+    private var autoCheckUpdatesItem: NSMenuItem!
     private var restartItem: NSMenuItem!
     private var quitItem: NSMenuItem!
+
+    private var updaterController: SPUStandardUpdaterController!
+    private var pendingUpdateVersion: String?
+    private var updateReminderActive = false
 
     private var permissionWindow: NSWindow?
     private var daemonProcess: Process?
@@ -59,6 +67,11 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: self,
+            userDriverDelegate: self
+        )
         buildStatusItem()
         startPolling()
         ensureDaemonAndOpenBrowser()
@@ -86,6 +99,16 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
         statusHeaderItem = NSMenuItem(title: "Status: Starting…", action: nil, keyEquivalent: "")
         statusHeaderItem.isEnabled = false
         menu.addItem(statusHeaderItem)
+
+        updateAvailableItem = NSMenuItem(
+            title: "Update Available…",
+            action: #selector(checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        updateAvailableItem.target = self
+        updateAvailableItem.isHidden = true
+        menu.addItem(updateAvailableItem)
+
         menu.addItem(.separator())
 
         openWebItem = NSMenuItem(title: "Open H Web UI", action: #selector(openWebUI), keyEquivalent: "o")
@@ -121,6 +144,25 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
         )
         restartItem.target = self
         menu.addItem(restartItem)
+
+        menu.addItem(.separator())
+
+        checkForUpdatesItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(checkForUpdates(_:)),
+            keyEquivalent: "u"
+        )
+        checkForUpdatesItem.target = self
+        menu.addItem(checkForUpdatesItem)
+
+        autoCheckUpdatesItem = NSMenuItem(
+            title: "Automatically Check for Updates",
+            action: #selector(toggleAutomaticUpdateChecks(_:)),
+            keyEquivalent: ""
+        )
+        autoCheckUpdatesItem.target = self
+        autoCheckUpdatesItem.state = updaterController.updater.automaticallyChecksForUpdates ? .on : .off
+        menu.addItem(autoCheckUpdatesItem)
 
         menu.addItem(.separator())
 
@@ -249,17 +291,111 @@ final class HAppDelegate: NSObject, NSApplicationDelegate {
     private func refreshStatus() {
         let running = isDaemonRunning()
         DispatchQueue.main.async {
+            let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            let versionPrefix = appVersion.map { "H v\($0) — " } ?? ""
             if self.busy {
-                self.statusHeaderItem.title = "Status: Working…"
+                self.statusHeaderItem.title = "\(versionPrefix)Working…"
             } else if running {
                 let ownerNote = self.ownedDaemon ? " (managed by H.app)" : " (external daemon)"
-                self.statusHeaderItem.title = "Status: Running" + ownerNote
+                self.statusHeaderItem.title = "\(versionPrefix)Running" + ownerNote
             } else {
-                self.statusHeaderItem.title = "Status: Stopped"
+                self.statusHeaderItem.title = "\(versionPrefix)Stopped"
             }
             self.quitItem.title = self.ownedDaemon ? "Stop Daemon & Quit H" : "Quit H"
-            self.statusItem.button?.title = running ? "H" : "H·"
+            self.autoCheckUpdatesItem.state = self.updaterController.updater.automaticallyChecksForUpdates ? .on : .off
+            self.checkForUpdatesItem.isEnabled = self.updaterController.updater.canCheckForUpdates
+
+            if let newVersion = self.pendingUpdateVersion, self.updateReminderActive {
+                self.updateAvailableItem.title = "Update Available: H v\(newVersion)…"
+                self.updateAvailableItem.isHidden = false
+                self.statusItem.button?.title = running ? "H↑" : "H·↑"
+                self.statusItem.button?.toolTip = "H — Update v\(newVersion) available"
+            } else {
+                self.updateAvailableItem.isHidden = true
+                self.statusItem.button?.title = running ? "H" : "H·"
+                self.statusItem.button?.toolTip = "H — Local Agent Harness"
+            }
         }
+    }
+
+    // MARK: - Sparkle Updater
+
+    @objc private func checkForUpdates(_ sender: Any?) {
+        NSApp.activate(ignoringOtherApps: true)
+        updaterController.checkForUpdates(sender)
+    }
+
+    @objc private func toggleAutomaticUpdateChecks(_ sender: Any?) {
+        let next = !updaterController.updater.automaticallyChecksForUpdates
+        updaterController.updater.automaticallyChecksForUpdates = next
+        autoCheckUpdatesItem.state = next ? .on : .off
+    }
+
+    var supportsGentleScheduledUpdateReminders: Bool {
+        true
+    }
+
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        if let override = ProcessInfo.processInfo.environment["H_SPARKLE_FEED_URL"], !override.isEmpty {
+            return override
+        }
+        return nil
+    }
+
+    func standardUserDriverShouldHandleShowingScheduledUpdate(
+        _ update: SUAppcastItem,
+        andInImmediateFocus immediateFocus: Bool
+    ) -> Bool {
+        // Show Sparkle's native update window in immediate focus when appropriate,
+        // otherwise keep a gentle indicator in the menu bar so background work isn't interrupted.
+        immediateFocus
+    }
+
+    func standardUserDriverWillHandleShowingUpdate(
+        _ handleShowingUpdate: Bool,
+        forUpdate update: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        pendingUpdateVersion = update.displayVersionString
+        updateReminderActive = !handleShowingUpdate
+        refreshStatus()
+        if handleShowingUpdate {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
+        updateReminderActive = false
+        refreshStatus()
+    }
+
+    func standardUserDriverWillFinishUpdateSession() {
+        pendingUpdateVersion = nil
+        updateReminderActive = false
+        refreshStatus()
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        shouldPostponeRelaunchForUpdate item: SUAppcastItem,
+        untilInvokingBlock installHandler: @escaping () -> Void
+    ) -> Bool {
+        guard ownedDaemon else { return false }
+        workQueue.async {
+            self.busy = true
+            self.refreshStatus()
+            self.stopOwnedDaemonSynchronously()
+            self.busy = false
+            self.refreshStatus()
+            DispatchQueue.main.async {
+                installHandler()
+            }
+        }
+        return true
+    }
+
+    func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+        stopOwnedDaemonSynchronously()
     }
 
     private func ensureDataDir() throws {

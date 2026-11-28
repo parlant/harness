@@ -95,11 +95,12 @@ test:websites:
     - when: never
   before_script:
     - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg openssh-client python3
+    - apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg openssh-client openssl python3
     - curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
     - apt-get install -y -qq --no-install-recommends nodejs
   script:
     - python3 scripts/test-install-sh.py
+    - python3 scripts/test-generate-appcast.py
     - diff -u scripts/install.sh websites/hiness.dev/install.sh
     - |
       for site in websites/hiness.dev websites/hiness.app; do
@@ -256,7 +257,7 @@ release:publish:
   before_script:
     - |
       apt-get update -qq
-      apt-get install -y -qq --no-install-recommends ca-certificates curl git openssh-client python3
+      apt-get install -y -qq --no-install-recommends ca-certificates curl git openssh-client openssl python3
   script:
     - export H_GIT_COMMIT="${CI_COMMIT_SHA}"
     - export H_GIT_TAG="${CI_COMMIT_TAG}"
@@ -274,6 +275,7 @@ release:publish:
         scripts/sign-release.sh dist/release
         scripts/verify-release.sh dist/release
       fi
+      python3 scripts/generate-appcast.py dist/release
     - scripts/ci/gitlab-release.sh dist/release
   artifacts:
     name: "harness-release-${CI_COMMIT_TAG}"
@@ -282,6 +284,7 @@ release:publish:
       - dist/release/SHA256SUMS.sig
       - dist/release/release-manifest.json
       - dist/release/release-manifest.json.sig
+      - dist/release/appcast.xml
     expire_in: 90 days
 
 .hex_publish_template:
