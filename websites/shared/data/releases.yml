@@ -1,4 +1,4 @@
-current_version: "0.5.1"
+current_version: "0.5.3"
 signer_identity: "bingboombam@parlant.xyz"
 signer_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsOhoxQkZ8pxWeObg2Q10fJ/Gcg0uL4pt1Oy/3vgLuN"
 github_repo: "https://github.com/parlant/harness"
@@ -10,6 +10,22 @@ hex_hiness: "https://hex.pm/packages/hiness"
 hexdocs_hiness: "https://hiness.hexdocs.pm/"
 
 news:
+  - id: v0-5-3-sparkle-auto-updates
+    date: "2026-11-28"
+    tag: "Release v0.5.3"
+    title: "H v0.5.3 adds native Sparkle 2 auto-updates for H.app"
+    summary: "H.app now checks for signed macOS updates automatically via Sparkle 2, shows release notes in a native update dialog, and drains the bundled daemon before relaunching."
+    links:
+      - label: Download H v0.5.3
+        url: "https://gitlab.com/parlant-co/harness/-/releases/v0.5.3"
+  - id: v0-5-2-notarized-macos-and-auto-signin
+    date: "2026-11-28"
+    tag: "Release v0.5.2"
+    title: "H v0.5.2 ships notarized macOS downloads and one-click browser sign-in"
+    summary: "H.app, the macOS disk image, and the app archive are now Developer ID-signed, notarized, and stapled, and launching the web UI from H.app signs you in automatically via a single-use link."
+    links:
+      - label: Download H v0.5.2
+        url: "https://gitlab.com/parlant-co/harness/-/releases/v0.5.2"
   - id: v0-5-1-hi-pty-disconnect
     date: "2026-11-26"
     tag: "Release v0.5.1"
@@ -63,10 +79,70 @@ news:
     summary: "First signed standalone bundles for macOS Apple Silicon (darwin-arm64) and Linux (linux-arm64, linux-x86_64), the h_setup Mix archive, and the native AppKit H.app menu-bar launcher."
 
 entries:
+  - version: "0.5.3"
+    tag: "v0.5.3"
+    date: "2026-11-28"
+    status: "Current release"
+    title: "Native Sparkle 2 auto-updates for H.app"
+    summary: "H.app integrates Sparkle 2 to check for signed macOS updates automatically, announce new releases gently in the menu bar, display release notes, and cleanly drain the daemon before relaunching."
+    artifacts:
+      - name: "H-v0.5.3-darwin-arm64.dmg"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "macOS Disk Image (H.app)"
+      - name: "H-v0.5.3-darwin-arm64.app.zip"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Zipped macOS Application Bundle"
+      - name: "harness-v0.5.3-darwin-arm64.tar.gz"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.5.3-linux-arm64.tar.gz"
+        platform: "Linux aarch64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.5.3-linux-x86_64.tar.gz"
+        platform: "Linux x86_64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "h_setup-v0.5.3.ez"
+        platform: "Elixir 1.18+ / Mix"
+        kind: "Signed Mix Archive Installer"
+    highlights:
+      - "Embed Sparkle 2 (`Sparkle.framework`) in `H.app` with Developer ID inside-out signing, hardened runtime, and Apple notarization."
+      - "Add Check for Updates (`⌘U`), automatic check toggle, and gentle menu-bar update reminders (`H↑`) that open Sparkle's native release notes and install dialog."
+      - "Drain and stop the bundled `hi-exec` daemon cleanly before Sparkle replaces `H.app` and relaunches."
+      - "Publish an Ed25519-signed `appcast.xml` automatically with every GitHub and GitLab release."
+
+  - version: "0.5.2"
+    tag: "v0.5.2"
+    date: "2026-11-28"
+    status: "Previous release"
+    title: "Notarized macOS builds and automatic browser sign-in"
+    summary: "Developer ID-sign, notarize, and staple H.app, the .dmg, and the .app.zip for Gatekeeper, and automatically sign into the web workbench from H.app using short-lived single-use links."
+    artifacts:
+      - name: "H-v0.5.2-darwin-arm64.dmg"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "macOS Disk Image (H.app)"
+      - name: "H-v0.5.2-darwin-arm64.app.zip"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Zipped macOS Application Bundle"
+      - name: "harness-v0.5.2-darwin-arm64.tar.gz"
+        platform: "macOS 14+ (Apple Silicon)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.5.2-linux-arm64.tar.gz"
+        platform: "Linux aarch64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "harness-v0.5.2-linux-x86_64.tar.gz"
+        platform: "Linux x86_64 (glibc)"
+        kind: "Standalone CLI & OTP Daemon Tarball"
+      - name: "h_setup-v0.5.2.ez"
+        platform: "Elixir 1.18+ / Mix"
+        kind: "Signed Mix Archive Installer"
+    highlights:
+      - "Notarize and staple `H.app` before packaging `.app.zip` and `.dmg`, then sign, notarize, and staple the `.dmg` so Gatekeeper accepts downloads cleanly."
+      - "Mint 60-second single-use sign-in codes via `POST /api/v1/auth/sign-in-link` and redeem them at `/login/link` to land directly on `/workspaces` without exposing the owner token."
+
   - version: "0.5.1"
     tag: "v0.5.1"
     date: "2026-11-26"
-    status: "Current release"
+    status: "Previous release"
     title: "Prevent hi CPU spin on terminal disconnect"
     summary: "Fix an infinite read loop in the terminal client when its PTY closes, and exit cleanly on SIGHUP or terminal hangup."
     artifacts:
