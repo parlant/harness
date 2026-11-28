@@ -4,7 +4,7 @@ defmodule MultiCodexExtension.MixProject do
   def project do
     [
       app: :multicodex_extension,
-      version: "0.5.2",
+      version: "0.5.3",
       elixir: "~> 1.20",
       aliases: [
         check: ["format --check-formatted", "compile --warnings-as-errors"],
