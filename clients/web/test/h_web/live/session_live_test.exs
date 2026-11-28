@@ -1017,6 +1017,32 @@ defmodule HWeb.SessionLiveTest do
     refute has_element?(view, "#load-earlier-btn")
   end
 
+  test "stock SessionLive does not render #session-metrics-chart without the turn_metrics extension",
+       ctx do
+    {:ok, %{session: session}} =
+      Daemon.create_session(%{"cwd" => ctx.projects_dir}, ctx.daemon_opts)
+
+    sid = session.session_id
+    server = {:via, Registry, {ctx.daemon_opts[:registry], {:session, sid}}}
+
+    assert {:ok, %{seeded: 2}} =
+             H.Session.Server.seed_entries(server, [
+               %{kind: "user", created_at: 1_000, data: %{"content" => "Hello"}},
+               %{
+                 kind: "assistant",
+                 created_at: 2_000,
+                 data: %{
+                   "content" => "World",
+                   "usage" => %{"input_tokens" => 100, "output_tokens" => 50},
+                   "duration_ms" => 1_000
+                 }
+               }
+             ])
+
+    {:ok, view, _html} = live(log_in_owner(ctx.conn, ctx.owner_token), "/sessions/#{sid}")
+    refute has_element?(view, "#session-metrics-chart")
+  end
+
   defp send_commit(view, seq, entries, live) do
     json =
       JSON.encode!(%{seq: seq, appended_entries: entries, doc_ops: %{live: [["replace", live]]}})
