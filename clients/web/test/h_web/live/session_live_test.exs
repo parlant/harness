@@ -6,6 +6,28 @@ defmodule HWeb.SessionLiveTest do
 
   import Phoenix.LiveViewTest
 
+  test "shows workspace screenshots and video in a committed assistant reply", ctx do
+    {:ok, %{session: session}} = Daemon.create_session(%{cwd: ctx.projects_dir}, ctx.daemon_opts)
+    sid = session.session_id
+
+    Fake.push_step(
+      ctx.fake,
+      {:reply, [], %{content: "![Desktop](workspace:preview.png)\n\n![Tour](workspace:tour.mp4)"}}
+    )
+
+    conn = log_in_owner(ctx.conn, ctx.owner_token)
+    {:ok, view, _} = live(conn, "/sessions/#{sid}")
+    view |> form("#composer-form", %{content: "Show me the workspace"}) |> render_submit()
+
+    image = ~s(#entries-stream .entry-assistant img[alt="Desktop"])
+    video = ~s(#entries-stream .entry-assistant video[aria-label="Tour"][controls])
+    wait_until(fn -> has_element?(view, image) and has_element?(view, video) end)
+
+    {:ok, reopened, _} = live(conn, "/sessions/#{sid}")
+    assert has_element?(reopened, image)
+    assert has_element?(reopened, video)
+  end
+
   test "processes fake generation live progress and commits assistant response without real LLM calls",
        %{
          conn: conn,
@@ -149,6 +171,15 @@ defmodule HWeb.SessionLiveTest do
            )
 
     assert has_element?(view, "aside#session-details[hidden] #session-tags-form")
+    assert has_element?(view, "#session-tags-form + #session-agent h3", "Agent")
+
+    assert has_element?(
+             view,
+             ~s(#session-agent button[data-open-panel="agent-options"][aria-controls="agent-options"][aria-label="Change agent settings"] svg)
+           )
+
+    assert has_element?(view, "#session-agent .session-agent-summary strong")
+    assert has_element?(view, "#session-agent .session-agent-summary small", "reasoning")
     refute has_element?(view, ".app-bar .inbox-caret")
     refute has_element?(view, ".app-bar > a")
     refute has_element?(view, ".app-bar select")

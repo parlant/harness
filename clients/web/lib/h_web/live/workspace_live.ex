@@ -27,20 +27,18 @@ defmodule HWeb.WorkspaceLive do
         harnesses: harnesses,
         models: models,
         env_id: initial_env,
-        selected_harness: first_harness_id(harnesses),
         path: "",
         parent_path: nil,
         directories: [],
-        folder_sessions: [],
         catalog: CatalogState.new(),
         catalog_subscribed?: false,
-        sessions: [],
+        sessions_by_dir: %{},
         session_groups: [],
         session_counts: CatalogState.counts([]),
-        selected_dir: "",
+        selected_dir: nil,
+        workspace_pane: "folders",
         filter: "",
-        new_session_id: "",
-        selected_model: first_model_id(models),
+        new_session: nil,
         browse_error: nil
       )
       |> load_sessions()
@@ -74,10 +72,7 @@ defmodule HWeb.WorkspaceLive do
 
   @impl true
   def handle_event("select_env", %{"env_id" => env_id}, socket) do
-    {:noreply,
-     socket
-     |> assign(filter: "")
-     |> browse(env_id, "")}
+    {:noreply, browse(socket, env_id, "")}
   end
 
   def handle_event("browse_dir", %{"path" => path}, socket) do
@@ -100,7 +95,24 @@ defmodule HWeb.WorkspaceLive do
   end
 
   def handle_event("select_dir", %{"path" => path}, socket) do
-    {:noreply, assign(socket, :selected_dir, path)}
+    cond do
+      path == socket.assigns.selected_dir ->
+        {:noreply, assign(socket, :selected_dir, nil)}
+
+      Enum.any?(socket.assigns.directories, &(&1.path == path)) ->
+        {:noreply, assign(socket, selected_dir: path, workspace_pane: "sessions")}
+
+      true ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("clear_dir_selection", _params, socket) do
+    {:noreply, assign(socket, :selected_dir, nil)}
+  end
+
+  def handle_event("show_pane", %{"pane" => pane}, socket) when pane in ["folders", "sessions"] do
+    {:noreply, assign(socket, :workspace_pane, pane)}
   end
 
   def handle_event("complete_directory", params, socket) do
@@ -137,19 +149,44 @@ defmodule HWeb.WorkspaceLive do
      |> browse(socket.assigns.env_id, socket.assigns.path)}
   end
 
-  def handle_event("start_session", params, socket) do
-    cwd =
-      non_empty(params["cwd"]) || non_empty(socket.assigns.selected_dir) || socket.assigns.path
+  def handle_event("prepare_session", %{"cwd" => cwd} = params, socket) do
+    env_id = params["env_id"] || socket.assigns.env_id
 
-    env_id = non_empty(params["env_id"]) || socket.assigns.env_id
-    harness_id = non_empty(params["harness_id"]) || socket.assigns.selected_harness
-    session_id = non_empty(params["session_id"])
-    model = non_empty(params["model"]) || non_empty(socket.assigns.selected_model)
+    if is_binary(cwd) and cwd != "" do
+      draft = %{
+        cwd: cwd,
+        env_id: env_id,
+        fields: %{
+          "harness_id" => first_harness_id(socket.assigns.harnesses),
+          "model" => first_model_id(socket.assigns.models),
+          "session_id" => ""
+        },
+        error: nil
+      }
+
+      {:noreply,
+       socket
+       |> assign(:new_session, draft)
+       |> push_event("open_panel", %{id: "workspace-new-session"})}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("edit_session_draft", params, %{assigns: %{new_session: draft}} = socket)
+      when not is_nil(draft) do
+    {:noreply, assign(socket, :new_session, update_session_draft(draft, params))}
+  end
+
+  def handle_event("start_session", params, %{assigns: %{new_session: draft}} = socket)
+      when not is_nil(draft) do
+    draft = update_session_draft(draft, params)
+    model = non_empty(draft.fields["model"])
 
     create_params =
-      %{"env_id" => env_id, "cwd" => cwd}
-      |> maybe_put("harness_id", harness_id)
-      |> maybe_put("session_id", session_id)
+      %{"env_id" => draft.env_id, "cwd" => draft.cwd}
+      |> maybe_put("harness_id", non_empty(draft.fields["harness_id"]))
+      |> maybe_put("session_id", non_empty(draft.fields["session_id"]))
       |> maybe_put("agent", if(model, do: %{"model" => model}, else: nil))
 
     case Backend.create_session(create_params) do
@@ -158,20 +195,28 @@ defmodule HWeb.WorkspaceLive do
         {:noreply, push_navigate(socket, to: ~p"/sessions/#{sid}")}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, format_error(reason))}
+        {:noreply, assign(socket, :new_session, %{draft | error: format_error(reason)})}
     end
   end
+
+  def handle_event(event, _params, socket) when event in ["edit_session_draft", "start_session"],
+    do: {:noreply, socket}
 
   def handle_event("review_workspace", params, socket) do
     with {:ok, %{session: session}} <-
            Backend.open_workspace_review(%{
              "env_id" => params["env_id"] || socket.assigns.env_id,
-             "cwd" => non_empty(params["cwd"]) || socket.assigns.selected_dir
+             "cwd" => non_empty(params["cwd"]) || socket.assigns.path
            }) do
       {:noreply, push_navigate(socket, to: ~p"/sessions/#{session.session_id}/review")}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, format_error(reason))}
     end
+  end
+
+  defp update_session_draft(draft, params) do
+    fields = Map.merge(draft.fields, Map.take(params, Map.keys(draft.fields)))
+    %{draft | fields: fields, error: nil}
   end
 
   defp load_sessions(socket) do
@@ -211,7 +256,7 @@ defmodule HWeb.WorkspaceLive do
 
     assign(socket,
       catalog: catalog,
-      sessions: root_sessions,
+      sessions_by_dir: Enum.group_by(root_sessions, &{&1.env_id, &1.cwd}),
       session_groups: CatalogState.group_by_workspace(catalog.sessions),
       session_counts: CatalogState.counts(catalog.sessions)
     )
@@ -222,21 +267,33 @@ defmodule HWeb.WorkspaceLive do
 
     case Backend.browse_workspace(query) do
       {:ok, view} ->
+        same_folder? = view.env_id == socket.assigns.env_id and view.path == socket.assigns.path
+
+        selected_dir =
+          if same_folder? and
+               Enum.any?(view.directories, &(&1.path == socket.assigns.selected_dir)),
+             do: socket.assigns.selected_dir
+
         assign(socket,
           env_id: view.env_id,
           path: view.path,
           parent_path: view.parent_path,
           directories: view.directories,
-          folder_sessions: view.sessions,
-          selected_dir: view.path,
+          selected_dir: selected_dir,
+          workspace_pane: if(same_folder?, do: socket.assigns.workspace_pane, else: "folders"),
+          filter: if(same_folder?, do: socket.assigns.filter, else: ""),
           browse_error: nil
         )
 
       {:error, reason} ->
         assign(socket,
           env_id: env_id,
+          path: path,
+          parent_path: nil,
           directories: [],
-          folder_sessions: [],
+          selected_dir: nil,
+          workspace_pane: "folders",
+          filter: "",
           browse_error: format_error(reason)
         )
     end

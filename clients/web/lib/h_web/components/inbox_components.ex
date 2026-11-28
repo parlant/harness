@@ -153,6 +153,15 @@ defmodule HWeb.InboxComponents do
     >
       <select name="workspace" class="input mono" aria-label="Working directory">
         <option value="" selected={is_nil(@filter.workspace)}>All directories</option>
+        <%!-- Keep a bookmarked filter selected without offering archived-only directories. --%>
+        <option
+          :for={{label, value} <- List.wrap(@options.selected_workspace)}
+          value={value}
+          selected
+          hidden
+        >
+          {label}
+        </option>
         <option
           :for={{label, value} <- @options.workspaces}
           value={value}
@@ -480,7 +489,7 @@ defmodule HWeb.InboxComponents do
 
         <div
           id={@actions_menu_id}
-          class="app-menu inbox-row-actions-menu"
+          class="app-menu row-actions-popover"
           popover
           role="menu"
           aria-label={"Actions for #{@session.session_id}"}

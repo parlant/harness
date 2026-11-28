@@ -13,6 +13,52 @@ defmodule HWeb.InboxLiveTest do
   end
 
   describe "/inbox workspace grouping, states, filters, and live updates" do
+    test "offers only directories with unarchived root sessions, regardless of inbox mode", ctx do
+      catalog = Keyword.fetch!(ctx.daemon_opts, :catalog)
+      root = ctx.projects_dir
+      archived_dir = Path.join(root, "archive-only")
+      child_dir = Path.join(root, "child-worktree")
+      parent = %{session_id: "idle-root", conversation_id: 1, at_entry_id: 1, depth: 1}
+
+      for attrs <- [
+            %{session_id: "idle-root", cwd: root, active: false, needs_attention: false},
+            %{session_id: "second-root", cwd: root},
+            %{session_id: "remote-root", env_id: "vm", cwd: root},
+            %{session_id: "archive-root", cwd: archived_dir, archived: true},
+            %{session_id: "child", cwd: child_dir, parent: parent, role: "subagent"}
+          ] do
+        assert {:ok, _} = Catalog.put_session(catalog, attrs)
+      end
+
+      conn = log_in_owner(ctx.conn, ctx.owner_token)
+      {:ok, inbox, _} = live(conn, "/inbox?filter=all&subsessions=1")
+      option = "#inbox-filter-search-form select[name=workspace] option"
+
+      assert inbox
+             |> render()
+             |> LazyHTML.from_fragment()
+             |> LazyHTML.query(option)
+             |> LazyHTML.attribute("value") == [
+               "",
+               JSON.encode!(["host", root]),
+               JSON.encode!(["vm", root])
+             ]
+
+      assert {:ok, _} = Catalog.set_archived(catalog, "idle-root", true)
+      assert {:ok, _} = Catalog.set_archived(catalog, "second-root", true)
+
+      wait_until(fn ->
+        not has_element?(inbox, "#{option}[value='#{JSON.encode!(["host", root])}']")
+      end)
+
+      assert has_element?(inbox, "#{option}[value='#{JSON.encode!(["vm", root])}']")
+
+      {:ok, bookmarked, _} = live(conn, ~p"/inbox?#{%{filter: "archived", cwd: archived_dir}}")
+      assert has_element?(bookmarked, ~s(a[data-session-id="archive-root"]))
+      assert has_element?(bookmarked, "#{option}[selected][hidden]")
+      refute has_element?(bookmarked, "#{option}:not([hidden])", archived_dir)
+    end
+
     test "groups sessions by cwd, renders attention/processing states, filters, and updates live via :catalog PubSub",
          %{
            conn: conn,

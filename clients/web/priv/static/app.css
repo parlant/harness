@@ -376,9 +376,9 @@ body {
 .app-menu :is(a, button):hover, .app-menu [aria-current="page"] { background: var(--surface-2); }
 .session-actions-menu {
   inset-inline: auto max(8px, env(safe-area-inset-right));
-  width: min(14.5rem, calc(100vw - 16px));
+  width: min(18rem, calc(100vw - 16px));
 }
-.session-actions-menu :is(a, button) { justify-content: space-between; gap: 10px; }
+.session-actions-menu :is(a, button) { justify-content: space-between; gap: 10px; text-align: left; }
 .session-actions-menu button:disabled { opacity: .5; cursor: default; }
 .session-actions-menu kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
 .app-menu-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
@@ -436,7 +436,7 @@ body {
 
 /* Workspaces */
 .workspace-content {
-  width: min(100%, 64rem);
+  width: min(100%, 80rem);
   margin-inline: auto;
   padding: clamp(12px, 3vw, 28px);
   display: flex;
@@ -475,50 +475,55 @@ body {
   gap: 6px;
 }
 
-.path-toolbar {
+.path-toolbar, .workspace-path-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
+  gap: 6px;
 }
 
 .path-form {
   display: flex;
-  flex: 1 1 240px;
+  flex: 1 1 200px;
   gap: 6px;
 }
 
-.filter-form {
-  flex: 0 1 200px;
-}
+.path-toolbar > .btn,
+.path-toolbar .path-form > .btn,
+.workspace-path-actions > .btn { white-space: nowrap; }
 
-.new-session-card {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
+.workspace-new-session-form { display: grid; gap: 12px; }
+.workspace-session-target { display: grid; gap: 4px; margin: 0; }
+.workspace-new-session-form .flash-banner { margin: 0; }
+.new-session-actions { display: flex; justify-content: flex-end; gap: 6px; }
 
-.new-session-fields {
+.workspace-columns {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
 }
-
-.new-session-actions {
-  display: flex;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 6px;
+.workspace-pane { display: grid; gap: 8px; }
+.workspace-pane + .workspace-pane {
+  position: sticky;
+  top: 12px;
+  max-height: calc(100dvh - 80px);
+  overflow: auto;
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 20px;
 }
+.workspace-pane-switch { display: none; }
+.workspace-sessions-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+#workspace-sessions-path { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.workspace-empty { margin: 4px 0; }
 
-.section-block {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+@media (max-width: 740px) {
+  .workspace-columns { grid-template-columns: minmax(0, 1fr); }
+  .workspace-pane + .workspace-pane { position: static; max-height: none; overflow: visible; border: 0; padding: 0; }
+  .workspace-columns[data-pane="folders"] #workspace-pane-sessions,
+  .workspace-columns[data-pane="sessions"] #workspace-pane-folders { display: none; }
+  .workspace-pane-switch { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+  .workspace-pane-switch > button { flex: 1; min-height: 40px; }
+  .workspace-pane-switch > [aria-pressed="true"] { color: var(--accent); border-bottom-color: currentColor; }
 }
 
 .section-title {
@@ -534,45 +539,49 @@ body {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
 }
 
+.branch-list { display: flex; flex-direction: column; gap: 6px; }
+
 .dir-row,
-.session-card {
+.workspace-browser .session-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
 }
 
-.dir-main {
+.dir-row:hover, .dir-row:focus-within { background: var(--surface-2); }
+.dir-row:has(.dir-select[aria-pressed="true"]) { background: var(--user-bg); }
+
+.dir-select {
   display: flex;
+  flex: 1;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-width: 0;
-}
-
-.dir-name-btn {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--accent);
-  font-weight: 600;
+  min-height: 44px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
   cursor: pointer;
 }
-
-.dir-actions {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
+.dir-name { font-weight: 600; overflow-wrap: anywhere; }
+.dir-menu-button { flex: none; color: var(--muted); }
+@media (hover: hover) and (pointer: fine) {
+  .dir-menu-button { opacity: 0; }
+  .dir-row:is(:hover, :focus-within, :has(:popover-open)) .dir-menu-button { opacity: 1; }
 }
+@media (any-pointer: coarse) {
+  .dir-menu-button { opacity: 1; }
+}
+
+.workspace-browser .session-card { padding: 8px 0; }
 
 .session-card-info {
   min-width: 0;
@@ -686,6 +695,8 @@ body {
   flex-direction: column;
   gap: 8px;
 }
+
+.session-agent-summary { display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
 
 .session-detail-badges { display: flex; flex-wrap: wrap; gap: 6px; }
 .session-meta-lines {
@@ -991,6 +1002,7 @@ body {
 .markdown h2 { font-size: 1.3em; }
 .markdown h3 { font-size: 1.15em; }
 .markdown a { color: var(--accent); }
+.markdown :is(img, video) { display: block; max-width: 100%; max-height: min(32rem, 70dvh); object-fit: contain; }
 
 .markdown code {
   padding: 0.12em 0.35em;
@@ -1342,8 +1354,6 @@ summary.activity-caption:hover { background: var(--surface-2); }
 
 @media (max-width: 860px) {
   .pane-splitter { display: none; }
-  .dir-row { flex-direction: column; align-items: stretch; }
-  .dir-actions { justify-content: flex-end; flex-wrap: wrap; }
   .bar-button, .app-menu :is(a, button) { min-height: 44px; }
   .bar-button { min-width: 44px; }
   .tag-chip button { min-width: 36px; min-height: 36px; }
@@ -1744,10 +1754,11 @@ html.inspect-picking * { cursor: crosshair !important; }
   color: var(--text);
 }
 
-.inbox-row-actions-menu {
+.row-actions-popover {
   inset: auto;
   width: min(11.5rem, calc(100vw - 16px));
 }
+.row-actions-popover :is(a, button) { text-align: start; }
 
 .inbox-action-btn {
   white-space: nowrap;

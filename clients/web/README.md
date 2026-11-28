@@ -64,11 +64,21 @@ without enabling the development inspector below.
 Authenticated pages share `HWeb.Layouts.app_bar/1`: one row for navigation,
 page title and immediate actions. The main menu opens over the page. The central
 content takes the remaining viewport height and scrolls independently of the bar.
-In a session this is the transcript. The composer opens by default on a new
-session. **Hide reply** tucks it away without clearing text or attachments;
-**Reply** reveals it again. The model
-button in the composer opens **Agent settings**. Browsing providers doesn't
-change the conversation; choosing a model or reasoning level applies it directly.
+
+In **Workspaces**, the path toolbar acts on the current directory. Select a folder
+row to see its sessions without navigating. Select it again or use
+**Clear selection** to return to the current directory’s sessions. On narrow screens,
+**Folders** and **Folder sessions** switch between the same two panes. A folder’s
+three-dot menu offers **Open folder**, **Review files**, and **New session**. The
+menu trigger appears on hover or keyboard focus and stays visible on touch
+screens. **New session** opens a dialog for that directory; nothing is created
+until you submit it.
+
+In a session the scrollable content is the transcript. The composer opens by
+default on a new session. **Hide reply** tucks it away without clearing text
+or attachments; **Reply** reveals it again. The model button in the composer
+opens **Agent settings**. Browsing providers doesn't change the conversation;
+choosing a model or reasoning level applies it directly.
 The transcript follows output while you're at the end. Reading earlier messages
 turns following off; **Latest** returns to the end. During a run, the open
 composer groups **Queue**, **Steer**, and the square **Stop** icon. With reply
@@ -93,7 +103,9 @@ need you to act.
 Working-directory, tag, and text filters are available from the Inbox filter panel.
 They travel in the URL: opening a row, using the session carets, switching branches,
 and returning through **Main menu → Inbox** preserve them. A directory filter
-matches the exact environment and directory; a tag filter matches the full tag.
+matches the exact environment and directory. The directory picker offers only
+working directories with an unarchived top-level session; subagent sessions
+never add choices. A tag filter matches the full tag.
 Use **Clear filters** to reset the view. The session sidebar lists other unarchived
 sessions in the same directory regardless of those filters. Add a session tag with
 Enter, comma, or **+**; remove it with **×**. Changes save automatically. In the
@@ -122,9 +134,25 @@ width) and assistant replies as full-width Markdown prose. Assistant replies
 render Markdown while streaming and after commit; fenced `console` and shell
 blocks use a scrollable terminal style and are never executed. User text stays
 plain, and attached screenshots display in the transcript. Markdown does not
-render raw HTML or load images from URLs. Each message card places status
+render raw HTML or fetch arbitrary image URLs. Each message card places status
 indicators (`Aborted`, `Failed`, or live `Streaming…`), raw Markdown / plain-text
 copy, and `Fork` below the card.
+
+### Show screenshots and recordings in an assistant reply
+
+Save the result inside the session's workspace and reference it in the reply:
+
+```markdown
+![Workspace on desktop](workspace:artifacts/workspace.png)
+![30-second walkthrough](workspace:artifacts/walkthrough.webm)
+```
+
+The web client embeds PNG, JPEG, GIF and WebP images and plays MP4 or WebM
+with controls after the reply commits. Use a workspace-relative path, with
+spaces encoded as `%20`; absolute paths, symlinks and remote URLs are not
+embedded. The authenticated file preview limits each file to 16 MiB. Only the
+reference is saved in the reply, so leave the file in place if the preview
+should remain available.
 
 In the composer, type `/` at the start of a message for slash commands, or
 `@` anywhere for workspace files. Pick a suggestion by tapping it or pressing
@@ -152,12 +180,12 @@ transcript are unchanged.
 
 Run `mix format`, `mix compile --warnings-as-errors`, and `mix test` here.
 For the browser completion logic, also run `node --test assets/test/*.test.mjs`.
-For a browser smoke check, pick the workspace's **Start New Session** button
-(it must not start anything), preview a crop, and save a note. Open its
-session, verify the image, and return to workspaces. Change a CSS rule, then
-a HEEx label: the first should update without navigation and the second
-should refresh the page and restore the inspector mode. None of these steps
-requires a provider call.
+For a browser smoke check, open **New session** from the workspace path toolbar
+(it must not create anything until submitted), then cancel it. Preview a crop
+and save a note. Open its session, verify the image, and return to workspaces.
+Change a CSS rule, then a HEEx label: the first should update without navigation
+and the second should refresh the page and restore the inspector mode. None of
+these steps requires a provider call.
 
 ## Review working files and commits
 

@@ -92,14 +92,13 @@ defmodule HWeb.InboxFilter do
     root_sessions = Enum.filter(sessions, &CatalogState.root_session?/1)
 
     workspaces =
-      [filter.workspace | Enum.map(root_sessions, &{&1.env_id, &1.cwd})]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-      |> Enum.map(fn {env_id, cwd} = workspace ->
-        {CatalogState.format_workspace_label(env_id, cwd, System.user_home()),
-         workspace_value(workspace)}
-      end)
-      |> Enum.sort()
+      for s <- root_sessions, not s.archived, do: {s.env_id, s.cwd}
+
+    selected_workspace =
+      if filter.workspace && filter.workspace not in workspaces,
+        do: workspace_option(filter.workspace)
+
+    workspaces = workspaces |> Enum.uniq() |> Enum.map(&workspace_option/1) |> Enum.sort()
 
     tags =
       [filter.tag | Enum.flat_map(root_sessions, & &1.tags)]
@@ -107,7 +106,12 @@ defmodule HWeb.InboxFilter do
       |> Enum.uniq()
       |> Enum.sort()
 
-    %{workspaces: workspaces, tags: tags}
+    %{workspaces: workspaces, selected_workspace: selected_workspace, tags: tags}
+  end
+
+  defp workspace_option({env_id, cwd} = workspace) do
+    {CatalogState.format_workspace_label(env_id, cwd, System.user_home()),
+     workspace_value(workspace)}
   end
 
   defp ancestor_root(session, by_id, seen \\ MapSet.new())

@@ -77,7 +77,7 @@ import {Completer, DirectoryComplete} from "./completion.js";
   // Position row action popovers relative to their 3-dot trigger button.
   document.addEventListener("toggle", event => {
     const menu = event.target;
-    if (!(menu instanceof Element) || !menu.matches(".inbox-row-actions-menu[popover]")) return;
+    if (!(menu instanceof Element) || !menu.matches(".row-actions-popover[popover]")) return;
     if (event.newState !== "open") return;
     const trigger = document.querySelector(`[popovertarget="${CSS.escape(menu.id)}"]`);
     if (!trigger) return;

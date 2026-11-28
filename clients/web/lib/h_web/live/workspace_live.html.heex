@@ -17,7 +17,7 @@
         aria-haspopup="dialog"
         aria-controls="workspace-sessions"
         data-open-panel="workspace-sessions"
-      >Sessions</button>
+      >All sessions</button>
     </:actions>
     <:menu_actions>
       <button
@@ -36,22 +36,84 @@
         groups={@session_groups}
         from_inbox={false}
         compact={true}
-        new_session_event="start_session"
+        new_session_event="prepare_session"
         review_event="review_workspace"
         empty_message="No sessions yet. Select a folder and start one."
       />
     </div>
   </Layouts.panel>
 
+  <Layouts.panel id="workspace-new-session" title="New session">
+    <form
+      :if={@new_session}
+      id="start-session-form"
+      phx-change="edit_session_draft"
+      phx-submit="start_session"
+      class="workspace-new-session-form"
+    >
+      <p class="workspace-session-target">
+        <span class="field-label">Directory · {@new_session.env_id}</span>
+        <span id="new-session-directory" class="mono">{@new_session.cwd}</span>
+      </p>
+      <p :if={@new_session.error} class="flash-banner flash-error" role="alert">
+        {@new_session.error}
+      </p>
+      <label class="field-group">
+        <span class="field-label">Harness</span>
+        <select id="workspace-harness-select" name="harness_id" class="input">
+          <option
+            :for={harness <- @harnesses}
+            value={harness["id"] || harness[:id]}
+            selected={(harness["id"] || harness[:id]) == @new_session.fields["harness_id"]}
+          >
+            {harness["name"] || harness[:name] || harness["id"] || harness[:id]}
+          </option>
+        </select>
+      </label>
+
+      <label class="field-group">
+        <span class="field-label">Model</span>
+        <select id="workspace-model-select" name="model" class="input">
+          <option
+            :for={model <- @models}
+            value={model.id}
+            selected={model.id == @new_session.fields["model"]}
+          >
+            {model.name || model.id}
+          </option>
+        </select>
+      </label>
+
+      <label class="field-group">
+        <span class="field-label">Session ID (optional)</span>
+        <input
+          id="new-session-id-input"
+          type="text"
+          name="session_id"
+          value={@new_session.fields["session_id"]}
+          placeholder="auto-generated"
+          class="input mono"
+        />
+      </label>
+      <div class="new-session-actions">
+        <button type="button" class="btn" data-close-panel>Cancel</button>
+        <button type="submit" class="btn btn-primary" phx-disable-with="Starting…">
+          Start session
+        </button>
+      </div>
+    </form>
+  </Layouts.panel>
+
   <main class="workspace-browser screen-scroll" aria-label="Workspace browser">
     <div class="workspace-content">
       <div class="panel-header">
         <h2>Workspace Browser</h2>
-        <div class="env-tabs" role="tablist" aria-label="Execution environments">
+        <div class="env-tabs" role="group" aria-label="Execution environments">
           <button
             :for={env <- @environments}
             type="button"
             class={["btn btn-sm", if(env.id == @env_id, do: "btn-primary", else: "btn-ghost")]}
+            aria-pressed={to_string(env.id == @env_id)}
             phx-click="select_env"
             phx-value-env_id={env.id}
           >
@@ -64,11 +126,11 @@
         <button
           id="browse-up-btn"
           type="button"
-          class="btn btn-sm"
+          class="btn"
           phx-click="browse_parent"
           disabled={is_nil(@parent_path)}
         >
-          Up ..
+          Up
         </button>
 
         <form phx-submit="browse_path" class="path-form">
@@ -96,195 +158,184 @@
             />
             <.completion_layer id="workspace-path-input-completion" />
           </div>
-          <button type="submit" class="btn btn-sm">Go</button>
+          <button type="submit" class="btn">Go</button>
         </form>
 
-        <form id="filter-dirs-form" phx-change="filter_dirs" class="filter-form">
-          <input
-            type="search"
-            name="filter"
-            value={@filter}
-            placeholder="Filter folders…"
-            aria-label="Filter folders"
-            class="input"
-          />
-        </form>
-      </div>
-
-      <div :if={@browse_error} class="flash-banner flash-error">
-        <span>{@browse_error}</span>
-      </div>
-
-      <form id="start-session-form" phx-submit="start_session" class="new-session-card">
-        <input type="hidden" name="env_id" value={@env_id} />
-        <div class="new-session-fields">
-          <label class="field-group">
-            <span class="field-label">Selected directory</span>
-            <div
-              id="selected-cwd-dir-complete"
-              class="dir-complete-wrap"
-              phx-hook="DirectoryComplete"
-              data-event="complete_directory"
-              data-kind="directory"
-            >
-              <input
-                id="selected-cwd-input"
-                type="text"
-                name="cwd"
-                value={@selected_dir}
-                autocomplete="off"
-                autocapitalize="off"
-                autocorrect="off"
-                aria-autocomplete="both"
-                aria-controls="selected-cwd-input-completion-list"
-                phx-mounted={JS.ignore_attributes("aria-activedescendant")}
-                spellcheck="false"
-                class="input mono dir-complete-input"
-                required
-              />
-              <.completion_layer id="selected-cwd-input-completion" />
-            </div>
-          </label>
-
-          <label class="field-group">
-            <span class="field-label">Harness</span>
-            <select id="workspace-harness-select" name="harness_id" class="input">
-              <option
-                :for={harness <- @harnesses}
-                value={harness["id"] || harness[:id]}
-                selected={(harness["id"] || harness[:id]) == @selected_harness}
-              >
-                {harness["name"] || harness[:name] || harness["id"] || harness[:id]}
-              </option>
-            </select>
-          </label>
-
-          <label class="field-group">
-            <span class="field-label">Model</span>
-            <select id="workspace-model-select" name="model" class="input">
-              <option
-                :for={model <- @models}
-                value={model.id}
-                selected={model.id == @selected_model}
-              >
-                {model.name || model.id}
-              </option>
-            </select>
-          </label>
-
-          <label class="field-group">
-            <span class="field-label">Session ID (optional)</span>
-            <input
-              id="new-session-id-input"
-              type="text"
-              name="session_id"
-              value={@new_session_id}
-              placeholder="auto-generated"
-              class="input mono"
-            />
-          </label>
-        </div>
-
-        <div class="new-session-actions">
+        <div class="workspace-path-actions">
           <button
-            id="review-selected-workspace-btn"
+            id="review-current-workspace-btn"
             type="button"
             class="btn"
             phx-click="review_workspace"
-            phx-value-cwd={@selected_dir}
+            phx-value-cwd={@path}
             disabled={@browse_error != nil}
-          >
-            Review files
-          </button>
-          <button id="start-selected-session-btn" type="submit" class="btn btn-primary">
-            Start New Session
-          </button>
+          >Review files</button>
+          <button
+            id="new-current-session-btn"
+            type="button"
+            class="btn btn-primary"
+            phx-click="prepare_session"
+            phx-value-cwd={@path}
+            aria-haspopup="dialog"
+            aria-controls="workspace-new-session"
+            disabled={@browse_error != nil}
+          >New session</button>
         </div>
-      </form>
-
-      <div class="section-block">
-        <h3 class="section-title">Folders in <span class="mono">{@path}</span></h3>
-        <p :if={filter_directories(@directories, @filter) == []} class="muted">
-          No subdirectories match.
-        </p>
-
-        <ul id="directories-list" class="dir-list">
-          <li :for={dir <- filter_directories(@directories, @filter)} class="dir-row">
-            <div class="dir-main">
-              <button
-                type="button"
-                class="dir-name-btn"
-                phx-click="browse_dir"
-                phx-value-path={dir.path}
-              >
-                <span class="mono">{dir.name}/</span>
-              </button>
-
-              <span :for={marker <- dir.markers} class="badge mono">{marker}</span>
-
-              <span
-                :if={dir.active_session_count > 0}
-                class="badge badge-active"
-                title="Active sessions"
-              >
-                {dir.active_session_count} active
-              </span>
-
-              <span
-                :if={dir.direct_session_count > 0 or dir.subtree_session_count > 0}
-                class="badge mono"
-              >
-                {dir.direct_session_count} direct / {dir.subtree_session_count} total
-              </span>
-            </div>
-
-            <div class="dir-actions">
-              <button
-                type="button"
-                class="btn btn-sm btn-ghost"
-                phx-click="select_dir"
-                phx-value-path={dir.path}
-              >
-                Select
-              </button>
-              <button
-                type="button"
-                class="btn btn-sm"
-                phx-click="review_workspace"
-                phx-value-cwd={dir.path}
-              >
-                Review files
-              </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-primary"
-                phx-click="start_session"
-                phx-value-cwd={dir.path}
-              >
-                Start Session
-              </button>
-            </div>
-          </li>
-        </ul>
       </div>
 
-      <div :if={@folder_sessions != []} class="section-block">
-        <h3 class="section-title">Sessions in this folder</h3>
-        <ul class="session-list">
-          <li :for={s <- @folder_sessions} class="session-card">
-            <div class="session-card-info">
-              <span :if={s.title} class="session-title" title={s.title}>{s.title}</span>
-              <span class="mono session-id" title={s.session_id}>{s.session_id}</span>
-              <div :if={s.active || Map.get(s, :archived, false)} class="session-card-badges">
-                <span :if={s.active} class="badge badge-active">active</span>
-                <span :if={Map.get(s, :archived, false)} class="badge">Archived</span>
+      <div :if={@browse_error} class="flash-banner flash-error" role="alert">
+        <span>{@browse_error}</span>
+      </div>
+
+      <div class="workspace-pane-switch" role="group" aria-label="Workspace view">
+        <button
+          :for={{pane, title} <- [{"folders", "Folders"}, {"sessions", "Folder sessions"}]}
+          type="button"
+          class="btn btn-ghost"
+          aria-controls={"workspace-pane-#{pane}"}
+          aria-pressed={to_string(@workspace_pane == pane)}
+          phx-click="show_pane"
+          phx-value-pane={pane}
+        >{title}</button>
+      </div>
+
+      <div class="workspace-columns" data-pane={@workspace_pane}>
+        <section
+          id="workspace-pane-folders"
+          class="workspace-pane"
+          aria-labelledby="workspace-folders-title"
+        >
+          <h3 id="workspace-folders-title" class="section-title">Folders</h3>
+          <form id="filter-dirs-form" phx-change="filter_dirs">
+            <input
+              type="search"
+              name="filter"
+              value={@filter}
+              placeholder="Filter folders…"
+              aria-label="Filter folders"
+              class="input"
+            />
+          </form>
+
+          <% directories = filter_directories(@directories, @filter) %>
+          <p :if={directories == []} class="workspace-empty muted">
+            {if @filter == "", do: "No subfolders.", else: "No folders match the filter."}
+          </p>
+
+          <ul id="directories-list" class="dir-list">
+            <li :for={dir <- directories} :key={dir.path} class="dir-row">
+              <% menu_id = "folder-actions-" <> Base.url_encode64(dir.path, padding: false) %>
+              <button
+                type="button"
+                class="dir-select"
+                phx-click="select_dir"
+                phx-value-path={dir.path}
+                aria-pressed={to_string(dir.path == @selected_dir)}
+                title={dir.path}
+              >
+                <span class="dir-name mono">{dir.name}/</span>
+                <span :for={marker <- dir.markers} class="badge mono">{marker}</span>
+                <span
+                  :if={dir.active_session_count > 0}
+                  class="badge badge-active"
+                  title="Active sessions"
+                >
+                  {dir.active_session_count} active
+                </span>
+                <span
+                  :if={dir.direct_session_count > 0 or dir.subtree_session_count > 0}
+                  class="badge mono"
+                >
+                  {dir.direct_session_count} direct / {dir.subtree_session_count} total
+                </span>
+              </button>
+              <button
+                type="button"
+                class="bar-button dir-menu-button"
+                popovertarget={menu_id}
+                aria-label={"Folder actions for #{dir.name}"}
+                title="Folder actions"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="5" cy="12" r="1.5" />
+                  <circle cx="12" cy="12" r="1.5" />
+                  <circle cx="19" cy="12" r="1.5" />
+                </svg>
+              </button>
+              <div
+                id={menu_id}
+                class="app-menu row-actions-popover"
+                popover
+                aria-label={"Actions for #{dir.name}"}
+              >
+                <button
+                  type="button"
+                  phx-click="browse_dir"
+                  phx-value-path={dir.path}
+                  data-dismiss-menu
+                >
+                  Open folder
+                </button>
+                <button
+                  type="button"
+                  phx-click="review_workspace"
+                  phx-value-cwd={dir.path}
+                  data-dismiss-menu
+                >
+                  Review files
+                </button>
+                <button
+                  type="button"
+                  phx-click="prepare_session"
+                  phx-value-cwd={dir.path}
+                  aria-haspopup="dialog"
+                  aria-controls="workspace-new-session"
+                  data-dismiss-menu
+                >New session</button>
               </div>
-            </div>
-            <.link navigate={~p"/sessions/#{s.session_id}"} class="btn btn-sm">
-              {if Map.get(s, :archived, false), do: "Open", else: "Resume"}
-            </.link>
-          </li>
-        </ul>
+            </li>
+          </ul>
+        </section>
+
+        <% session_path = @selected_dir || @path %>
+        <% folder_sessions =
+          if @browse_error, do: [], else: Map.get(@sessions_by_dir, {@env_id, session_path}, []) %>
+        <section
+          id="workspace-pane-sessions"
+          class="workspace-pane"
+          aria-labelledby="workspace-folder-sessions-title"
+        >
+          <header class="workspace-sessions-header">
+            <h3 id="workspace-folder-sessions-title" class="section-title">
+              Sessions in this folder
+            </h3>
+            <button
+              :if={@selected_dir}
+              type="button"
+              class="btn btn-sm btn-ghost"
+              phx-click="clear_dir_selection"
+            >Clear selection</button>
+          </header>
+          <p id="workspace-sessions-path" class="mono muted">{session_path}</p>
+          <p :if={folder_sessions == []} class="workspace-empty muted">
+            No sessions in this folder.
+          </p>
+          <ul id="folder-sessions-list" class="session-list">
+            <li :for={s <- folder_sessions} :key={s.session_id} class="session-card">
+              <div class="session-card-info">
+                <span :if={s.title} class="session-title" title={s.title}>{s.title}</span>
+                <span class="mono session-id" title={s.session_id}>{s.session_id}</span>
+                <div :if={s.active || s.archived} class="session-card-badges">
+                  <span :if={s.active} class="badge badge-active">active</span>
+                  <span :if={s.archived} class="badge">Archived</span>
+                </div>
+              </div>
+              <.link navigate={~p"/sessions/#{s.session_id}"} class="btn btn-sm">
+                {if s.archived, do: "Open", else: "Resume"}
+              </.link>
+            </li>
+          </ul>
+        </section>
       </div>
     </div>
   </main>

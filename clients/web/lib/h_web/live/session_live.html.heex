@@ -150,6 +150,7 @@
                 <ConversationComponents.entry_card
                   id={dom_id}
                   entry={entry}
+                  session_id={@session_id}
                   can_fork?={@session != nil && @session.status != "archived"}
                 />
             <% end %>
@@ -694,15 +695,42 @@
             </.link>
           </div>
         <% %{kind: :builtin, id: "session-tags"} -> %>
-          <div :if={@session} class="sidebar-section">
-            <.tag_input
-              id="session-tags"
-              tags={session_tags(assigns)}
-              error={@tag_error}
-            />
-          </div>
+          <.tag_input
+            :if={@session}
+            id="session-tags"
+            tags={session_tags(assigns)}
+            error={@tag_error}
+          />
         <% %{kind: :builtin, id: "session-agent"} -> %>
-          {nil}
+          <section
+            :if={profile}
+            id="session-agent"
+            class="sidebar-section"
+            aria-labelledby="session-agent-title"
+          >
+            <div class="sidebar-section-head">
+              <h3 id="session-agent-title" class="section-title">Agent</h3>
+              <button
+                id="session-agent-settings"
+                type="button"
+                class="bar-button"
+                aria-label="Change agent settings"
+                title="Change agent settings"
+                aria-haspopup="dialog"
+                aria-controls="agent-options"
+                data-open-panel="agent-options"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m9.5 3-.5 2-2 1.2-2-.6-2.5 4.3L3.5 11v2L2 14.1l2.5 4.3 2-.6L9 19l.5 2h5l.5-2 2.5-1.2 2 .6 2.5-4.3L20.5 13v-2L22 9.9l-2.5-4.3-2 .6L15 5l-.5-2Z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
+            </div>
+            <div class="session-agent-summary">
+              <strong>{profile.model_label}</strong>
+              <small class="muted">{profile.provider_label} · {profile.thinking_label} reasoning</small>
+            </div>
+          </section>
         <% %{kind: :builtin, id: "session-conversations"} -> %>
           <div class="sidebar-section sidebar-divider">
             <h3 class="section-title">Conversations</h3>

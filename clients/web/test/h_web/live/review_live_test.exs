@@ -25,7 +25,7 @@ defmodule HWeb.ReviewLiveTest do
       {:ok, workspace, _} = live(conn, "/workspaces")
 
       assert {:error, {:live_redirect, %{to: "/sessions/" <> ^sid <> "/review"}}} =
-               workspace |> element("#review-selected-workspace-btn") |> render_click()
+               workspace |> element("#review-current-workspace-btn") |> render_click()
 
       {:ok, view, html} = live(conn, "/sessions/#{sid}/review")
       assert html =~ ~s(id="review-files")

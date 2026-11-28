@@ -35,6 +35,7 @@ defmodule HWeb.ConversationComponents do
 
   attr(:id, :string, required: true)
   attr(:entry, :map, required: true)
+  attr(:session_id, :string, default: nil)
   attr(:can_fork?, :boolean, default: false)
 
   def entry_card(assigns) do
@@ -54,7 +55,7 @@ defmodule HWeb.ConversationComponents do
       class={["entry-card", "entry-#{@kind}", @status && "has-status"]}
     >
       <div class="entry-body">
-        <.entry_body entry={@entry} />
+        <.entry_body entry={@entry} session_id={@session_id} />
       </div>
       <.entry_toolbar
         entry_id={@entry["id"]}
@@ -155,6 +156,7 @@ defmodule HWeb.ConversationComponents do
   end
 
   attr(:entry, :map, required: true)
+  attr(:session_id, :string, default: nil)
 
   def entry_body(assigns) do
     data = assigns.entry["data"] || %{}
@@ -176,7 +178,11 @@ defmodule HWeb.ConversationComponents do
         alt="Attached screenshot"
         loading="lazy"
       />
-      <.assistant_text :if={@kind == "assistant" and @text != ""} text={@text} />
+      <.assistant_text
+        :if={@kind == "assistant" and @text != ""}
+        text={@text}
+        session_id={@session_id}
+      />
       <p :if={@kind == "assistant" and @text == "" and @filter_notice} class="muted">
         {@filter_notice}
       </p>
@@ -186,10 +192,11 @@ defmodule HWeb.ConversationComponents do
   end
 
   attr(:text, :string, required: true)
+  attr(:session_id, :string, default: nil)
 
   defp assistant_text(assigns) do
     ~H"""
-    <div class="markdown">{Markdown.render(@text)}</div>
+    <div class="markdown">{Markdown.render(@text, @session_id)}</div>
     """
   end
 

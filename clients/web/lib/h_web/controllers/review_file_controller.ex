@@ -1,7 +1,19 @@
 defmodule HWeb.ReviewFileController do
   use HWeb, :controller
 
-  alias HWeb.{Backend, ReviewLive}
+  alias HWeb.{Backend, ReviewLive, WorkspaceMedia}
+
+  def show(conn, %{"session_id" => sid, "path" => path, "preview" => "media"}) do
+    conn = put_resp_header(conn, "cache-control", "no-store")
+
+    with {:ok, {mode, mime}} <- WorkspaceMedia.type(path),
+         {:ok, %{kind: :media, mode: ^mode, mime: ^mime, bytes: bytes}} <-
+           Backend.read_review_file(sid, path, "working") do
+      preview(conn, mime, bytes)
+    else
+      _ -> send_resp(conn, 404, "Media unavailable")
+    end
+  end
 
   def show(conn, %{"session_id" => sid, "path" => path} = params) do
     source = Map.get(params, "source", "working")
@@ -57,6 +69,7 @@ defmodule HWeb.ReviewFileController do
   defp preview(conn, mime, bytes) do
     conn
     |> put_resp_header("cross-origin-resource-policy", "same-origin")
+    |> put_resp_header("x-content-type-options", "nosniff")
     |> put_resp_header(
       "content-security-policy",
       "sandbox; default-src 'none'; frame-ancestors 'self'; style-src 'unsafe-inline'; img-src data:"
