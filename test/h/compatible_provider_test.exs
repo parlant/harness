@@ -410,6 +410,38 @@ defmodule H.CompatibleProviderTest do
 
       refute log =~ @secret
     end
+
+    test "marks compatible provider transport failures and timeouts as retryable without leaking secrets",
+         %{config: config, accounts: accounts} do
+      assert {:ok, _} = Accounts.put_api_key(accounts, profile())
+
+      # Connection refused on a closed loopback port -> retryable provider_transport_error
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      {:ok, closed_port} = :inet.port(listener)
+      :ok = :gen_tcp.close(listener)
+
+      refused_config = with_local_url(config, closed_port)
+
+      assert {:error, %{code: "provider_transport_error", message: msg, retryable: true}} =
+               turn(refused_config, @slash)
+
+      refute msg =~ @secret
+
+      # Receive timeout -> retryable provider_timeout
+      {:ok, stall_listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      on_exit(fn -> :gen_tcp.close(stall_listener) end)
+      {:ok, stall_port} = :inet.port(stall_listener)
+
+      timeout_config =
+        config
+        |> with_local_url(stall_port)
+        |> Map.put(:receive_timeout, 50)
+
+      assert {:error, %{code: "provider_timeout", message: timeout_msg, retryable: true}} =
+               turn(timeout_config, @slash)
+
+      refute timeout_msg =~ @secret
+    end
   end
 
   defp local(config, respond, child_id \\ :default) do

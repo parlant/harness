@@ -67,13 +67,43 @@ defmodule H.Provider.ReqLLM.CodexPool do
 
   # A typed transport HTTP 401 with the explicit invalid_token code is an
   # authentication rejection, not a generic 401 or a stream error string.
-  def rejection(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Request{} = request}),
-    do: rejection(request)
+  def rejection(%ReqLLM.Error.API.Stream{cause: cause}) when not is_nil(cause),
+    do: rejection(cause)
+
+  def rejection({wrapper, reason})
+      when wrapper in [:error, :exit, :throw, :shutdown, :http_task_failed],
+      do: rejection(reason)
 
   def rejection(%ReqLLM.Error.API.Request{status: 401, provider_code: "invalid_token"}),
     do: :invalid_token
 
   def rejection(%ReqLLM.Error.API.Request{status: 429}), do: :rate_limited
+
+  def rejection(%ReqLLM.Error.API.Timeout{kind: kind} = err)
+      when kind in [:connect, :receive, :stream_idle] do
+    %{
+      code: "provider_timeout",
+      message: Exception.message(err),
+      retryable: true
+    }
+  end
+
+  def rejection(cause) when cause in [:timeout, :recv_timeout] do
+    %{
+      code: "provider_timeout",
+      message: "Timed out waiting for the provider stream",
+      retryable: true
+    }
+  end
+
+  def rejection(%{__struct__: mod} = err)
+      when mod in [Finch.TransportError, Mint.TransportError, Req.TransportError, Finch.Error] do
+    case H.Provider.ReqLLM.normalize_transport_error(err) do
+      %{retryable: true} = normalized -> normalized
+      _ -> :codex_request_failed
+    end
+  end
+
   def rejection(_), do: :codex_request_failed
 
   # Internal pool & managed dispatch mechanics

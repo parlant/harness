@@ -812,6 +812,20 @@ defmodule H.Provider.ReqLLM do
     %{code: "http_#{status}", message: "Model router returned HTTP #{status}", retryable: false}
   end
 
+  defp normalize_error(%ReqLLM.Error.API.Stream{cause: cause}) when not is_nil(cause) do
+    case normalize_stream_cause(cause) do
+      {:ok, normalized} ->
+        normalized
+
+      :error ->
+        %{
+          code: "provider_error",
+          message: Credentials.sanitize("Stream failed: #{inspect(cause)}"),
+          retryable: false
+        }
+    end
+  end
+
   defp normalize_error(%{code: code, message: message, retryable: retryable}) do
     %{
       code: to_string(code),
@@ -843,26 +857,6 @@ defmodule H.Provider.ReqLLM do
     http_error(status, code, Exception.message(err), retryable_status?(status), [])
   end
 
-  defp normalize_error(%ReqLLM.Error.API.Stream{cause: cause})
-       when cause == :timeout or cause == :recv_timeout do
-    %{
-      code: "provider_timeout",
-      message: "Timed out waiting for the provider stream",
-      retryable: true
-    }
-  end
-
-  # The stream wrapper's message can inspect the entire HTTP exception, including
-  # response headers. Use only the same normalized fields as a direct failure.
-  defp normalize_error(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Request{} = request}),
-    do: normalize_error(request)
-
-  defp normalize_error(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Response{} = response}),
-    do: normalize_error(response)
-
-  defp normalize_error(%ReqLLM.Error.API.Stream{cause: %ReqLLM.Error.API.Timeout{} = timeout}),
-    do: normalize_error(timeout)
-
   defp normalize_error(%ReqLLM.Error.API.Timeout{kind: kind} = err) do
     %{
       code: "provider_timeout",
@@ -870,6 +864,11 @@ defmodule H.Provider.ReqLLM do
       retryable: kind in [:connect, :receive, :stream_idle]
     }
   end
+
+  defp normalize_error(%Finch.TransportError{} = err), do: normalize_transport_error(err)
+  defp normalize_error(%Mint.TransportError{} = err), do: normalize_transport_error(err)
+  defp normalize_error(%Req.TransportError{} = err), do: normalize_transport_error(err)
+  defp normalize_error(%Finch.Error{} = err), do: normalize_transport_error(err)
 
   defp normalize_error(err) when is_exception(err) do
     %{
@@ -920,6 +919,122 @@ defmodule H.Provider.ReqLLM do
       retryable: false
     }
   end
+
+  # The stream wrapper's message can inspect the entire HTTP or transport exception,
+  # including response headers or raw struct fields. Unwrap structured causes into
+  # the same normalized shape as direct failures.
+  defp normalize_stream_cause({wrapper, reason})
+       when wrapper in [:error, :exit, :throw, :shutdown, :http_task_failed] do
+    normalize_stream_cause(reason)
+  end
+
+  defp normalize_stream_cause(cause) when cause in [:timeout, :recv_timeout, :chat_timeout] do
+    {:ok,
+     %{
+       code: "provider_timeout",
+       message: "Timed out waiting for the provider stream",
+       retryable: true
+     }}
+  end
+
+  defp normalize_stream_cause(:chat_transport_failed) do
+    {:ok,
+     %{
+       code: "provider_transport_error",
+       message: "Provider connection failed",
+       retryable: true
+     }}
+  end
+
+  defp normalize_stream_cause(%ReqLLM.Error.API.Request{} = request),
+    do: {:ok, normalize_error(request)}
+
+  defp normalize_stream_cause(%ReqLLM.Error.API.Response{} = response),
+    do: {:ok, normalize_error(response)}
+
+  defp normalize_stream_cause(%ReqLLM.Error.API.Timeout{} = timeout),
+    do: {:ok, normalize_error(timeout)}
+
+  defp normalize_stream_cause(%Finch.TransportError{} = err),
+    do: {:ok, normalize_transport_error(err)}
+
+  defp normalize_stream_cause(%Mint.TransportError{} = err),
+    do: {:ok, normalize_transport_error(err)}
+
+  defp normalize_stream_cause(%Req.TransportError{} = err),
+    do: {:ok, normalize_transport_error(err)}
+
+  defp normalize_stream_cause(%Finch.Error{} = err),
+    do: {:ok, normalize_transport_error(err)}
+
+  defp normalize_stream_cause(_other), do: :error
+
+  @retryable_transport_reasons [
+    :closed,
+    :econnrefused,
+    :econnreset,
+    :ehostunreach,
+    :enetunreach,
+    :pool_not_available,
+    :connection_closed,
+    :disconnected,
+    :connection_not_ready,
+    :could_not_connect,
+    :connection_dead,
+    :connection_process_went_down
+  ]
+
+  @doc false
+  def normalize_transport_error(err) do
+    reason = transport_reason(err)
+    phase = Map.get(err, :phase)
+
+    cond do
+      reason in [:timeout, :recv_timeout, :request_timeout] ->
+        message =
+          case phase do
+            :connect -> "Timed out connecting to provider"
+            :receive -> "Timed out waiting for the provider stream"
+            _ -> "Timed out waiting for the provider stream"
+          end
+
+        %{
+          code: "provider_timeout",
+          message: message,
+          retryable: true
+        }
+
+      reason in @retryable_transport_reasons ->
+        detail = Credentials.sanitize(Exception.message(err))
+
+        message =
+          case phase do
+            :connect -> "Failed to connect to provider (#{detail})"
+            _ -> "Provider transport error (#{detail})"
+          end
+
+        %{
+          code: "provider_transport_error",
+          message: message,
+          retryable: true
+        }
+
+      true ->
+        detail = Credentials.sanitize(Exception.message(err))
+
+        %{
+          code: "provider_transport_error",
+          message: "Provider transport error (#{detail})",
+          retryable: false
+        }
+    end
+  end
+
+  defp transport_reason(%Finch.TransportError{source: %Mint.TransportError{reason: reason}}),
+    do: reason
+
+  defp transport_reason(%{reason: reason}), do: reason
+  defp transport_reason(_), do: nil
 
   defp http_error(status, provider_code, message, retryable, headers) do
     message = Credentials.sanitize(to_string(message))

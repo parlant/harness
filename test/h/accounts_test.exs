@@ -450,6 +450,37 @@ defmodule H.AccountsTest do
       }
 
       assert {:error, %{retryable: false}} = Adapter.stream_turn(config, request, emit)
+
+      # Pre-output transport timeout returns retryable error without rotating accounts.
+      connect_timeout =
+        Map.put(
+          %Finch.TransportError{reason: :timeout, source: %Mint.TransportError{reason: :timeout}},
+          :phase,
+          :connect
+        )
+
+      timeout_config = %{
+        config
+        | stream_fn: fn _, _, _ ->
+            {:ok,
+             [
+               %StreamEvent{
+                 type: :error,
+                 data: %ReqLLM.Error.API.Stream{
+                   reason: "Stream failed: #{inspect(connect_timeout)}",
+                   cause: connect_timeout
+                 }
+               }
+             ]}
+          end
+      }
+
+      assert {:error,
+              %{
+                code: "provider_timeout",
+                message: "Timed out connecting to provider",
+                retryable: true
+              }} = Adapter.stream_turn(timeout_config, request, emit)
     end
   end
 

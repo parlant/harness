@@ -95,12 +95,56 @@ defmodule H.Provider.ReqLLM.CompatibleChat do
         tail = if terminal?, do: [], else: [{:error, :chat_stream_interrupted}]
         {chunks ++ tail, {ref, decoder}}
 
-      {^ref, {:error, _}} ->
-        {[{:error, :chat_transport_failed}], state}
+      {^ref, {:error, err}} ->
+        # Preserve only transient vs non-transient classification, never raw
+        # transport details that might echo URLs or provider-controlled text.
+        if transient_transport_error?(err) do
+          {[{:error, :chat_transport_failed}], state}
+        else
+          {[{:error, :chat_stream_failed}], state}
+        end
     after
       timeout -> {[{:error, :chat_timeout}], state}
     end
   rescue
     _ -> {[{:error, :chat_stream_failed}], state}
   end
+
+  defp transient_transport_error?(%Finch.TransportError{
+         source: %Mint.TransportError{reason: reason}
+       }),
+       do: transient_transport_reason?(reason)
+
+  defp transient_transport_error?(%Finch.TransportError{reason: reason}),
+    do: transient_transport_reason?(reason)
+
+  defp transient_transport_error?(%Mint.TransportError{reason: reason}),
+    do: transient_transport_reason?(reason)
+
+  defp transient_transport_error?(%Finch.Error{reason: reason}),
+    do: transient_transport_reason?(reason)
+
+  defp transient_transport_error?(_), do: false
+
+  defp transient_transport_reason?(reason)
+       when reason in [
+              :timeout,
+              :recv_timeout,
+              :request_timeout,
+              :closed,
+              :econnrefused,
+              :econnreset,
+              :ehostunreach,
+              :enetunreach,
+              :pool_not_available,
+              :connection_closed,
+              :disconnected,
+              :connection_not_ready,
+              :could_not_connect,
+              :connection_dead,
+              :connection_process_went_down
+            ],
+       do: true
+
+  defp transient_transport_reason?(_), do: false
 end

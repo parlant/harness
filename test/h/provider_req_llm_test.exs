@@ -183,6 +183,97 @@ defmodule H.Provider.ReqLLMTest do
               }} = Adapter.stream_turn(%{stream_fn: stream_fn}, request, fn _ -> :ok end)
     end
 
+    test "normalizes stream-wrapped Finch and Mint transport timeouts and transient errors as retryable" do
+      request = Context.build_request([], %{model: "openai:gpt-5.4"})
+
+      run_stream_cause = fn cause ->
+        stream_fn = fn model, ctx, _opts ->
+          {:ok, metadata} = MetadataHandle.start_link(fn -> %{} end)
+
+          {:ok,
+           %StreamResponse{
+             model: model,
+             context: ctx,
+             metadata_handle: metadata,
+             stream:
+               Stream.map([cause], fn c ->
+                 raise %ReqLLM.Error.API.Stream{
+                   reason: "Stream failed: #{inspect(c)}",
+                   cause: c
+                 }
+               end),
+             cancel: fn -> :ok end
+           }}
+        end
+
+        Adapter.stream_turn(%{stream_fn: stream_fn}, request, fn _ -> :ok end)
+      end
+
+      connect_timeout =
+        Map.put(
+          %Finch.TransportError{
+            reason: :timeout,
+            source: %Mint.TransportError{reason: :timeout}
+          },
+          :phase,
+          :connect
+        )
+
+      assert {:error,
+              %{
+                code: "provider_timeout",
+                message: "Timed out connecting to provider",
+                retryable: true
+              }} = run_stream_cause.(connect_timeout)
+
+      plain_timeout = %Finch.TransportError{
+        reason: :timeout,
+        source: %Mint.TransportError{reason: :timeout}
+      }
+
+      assert {:error,
+              %{
+                code: "provider_timeout",
+                message: "Timed out waiting for the provider stream",
+                retryable: true
+              }} = run_stream_cause.(plain_timeout)
+
+      assert {:error, %{code: "provider_timeout", retryable: true}} =
+               run_stream_cause.({:http_task_failed, plain_timeout})
+
+      for cause <- [
+            %Finch.TransportError{reason: :closed, source: %Mint.TransportError{reason: :closed}},
+            %Mint.TransportError{reason: :econnrefused},
+            %Req.TransportError{reason: :econnreset},
+            %Finch.Error{reason: :disconnected}
+          ] do
+        assert {:error, %{code: "provider_transport_error", message: msg, retryable: true}} =
+                 run_stream_cause.(cause)
+
+        refute msg =~ "Stream failed:"
+      end
+
+      tls_error = %Finch.TransportError{
+        reason: {:tls_alert, {:certificate_expired, ~c"certificate expired"}},
+        source: %Mint.TransportError{
+          reason: {:tls_alert, {:certificate_expired, ~c"certificate expired"}}
+        }
+      }
+
+      assert {:error, %{code: "provider_transport_error", retryable: false}} =
+               run_stream_cause.(tls_error)
+
+      # Direct transport errors from start_stream are normalized identically.
+      direct_fn = fn _model, _ctx, _opts -> {:error, connect_timeout} end
+
+      assert {:error,
+              %{
+                code: "provider_timeout",
+                message: "Timed out connecting to provider",
+                retryable: true
+              }} = Adapter.stream_turn(%{stream_fn: direct_fn}, request, fn _ -> :ok end)
+    end
+
     test "injects google_vertex provider_options from H.Credentials" do
       test_pid = self()
 

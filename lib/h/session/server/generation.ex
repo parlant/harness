@@ -1474,8 +1474,17 @@ defmodule H.Session.Server.Generation do
             do: "retry /compact",
             else: "continue"
 
-        message <>
-          " Automatic retries exhausted (#{count}/#{state.retry_limit}). Resolve the provider restriction, then #{action}; history is preserved."
+        guidance =
+          if to_string(Map.get(error, :code, default_code)) in [
+               "provider_timeout",
+               "provider_transport_error"
+             ] do
+            "Check network connectivity or provider status, then #{action}; history is preserved."
+          else
+            "Resolve the provider restriction, then #{action}; history is preserved."
+          end
+
+        message <> " Automatic retries exhausted (#{count}/#{state.retry_limit}). " <> guidance
       else
         message
       end
